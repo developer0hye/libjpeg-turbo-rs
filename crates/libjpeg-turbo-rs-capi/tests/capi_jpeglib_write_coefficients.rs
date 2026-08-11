@@ -6,6 +6,8 @@
 //! (the quantization tables and entropy coding survive the round trip
 //! because the coefficients are re-emitted verbatim).
 
+use libjpeg_turbo_rs_capi::jpeglib::JpegCompressPublic;
+use libjpeg_turbo_rs_capi::jpeglib::JpegDecompressPublic;
 use std::ffi::{c_int, c_void};
 use std::mem::MaybeUninit;
 use std::os::raw::c_ulong;
@@ -171,9 +173,7 @@ fn write_coefficients_roundtrip_pixel_exact() {
     assert_eq!((ref_w, ref_h), (src_w, src_h));
 
     let transcoded: Vec<u8> = unsafe {
-        // ---- Decompress side: read coefficients ----
-        const CINFO_BYTES: usize = 4096;
-        let mut dec_cinfo: MaybeUninit<[u8; CINFO_BYTES]> = MaybeUninit::zeroed();
+        let mut dec_cinfo: MaybeUninit<JpegDecompressPublic> = MaybeUninit::zeroed();
         let dec_cinfo_ptr: *mut c_void = dec_cinfo.as_mut_ptr() as *mut c_void;
         const ERR_BYTES: usize = 512;
         let mut dec_err: MaybeUninit<[u8; ERR_BYTES]> = MaybeUninit::zeroed();
@@ -189,7 +189,11 @@ fn write_coefficients_roundtrip_pixel_exact() {
         > = lib
             .get(b"jpeg_CreateDecompress")
             .expect("jpeg_CreateDecompress");
-        jpeg_create_decompress(dec_cinfo_ptr, 80, CINFO_BYTES);
+        jpeg_create_decompress(
+            dec_cinfo_ptr,
+            80,
+            std::mem::size_of::<JpegDecompressPublic>(),
+        );
 
         let jpeg_mem_src: libloading::Symbol<
             unsafe extern "C" fn(*mut c_void, *const u8, c_ulong),
@@ -210,7 +214,7 @@ fn write_coefficients_roundtrip_pixel_exact() {
         assert!(!coef_arrays.is_null(), "coef handle must be non-null");
 
         // ---- Compress side: write coefficients ----
-        let mut enc_cinfo: MaybeUninit<[u8; CINFO_BYTES]> = MaybeUninit::zeroed();
+        let mut enc_cinfo: MaybeUninit<JpegCompressPublic> = MaybeUninit::zeroed();
         let enc_cinfo_ptr: *mut c_void = enc_cinfo.as_mut_ptr() as *mut c_void;
         let mut enc_err: MaybeUninit<[u8; ERR_BYTES]> = MaybeUninit::zeroed();
         let enc_err_ptr: *mut c_void = enc_err.as_mut_ptr() as *mut c_void;
@@ -222,7 +226,7 @@ fn write_coefficients_roundtrip_pixel_exact() {
         > = lib
             .get(b"jpeg_CreateCompress")
             .expect("jpeg_CreateCompress");
-        jpeg_create_compress(enc_cinfo_ptr, 80, CINFO_BYTES);
+        jpeg_create_compress(enc_cinfo_ptr, 80, std::mem::size_of::<JpegCompressPublic>());
 
         let mut out_buf: *mut u8 = std::ptr::null_mut();
         let mut out_size: c_ulong = 0;
@@ -312,9 +316,7 @@ fn write_coefficients_null_inputs_do_not_crash() {
             .expect("jpeg_write_coefficients");
         jpeg_write_coefficients(std::ptr::null_mut(), std::ptr::null_mut());
 
-        // cinfo OK, coef_arrays NULL: must not crash, must record error.
-        const CINFO_BYTES: usize = 4096;
-        let mut cinfo: MaybeUninit<[u8; CINFO_BYTES]> = MaybeUninit::zeroed();
+        let mut cinfo: MaybeUninit<JpegDecompressPublic> = MaybeUninit::zeroed();
         let cinfo_ptr: *mut c_void = cinfo.as_mut_ptr() as *mut c_void;
         const ERR_BYTES: usize = 512;
         let mut err: MaybeUninit<[u8; ERR_BYTES]> = MaybeUninit::zeroed();
@@ -330,7 +332,7 @@ fn write_coefficients_null_inputs_do_not_crash() {
         > = lib
             .get(b"jpeg_CreateCompress")
             .expect("jpeg_CreateCompress");
-        jpeg_create_compress(cinfo_ptr, 80, CINFO_BYTES);
+        jpeg_create_compress(cinfo_ptr, 80, std::mem::size_of::<JpegCompressPublic>());
         jpeg_write_coefficients(cinfo_ptr, std::ptr::null_mut());
 
         let jpeg_destroy_compress: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> = lib
@@ -353,8 +355,7 @@ fn write_coefficients_then_marker_then_finish_emits_marker() {
     const PAYLOAD: &[u8] = b"WRCOEFS-MARKER-PROBE";
 
     let transcoded: Vec<u8> = unsafe {
-        const CINFO_BYTES: usize = 4096;
-        let mut dec_cinfo: MaybeUninit<[u8; CINFO_BYTES]> = MaybeUninit::zeroed();
+        let mut dec_cinfo: MaybeUninit<JpegDecompressPublic> = MaybeUninit::zeroed();
         let dec_cinfo_ptr: *mut c_void = dec_cinfo.as_mut_ptr() as *mut c_void;
         const ERR_BYTES: usize = 512;
         let mut dec_err: MaybeUninit<[u8; ERR_BYTES]> = MaybeUninit::zeroed();
@@ -369,7 +370,11 @@ fn write_coefficients_then_marker_then_finish_emits_marker() {
         > = lib
             .get(b"jpeg_CreateDecompress")
             .expect("jpeg_CreateDecompress");
-        jpeg_create_decompress(dec_cinfo_ptr, 80, CINFO_BYTES);
+        jpeg_create_decompress(
+            dec_cinfo_ptr,
+            80,
+            std::mem::size_of::<JpegDecompressPublic>(),
+        );
         let jpeg_mem_src: libloading::Symbol<
             unsafe extern "C" fn(*mut c_void, *const u8, c_ulong),
         > = lib.get(b"jpeg_mem_src").expect("jpeg_mem_src");
@@ -386,7 +391,7 @@ fn write_coefficients_then_marker_then_finish_emits_marker() {
         let coef_arrays: *mut c_void = jpeg_read_coefficients(dec_cinfo_ptr);
         assert!(!coef_arrays.is_null());
 
-        let mut enc_cinfo: MaybeUninit<[u8; CINFO_BYTES]> = MaybeUninit::zeroed();
+        let mut enc_cinfo: MaybeUninit<JpegCompressPublic> = MaybeUninit::zeroed();
         let enc_cinfo_ptr: *mut c_void = enc_cinfo.as_mut_ptr() as *mut c_void;
         let mut enc_err: MaybeUninit<[u8; ERR_BYTES]> = MaybeUninit::zeroed();
         let enc_err_ptr: *mut c_void = enc_err.as_mut_ptr() as *mut c_void;
@@ -398,7 +403,7 @@ fn write_coefficients_then_marker_then_finish_emits_marker() {
         > = lib
             .get(b"jpeg_CreateCompress")
             .expect("jpeg_CreateCompress");
-        jpeg_create_compress(enc_cinfo_ptr, 80, CINFO_BYTES);
+        jpeg_create_compress(enc_cinfo_ptr, 80, std::mem::size_of::<JpegCompressPublic>());
 
         let mut out_buf: *mut u8 = std::ptr::null_mut();
         let mut out_size: c_ulong = 0;
@@ -533,8 +538,7 @@ const MSG_CODE_OFFSET: usize = 5 * std::mem::size_of::<usize>();
 fn write_coefficients_rejects_foreign_handle() {
     let lib = unsafe { libloading::Library::new(cdylib_path()) }.expect("dlopen");
     unsafe {
-        const CINFO_BYTES: usize = 4096;
-        let mut cinfo: MaybeUninit<[u8; CINFO_BYTES]> = MaybeUninit::zeroed();
+        let mut cinfo: MaybeUninit<JpegCompressPublic> = MaybeUninit::zeroed();
         let cinfo_ptr: *mut c_void = cinfo.as_mut_ptr() as *mut c_void;
         const ERR_BYTES: usize = 512;
         let mut err: MaybeUninit<[u8; ERR_BYTES]> = MaybeUninit::zeroed();
@@ -555,7 +559,7 @@ fn write_coefficients_rejects_foreign_handle() {
         > = lib
             .get(b"jpeg_CreateCompress")
             .expect("jpeg_CreateCompress");
-        jpeg_create_compress(cinfo_ptr, 80, CINFO_BYTES);
+        jpeg_create_compress(cinfo_ptr, 80, std::mem::size_of::<JpegCompressPublic>());
 
         let mut out_buf: *mut u8 = std::ptr::null_mut();
         let mut out_size: c_ulong = 0;
@@ -616,8 +620,7 @@ fn write_coefficients_honors_progressive_mode() {
     let (jpeg_in, _src, _w, _h_px) = build_fixture_jpeg(&lib);
 
     let transcoded: Vec<u8> = unsafe {
-        const CINFO_BYTES: usize = 4096;
-        let mut dec_cinfo: MaybeUninit<[u8; CINFO_BYTES]> = MaybeUninit::zeroed();
+        let mut dec_cinfo: MaybeUninit<JpegDecompressPublic> = MaybeUninit::zeroed();
         let dec_cinfo_ptr: *mut c_void = dec_cinfo.as_mut_ptr() as *mut c_void;
         const ERR_BYTES: usize = 512;
         let mut dec_err: MaybeUninit<[u8; ERR_BYTES]> = MaybeUninit::zeroed();
@@ -631,7 +634,11 @@ fn write_coefficients_honors_progressive_mode() {
         > = lib
             .get(b"jpeg_CreateDecompress")
             .expect("jpeg_CreateDecompress");
-        jpeg_create_decompress(dec_cinfo_ptr, 80, CINFO_BYTES);
+        jpeg_create_decompress(
+            dec_cinfo_ptr,
+            80,
+            std::mem::size_of::<JpegDecompressPublic>(),
+        );
         let jpeg_mem_src: libloading::Symbol<
             unsafe extern "C" fn(*mut c_void, *const u8, c_ulong),
         > = lib.get(b"jpeg_mem_src").expect("jpeg_mem_src");
@@ -648,7 +655,7 @@ fn write_coefficients_honors_progressive_mode() {
         let coef_arrays: *mut c_void = jpeg_read_coefficients(dec_cinfo_ptr);
         assert!(!coef_arrays.is_null());
 
-        let mut enc_cinfo: MaybeUninit<[u8; CINFO_BYTES]> = MaybeUninit::zeroed();
+        let mut enc_cinfo: MaybeUninit<JpegCompressPublic> = MaybeUninit::zeroed();
         let enc_cinfo_ptr: *mut c_void = enc_cinfo.as_mut_ptr() as *mut c_void;
         let mut enc_err: MaybeUninit<[u8; ERR_BYTES]> = MaybeUninit::zeroed();
         let enc_err_ptr: *mut c_void = enc_err.as_mut_ptr() as *mut c_void;
@@ -659,7 +666,7 @@ fn write_coefficients_honors_progressive_mode() {
         > = lib
             .get(b"jpeg_CreateCompress")
             .expect("jpeg_CreateCompress");
-        jpeg_create_compress(enc_cinfo_ptr, 80, CINFO_BYTES);
+        jpeg_create_compress(enc_cinfo_ptr, 80, std::mem::size_of::<JpegCompressPublic>());
 
         let mut out_buf: *mut u8 = std::ptr::null_mut();
         let mut out_size: c_ulong = 0;
@@ -751,8 +758,7 @@ fn write_coefficients_preserves_source_adobe_app14() {
     let src_transform: u8 = jpeg_in[src_app14_pos + 15];
 
     let transcoded: Vec<u8> = unsafe {
-        const CINFO_BYTES: usize = 4096;
-        let mut dec_cinfo: MaybeUninit<[u8; CINFO_BYTES]> = MaybeUninit::zeroed();
+        let mut dec_cinfo: MaybeUninit<JpegDecompressPublic> = MaybeUninit::zeroed();
         let dec_cinfo_ptr: *mut c_void = dec_cinfo.as_mut_ptr() as *mut c_void;
         const ERR_BYTES: usize = 512;
         let mut dec_err: MaybeUninit<[u8; ERR_BYTES]> = MaybeUninit::zeroed();
@@ -766,7 +772,11 @@ fn write_coefficients_preserves_source_adobe_app14() {
         > = lib
             .get(b"jpeg_CreateDecompress")
             .expect("jpeg_CreateDecompress");
-        jpeg_create_decompress(dec_cinfo_ptr, 80, CINFO_BYTES);
+        jpeg_create_decompress(
+            dec_cinfo_ptr,
+            80,
+            std::mem::size_of::<JpegDecompressPublic>(),
+        );
         let jpeg_mem_src: libloading::Symbol<
             unsafe extern "C" fn(*mut c_void, *const u8, c_ulong),
         > = lib.get(b"jpeg_mem_src").expect("jpeg_mem_src");
@@ -783,7 +793,7 @@ fn write_coefficients_preserves_source_adobe_app14() {
         let coef_arrays: *mut c_void = jpeg_read_coefficients(dec_cinfo_ptr);
         assert!(!coef_arrays.is_null(), "coef handle must be non-null");
 
-        let mut enc_cinfo: MaybeUninit<[u8; CINFO_BYTES]> = MaybeUninit::zeroed();
+        let mut enc_cinfo: MaybeUninit<JpegCompressPublic> = MaybeUninit::zeroed();
         let enc_cinfo_ptr: *mut c_void = enc_cinfo.as_mut_ptr() as *mut c_void;
         let mut enc_err: MaybeUninit<[u8; ERR_BYTES]> = MaybeUninit::zeroed();
         let enc_err_ptr: *mut c_void = enc_err.as_mut_ptr() as *mut c_void;
@@ -794,7 +804,7 @@ fn write_coefficients_preserves_source_adobe_app14() {
         > = lib
             .get(b"jpeg_CreateCompress")
             .expect("jpeg_CreateCompress");
-        jpeg_create_compress(enc_cinfo_ptr, 80, CINFO_BYTES);
+        jpeg_create_compress(enc_cinfo_ptr, 80, std::mem::size_of::<JpegCompressPublic>());
 
         let mut out_buf: *mut u8 = std::ptr::null_mut();
         let mut out_size: c_ulong = 0;
@@ -868,8 +878,7 @@ fn write_coefficients_baseline_honors_restart_in_rows() {
     let (jpeg_in, _src, _w, _h_px) = build_fixture_jpeg(&lib);
 
     let transcoded: Vec<u8> = unsafe {
-        const CINFO_BYTES: usize = 4096;
-        let mut dec_cinfo: MaybeUninit<[u8; CINFO_BYTES]> = MaybeUninit::zeroed();
+        let mut dec_cinfo: MaybeUninit<JpegDecompressPublic> = MaybeUninit::zeroed();
         let dec_cinfo_ptr: *mut c_void = dec_cinfo.as_mut_ptr() as *mut c_void;
         const ERR_BYTES: usize = 512;
         let mut dec_err: MaybeUninit<[u8; ERR_BYTES]> = MaybeUninit::zeroed();
@@ -883,7 +892,11 @@ fn write_coefficients_baseline_honors_restart_in_rows() {
         > = lib
             .get(b"jpeg_CreateDecompress")
             .expect("jpeg_CreateDecompress");
-        jpeg_create_decompress(dec_cinfo_ptr, 80, CINFO_BYTES);
+        jpeg_create_decompress(
+            dec_cinfo_ptr,
+            80,
+            std::mem::size_of::<JpegDecompressPublic>(),
+        );
         let jpeg_mem_src: libloading::Symbol<
             unsafe extern "C" fn(*mut c_void, *const u8, c_ulong),
         > = lib.get(b"jpeg_mem_src").expect("jpeg_mem_src");
@@ -900,7 +913,7 @@ fn write_coefficients_baseline_honors_restart_in_rows() {
         let coef_arrays: *mut c_void = jpeg_read_coefficients(dec_cinfo_ptr);
         assert!(!coef_arrays.is_null());
 
-        let mut enc_cinfo: MaybeUninit<[u8; CINFO_BYTES]> = MaybeUninit::zeroed();
+        let mut enc_cinfo: MaybeUninit<JpegCompressPublic> = MaybeUninit::zeroed();
         let enc_cinfo_ptr: *mut c_void = enc_cinfo.as_mut_ptr() as *mut c_void;
         let mut enc_err: MaybeUninit<[u8; ERR_BYTES]> = MaybeUninit::zeroed();
         let enc_err_ptr: *mut c_void = enc_err.as_mut_ptr() as *mut c_void;
@@ -911,7 +924,7 @@ fn write_coefficients_baseline_honors_restart_in_rows() {
         > = lib
             .get(b"jpeg_CreateCompress")
             .expect("jpeg_CreateCompress");
-        jpeg_create_compress(enc_cinfo_ptr, 80, CINFO_BYTES);
+        jpeg_create_compress(enc_cinfo_ptr, 80, std::mem::size_of::<JpegCompressPublic>());
 
         let mut out_buf: *mut u8 = std::ptr::null_mut();
         let mut out_size: c_ulong = 0;
@@ -995,8 +1008,7 @@ fn write_coefficients_arithmetic_with_restart_emits_rst_markers() {
     let (jpeg_in, _src, _w, _h_px) = build_fixture_jpeg(&lib);
 
     let transcoded: Vec<u8> = unsafe {
-        const CINFO_BYTES: usize = 4096;
-        let mut dec_cinfo: MaybeUninit<[u8; CINFO_BYTES]> = MaybeUninit::zeroed();
+        let mut dec_cinfo: MaybeUninit<JpegDecompressPublic> = MaybeUninit::zeroed();
         let dec_cinfo_ptr: *mut c_void = dec_cinfo.as_mut_ptr() as *mut c_void;
         const ERR_BYTES: usize = 512;
         let mut dec_err: MaybeUninit<[u8; ERR_BYTES]> = MaybeUninit::zeroed();
@@ -1010,7 +1022,11 @@ fn write_coefficients_arithmetic_with_restart_emits_rst_markers() {
         > = lib
             .get(b"jpeg_CreateDecompress")
             .expect("jpeg_CreateDecompress");
-        jpeg_create_decompress(dec_cinfo_ptr, 80, CINFO_BYTES);
+        jpeg_create_decompress(
+            dec_cinfo_ptr,
+            80,
+            std::mem::size_of::<JpegDecompressPublic>(),
+        );
         let jpeg_mem_src: libloading::Symbol<
             unsafe extern "C" fn(*mut c_void, *const u8, c_ulong),
         > = lib.get(b"jpeg_mem_src").expect("jpeg_mem_src");
@@ -1027,7 +1043,7 @@ fn write_coefficients_arithmetic_with_restart_emits_rst_markers() {
         let coef_arrays: *mut c_void = jpeg_read_coefficients(dec_cinfo_ptr);
         assert!(!coef_arrays.is_null());
 
-        let mut enc_cinfo: MaybeUninit<[u8; CINFO_BYTES]> = MaybeUninit::zeroed();
+        let mut enc_cinfo: MaybeUninit<JpegCompressPublic> = MaybeUninit::zeroed();
         let enc_cinfo_ptr: *mut c_void = enc_cinfo.as_mut_ptr() as *mut c_void;
         let mut enc_err: MaybeUninit<[u8; ERR_BYTES]> = MaybeUninit::zeroed();
         let enc_err_ptr: *mut c_void = enc_err.as_mut_ptr() as *mut c_void;
@@ -1038,7 +1054,7 @@ fn write_coefficients_arithmetic_with_restart_emits_rst_markers() {
         > = lib
             .get(b"jpeg_CreateCompress")
             .expect("jpeg_CreateCompress");
-        jpeg_create_compress(enc_cinfo_ptr, 80, CINFO_BYTES);
+        jpeg_create_compress(enc_cinfo_ptr, 80, std::mem::size_of::<JpegCompressPublic>());
 
         let mut out_buf: *mut u8 = std::ptr::null_mut();
         let mut out_size: c_ulong = 0;
@@ -1147,8 +1163,7 @@ fn write_coefficients_progressive_arithmetic_with_row_restart_emits_rst_and_dri(
     let (jpeg_in, _src, _w, _h_px) = build_fixture_jpeg(&lib);
 
     let transcoded: Vec<u8> = unsafe {
-        const CINFO_BYTES: usize = 4096;
-        let mut dec_cinfo: MaybeUninit<[u8; CINFO_BYTES]> = MaybeUninit::zeroed();
+        let mut dec_cinfo: MaybeUninit<JpegDecompressPublic> = MaybeUninit::zeroed();
         let dec_cinfo_ptr: *mut c_void = dec_cinfo.as_mut_ptr() as *mut c_void;
         const ERR_BYTES: usize = 512;
         let mut dec_err: MaybeUninit<[u8; ERR_BYTES]> = MaybeUninit::zeroed();
@@ -1162,7 +1177,11 @@ fn write_coefficients_progressive_arithmetic_with_row_restart_emits_rst_and_dri(
         > = lib
             .get(b"jpeg_CreateDecompress")
             .expect("jpeg_CreateDecompress");
-        jpeg_create_decompress(dec_cinfo_ptr, 80, CINFO_BYTES);
+        jpeg_create_decompress(
+            dec_cinfo_ptr,
+            80,
+            std::mem::size_of::<JpegDecompressPublic>(),
+        );
         let jpeg_mem_src: libloading::Symbol<
             unsafe extern "C" fn(*mut c_void, *const u8, c_ulong),
         > = lib.get(b"jpeg_mem_src").expect("jpeg_mem_src");
@@ -1179,7 +1198,7 @@ fn write_coefficients_progressive_arithmetic_with_row_restart_emits_rst_and_dri(
         let coef_arrays: *mut c_void = jpeg_read_coefficients(dec_cinfo_ptr);
         assert!(!coef_arrays.is_null());
 
-        let mut enc_cinfo: MaybeUninit<[u8; CINFO_BYTES]> = MaybeUninit::zeroed();
+        let mut enc_cinfo: MaybeUninit<JpegCompressPublic> = MaybeUninit::zeroed();
         let enc_cinfo_ptr: *mut c_void = enc_cinfo.as_mut_ptr() as *mut c_void;
         let mut enc_err: MaybeUninit<[u8; ERR_BYTES]> = MaybeUninit::zeroed();
         let enc_err_ptr: *mut c_void = enc_err.as_mut_ptr() as *mut c_void;
@@ -1190,7 +1209,7 @@ fn write_coefficients_progressive_arithmetic_with_row_restart_emits_rst_and_dri(
         > = lib
             .get(b"jpeg_CreateCompress")
             .expect("jpeg_CreateCompress");
-        jpeg_create_compress(enc_cinfo_ptr, 80, CINFO_BYTES);
+        jpeg_create_compress(enc_cinfo_ptr, 80, std::mem::size_of::<JpegCompressPublic>());
 
         let mut out_buf: *mut u8 = std::ptr::null_mut();
         let mut out_size: c_ulong = 0;
@@ -1296,8 +1315,7 @@ fn write_coefficients_progressive_arithmetic_restart_roundtrip_pixel_exact() {
     assert_eq!(gt_h, src_h);
 
     let transcoded: Vec<u8> = unsafe {
-        const CINFO_BYTES: usize = 4096;
-        let mut dec_cinfo: MaybeUninit<[u8; CINFO_BYTES]> = MaybeUninit::zeroed();
+        let mut dec_cinfo: MaybeUninit<JpegDecompressPublic> = MaybeUninit::zeroed();
         let dec_cinfo_ptr: *mut c_void = dec_cinfo.as_mut_ptr() as *mut c_void;
         const ERR_BYTES: usize = 512;
         let mut dec_err: MaybeUninit<[u8; ERR_BYTES]> = MaybeUninit::zeroed();
@@ -1311,7 +1329,11 @@ fn write_coefficients_progressive_arithmetic_restart_roundtrip_pixel_exact() {
         > = lib
             .get(b"jpeg_CreateDecompress")
             .expect("jpeg_CreateDecompress");
-        jpeg_create_decompress(dec_cinfo_ptr, 80, CINFO_BYTES);
+        jpeg_create_decompress(
+            dec_cinfo_ptr,
+            80,
+            std::mem::size_of::<JpegDecompressPublic>(),
+        );
         let jpeg_mem_src: libloading::Symbol<
             unsafe extern "C" fn(*mut c_void, *const u8, c_ulong),
         > = lib.get(b"jpeg_mem_src").expect("jpeg_mem_src");
@@ -1327,7 +1349,7 @@ fn write_coefficients_progressive_arithmetic_restart_roundtrip_pixel_exact() {
             .expect("jpeg_read_coefficients");
         let coef_arrays: *mut c_void = jpeg_read_coefficients(dec_cinfo_ptr);
 
-        let mut enc_cinfo: MaybeUninit<[u8; CINFO_BYTES]> = MaybeUninit::zeroed();
+        let mut enc_cinfo: MaybeUninit<JpegCompressPublic> = MaybeUninit::zeroed();
         let enc_cinfo_ptr: *mut c_void = enc_cinfo.as_mut_ptr() as *mut c_void;
         let mut enc_err: MaybeUninit<[u8; ERR_BYTES]> = MaybeUninit::zeroed();
         let enc_err_ptr: *mut c_void = enc_err.as_mut_ptr() as *mut c_void;
@@ -1338,7 +1360,7 @@ fn write_coefficients_progressive_arithmetic_restart_roundtrip_pixel_exact() {
         > = lib
             .get(b"jpeg_CreateCompress")
             .expect("jpeg_CreateCompress");
-        jpeg_create_compress(enc_cinfo_ptr, 80, CINFO_BYTES);
+        jpeg_create_compress(enc_cinfo_ptr, 80, std::mem::size_of::<JpegCompressPublic>());
 
         let mut out_buf: *mut u8 = std::ptr::null_mut();
         let mut out_size: c_ulong = 0;

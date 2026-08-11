@@ -265,10 +265,23 @@ pub fn find_libjpeg_dev() -> Option<LibJpegDev> {
         if let Some(triplet) = host_multiarch_triplet() {
             candidates.push(base_include.join(&triplet));
         }
-        let Some(config_dir) = candidates
-            .into_iter()
-            .find(|dir| dir.join("jconfig.h").is_file())
-        else {
+        let Some(config_dir) = candidates.into_iter().find(|dir| {
+            // Must be a *v8* install. The traces these oracles print are
+            // version- and layout-specific — `JPEG_LIB_VERSION`, both struct
+            // sizes — so comparing against an ordinary v6b development install
+            // (still the default on several distributions) reports a
+            // divergence that is really an ABI mismatch: version 62 and a
+            // 632-byte struct against our 80 and 656. That is a false failure,
+            // and the kind that gets a real gate deleted.
+            std::fs::read_to_string(dir.join("jconfig.h")).is_ok_and(|text| {
+                text.lines().any(|line| {
+                    let mut parts = line.split_whitespace();
+                    parts.next() == Some("#define")
+                        && parts.next() == Some("JPEG_LIB_VERSION")
+                        && parts.next() == Some("80")
+                })
+            })
+        }) else {
             continue;
         };
         let mut include_dirs: Vec<PathBuf> = vec![base_include.clone()];
@@ -335,10 +348,11 @@ pub fn build_classic_oracle(source_stem: &str) -> Option<PathBuf> {
         None => {
             assert!(
                 !oracle_is_required(),
-                "no stock libjpeg development install found under LIBJPEG_TURBO_PREFIX={:?} — \
+                "no stock *v8* libjpeg development install found under LIBJPEG_TURBO_PREFIX={:?} — \
                  that variable says one is provisioned, and skipping here would pass the C parity \
                  gate without checking anything. A candidate needs a jpeglib.h declaring \
-                 jpeg_consume_input, a jconfig.h (in include/ or include/<triplet>/), and a \
+                 jpeg_consume_input, a jconfig.h declaring JPEG_LIB_VERSION 80 (in include/ or \
+                 include/<triplet>/), and a \
                  libjpeg that is not this crate's own shim — an installed shim is rejected on \
                  purpose, since linking it would compare the implementation with itself",
                 std::env::var_os("LIBJPEG_TURBO_PREFIX")

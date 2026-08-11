@@ -13,6 +13,7 @@
 
 #![cfg(all(target_pointer_width = "64", not(windows)))]
 
+use libjpeg_turbo_rs_capi::jpeglib::JpegDecompressPublic;
 use std::ffi::{c_int, c_void};
 use std::mem::MaybeUninit;
 use std::os::raw::c_ulong;
@@ -127,12 +128,7 @@ fn data_precision_is_at_libjpeg_offset_296_after_read_header() {
     let jpeg: Vec<u8> = build_fixture(&lib);
 
     unsafe {
-        // Real libjpeg callers allocate `sizeof(struct jpeg_decompress_struct)` —
-        // on LP64 that's currently ~632 bytes. Using 4096 gives us plenty of
-        // headroom; any writes past our declared `JpegDecompressPublic` size
-        // would still be contained inside this caller-allocated buffer.
-        const CINFO_BYTES: usize = 4096;
-        let mut cinfo: MaybeUninit<[u8; CINFO_BYTES]> = MaybeUninit::zeroed();
+        let mut cinfo: MaybeUninit<JpegDecompressPublic> = MaybeUninit::zeroed();
         let cinfo_ptr: *mut c_void = cinfo.as_mut_ptr() as *mut c_void;
 
         const ERR_BYTES: usize = 512;
@@ -149,7 +145,7 @@ fn data_precision_is_at_libjpeg_offset_296_after_read_header() {
         > = lib
             .get(b"jpeg_CreateDecompress")
             .expect("jpeg_CreateDecompress");
-        jpeg_create_decompress(cinfo_ptr, 80, CINFO_BYTES);
+        jpeg_create_decompress(cinfo_ptr, 80, std::mem::size_of::<JpegDecompressPublic>());
 
         let jpeg_mem_src: libloading::Symbol<
             unsafe extern "C" fn(*mut c_void, *const u8, c_ulong),

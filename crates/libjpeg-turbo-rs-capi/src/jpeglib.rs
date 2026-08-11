@@ -815,21 +815,39 @@ unsafe extern "C" fn default_error_exit(cinfo: *mut c_void) {
     // message; we surface the msg_code + parm to aid debugging.
     let mut code: c_int = -1;
     let mut parm0: c_int = 0;
-    if let Some(c) = unsafe { cinfo_mut(cinfo) } {
-        if !c.err.is_null() {
-            let err: &JpegErrorMgr = unsafe { &*c.err };
-            code = err.msg_code;
-            parm0 = i32::from_le_bytes([
-                err.msg_parm[0],
-                err.msg_parm[1],
-                err.msg_parm[2],
-                err.msg_parm[3],
-            ]);
+    let mut parm1: c_int = 0;
+    // Read `err` through the `jpeg_common_fields` prefix rather than a full
+    // mirror reference. This handler is what `jpeg_Create*`'s ABI guards reach
+    // when the caller declared a *smaller* struct — the case those guards
+    // exist for — so forming `&mut JpegDecompressPublic` here would be
+    // undefined on exactly the path being made safe. It would also be the
+    // wrong mirror half the time: the compressor shares this handler.
+    if !cinfo.is_null() {
+        // SAFETY: `err` is the first field of every jpeg object, so it is
+        // inside whatever the caller allocated, whichever ABI it compiled
+        // against.
+        let err_ptr: *mut JpegErrorMgr = unsafe { (cinfo as *const *mut JpegErrorMgr).read() };
+        if !err_ptr.is_null() {
+            // SAFETY: `err` points at a caller-owned `jpeg_error_mgr`; only
+            // raw reads, since this may run while the shim still holds
+            // pointers into the same object.
+            unsafe {
+                code = std::ptr::addr_of!((*err_ptr).msg_code).read();
+                let parm: *const u8 = std::ptr::addr_of!((*err_ptr).msg_parm) as *const u8;
+                let width: usize = std::mem::size_of::<c_int>();
+                let mut bytes: [u8; std::mem::size_of::<c_int>()] = Default::default();
+                std::ptr::copy_nonoverlapping(parm, bytes.as_mut_ptr(), width);
+                parm0 = c_int::from_ne_bytes(bytes);
+                std::ptr::copy_nonoverlapping(parm.add(width), bytes.as_mut_ptr(), width);
+                parm1 = c_int::from_ne_bytes(bytes);
+            }
         }
     }
+    // Both parameters: the ABI guards are `ERREXIT2`, and reporting only the
+    // first turns "library is 80, caller expects 70" into a bare 80.
     eprintln!(
-        "libjpeg-turbo-rs: fatal JPEG error (msg_code={}, parm0={})",
-        code, parm0
+        "libjpeg-turbo-rs: fatal JPEG error (msg_code={}, parm0={}, parm1={})",
+        code, parm0, parm1
     );
     std::process::abort();
 }
@@ -907,6 +925,20 @@ const JERR_BAD_PRECISION: c_int = 16;
 #[allow(dead_code)]
 /// "Improper call to JPEG library in state %d"
 const JERR_BAD_STATE: c_int = 21;
+
+/// `jerror.h`: "Wrong JPEG library version: library is %d, caller expects %d".
+/// `ERREXIT2`, so parm0 is the *library's* version and parm1 the caller's.
+/// Measured against a real libjpeg by `create_abi_guards_oracle.c`.
+const JERR_BAD_LIB_VERSION: c_int = 13;
+
+/// `jerror.h`: "JPEG parameter struct mismatch: library thinks size is %u,
+/// caller expects %u". parm0 is the library's `sizeof`, parm1 the caller's.
+const JERR_BAD_STRUCT_SIZE: c_int = 22;
+
+/// The ABI this shim implements. `jpeg_create_*` expands to a call carrying
+/// this value, and a caller compiled against a different libjpeg carries
+/// theirs — which is the whole point of the check.
+const JPEG_LIB_VERSION_IMPLEMENTED: c_int = 80;
 #[allow(dead_code)]
 /// "Buffer passed to JPEG library is too small"
 const JERR_BUFFER_SIZE: c_int = 24;
@@ -1170,6 +1202,42 @@ pub(crate) fn invoke_error_exit(cinfo: *mut c_void, msg_code: c_int) {
 /// Without it `format_message` renders whatever integer happened to be left in
 /// `msg_parm`, which is exactly the kind of divergence a drop-in replacement
 /// must not have.
+/// `ERREXIT2` — raise `msg_code` with two int parameters.
+///
+/// Separate from [`invoke_error_exit_parm`] rather than defaulting the second
+/// slot: several upstream messages take two, and writing only `i[0]` would
+/// leave `i[1]` holding whatever the caller's `msg_parm` union last contained,
+/// which `format_message` would then render.
+pub(crate) fn invoke_error_exit_parm2(
+    cinfo: *mut c_void,
+    msg_code: c_int,
+    parm0: c_int,
+    parm1: c_int,
+) {
+    if cinfo.is_null() {
+        return;
+    }
+    // SAFETY: caller guarantees `cinfo` points at a `j_common_ptr`-shaped
+    // struct whose first pointer-sized field is the `err` slot. Only that
+    // field is read, so this is valid even when the caller's object is
+    // smaller than a full mirror — which is exactly when it is used.
+    unsafe {
+        let err_pp: *const *mut JpegErrorMgr = cinfo as *const *mut JpegErrorMgr;
+        let err_ptr: *mut JpegErrorMgr = err_pp.read();
+        if !err_ptr.is_null() {
+            let width: usize = std::mem::size_of::<c_int>();
+            let first: [u8; std::mem::size_of::<c_int>()] = parm0.to_ne_bytes();
+            let second: [u8; std::mem::size_of::<c_int>()] = parm1.to_ne_bytes();
+            // Raw writes: `err` is caller-owned and `error_exit` may inspect
+            // it, so no Rust reference may be live across the call below.
+            let parm: *mut u8 = std::ptr::addr_of_mut!((*err_ptr).msg_parm) as *mut u8;
+            std::ptr::copy_nonoverlapping(first.as_ptr(), parm, width);
+            std::ptr::copy_nonoverlapping(second.as_ptr(), parm.add(width), width);
+        }
+    }
+    invoke_error_exit(cinfo, msg_code);
+}
+
 pub(crate) fn invoke_error_exit_parm(cinfo: *mut c_void, msg_code: c_int, parm0: c_int) {
     if cinfo.is_null() {
         return;
@@ -1589,6 +1657,141 @@ pub unsafe extern "C" fn jpeg_std_error(err: *mut JpegErrorMgr) -> *mut JpegErro
 // `jpeg_CreateDecompress` + `jpeg_destroy_decompress` — subtask #3.
 // ---------------------------------------------------------------------------
 
+/// Upstream's create-time ABI guards (`jdapimin.c` / `jcapimin.c`), shared by
+/// both entry points because the contract is identical and the order matters.
+///
+/// Returns `false` when the caller's declaration was rejected, in which case an
+/// error has already been raised and **nothing beyond `mem` may be written**.
+///
+/// Three details are load-bearing, and all three were measured from a real
+/// libjpeg by `examples/create_abi_guards_oracle.c` rather than read off the
+/// source:
+///
+/// 1. `mem` is nulled *first*, before either check, so `jpeg_destroy_*` is
+///    safe on a rejected object — the caller's error handler usually calls it.
+/// 2. The version check wins when both are wrong.
+/// 3. Both are `ERREXIT2`, and parameter order is (library's value, caller's).
+///
+/// Everything here goes through raw field projections. The caller may have
+/// allocated only `struct_size` bytes, so forming a reference to the full
+/// mirror — which is what this function exists to prevent — would itself be
+/// undefined before the size has been checked.
+fn create_abi_guards_pass(
+    cinfo: *mut c_void,
+    version: c_int,
+    struct_size: usize,
+    expected_size: usize,
+    mem_offset: usize,
+) -> bool {
+    // SAFETY: `cinfo` is non-null and the `mem` slot lies within the
+    // `jpeg_common_fields` prefix that every caller allocates, whatever ABI
+    // it was compiled against.
+    unsafe {
+        let mem_slot: *mut *mut c_void = (cinfo as *mut u8).add(mem_offset) as *mut *mut c_void;
+        mem_slot.write(std::ptr::null_mut());
+    }
+
+    if version != JPEG_LIB_VERSION_IMPLEMENTED {
+        invoke_error_exit_parm2(
+            cinfo,
+            JERR_BAD_LIB_VERSION,
+            JPEG_LIB_VERSION_IMPLEMENTED,
+            version,
+        );
+        return false;
+    }
+    if struct_size != expected_size {
+        invoke_error_exit_parm2(
+            cinfo,
+            JERR_BAD_STRUCT_SIZE,
+            expected_size as c_int,
+            struct_size as c_int,
+        );
+        return false;
+    }
+    true
+}
+
+/// Zero the public struct while leaving the `err` and `client_data` slots
+/// exactly as the caller left them.
+///
+/// Upstream copies both into locals, `memset`s, and copies them back. Doing
+/// that in Rust would *load* `client_data` as an initialized pointer — and the
+/// standard idiom leaves it indeterminate: stock `djpeg` puts
+/// `jpeg_decompress_struct` on the stack and sets only `err`
+/// (`djpeg.c:573-589`), which is why upstream's own comment says the
+/// application "may have set client_data" and warns that "tools like Purify
+/// may complain here". C tolerates reading that; Rust does not — a typed load
+/// of uninitialized memory is undefined however the value is used afterwards.
+///
+/// So this zeroes *around* the two slots and never reads either. The observable
+/// result is upstream's: both survive, everything else is cleared.
+///
+/// **Known strictness question (P4-149).** Preserving means that when the
+/// caller never set `client_data`, the slot stays uninitialized — which is
+/// exactly what upstream leaves too. Under a *deep* reading of reference
+/// validity, holding `&mut JpegDecompressPublic` over a struct with an
+/// uninitialized field would itself be invalid, and create does hold one to
+/// write the remaining defaults. Miri — the checker this crate gates on —
+/// accepts it: reference retagging does not descend into plain-data fields,
+/// and `create_never_loads_an_uninitialized_client_data` exercises exactly
+/// this shape. Whether deep validity applies on reference creation is unsettled
+/// in the UCG; if it is settled the strict way, create must become
+/// raw-pointer-only throughout. Nulling the slot instead is *not* the fix: it
+/// silently drops a pointer the application attached, which is the defect this
+/// preservation was added to correct.
+///
+/// # Safety
+///
+/// `base` must be valid for writes of `size` bytes, and both slots must lie
+/// within it with `err_off < client_off`.
+unsafe fn zero_public_struct_preserving_err_and_client_data(
+    base: *mut u8,
+    size: usize,
+    err_off: usize,
+    client_off: usize,
+) {
+    let word: usize = std::mem::size_of::<*mut c_void>();
+    debug_assert!(err_off + word <= client_off);
+    debug_assert!(client_off + word <= size);
+    // SAFETY: every range below is inside `base[..size]` by the assertions
+    // above, and all of the fields they cover are plain data.
+    unsafe {
+        std::ptr::write_bytes(base, 0, err_off);
+        std::ptr::write_bytes(base.add(err_off + word), 0, client_off - (err_off + word));
+        std::ptr::write_bytes(base.add(client_off + word), 0, size - (client_off + word));
+    }
+}
+
+/// Byte offset of `mem` in the `jpeg_common_fields` prefix both public structs
+/// begin with. Asserted equal for the two mirrors by
+/// `common_mem_offset_is_shared`, because the generic `jpeg_destroy` /
+/// `jpeg_abort` entry points must read it before they know which one they have.
+const COMMON_MEM_OFFSET: usize = std::mem::offset_of!(JpegDecompressPublic, mem);
+
+/// Reads the `mem` slot without forming a reference to the whole struct.
+///
+/// `jpeg_destroy_*` runs on objects that were never successfully created —
+/// a caller's error handler almost always calls it after the create-time ABI
+/// guards reject a declaration. Such an object still holds whatever the
+/// caller's allocation contained, and may be *smaller* than this shim's
+/// mirror, so neither its contents nor its extent can be trusted. `mem` is
+/// the one field `jpeg_Create*` writes before validating (see
+/// [`create_abi_guards_pass`]), which is what makes it the only safe thing to
+/// test — and it is exactly why upstream's `jpeg_destroy` gates everything on
+/// it (`jcomapi.c`).
+fn common_mem_is_null(cinfo: *mut c_void, mem_offset: usize) -> bool {
+    if cinfo.is_null() {
+        return true;
+    }
+    // SAFETY: the `mem` slot lies inside the `jpeg_common_fields` prefix that
+    // every caller allocates, whatever ABI it compiled against.
+    unsafe {
+        let slot: *const *mut c_void = (cinfo as *const u8).add(mem_offset) as *const *mut c_void;
+        slot.read().is_null()
+    }
+}
+
 /// `jpeg_CreateDecompress(cinfo, version, structsize)`.
 ///
 /// The `jpeg_create_decompress(cinfo)` macro expands to this function
@@ -1610,27 +1813,61 @@ pub unsafe extern "C" fn jpeg_std_error(err: *mut JpegErrorMgr) -> *mut JpegErro
 #[no_mangle]
 pub unsafe extern "C" fn jpeg_CreateDecompress(
     cinfo: *mut c_void,
-    _version: c_int,
-    _struct_size: usize,
+    version: c_int,
+    struct_size: usize,
 ) {
     crate::unwind_guard!((), {
-        // SAFETY: `cinfo` is caller-allocated; we only touch the bytes that
-        // fit the `JpegDecompressPublic` layout. If the buffer is smaller
-        // than that, the caller violated libjpeg's `sizeof(*cinfo)` contract
-        // and crashes are acceptable (matching upstream).
+        if cinfo.is_null() {
+            return;
+        }
+        // P4-110: validate *before* writing the caller's object. This shim
+        // used to ignore both parameters and write its full mirror, so a
+        // caller declaring a smaller struct had memory written past the end of
+        // its allocation — the item's P0. Measured against a real libjpeg:
+        // `capi_create_abi_guards.rs` compares every case with C.
+        if !create_abi_guards_pass(
+            cinfo,
+            version,
+            struct_size,
+            std::mem::size_of::<JpegDecompressPublic>(),
+            std::mem::offset_of!(JpegDecompressPublic, mem),
+        ) {
+            return;
+        }
+
+        // Past the guards the declared size matches the mirror exactly, so a
+        // reference to the whole struct is now sound.
+        // SAFETY: `struct_size` equals `size_of::<JpegDecompressPublic>()`,
+        // checked immediately above, and the caller's pointer contract makes
+        // that many bytes valid and aligned.
         let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
             Some(c) => c,
             None => return,
         };
-        // Do NOT zero `err` — the caller sets that up before calling us
-        // (per the `cinfo.err = jpeg_std_error(&err);` idiom).
-        //
+
+        // Upstream zeroes the entire struct and restores the two fields the
+        // application owns (`jdapimin.c`: "the application has already set the
+        // err pointer, and may have set client_data"). Zeroing matters on its
+        // own: the assignments below name most fields but not all, and a
+        // caller reusing a stack object would otherwise see stale values in
+        // whatever this function forgets.
+        // SAFETY: `c` is a valid, exclusively-borrowed mirror of exactly this
+        // size; every field it clears is plain data for which all-zero is a
+        // valid value, and it reads neither preserved slot.
+        unsafe {
+            zero_public_struct_preserving_err_and_client_data(
+                c as *mut JpegDecompressPublic as *mut u8,
+                std::mem::size_of::<JpegDecompressPublic>(),
+                std::mem::offset_of!(JpegDecompressPublic, err),
+                std::mem::offset_of!(JpegDecompressPublic, client_data),
+            );
+        }
+
         // Wire up the memory-manager vtable so libjpeg callers can invoke
         // `(*cinfo->mem->alloc_small)(...)` from the very first line of
         // their main loops (e.g. wrppm.c output init).
         c.mem = memmgr::create_memory_mgr() as *mut c_void;
         c.progress = std::ptr::null_mut();
-        c.client_data = std::ptr::null_mut();
         c.is_decompressor = 1;
         c.global_state = DSTATE_START;
 
@@ -1769,7 +2006,13 @@ pub unsafe extern "C" fn jpeg_CreateDecompress(
 #[no_mangle]
 pub unsafe extern "C" fn jpeg_destroy_decompress(cinfo: *mut c_void) {
     crate::unwind_guard!((), {
-        if cinfo.is_null() {
+        // Same reasoning as `jpeg_destroy_compress`: an object whose `mem` is
+        // null was never created (or has already been destroyed), so its
+        // contents and even its extent are untrustworthy — a create rejected
+        // by the P4-110 guards leaves the caller's smaller object exactly as
+        // it was. Forming a reference to the full mirror below would be
+        // undefined for such a caller.
+        if common_mem_is_null(cinfo, std::mem::offset_of!(JpegDecompressPublic, mem)) {
             return;
         }
         // Release the private state from the side table. Drop any
@@ -6134,6 +6377,15 @@ pub unsafe extern "C" fn jpeg_abort(cinfo: *mut c_void) {
         if cinfo.is_null() {
             return;
         }
+        // `mem` first, and through the common prefix. A create rejected by
+        // the P4-110 ABI guards has initialized *only* `mem` — the caller
+        // itself set just `err` — so `is_decompressor` is indeterminate, and
+        // reading it to pick a teardown path would be an uninitialized read on
+        // the exact path a caller's error handler takes. `mem` is nulled
+        // before those guards precisely so this test is available.
+        if common_mem_is_null(cinfo, COMMON_MEM_OFFSET) {
+            return;
+        }
         let is_decompressor: CBoolean = unsafe { *(cinfo as *const u8).add(32).cast::<CBoolean>() };
         if is_decompressor != 0 {
             unsafe { jpeg_abort_decompress(cinfo) };
@@ -6158,6 +6410,15 @@ pub unsafe extern "C" fn jpeg_abort(cinfo: *mut c_void) {
 pub unsafe extern "C" fn jpeg_destroy(cinfo: *mut c_void) {
     crate::unwind_guard!((), {
         if cinfo.is_null() {
+            return;
+        }
+        // `mem` first, and through the common prefix. A create rejected by
+        // the P4-110 ABI guards has initialized *only* `mem` — the caller
+        // itself set just `err` — so `is_decompressor` is indeterminate, and
+        // reading it to pick a teardown path would be an uninitialized read on
+        // the exact path a caller's error handler takes. `mem` is nulled
+        // before those guards precisely so this test is available.
+        if common_mem_is_null(cinfo, COMMON_MEM_OFFSET) {
             return;
         }
         let is_decompressor: CBoolean = unsafe { *(cinfo as *const u8).add(32).cast::<CBoolean>() };
@@ -6812,22 +7073,49 @@ fn default_num_components_for(cs: c_int) -> c_int {
 #[no_mangle]
 pub unsafe extern "C" fn jpeg_CreateCompress(
     cinfo: *mut c_void,
-    _version: c_int,
-    _struct_size: usize,
+    version: c_int,
+    struct_size: usize,
 ) {
     crate::unwind_guard!((), {
+        if cinfo.is_null() {
+            return;
+        }
+        // P4-110, as in `jpeg_CreateDecompress`: validate before writing.
+        if !create_abi_guards_pass(
+            cinfo,
+            version,
+            struct_size,
+            std::mem::size_of::<JpegCompressPublic>(),
+            std::mem::offset_of!(JpegCompressPublic, mem),
+        ) {
+            return;
+        }
+
+        // SAFETY: the guard above established that `struct_size` equals this
+        // mirror's size, so the caller's object covers the whole struct.
         let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
             Some(c) => c,
             None => return,
         };
-        // Per jcapimin.c jpeg_CreateCompress, the struct is memset to zero with
-        // `err` and `client_data` preserved, then fields are populated.
-        //
+        // `jcapimin.c` zeroes the struct and restores `err` and `client_data`.
+        // This comment claimed that behaviour long before the code did it: the
+        // assignments below name most fields but not all, so a reused object
+        // kept stale values in the remainder.
+        // SAFETY: as in `jpeg_CreateDecompress` — exclusive borrow of exactly
+        // this many bytes, plain-data fields, and neither preserved slot read.
+        unsafe {
+            zero_public_struct_preserving_err_and_client_data(
+                c as *mut JpegCompressPublic as *mut u8,
+                std::mem::size_of::<JpegCompressPublic>(),
+                std::mem::offset_of!(JpegCompressPublic, err),
+                std::mem::offset_of!(JpegCompressPublic, client_data),
+            );
+        }
+
         // Wire up the memory-manager vtable so stock cjpeg / jpegtran can
         // invoke `cinfo->mem->alloc_*` from their init paths.
         c.mem = memmgr::create_memory_mgr() as *mut c_void;
         c.progress = std::ptr::null_mut();
-        // err / client_data are already set by the caller; do NOT overwrite.
         c.is_decompressor = 0;
         c.global_state = CSTATE_START;
         c.dest = std::ptr::null_mut();
@@ -6976,6 +7264,16 @@ pub unsafe extern "C" fn jpeg_calc_jpeg_dimensions(cinfo: *mut c_void) {
 #[no_mangle]
 pub unsafe extern "C" fn jpeg_destroy_compress(cinfo: *mut c_void) {
     crate::unwind_guard!((), {
+        // Nothing was ever created here — or it was already destroyed. Reading
+        // `master` out of such an object and handing it to `Box::from_raw`
+        // freed whatever bit pattern the caller's allocation happened to hold;
+        // with the P4-110 guards in place that is reached routinely, because a
+        // rejected create leaves the object untouched and callers still call
+        // destroy. Upstream gates its whole teardown on this field for the
+        // same reason.
+        if common_mem_is_null(cinfo, std::mem::offset_of!(JpegCompressPublic, mem)) {
+            return;
+        }
         let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
             Some(c) => c,
             None => return,
@@ -11746,5 +12044,34 @@ mod marker_scan_tests {
         assert_eq!(find_first_sos(&[0x00, 0x01, 0x02]), None);
         assert_eq!(find_first_sos(&[0xFF]), None);
         assert_eq!(find_first_sos(&[]), None);
+    }
+}
+
+#[cfg(test)]
+mod common_prefix_tests {
+    use super::*;
+
+    /// `jpeg_destroy` / `jpeg_abort` read `mem` before they know which struct
+    /// they were handed, so the offset must be identical in both. It is, via
+    /// the `jpeg_common_fields` prefix — but nothing in the type system says
+    /// so, and a field reordered into that prefix would silently move it.
+    #[test]
+    fn common_mem_offset_is_shared() {
+        assert_eq!(
+            std::mem::offset_of!(JpegDecompressPublic, mem),
+            std::mem::offset_of!(JpegCompressPublic, mem),
+            "`mem` must sit at the same offset in both public structs"
+        );
+        assert_eq!(
+            COMMON_MEM_OFFSET,
+            std::mem::offset_of!(JpegCompressPublic, mem)
+        );
+    }
+
+    /// The same for `err`, which every raise path reads at offset 0.
+    #[test]
+    fn common_err_offset_is_zero_in_both() {
+        assert_eq!(std::mem::offset_of!(JpegDecompressPublic, err), 0);
+        assert_eq!(std::mem::offset_of!(JpegCompressPublic, err), 0);
     }
 }

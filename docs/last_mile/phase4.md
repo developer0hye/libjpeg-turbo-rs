@@ -68,7 +68,7 @@
 | P4-107 | OPEN (`jpeg_enable_lossless` clamps invalid input and omits public state) |
 | P4-108 | CLOSED 2026-08-08 (classic destination managers violate buffer ownership and I/O errors) |
 | P4-109 | OPEN (classic source-manager setup/stdio semantics diverge) |
-| P4-110 | OPEN (`jpeg_Create*` ignores version/struct-size ABI guards) |
+| P4-110 | CLOSED 2026-08-11 (`jpeg_Create*` version/struct-size ABI guards, compared against a real libjpeg) |
 | P4-111 | OPEN (classic progress-manager callbacks/counters are not wired) |
 | P4-112 | OPEN (`jpeg_set_marker_processor` callbacks are stored but never invoked) |
 | P4-113 | OPEN (`jpeg_read_icc_profile` bypasses classic saved-marker semantics) |
@@ -2822,7 +2822,7 @@ above on its own — validation, FILE buffering and Windows all remain — but i
 removes a divergence those cross-validations would otherwise have to encode.
 Pinned by `capi_resync_to_restart.rs::scan_forward_past_end_of_memory_source_yields_fake_eoi`.
 
-## P4-110. `jpeg_Create*` Ignores Version and Struct-Size ABI Guards — **OPEN**
+## P4-110. `jpeg_Create*` Ignores Version and Struct-Size ABI Guards — **CLOSED 2026-08-11**
 
 **Motivation.** Filed 2026-08-02 as a P0 ABI memory-safety finding. Many tests
 pass a 4096-byte blob/size that stock v8 rejects, normalizing the missing guard.
@@ -2836,6 +2836,177 @@ exact mirrored size. Canary/setjmp tests cover wrong version and smaller/larger
 sizes, exact `JERR_BAD_LIB_VERSION`/`JERR_BAD_STRUCT_SIZE`, no write past the
 declared object, preservation of `err`/`client_data`, and zero-init of all other
 public fields for both compressor and decompressor.
+
+**Status (2026-08-11): closed.** `cargo test -p libjpeg-turbo-rs-capi --test
+capi_create_abi_guards` passes, comparing the shim against a real libjpeg
+(`examples/create_abi_guards_oracle.c`) across six cases per entry point — ok,
+version low/high, size small/large, and both wrong — on every observable the
+criteria name: raised code, both `ERREXIT2` parameters, canary integrity past
+the declared object, `mem`, `err`/`client_data` preservation, and zeroing.
+
+What the C oracle settled, none of which was safe to assume:
+
+- **The version check wins** when version *and* size are both wrong.
+- `JERR_BAD_LIB_VERSION` is **13**, `JERR_BAD_STRUCT_SIZE` **22**; parameter
+  order is (library's value, caller's) for both. Independently confirmed by
+  `capi_classic_error_codes.rs`, whose gate cross-checks every shim constant
+  against upstream's `jerror.h` — it failed until the two new codes were
+  registered.
+- `mem` is nulled **before** either check, which is what makes
+  `jpeg_destroy_*` safe on a rejected object.
+
+That last point found a second defect. `jpeg_destroy_compress` read `master`
+straight out of the caller's struct and handed it to `Box::from_raw`; on a
+rejected create the struct still holds whatever the caller allocated, so the
+new tests turned it into a `SIGSEGV` on the first run. Both destroys now gate
+on `mem` through a raw field read (`common_mem_is_null`), never forming a
+reference to a mirror the caller may not have allocated.
+
+**The guards are raw-pointer-only, and that is checked rather than argued.**
+A caller declaring a smaller struct means the mirror does not fit its
+allocation, so even *forming* `&mut JpegDecompressPublic` is undefined — before
+any write. The guards therefore read and write `mem` through a field offset,
+and `jpeg_destroy_*` tests `mem` the same way. Review found the default error
+handler still built a full mirror reference to read `err` at offset 0; it now
+reads through the common prefix too.
+
+`rejection_path_touches_only_the_declared_object` allocates **exactly** the
+declared size — no canary, nothing past it — and runs create, the error
+handler and destroy over it under Miri, where an oversized borrow is a hard
+error. It passes. (Its first Miri run failed on a defect in the *test*: the
+error manager pointer was derived from the `pub_mgr` field rather than the
+enclosing struct, so the callback's write to `fired` landed outside that
+pointer's provenance. The C idiom has the same shape and the same trap.)
+
+Review then found a third defect in the fix itself, on the *accepted* path.
+Upstream saves `err` and `client_data` into locals, `memset`s, and restores
+them. Transcribed literally that *loads* `client_data` as an initialized
+pointer — and the standard idiom leaves it indeterminate: stock `djpeg` puts
+the struct on the stack and sets only `err` (`djpeg.c:573-589`), which is why
+upstream's own comment says the application "may have set client_data" and
+warns that "tools like Purify may complain here". C tolerates copying an
+indeterminate value; Rust does not. Create now zeroes *around* the two slots
+and reads neither. `create_never_loads_an_uninitialized_client_data` leaves the
+allocation exactly as `alloc` returned it and sets only `err`; under Miri the
+transcribed version fails with *"reading memory at alloc[0x18..0x20], but
+memory is uninitialized"* — 0x18 being `client_data`. Every other test in the
+file pre-fills its allocation, so none of them could have caught it.
+
+Review found one more door into the same room: the *generic* `jpeg_destroy` /
+`jpeg_abort` choose their teardown path by reading `is_decompressor` — which a
+rejected create leaves indeterminate, since only `err` (the caller) and `mem`
+(the guard) are initialized. Both now test `mem` through the shared prefix
+first, at a named `COMMON_MEM_OFFSET` whose equality across the two mirrors is
+asserted by a unit test rather than assumed. The Miri case calls
+`jpeg_abort` and `jpeg_destroy` as well as the typed destroy; without the guard
+it fails with *"constructing invalid value of type &mut JpegDecompressPublic:
+encountered a dangling reference (going beyond the bounds of its
+allocation)"* — the P0 itself, one function further along.
+
+**One gap, stated rather than papered over:** that Miri run installs its own
+`error_exit`, so it does not cover `default_error_exit`, which aborts the
+process and therefore cannot be observed under Miri at all.
+`default_error_handler_reports_both_parameters_and_aborts` covers it from a
+child process for the observable half — the rejection reaches the default
+handler and reports *both* `ERREXIT2` parameters, verified red by dropping
+`parm1` — but the "stays inside the caller's object" half rests on that handler
+reading only offset 0, not on a checker.
+
+**The measured P0, before the fix:** `undersized fired=0 … canary=0
+client_kept=0` — a caller declaring even 8 bytes fewer than the real struct had
+the full mirror written over the end of its allocation, and its `client_data`
+silently dropped. After: `fired=1 code=22 … canary=1 mem_null=1`.
+
+14 test files declared a 4096-byte blob (or `vec![0u8; 1024]`) and passed that
+as `structsize` — the normalisation the item predicted. All 58 create call
+sites now derive the size from the mirrored struct, and zero remain passing a
+literal. Naming the struct also fixes a second latent problem the item did not
+mention: `MaybeUninit<[u8; N]>` has alignment 1, so those tests were handing the
+C ABI under-aligned `j_decompress_ptr`s — including nine sites review caught
+that the first sweep missed, because they spell the buffer `[u8; 4096]` or
+`Box<[u8; 4096]>` rather than `MaybeUninit<[u8; N]>`. Every cinfo buffer in the
+suite now names its struct, except the one that cannot: `capi_jpeglib_encode.rs`'s
+red-zone test needs raw bytes on both sides of the struct, so it over-allocates
+by one alignment and offsets to an aligned base instead — and its red-zone
+indices carry that offset, which they did not before, so an unaligned
+allocation used to be checked against the wrong bytes. **42 error-manager blobs still have that alignment
+bug** and are filed separately as P4-148.
+
+## P4-149. Preserved `client_data` May Be Uninitialized While Create Holds `&mut` — **OPEN**
+
+**Motivation.** Raised in review while closing P4-110 (2026-08-11) and
+deliberately not resolved there. `jpeg_Create*` must preserve `client_data`
+across its zeroing — that is upstream's contract and one of P4-110's acceptance
+criteria — but the standard idiom leaves the slot uninitialized (stock `djpeg`
+sets only `err`). Create then holds `&mut JpegDecompressPublic` to write the
+remaining defaults, so under a *deep* reading of reference validity the
+reference points at an invalid value.
+
+**Why it was not fixed with P4-110.** The two obvious resolutions are both
+worse:
+
+- *Null the slot.* Defined, but it is the bug P4-110 fixed — it drops the
+  pointer an application attached before calling, which its own callbacks then
+  read back.
+- *Make create raw-pointer-only.* Correct under any reading, but it converts a
+  ~60-field initializer into raw writes inside a change that was already a P0
+  memory-safety fix. Reviewing that as one commit is worse for safety, not
+  better.
+
+**Current status.** Miri accepts the present code — retagging does not descend
+into plain-data fields — and `create_never_loads_an_uninitialized_client_data`
+runs exactly this shape under it in CI. Whether deep validity applies on
+reference creation is unsettled in the UCG.
+
+**Acceptance criteria.** Either the UCG settles it permissively and this item
+closes with a citation, or `jpeg_CreateCompress` / `jpeg_CreateDecompress` stop
+forming `&mut` over the caller's struct entirely and write every field through
+raw pointers, with the existing Miri case still passing and no `client_data`
+behaviour change.
+
+## P4-147. `worker_b8_restart_bomb` Asserts a Wall-Clock Bound and Flakes Under Parallel Load — **OPEN**
+
+**Motivation.** Filed 2026-08-11 (issue #523) during the P4-104 work.
+`tests/worker_b8_restart_bomb.rs::restart_bomb_4096x4096_decodes_within_measured_bound`
+asserts `m.wall_clock.as_millis() < BOMB_WALL_CLOCK_MS`. It failed once during a
+full `cargo test --workspace --release` run with a parallel build competing for
+CPU, and passes 3/3 in isolation.
+
+**Why it matters.** The default suite runs with parallel test threads, so a
+wall-clock assertion under contention is a coin flip — and its failure message
+blames a *"RST parsing regression"* that did not happen, which costs a debugging
+session before anyone thinks to re-run. `CLAUDE.md` already forbids parallel
+benchmarking for exactly this reason; the same reasoning applies to a clock
+assertion inside a test.
+
+**What the test is really guarding** is the *complexity* claim: RI=1 restart
+parsing must not be quadratic. That is measurable without a clock.
+
+**Acceptance criteria.** The regression it was written for is still caught, by
+a deterministic measure — a restart-marker scan counter with an O(n) bound, or
+equivalent work-based assertion — and no wall-clock comparison remains in the
+default suite. Timing-based checks, if kept at all, move to `experiments/` or a
+serial-only harness.
+
+## P4-148. Test Error-Manager Blobs Are Under-Aligned `[u8; N]` Buffers — **OPEN**
+
+**Motivation.** Discovered while closing P4-110. Across the C-ABI test suite
+the error manager is allocated as `MaybeUninit<[u8; ERR_BYTES]>` and cast to
+`*mut JpegErrorMgr`. `[u8; N]` has alignment 1, so nothing guarantees the
+pointer meets `align_of::<JpegErrorMgr>()`; `jpeg_std_error` then writes a
+struct through it. It works today because stack slots happen to be
+over-aligned, which is precisely the kind of accident that changes with a
+compiler version or target.
+
+**Why not fixed with P4-110.** That change converted the *cinfo* blobs, which
+it had to — the new `structsize` guard rejects them. The error blobs are a
+separate, pre-existing defect with no forcing function, and folding ~40 more
+edits into a P0 fix would have made it harder to review, not safer.
+
+**Acceptance criteria.** No `MaybeUninit<[u8; N]>` in this crate's tests is
+cast to a libjpeg struct pointer; each names the mirrored struct instead. A
+Miri run over the affected suites passes (Miri rejects misaligned references,
+so it is the mechanism rather than a convention).
 
 ## P4-111. Classic Progress-Manager Callbacks and Counters Are Not Wired — **OPEN**
 

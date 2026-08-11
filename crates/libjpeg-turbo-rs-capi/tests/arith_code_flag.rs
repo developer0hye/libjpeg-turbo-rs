@@ -12,6 +12,7 @@
 //! The shim previously hardcoded `arith_code = 0` regardless of the actual
 //! SOF marker; these tests pin the correct behaviour.
 
+use libjpeg_turbo_rs_capi::jpeglib::JpegDecompressPublic;
 use std::ffi::{c_int, c_void};
 use std::mem::MaybeUninit;
 use std::os::raw::c_ulong;
@@ -59,9 +60,7 @@ fn cdylib_path() -> PathBuf {
 /// and return the `arith_code` value the shim put in `cinfo`.
 fn read_arith_code_flag(lib: &libloading::Library, jpeg_bytes: &[u8]) -> c_int {
     unsafe {
-        // Allocate opaque buffers for cinfo and the error manager.
-        const CINFO_BYTES: usize = 4096;
-        let mut cinfo: MaybeUninit<[u8; CINFO_BYTES]> = MaybeUninit::zeroed();
+        let mut cinfo: MaybeUninit<JpegDecompressPublic> = MaybeUninit::zeroed();
         let cinfo_ptr: *mut c_void = cinfo.as_mut_ptr() as *mut c_void;
 
         const ERR_BYTES: usize = 512;
@@ -83,7 +82,11 @@ fn read_arith_code_flag(lib: &libloading::Library, jpeg_bytes: &[u8]) -> c_int {
             .get(b"jpeg_CreateDecompress")
             .expect("jpeg_CreateDecompress");
         let jpeg_lib_version: c_int = 80; // JPEG_LIB_VERSION for libjpeg-turbo 3.x
-        jpeg_create_decompress(cinfo_ptr, jpeg_lib_version, CINFO_BYTES);
+        jpeg_create_decompress(
+            cinfo_ptr,
+            jpeg_lib_version,
+            std::mem::size_of::<JpegDecompressPublic>(),
+        );
 
         // Point the decoder at the in-memory JPEG bytes.
         let jpeg_mem_src: libloading::Symbol<

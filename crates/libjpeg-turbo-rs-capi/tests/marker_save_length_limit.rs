@@ -10,6 +10,7 @@
 //!   3. `marker_save_no_call_saves_nothing` — without `jpeg_save_markers` no
 //!      markers are saved (default behavior regression guard).
 
+use libjpeg_turbo_rs_capi::jpeglib::JpegDecompressPublic;
 use std::ffi::{c_int, c_uint, c_void};
 use std::mem::MaybeUninit;
 use std::os::raw::c_ulong;
@@ -104,8 +105,7 @@ unsafe fn saved_marker_lengths(
     jpeg_bytes: &[u8],
     save_calls: &[(c_int, c_uint)], // (code, length_limit) pairs; empty = no call
 ) -> Vec<(u8, usize, usize)> {
-    const CINFO_BYTES: usize = 4096;
-    let mut cinfo: MaybeUninit<[u8; CINFO_BYTES]> = MaybeUninit::zeroed();
+    let mut cinfo: MaybeUninit<JpegDecompressPublic> = MaybeUninit::zeroed();
     let cinfo_ptr: *mut c_void = cinfo.as_mut_ptr() as *mut c_void;
 
     const ERR_BYTES: usize = 512;
@@ -123,7 +123,7 @@ unsafe fn saved_marker_lengths(
     > = lib
         .get(b"jpeg_CreateDecompress")
         .expect("jpeg_CreateDecompress");
-    jpeg_create_decompress(cinfo_ptr, 80, CINFO_BYTES);
+    jpeg_create_decompress(cinfo_ptr, 80, std::mem::size_of::<JpegDecompressPublic>());
 
     let jpeg_mem_src: libloading::Symbol<unsafe extern "C" fn(*mut c_void, *const u8, c_ulong)> =
         lib.get(b"jpeg_mem_src").expect("jpeg_mem_src");

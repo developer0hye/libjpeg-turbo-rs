@@ -13,6 +13,7 @@
 //! Both tests hard-panic on any Rust library error (CLAUDE.md strict assertion
 //! rule). Skip only when the cdylib cannot be located.
 
+use libjpeg_turbo_rs_capi::jpeglib::JpegCompressPublic;
 use std::ffi::{c_int, c_void};
 use std::mem::MaybeUninit;
 use std::os::raw::c_ulong;
@@ -155,8 +156,7 @@ unsafe fn encode_raw_planes_via_capi(
     // -----------------------------------------------------------------------
     // Allocate cinfo + error-manager buffers.
     // -----------------------------------------------------------------------
-    const CINFO_BYTES: usize = 4096;
-    let mut cinfo_buf: MaybeUninit<[u8; CINFO_BYTES]> = MaybeUninit::zeroed();
+    let mut cinfo_buf: MaybeUninit<JpegCompressPublic> = MaybeUninit::zeroed();
     let cinfo_ptr: *mut c_void = cinfo_buf.as_mut_ptr() as *mut c_void;
 
     const ERR_BYTES: usize = 512;
@@ -170,7 +170,11 @@ unsafe fn encode_raw_planes_via_capi(
     (cinfo_ptr as *mut *mut c_void).write(err_ptr);
 
     // Create compressor.
-    jpeg_create_compress(cinfo_ptr, 80 /* JPEG_LIB_VERSION */, CINFO_BYTES);
+    jpeg_create_compress(
+        cinfo_ptr,
+        80, /* JPEG_LIB_VERSION */
+        std::mem::size_of::<JpegCompressPublic>(),
+    );
 
     // Configure output destination (caller-allocated).
     let mut out_ptr: *mut u8 = std::ptr::null_mut();

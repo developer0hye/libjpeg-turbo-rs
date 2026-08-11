@@ -22,6 +22,7 @@
 //! `tables_only_with_require_image_true_invokes_jerr_no_image`
 //! red-fail with `error_exit fired 0 times, expected 1`.
 
+use libjpeg_turbo_rs_capi::jpeglib::JpegDecompressPublic;
 use std::ffi::c_int;
 use std::os::raw::{c_long, c_void};
 use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
@@ -146,7 +147,11 @@ fn tables_only_with_require_image_false_returns_header_tables_only() {
     // Allocate cinfo as a 4 KiB buffer (well above the JpegDecompressPublic
     // size). Initialize the err slot at offset 0; the rest is initialised
     // by jpeg_CreateDecompress.
-    let mut cinfo_buf: [u8; 4096] = [0u8; 4096];
+    // P4-110: a `[u8; N]` is only byte-aligned, so casting it to a
+    // `j_decompress_ptr` was undefined regardless of size. Naming the mirrored
+    // struct fixes the alignment and gives the exact size the guard requires.
+    let mut cinfo_buf: std::mem::MaybeUninit<JpegDecompressPublic> =
+        std::mem::MaybeUninit::zeroed();
     unsafe {
         let err_slot: *mut *mut JpegErrorMgrLayout =
             cinfo_buf.as_mut_ptr() as *mut *mut JpegErrorMgrLayout;
@@ -154,9 +159,10 @@ fn tables_only_with_require_image_false_returns_header_tables_only() {
     }
     let cinfo_ptr: *mut c_void = cinfo_buf.as_mut_ptr() as *mut c_void;
 
-    // JPEG_LIB_VERSION = 80, struct size: pass actual JpegDecompressPublic size.
-    // 4096 is conservative — any value >= the real struct size is accepted.
-    unsafe { create(cinfo_ptr, 80, 4096) };
+    // JPEG_LIB_VERSION = 80 and the *exact* struct size: since P4-110 the
+    // guard requires equality, not "at least as large". The backing allocation
+    // may be bigger than the declaration; the declaration may not.
+    unsafe { create(cinfo_ptr, 80, std::mem::size_of::<JpegDecompressPublic>()) };
 
     let blob: Vec<u8> = build_tables_only_blob();
     unsafe { mem_src(cinfo_ptr, blob.as_ptr(), blob.len()) };
@@ -205,7 +211,11 @@ fn tables_only_with_require_image_true_invokes_jerr_no_image() {
     unsafe { std_error(&mut err as *mut _) };
     err.error_exit = Some(track_true_error_exit);
 
-    let mut cinfo_buf: [u8; 4096] = [0u8; 4096];
+    // P4-110: a `[u8; N]` is only byte-aligned, so casting it to a
+    // `j_decompress_ptr` was undefined regardless of size. Naming the mirrored
+    // struct fixes the alignment and gives the exact size the guard requires.
+    let mut cinfo_buf: std::mem::MaybeUninit<JpegDecompressPublic> =
+        std::mem::MaybeUninit::zeroed();
     unsafe {
         let err_slot: *mut *mut JpegErrorMgrLayout =
             cinfo_buf.as_mut_ptr() as *mut *mut JpegErrorMgrLayout;
@@ -213,7 +223,7 @@ fn tables_only_with_require_image_true_invokes_jerr_no_image() {
     }
     let cinfo_ptr: *mut c_void = cinfo_buf.as_mut_ptr() as *mut c_void;
 
-    unsafe { create(cinfo_ptr, 80, 4096) };
+    unsafe { create(cinfo_ptr, 80, std::mem::size_of::<JpegDecompressPublic>()) };
 
     let blob: Vec<u8> = build_tables_only_blob();
     unsafe { mem_src(cinfo_ptr, blob.as_ptr(), blob.len()) };
@@ -281,7 +291,11 @@ fn jpeg_consume_input_on_tables_only_returns_reached_eoi() {
     unsafe { std_error(&mut err as *mut _) };
     err.error_exit = Some(track_consume_error_exit);
 
-    let mut cinfo_buf: [u8; 4096] = [0u8; 4096];
+    // P4-110: a `[u8; N]` is only byte-aligned, so casting it to a
+    // `j_decompress_ptr` was undefined regardless of size. Naming the mirrored
+    // struct fixes the alignment and gives the exact size the guard requires.
+    let mut cinfo_buf: std::mem::MaybeUninit<JpegDecompressPublic> =
+        std::mem::MaybeUninit::zeroed();
     unsafe {
         let err_slot: *mut *mut JpegErrorMgrLayout =
             cinfo_buf.as_mut_ptr() as *mut *mut JpegErrorMgrLayout;
@@ -289,7 +303,7 @@ fn jpeg_consume_input_on_tables_only_returns_reached_eoi() {
     }
     let cinfo_ptr: *mut c_void = cinfo_buf.as_mut_ptr() as *mut c_void;
 
-    unsafe { create(cinfo_ptr, 80, 4096) };
+    unsafe { create(cinfo_ptr, 80, std::mem::size_of::<JpegDecompressPublic>()) };
 
     let blob: Vec<u8> = build_tables_only_blob();
     unsafe { mem_src(cinfo_ptr, blob.as_ptr(), blob.len()) };

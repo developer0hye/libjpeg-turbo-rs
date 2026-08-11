@@ -169,8 +169,8 @@
 | C Function | Description | Rust | Status |
 |---|---|---|---|
 | `jpeg_std_error(err)` | Create default error manager | `JpegError` enum | ✅ |
-| `jpeg_create_compress(cinfo)` | Create compression struct | `Encoder` / `ScanlineEncoder`; classic version/size guards remain P4-110 | 🔶 |
-| `jpeg_create_decompress(cinfo)` | Create decompression struct | `Decoder::new()` / `ScanlineDecoder::new()`; classic version/size guards remain P4-110 | 🔶 |
+| `jpeg_create_compress(cinfo)` | Create compression struct | `Encoder` / `ScanlineEncoder`; version/size guards enforced as upstream (P4-110 closed 2026-08-11) | 🔶 |
+| `jpeg_create_decompress(cinfo)` | Create decompression struct | `Decoder::new()` / `ScanlineDecoder::new()`; version/size guards enforced as upstream (P4-110 closed 2026-08-11) | 🔶 |
 | `jpeg_destroy_compress(cinfo)` | Destroy compressor | RAII / `Drop` | ✅ |
 | `jpeg_destroy_decompress(cinfo)` | Destroy decompressor | RAII / `Drop` | ✅ |
 | `jpeg_abort_compress(cinfo)` | Abort compression | N/A (RAII) | N/A |
@@ -513,5 +513,5 @@ These are the highest-signal C API surfaces that still lack end-to-end public pa
 | `tj3GetErrorStr()` / `tj3GetErrorCode()` | 🔶 | Rust uses `Result` / `JpegError`, not C-style per-handle getters (C ABI shim in `libjpeg-turbo-rs-capi` exposes both for FFI callers) |
 | `tj3Alloc()` / `tj3Free()` | 🔶 | N/A — Rust ownership replaces C allocator API (FFI-facing aliases exist in `libjpeg-turbo-rs-capi`) |
 | `jpeg_write_icc_profile()` | 🔶 | Native helper and classic export exist; marker state/error contracts remain P4-105/P4-100. |
-| `jpeg_create_(de)compress()` + full `jpeg_*` state-machine ABI | 🔶 | The v8 export/layout surface is broad, but create guards, ownership, public state/options, lifecycle, callbacks, and error propagation remain P4-84..P4-114. See `docs/LAST_MILE.md`; symbol presence is not behavioral parity. |
+| `jpeg_create_(de)compress()` + full `jpeg_*` state-machine ABI | 🔶 | The v8 export/layout surface is broad; create-time version/size guards match upstream since 2026-08-11 (P4-110), but ownership, public state/options, lifecycle, callbacks, and error propagation remain P4-84..P4-114. See `docs/LAST_MILE.md`; symbol presence is not behavioral parity. |
 | B9-4 / B9-5 — stock-tool/tjunittest link and behavior gates | ✅ | B9-4 covers the reference image corpus for the operations it runs; B9-5 reaches completion. These are selected consumer gates, not a v6b/v8 general drop-in claim. |

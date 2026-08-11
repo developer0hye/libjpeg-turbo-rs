@@ -19,7 +19,8 @@
 use std::ffi::{c_int, c_void};
 
 use libjpeg_turbo_rs_capi::{
-    jpeg_CreateDecompress, jpeg_destroy_decompress, jpeg_mem_src, jpeg_std_error, JpegErrorMgr,
+    jpeg_CreateDecompress, jpeg_destroy_decompress, jpeg_mem_src, jpeg_std_error,
+    JpegDecompressPublic, JpegErrorMgr,
 };
 /// `jerror.h` JMESSAGE ordinal for `JERR_INPUT_EMPTY`.
 const JERR_INPUT_EMPTY: c_int = 43;
@@ -47,7 +48,10 @@ const NO_ERROR: c_int = -1;
 unsafe extern "C" fn ignore_error_exit(_cinfo: *mut c_void) {}
 
 fn drive(buf: *const u8, size: std::os::raw::c_ulong) -> c_int {
-    let mut cinfo: Vec<u8> = vec![0u8; 1024];
+    // P4-110: `structsize` is validated now, so this must be the real struct.
+    // A `Vec<u8>` was also only byte-aligned, which the C ABI does not allow
+    // for a `j_decompress_ptr`.
+    let mut cinfo: std::mem::MaybeUninit<JpegDecompressPublic> = std::mem::MaybeUninit::zeroed();
     let mut jerr: JpegErrorMgr = unsafe { std::mem::zeroed() };
     unsafe {
         let errp: *mut JpegErrorMgr = jpeg_std_error(&mut jerr as *mut JpegErrorMgr);
@@ -55,7 +59,11 @@ fn drive(buf: *const u8, size: std::os::raw::c_ulong) -> c_int {
         (*errp).error_exit = Some(ignore_error_exit);
         (*errp).msg_code = NO_ERROR;
         *(cinfo.as_mut_ptr() as *mut *mut JpegErrorMgr) = errp;
-        jpeg_CreateDecompress(cinfo.as_mut_ptr() as *mut c_void, 80, cinfo.len());
+        jpeg_CreateDecompress(
+            cinfo.as_mut_ptr() as *mut c_void,
+            80,
+            std::mem::size_of::<JpegDecompressPublic>(),
+        );
         jpeg_mem_src(cinfo.as_mut_ptr() as *mut c_void, buf, size);
         // Read before destroy: the error manager is this run's own `jerr`, so
         // no other test can have touched it.

@@ -386,7 +386,7 @@
 ### Source / Destination
 - [x] Memory-to-memory compress (`Vec<u8>` output)
 - [x] Memory-to-memory decompress (byte slice → `Image`)
-- [ ] Classic `jpeg_CreateCompress` / `jpeg_CreateDecompress` version/size guards — P4-110
+- [x] Classic `jpeg_CreateCompress` / `jpeg_CreateDecompress` version/size guards — P4-110 (closed 2026-08-11; `JERR_BAD_LIB_VERSION` / `JERR_BAD_STRUCT_SIZE` compared against a real libjpeg by `capi_create_abi_guards.rs`)
 - [x] Full classic `jpeg_stdio_dest()` contract — short writes, `fflush`, and `ferror` raise `JERR_FILE_WRITE`; foreign-manager reuse raises `JERR_BUFFER_SIZE` (P4-108)
 - [ ] Full classic `jpeg_stdio_src()` contract — native file I/O exists; FILE buffering/Windows/error semantics remain P4-109
 - [x] Full classic `jpeg_mem_dest()` ownership/reallocation contract — caller capacity honoured, caller buffers never freed, doubling growth into library memory (P4-108)

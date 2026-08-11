@@ -84,10 +84,10 @@ both variables at build time; they are honored by
 
 | Consumer compiled against     | Safe `CAPI_SONAME`            | Safe `CAPI_INSTALL_NAME`         | Notes                                                  |
 |-------------------------------|-------------------------------|----------------------------------|--------------------------------------------------------|
-| v8 headers (`libjpeg.so.8`)   | `libjpeg.so.8` *(default)*    | `@rpath/libjpeg.8.dylib` *(default)* | Correct advertised layout/SONAME. P4-110 still requires exact create-time version/size guards, and other behavioral gaps remain open. |
+| v8 headers (`libjpeg.so.8`)   | `libjpeg.so.8` *(default)*    | `@rpath/libjpeg.8.dylib` *(default)* | Correct advertised layout/SONAME. Create-time version/size guards match upstream since 2026-08-11 (P4-110); other behavioral gaps remain open. |
 | TurboJPEG (`libturbojpeg.so.0`) | `libturbojpeg.so.0`         | `@rpath/libturbojpeg.0.dylib`    | Safe for TJ3 callers — TurboJPEG API is opaque-handle, no struct ABI. Legacy 1.x/2.x surface is partial: 21 aliases wired in `legacy.rs` (mostly v2/v3 variants + buffer/image helpers); 18 deliberately deprecated (v1 / un-versioned variants like `tjAlloc`, `tjFree`, `tjCompress`, `tjGetScalingFactors`). See the [Legacy TurboJPEG 1.x/2.x aliases](#legacy-turbojpeg-1x2x-aliases--partial-coverage-p4-18) section below for the per-symbol migration matrix (P4-18 closed 2026-05-19). |
 | v7 headers (`libjpeg.so.7`)   | (unsupported)                 | (unsupported)                    | Recompile against v8 or use upstream v7.               |
-| v6b headers (`libjpeg.so.62`) | `libjpeg.so.62` *opt-in*      | `@rpath/libjpeg.62.dylib` *opt-in* | **Risky / non-default.** Works iff the consumer never touches v7+ fields, and requires the `CAPI_ACK_V6B_SONAME=1` env to silence the build warning. See below. |
+| v6b headers (`libjpeg.so.62`) | `libjpeg.so.62` *opt-in*      | `@rpath/libjpeg.62.dylib` *opt-in* | **Renames the library; does not change the ABI.** The struct mirrors stay v8, so since P4-110 (2026-08-11) a consumer *compiled against v6b headers* is now **rejected at `jpeg_create_*`** with `JERR_BAD_LIB_VERSION` (it passes 62) — as a real v8 libjpeg rejects it. That is the improvement, not a regression: before the guard, such a consumer had a v8 struct written into its smaller v6b allocation. The opt-in is therefore only useful for a consumer that is itself built against v8 headers but resolves the v6b SONAME. Requires `CAPI_ACK_V6B_SONAME=1`. See below. |
 
 ### Threading contract
 
@@ -157,7 +157,33 @@ Compile and link that file alongside your existing consumer; no source changes r
 
 Our build.rs default is **`CAPI_SONAME=libjpeg.so.8`** (P4-3, 2026-05-17). The v6b SONAME `libjpeg.so.62` is no longer the default; it remains available as an opt-in for distro experiments.
 
-The v6b SONAME *works* for the majority of v6b consumers (Pillow 10.x, ImageMagick 7, libtiff 4.x, GD 2.x, FFmpeg 6.x with the JPEG codec) because they only read fields that exist in both v6b and v8 at compatible offsets. But there is a non-empty set of cases where it silently breaks:
+**Updated 2026-08-11 (P4-110).** This section used to say the v6b SONAME
+*works* for the majority of v6b consumers (Pillow 10.x, ImageMagick 7, libtiff
+4.x, GD 2.x, FFmpeg 6.x) "because they only read fields that exist in both v6b
+and v8 at compatible offsets". **That is no longer true, and the reason it
+stopped being true is a bug fix.**
+
+`jpeg_create_decompress` is a macro that expands to
+`jpeg_CreateDecompress(cinfo, JPEG_LIB_VERSION, sizeof(struct
+jpeg_decompress_struct))` **at the consumer's compile time**. A genuinely
+v6b-compiled consumer therefore passes `62` and a v6b-sized struct, and since
+P4-110 both are checked: it now gets `JERR_BAD_LIB_VERSION` from the first
+call, exactly as a real v8 libjpeg gives it.
+
+That is strictly better than what it replaced. Before the guard those
+consumers did not "work" — they got this shim's full v8 struct written into
+their smaller v6b allocation, past the end of it, which is the P0 P4-110 was
+filed for. The failure modes below were the *observable* half of that; the
+memory write was the dangerous half.
+
+So: the v6b opt-in renames the library, and nothing more. It is useful only
+where the consumers are themselves built against v8 headers and merely resolve
+the `.so.62` name. For actual v6b consumers, use upstream libjpeg — and see
+`docs/LAST_MILE.md`'s stage E, which says a v6b/v7 decision must never be made
+"by putting a `.so.62` name on a v8 struct mirror".
+
+The original list of silent breakages, kept because it explains what the guard
+now prevents:
 
 1. **A v6b consumer reads `cinfo.scale_num` / `cinfo.scale_denom` / `cinfo.do_fancy_upsampling`** — these are at v8 offsets (68, 72, 96 etc.) but a v6b struct does not have them. Our shim writes there. Result: depending on what the v6b consumer has at *those* byte offsets in *its* struct, we silently corrupt a v6b-only field.
 2. **A v6b consumer reads `cinfo.is_baseline` (offset 312, v8-only)** — does not exist in v6b struct. Reading is undefined.
