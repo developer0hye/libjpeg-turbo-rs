@@ -418,6 +418,22 @@ jobs:
       # against `examples/create_abi_guards_oracle.c` linked to the pinned
       # reference built above, so the prefix is what makes the comparison
       # mandatory rather than skippable.
+      # P4-145: the six compressing entry points honour TJPARAM_NOREALLOC.
+      # Named because this crate's tests are selected by name, and the whole
+      # assertion is pointer identity — a suite that never runs proves nothing
+      # about it.
+      - name: TurboJPEG NOREALLOC ownership (P4-145)
+        run: >
+          cargo test -p libjpeg-turbo-rs-capi
+          --test norealloc_all_entry_points
+          --test norealloc_buffer_capacity -- --nocapture
+        env:
+          # One of these compares the whole ownership trace against real
+          # TurboJPEG. It skips without a development install, and skipping is
+          # how the NULL-slot divergence survived the first version of this
+          # fix — every self-consistent assertion accepted it.
+          LIBJPEG_TURBO_PREFIX: /opt/libjpeg-turbo
+
       - name: Classic C-ABI create guards (P4-110)
         run: >
           cargo test -p libjpeg-turbo-rs-capi

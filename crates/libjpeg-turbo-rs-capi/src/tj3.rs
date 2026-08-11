@@ -7,8 +7,10 @@
 //! `const char *`.
 //!
 //! Constant values match libjpeg-turbo's `turbojpeg.h`:
-//! - `TJINIT_COMPRESS = 1`, `TJINIT_DECOMPRESS = 2`, `TJINIT_TRANSFORM = 4`
-//!   (bit flags; callers may OR them together).
+//! - `TJINIT_COMPRESS = 0`, `TJINIT_DECOMPRESS = 1`, `TJINIT_TRANSFORM = 2`
+//!   — a plain C enum (`turbojpeg.h:91-105`), not bit flags. This line read
+//!   `1, 2, 4` until 2026-08-12, contradicting `tj3Init`'s own doc comment
+//!   twelve lines below and the `0..TJ_NUMINIT` range the code accepts.
 //! - `TJPARAM_*` numeric IDs follow the C header order.
 
 use std::ffi::{c_char, c_int, c_void, CString};
