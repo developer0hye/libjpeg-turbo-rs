@@ -358,11 +358,13 @@ raises `JERR_NO_BACKING_STORE`, an ample budget still realizes, and a
 non-positive budget means unlimited), verified to fail when the guard is
 removed. `capi_classic_error_codes.rs` cross-validates code 51 and the message
 "Memory limit exceeded" against the pinned v8 headers (18 codes now) — note
-this pins the *constant*, not what a C consumer sees: `format_message` renders
-"bogus message code" for every error today, filed as
-[P4-146](#p4-146-jpeg_std_error-leaves-jpeg_message_table-null-so-every-classic-error-formats-as-bogus-message-code--open) — which is
-how the first draft of that test was caught guessing "Backing store not
-supported" from the macro name.
+this pinned the *constant*, not what a C consumer saw. When this was written,
+`format_message` rendered "bogus message code" for every error — filed and
+since fixed as
+[P4-146](#p4-146-jpeg_std_error-leaves-jpeg_message_table-null-so-every-classic-error-formats-as-bogus-message-code--partial-rendering-fixed-output_messagetrace-gating-outstanding),
+which also made that test render each code through our own formatter. The
+message check is still how the first draft was caught guessing "Backing store
+not supported" from the macro name; the real text is "Memory limit exceeded".
 
 **What is NOT done, and why this is partial rather than closed.** The budget is
 enforced in the memory-manager vtable, but **the classic decode path does not
@@ -5174,7 +5176,7 @@ fix.
 4. The crate-root **Ownership transfer** note and the five `# Safety` sections
    drop the P4-145 caveat once (1)-(3) land.
 
-## P4-146. `jpeg_std_error` Leaves `jpeg_message_table` Null, So Every Classic Error Formats as "bogus message code" — **OPEN**
+## P4-146. `jpeg_std_error` Leaves `jpeg_message_table` Null, So Every Classic Error Formats as "bogus message code" — **PARTIAL: rendering fixed; `output_message`/trace gating outstanding**
 
 **GitHub:** [#518](https://github.com/developer0hye/libjpeg-turbo-rs/issues/518) — filed 2026-08-11 from the P4-14 review. Affects every classic
 `JERR_*`, not one code.
@@ -5214,3 +5216,61 @@ the payload is not.
    otherwise the same false-green returns.
 4. `output_message` writes to `stderr` in upstream's format, and
    `trace_level`-gated `emit_message` calls stay silent by default.
+
+**Status (2026-08-11): partial — the rendering defect is fixed.**
+
+* **Criteria 1–2 — done.** `jpeg_std_error` installs a 129-entry table and sets
+  `last_jpeg_message = 128`. Parameter substitution already worked — the
+  formatter was complete, it simply had no table to read — so `%d`, `%u` and
+  `%s` all render.
+
+* **The table is generated, not transcribed.** `message_table.rs` comes from a C
+  program that `#include`s `jerror.h` twice at `JPEG_LIB_VERSION 80`, exactly as
+  the pre-implementation note on #518 recommended. That mattered: the header has
+  **134** `JMESSAGE` lines but **129** entries at v8, because several are
+  version-conditional and a few appear twice under opposite `#if` guards. A
+  line-order parse counts both and misaligns everything after the first
+  divergence — and in a code-indexed table a shifted entry is a *wrong* message,
+  not a missing one.
+
+* **Criterion 3 — done, and it closed the false-green.**
+  `capi_classic_error_codes.rs` now renders every code **through our
+  `format_message`** rather than only comparing `jerror.h` to a literal, and a
+  new `the_whole_message_table_matches_upstream` re-runs the C probe over all
+  129 entries. The old test reported "18 codes verified" throughout the period
+  when every one of them rendered as `"bogus message code"`; it was a real
+  parity check of the *constants* and a false-green on the *rendering*.
+  `capi_error_message_rendering.rs` adds 6 cases: parameterless, `%d`, `%u`,
+  out-of-range, boundary — verified to fail 4/5 against the null table — plus
+  `a_real_failure_renders_its_message`, which is the one the criterion actually
+  asks for. The other five write `msg_code` by hand, which proves the formatter
+  and the table agree but nothing about whether a *failure* populates them; the
+  sixth triggers P4-14's budget guard and formats from the same error manager
+  the failure used.
+
+  Both suites, and `capi_classic_error_codes` itself, are now named in
+  `ci.yml`. That last one had never been named: it compiled on every PR and
+  executed on none, which is exactly how it reported "18 codes verified"
+  throughout the period when all 18 rendered as the fallback.
+
+* **A second divergence, found by the new whole-table check.** Our fallback for
+  an unknown code was a fixed `"libjpeg-turbo-rs: bogus message code"`.
+  Upstream's is `msg_parm.i[0] = msg_code; msgtext = table[0]`
+  (`jerror.c:173-175`), and entry 0 is `"Bogus message code %d"` — so upstream
+  *names the code* and we dropped the one piece of information the message
+  exists to carry. Now ported exactly; `render(100_000)` gives
+  `"Bogus message code 100000"`. The old string survives only for a caller that
+  built a `jpeg_error_mgr` without `jpeg_std_error`, where upstream would
+  dereference a null table.
+
+* **Criterion 4 — not done, and this item stays PARTIAL because of it.**
+  `output_message`'s stderr format and the `trace_level` gating on
+  `emit_message` are untouched.
+
+  An earlier draft closed this item and said criterion 4 was "tracked under
+  P4-100's error-reporting scope". **That was wrong and is corrected here:**
+  P4-100 is about failures surfacing as suspension or silent success — error
+  *propagation* — and its acceptance criteria say nothing about `output_message`
+  formatting or trace gating. Delegating to it would have retired a criterion
+  into an item that does not cover it, which is how work disappears. Criterion 4
+  stays here, measurable, until someone does it.
