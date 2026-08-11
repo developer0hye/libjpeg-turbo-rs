@@ -48,6 +48,11 @@ const TJINIT_DECOMPRESS: c_int = 1;
 const TJINIT_TRANSFORM: c_int = 2;
 
 // --- TJPARAM identifiers we drive from the legacy surface ---
+/// `turbojpeg.h:2793`. Upstream's `processFlags` maps this to the instance's
+/// `noRealloc` for every operation, not only compression (`turbojpeg.c:552`).
+const TJFLAG_NOREALLOC: c_int = 1024;
+/// The TJ3 parameter the legacy flag maps to.
+const TJPARAM_NOREALLOC: c_int = 2;
 const TJPARAM_QUALITY: c_int = 3;
 const TJPARAM_SUBSAMP: c_int = 4;
 
@@ -102,8 +107,10 @@ pub unsafe extern "C" fn tjDestroy(handle: *mut c_void) -> c_int {
 ///              jpegBuf, jpegSize, jpegSubsamp, jpegQual, flags)`.
 ///
 /// Matches the 2.x signature: `jpegSize` is a `unsigned long *` — we
-/// accept `*mut usize` (64-bit on modern targets). `flags` is ignored;
-/// TJ3 uses explicit parameters instead.
+/// accept `*mut usize` (64-bit on modern targets). Of `flags`, only
+/// `TJFLAG_NOREALLOC` is honoured — it maps to `TJPARAM_NOREALLOC`, which
+/// decides whether `*jpeg_buf` is written in place or replaced and freed
+/// (P4-145). The rest are ignored; TJ3 uses explicit parameters instead.
 ///
 /// # Safety
 ///
@@ -125,18 +132,70 @@ pub unsafe extern "C" fn tjCompress2(
     jpeg_size: *mut usize,
     jpeg_subsamp: c_int,
     jpeg_qual: c_int,
-    _flags: c_int,
+    flags: c_int,
 ) -> c_int {
     crate::unwind_guard!(-1, {
+        // `TJFLAG_NOREALLOC` must reach the TJ3 parameter, because that is what
+        // `tj3Compress8` reads. Discarding it silently made a legacy caller's
+        // pre-allocated buffer eligible for `free()` — harmless while
+        // `tj3Compress8` merely leaked the prior pointer, and an invalid free
+        // for caller-owned storage once P4-145 made that path release it.
+        // Validate *before* touching instance state. Upstream rejects a NULL
+        // `jpegSize` and out-of-range quality/subsampling with "Invalid
+        // argument" before `processFlags` runs (`turbojpeg.c:1274-1280`), and
+        // the ordering is observable: setting `TJPARAM_NOREALLOC` and then
+        // failing would leave the handle's ownership behaviour changed by a
+        // call that returned -1, so the *next* call could free caller-owned
+        // storage.
+        if jpeg_size.is_null() {
+            // Report it *on the handle*. A bare `-1` leaves
+            // `tjGetErrorStr2(handle)` saying "No error", where upstream says
+            // `tjCompress2(): Invalid argument`; writing only the process-global
+            // slot is just as wrong, since a caller with a handle reads the
+            // handle's message.
+            // SAFETY: `with_handle` NULL-checks the handle itself.
+            let _ = unsafe {
+                with_handle(handle, |inst: &mut crate::tj3::TjInstance| -> c_int {
+                    inst.set_error("tjCompress2: Invalid argument", crate::tj3::TJERR_FATAL);
+                    -1
+                })
+            };
+            return -1;
+        }
         // Subsampling and quality are set via TJ3 parameters before the
-        // actual compress call.
+        // actual compress call; both reject out-of-range values.
         if unsafe { tj3Set(handle, TJPARAM_QUALITY, jpeg_qual) } != 0 {
             return -1;
         }
         if unsafe { tj3Set(handle, TJPARAM_SUBSAMP, jpeg_subsamp) } != 0 {
             return -1;
         }
-        unsafe {
+        // `TJFLAG_NOREALLOC` must reach the TJ3 parameter, because that is what
+        // `tj3Compress8` reads. Discarding it silently made a legacy caller's
+        // pre-allocated buffer eligible for `free()` — harmless while
+        // `tj3Compress8` merely leaked the prior pointer, and an invalid free
+        // for caller-owned storage once P4-145 made that path release it.
+        let norealloc: bool = (flags & TJFLAG_NOREALLOC) != 0;
+        if unsafe { tj3Set(handle, TJPARAM_NOREALLOC, norealloc as c_int) } != 0 {
+            return -1;
+        }
+        // The two APIs disagree about what the size slot *means*, and the
+        // difference only shows under NOREALLOC. In TJ3 it is an input
+        // capacity; in the legacy API it is an **output only** — a caller that
+        // sized its buffer with `tjBufSize()` is entitled to leave `*jpegSize`
+        // at zero. Forwarding the slot directly turned a valid legacy call
+        // into "buffer too small".
+        //
+        // Upstream resolves it the same way: `size = *jpegSize;` then, under
+        // NOREALLOC, `size = tj3JPEGBufSize(width, height, subsamp)`
+        // (`turbojpeg.c:1282-1284`) — the worst case the caller was told to
+        // allocate.
+        // SAFETY: non-NULL, checked above.
+        let mut size: usize = unsafe { *jpeg_size };
+        if norealloc {
+            size = crate::bufsize::tj3JPEGBufSize(width, height, jpeg_subsamp);
+        }
+        let rc: c_int = unsafe {
             tj3Compress8(
                 handle,
                 src_buf,
@@ -145,9 +204,14 @@ pub unsafe extern "C" fn tjCompress2(
                 height,
                 pixel_format,
                 jpeg_buf,
-                jpeg_size,
+                &mut size,
             )
-        }
+        };
+        // Unconditional, as upstream's `*jpegSize = (unsigned long)size;` is:
+        // the legacy slot is an output.
+        // SAFETY: non-NULL (checked above) and writable per the contract.
+        unsafe { *jpeg_size = size };
+        rc
     })
 }
 
@@ -246,8 +310,18 @@ pub unsafe extern "C" fn tjDecompressHeader3(
 /// `tjTransform(handle, jpegBuf, jpegSize, n, dstBufs, dstSizes,
 ///              transforms, flags)`.
 ///
-/// `flags` is ignored (TJ3 drives options through `TJPARAM_*` on the
-/// handle). Otherwise identical to `tj3Transform`.
+/// Of `flags`, only `TJFLAG_NOREALLOC` is honoured — it maps to
+/// `TJPARAM_NOREALLOC`, which decides whether each `dst_bufs[i]` is written in
+/// place or replaced and freed (P4-145). The rest are ignored; TJ3 drives
+/// options through `TJPARAM_*` on the handle.
+///
+/// **One upstream behaviour is not reproduced (P4-151).** Upstream treats the
+/// legacy `dstSizes` as *outputs* and substitutes each transformed image's
+/// worst case as the capacity, so a caller may leave them at zero. This
+/// wrapper forwards them unchanged, so under `TJFLAG_NOREALLOC` a zero entry
+/// is read as a zero capacity and the call fails with "buffer too small". Set
+/// each `dst_sizes[i]` to the buffer's real size, or leave the flag unset.
+/// Otherwise identical to `tj3Transform`.
 ///
 /// # Safety
 ///
@@ -266,9 +340,48 @@ pub unsafe extern "C" fn tjTransform(
     dst_bufs: *mut *mut u8,
     dst_sizes: *mut usize,
     transforms: *const TjTransform,
-    _flags: c_int,
+    flags: c_int,
 ) -> c_int {
     crate::unwind_guard!(-1, {
+        // Validate before mutating instance state, as in `tjCompress2`.
+        if n <= 0 || dst_bufs.is_null() || dst_sizes.is_null() || transforms.is_null() {
+            // On the handle, as above.
+            // SAFETY: `with_handle` NULL-checks the handle itself.
+            let _ = unsafe {
+                with_handle(handle, |inst: &mut crate::tj3::TjInstance| -> c_int {
+                    inst.set_error("tjTransform: Invalid argument", crate::tj3::TJERR_FATAL);
+                    -1
+                })
+            };
+            return -1;
+        }
+
+        // As in `tjCompress2`: the destination slots are freed only when the
+        // parameter is unset, so the legacy flag has to reach it.
+        let norealloc: bool = (flags & TJFLAG_NOREALLOC) != 0;
+        if unsafe { tj3Set(handle, TJPARAM_NOREALLOC, norealloc as c_int) } != 0 {
+            return -1;
+        }
+
+        // The legacy `dstSizes` are *outputs*, so a caller that sized its
+        // buffers with `tjTransformBufSize()` may leave them at zero — and TJ3
+        // reads that slot as a capacity. Upstream bridges the gap by filling a
+        // temporary array with each transformed image's worst case
+        // (`turbojpeg.c:3118-3132`).
+        //
+        // **That bridge is deliberately not built here — see P4-151.** Two
+        // attempts at it were rejected in review, for reasons specific to this
+        // wrapper rather than to the ownership rule: the capacity must come
+        // from the transformed *geometry* alone (upstream uses bare
+        // `tj3JPEGBufSize`, while this port's `tj3TransformBufSize` adds the
+        // extracted ICC length, which overruns a `tjBufSize()`-sized buffer),
+        // and deriving the geometry must not mutate the handle's compression
+        // state the way a plain `tj3DecompressHeader` does.
+        //
+        // So a legacy caller that leaves `dstSizes[i]` at zero gets "buffer too
+        // small" rather than a transform. That is a smaller divergence than the
+        // alternative: before the flag reached the parameter at all, those same
+        // callers had their own buffers passed to `free()`.
         unsafe {
             tj3Transform(
                 handle, jpeg_buf, jpeg_size, n, dst_bufs, dst_sizes, transforms,

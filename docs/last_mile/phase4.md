@@ -2964,6 +2964,76 @@ forming `&mut` over the caller's struct entirely and write every field through
 raw pointers, with the existing Miri case still passing and no `client_data`
 behaviour change.
 
+## P4-150. `tj3Compress16` Accepts Lossy 16-bit Where Upstream Refuses — **OPEN**
+
+**Motivation.** Found 2026-08-12 (issue #531) while extending P4-145's C
+oracle to every compressing entry point. 16-bit samples exist for *lossless* JPEG in TurboJPEG;
+a lossy 16-bit compress is refused. Measured with the P4-145 oracle against
+TurboJPEG 3:
+
+```
+tj3Compress16, quality 80 / 4:4:4, TJPARAM_LOSSLESS unset
+  C     -1   (refused)
+  ours   0   (encodes)
+```
+
+Setting `TJPARAM_LOSSLESS = 1` makes both succeed, which is why the P4-145
+trace configures it — that comparison is about buffer ownership, and carrying
+this divergence would have made it fail for an unrelated reason.
+
+**Why it matters.** Accepting input upstream rejects is the same class of
+defect as P4-39 (CMYK options silently dropped): a caller gets output where the
+library it replaced gave a documented error, so the disagreement only surfaces
+downstream. Silent acceptance is worse than a wrong error code.
+
+**Acceptance criteria.** `tj3Compress16` (and `tj3Compress12`, if the same rule
+applies to it — verify rather than assume) rejects the configurations upstream
+rejects, with upstream's error, cross-validated by an oracle case rather than a
+transcription. The P4-145 oracle's `compress16_*` lines then no longer need
+`TJPARAM_LOSSLESS` to agree, which is the observable proof.
+
+## P4-151. Legacy `tjTransform` Does Not Bridge `dstSizes` Output-vs-Capacity Semantics — **OPEN**
+
+**Motivation.** Split out of P4-145 (2026-08-12, issue #529) after two attempts
+at it were rejected in review. Legacy `dstSizes[i]` are **outputs**: a caller that sized
+its destinations with `tjTransformBufSize()` may leave them at zero. TJ3 reads
+the same slot as an input capacity, so under `TJFLAG_NOREALLOC` such a call now
+fails as "buffer too small". Upstream bridges it by filling a temporary array
+with each transformed image's worst case (`turbojpeg.c:3118-3132`).
+
+`tjCompress2`'s equivalent bridge *did* land with P4-145: there the geometry is
+in the parameters, so `tj3JPEGBufSize(width, height, subsamp)` is a direct
+port of upstream's line.
+
+**Why the transform side is harder — both failures are recorded because they
+are the acceptance criteria in disguise:**
+
+1. **The capacity must come from geometry alone.** Upstream uses bare
+   `tj3JPEGBufSize` on the transformed specs. This port's
+   `tj3TransformBufSize` additionally adds the extracted ICC length
+   (`transform.rs:395-403`), so using it as the caller's capacity overruns a
+   `tjTransformBufSize()`-sized buffer — measured at a 32x32 source with a
+   128 KiB ICC profile: an 8192-byte bound against a 132320-byte copy.
+2. **Deriving the geometry must not mutate the handle.** A plain
+   `tj3DecompressHeader` overwrites shared compression state — subsampling,
+   colour space, density, ICC. Setting a `TJINIT_TRANSFORM` handle to S420 and
+   transforming an S444 source left the handle reporting S444, where upstream's
+   wrapper leaves S420, so a later compression silently used different
+   settings.
+
+**Current behaviour, and why it is acceptable meanwhile.** The flag *is* mapped
+to `TJPARAM_NOREALLOC`, which is the memory-safety half: the caller's
+destination buffers are no longer passed to `free()`. Only the convenience half
+is missing, and it fails loudly.
+
+**Acceptance criteria.** A legacy `tjTransform` with `TJFLAG_NOREALLOC` and
+`dstSizes[i] = 0` succeeds for a `tjTransformBufSize()`-sized destination;
+capacities derive from transformed geometry without metadata; the handle's
+compression parameters are unchanged across the call (assert one that differs
+from the source, e.g. S420 handle over an S444 source); and the P4-145 oracle
+gains a legacy-wrapper case so the comparison is against C rather than against
+this description.
+
 ## P4-147. `worker_b8_restart_bomb` Asserts a Wall-Clock Bound and Flakes Under Parallel Load — **OPEN**
 
 **Motivation.** Filed 2026-08-11 (issue #523) during the P4-104 work.
@@ -5564,7 +5634,7 @@ one buffer) and is the instance to measure first.
    clones, or whether criterion 2 should stop at the reassembly buffers. Decide
    it here; do not leave it implicit.
 
-## P4-145. `TJPARAM_NOREALLOC` Is Honoured by `tj3Compress8` Only — **OPEN**
+## P4-145. `TJPARAM_NOREALLOC` Is Honoured by `tj3Compress8` Only — **CLOSED 2026-08-12**
 
 **GitHub:** [#514](https://github.com/developer0hye/libjpeg-turbo-rs/issues/514) — filed 2026-08-11 while closing
 [P4-137](#p4-137-c-abi-raw-pointer-exports-are-safe-rust-functions--closed-2026-08-11);
@@ -5614,6 +5684,109 @@ fix.
    the one a doc fix cannot deliver.
 4. The crate-root **Ownership transfer** note and the five `# Safety` sections
    drop the P4-145 caveat once (1)-(3) land.
+
+**Status (2026-08-12): closed.** `cargo test -p libjpeg-turbo-rs-capi --test
+norealloc_all_entry_points` passes 14 tests: one per compressing entry point
+asserting the caller's pointer comes back **unchanged** when the flag is set
+and the buffer fits, the refusal case, the upstream-oracle comparison, two
+legacy-wrapper cases (flag propagation, output-slot semantics, fresh-handle
+sizing, validation ordering, NULL size), and `TJXOPT_NOOUTPUT`. Each was verified red by restoring
+the old path for that function: the assertion that fires is pointer identity,
+which is exactly what a documentation fix could not deliver and what a
+"did the encode succeed?" test would have missed throughout.
+
+All six now share one implementation, `alloc::deliver_compressed_output`. That
+matters as much as the fix: six copies of an ownership rule is how the
+`compress_*` family P4-40 was filed for came about, and this bug is what the
+sixth copy diverging looks like. The helper frees the previous pointee **only**
+on the reallocating path (criterion 2), which also removed a leak in
+`tj3Compress8` — it had been dropping the prior pointer on that path rather
+than freeing it, on the grounds that its allocator was unknown. Upstream
+reaches the same state by `realloc`, which consumes it, so freeing is what the
+contract already required of callers.
+
+The crate-root *Ownership transfer* note and all five `# Safety` sections drop
+the caveat (criterion 4) and now state the rule positively: the slot is freed
+only when the flag is unset.
+
+**Review found the first version got a case wrong that no self-consistent test
+could have caught.** With the flag set and the output slot **NULL**, it
+allocated. Upstream refuses: `jdatadst-tj.c:184-192` takes the
+`*outbuffer == NULL` branch and, with `alloc` false, raises `JERR_BUFFER_SIZE`.
+The flag is a request *not to allocate*, so honouring it half-way — refusing to
+grow a buffer but conjuring one when none was given — is the one behaviour no
+caller asked for. All six now return `NoBufferSupplied` there.
+
+That is why `examples/norealloc_oracle.c` exists. It runs the same cases
+against real TurboJPEG and prints `label rc kept produced`; the suite compares
+line for line. It covers **all six** entry points — roomy, cramped and NULL
+each — rather than the two that happened to be written first: the NULL-slot
+divergence is proof that a suite of self-consistency assertions stays green
+while one call diverges. Extending it also surfaced P4-150 (`tj3Compress16`
+accepts lossy 16-bit where upstream refuses), which is why those lines
+configure `TJPARAM_LOSSLESS`. Without the refusal, the diff is exact:
+
+```
+ours  compress8_null 0 0 1     (succeeded, swapped the pointer, produced output)
+C     compress8_null -1 1 0    (refused, pointer untouched)
+```
+
+The byte count is deliberately excluded from the comparison: two independent
+encoders do not agree on entropy-coded output size, and a trace carrying it
+would fail for a reason unrelated to the ownership contract. `rc` and pointer
+identity are what the contract actually specifies.
+
+Two further paths, also from review:
+
+- **The legacy flag never reached the parameter.** `tjCompress2` and
+  `tjTransform` take `TJFLAG_NOREALLOC` and discarded it, so `tj3Compress8` saw
+  `TJPARAM_NOREALLOC` unset. That was survivable only while the reallocating
+  path *leaked* the previous pointer; making it `free()` — which is what this
+  change did, and what upstream's `realloc` does — turned it into an invalid
+  free of caller-owned storage. **A regression introduced by the fix itself**,
+  and the reason that leak had been load-bearing. Both now map the flag, as
+  upstream's `processFlags` does for every operation (`turbojpeg.c:552`).
+- **And mapping the flag alone was still wrong — for `tjCompress2`.** The legacy size slots are
+  *outputs*, not capacities: a caller that sized its buffer with `tjBufSize()`
+  has no reason to write `*jpegSize`, so forwarding it to TJ3 — where the same
+  field *is* an input capacity — turned a valid call into "buffer too small".
+  Upstream substitutes the worst case instead: `tj3JPEGBufSize(...)` in
+  `tjCompress2` (`turbojpeg.c:1282-1284`) and a per-image temporary array in
+  `tjTransform` (`turbojpeg.c:3118-3132`). **Only the `tjCompress2` adapter is
+  ported** — see the next point for why the transform one is not. The
+  distinguishing input is `size = 0`, which the first legacy test could not
+  catch because it passed a real capacity.
+- **The transform side of that bridge is not shipped**, and the reason is
+  worth recording: two attempts were rejected in review, first for computing a
+  capacity of 0 on a fresh handle, then — after adding a header parse — for
+  deriving the capacity from `tj3TransformBufSize`, which adds the extracted
+  ICC length and so overruns a `tjTransformBufSize()`-sized buffer, and for
+  mutating the handle's compression state along the way. Split out as
+  **P4-151**, with those two failures as its acceptance criteria. The flag
+  mapping — the memory-safety half — did land.
+- **Ordering matters too.** Mapping the flag before validating left a call that
+  returned `-1` with the handle's ownership behaviour changed, so a later call
+  could free caller-owned storage because of a failure. And routing the legacy
+  call through a local `size_t` hid a NULL `jpegSize` from `tj3Compress8`,
+  turning a call upstream rejects into a success that allocated a buffer whose
+  size the caller could never learn. Both now validate first
+  (`turbojpeg.c:1274-1280`).
+
+Four review rounds produced five defects *in the fix*, every one on the legacy
+wrappers rather than the TJ3 entry points the item named. The pattern is worth
+keeping: adapting an API whose field *semantics* differ — output slot versus
+input capacity — is where the errors were, not in the ownership rule itself.
+- **`TJXOPT_NOOUTPUT` needs no destination.** Upstream skips destination setup
+  entirely for it (`turbojpeg.c:3007`), so a NULL slot succeeds and a non-NULL
+  slot is left alone. Delivery now returns early for that option instead of
+  demanding a buffer for output that was never produced.
+
+**Found in passing:** `tj3.rs`'s module doc said `TJINIT_COMPRESS = 1,
+TJINIT_DECOMPRESS = 2, TJINIT_TRANSFORM = 4` "(bit flags; callers may OR them
+together)", contradicting `tj3Init`'s own doc twelve lines below, the
+`0..TJ_NUMINIT` range the code accepts, and `turbojpeg.h:91-105`, where they
+are a plain enum. Corrected. The first draft of the new test believed the
+module doc and failed at `tj3Init(4)`.
 
 ## P4-146. `jpeg_std_error` Leaves `jpeg_message_table` Null, So Every Classic Error Formats as "bogus message code" — **PARTIAL: rendering fixed; `output_message`/trace gating outstanding**
 

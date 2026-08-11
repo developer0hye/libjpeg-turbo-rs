@@ -18,8 +18,17 @@
 //! ```
 //!
 //! Each entry of `transforms[0..n]` produces one output JPEG written to
-//! `dstBufs[i]` / `dstSizes[i]`. We allocate the outputs through libc
-//! so the caller can release them via `tj3Free` or `free`. The custom
+//! `dstBufs[i]` / `dstSizes[i]`. **Which of the two ownership paths is taken
+//! depends on `TJPARAM_NOREALLOC`** (P4-145): with the flag set, the output is
+//! written *in place* into the caller's buffer and the pointer comes back
+//! unchanged — so it may be a stack array or a `Vec`, and must **not** be
+//! passed to `free`. With the flag unset, the output is allocated through libc
+//! and the previous pointee freed, so the caller releases the result via
+//! `tj3Free` or `free`.
+//!
+//! This paragraph used to say the outputs are always libc-allocated and always
+//! releasable with `free`. Following that under the flag frees memory this
+//! library never allocated, which is the invalid free P4-145 fixed. The custom
 //! filter callback is not forwarded: wiring it would require converting
 //! all `int16` block coefficients back through our Rust interface, which
 //! the Rust `TransformOptions::custom_filter` already does internally
@@ -32,7 +41,7 @@ use libjpeg_turbo_rs::{
     transform_jpeg_with_options, CropRegion, MarkerCopyMode, TransformOp, TransformOptions,
 };
 
-use crate::alloc::{libc_free, libc_from_slice};
+use crate::alloc::{deliver_compressed_output, OutputDelivery};
 use crate::header::TjRegion;
 use crate::tj3::{with_handle, TJERR_FATAL};
 
@@ -112,13 +121,15 @@ fn op_from_c(op: c_int) -> Option<TransformOp> {
 /// optional may be null; any other null is reported through the documented
 /// error value rather than dereferenced.
 ///
-/// Each non-null `*dst_bufs[i]` is additionally **freed by this function**, so
-/// every one must have come from `tj3Alloc`/`malloc` — see
+/// Each non-null `*dst_bufs[i]` is **freed by this function only when
+/// `TJPARAM_NOREALLOC` is unset**, in which case every one must have come from
+/// `tj3Alloc`/`malloc` — see
 /// [Ownership transfer](crate#pointer-contract). Note it is the *destination*
 /// slots that are freed; `jpeg_buf` is the const source and is never freed.
-/// This entry point does **not** consult `TJPARAM_NOREALLOC`: it always
-/// allocates and frees the previous pointee. That divergence from upstream is
-/// tracked as P4-145.
+/// Each `dst_bufs[i]` honours `TJPARAM_NOREALLOC` independently: with the flag
+/// set the transform writes in place into that slot, leaves the pointer
+/// unchanged, and treats `dst_sizes[i]` as the slot's capacity — too small is
+/// an error rather than a resize (P4-145).
 #[no_mangle]
 pub unsafe extern "C" fn tj3Transform(
     handle: *mut c_void,
@@ -227,27 +238,62 @@ pub unsafe extern "C" fn tj3Transform(
                     }
                 };
 
+                // Upstream skips destination setup entirely for this option —
+                // `if (!(t[i].options & TJXOPT_NOOUTPUT)) jpeg_mem_dest_tj(...)`
+                // (`turbojpeg.c:3007`) — so the slots stay exactly as the caller
+                // left them and a NULL destination is fine. Delivering here
+                // instead would demand a buffer for output that was never
+                // produced, and would zero a non-NULL slot's size.
+                if (t.options & TJXOPT_NOOUTPUT) != 0 {
+                    continue;
+                }
+
+                // P4-145: `tj3Transform`'s reusable slots are `dst_bufs[i]`, not
+                // `jpeg_buf` — its `jpeg_buf` is the const *source* and is never
+                // freed. Each slot honours `TJPARAM_NOREALLOC` per-image, which
+                // is what a caller pre-sizing an array of output buffers relies
+                // on; before this they were freed unconditionally, with the
+                // wrong allocator whenever they were not `malloc`-owned.
+                let norealloc: bool =
+                    inst.inner.get(libjpeg_turbo_rs::tj3::TjParam::NoRealloc) != 0;
                 // SAFETY: dst_bufs/dst_sizes arrays validated non-NULL above and
-                // documented by the caller as having `n` slots.
+                // documented by the caller as having `n` slots, so `add(i)` is
+                // in bounds for `i < n`.
                 unsafe {
                     let slot: *mut *mut u8 = dst_bufs.add(i);
                     let size_slot: *mut usize = dst_sizes.add(i);
 
-                    let out_ptr: *mut u8 = libc_from_slice(&out);
-                    if out_ptr.is_null() && !out.is_empty() {
-                        inst.set_error(format!("tj3Transform[{i}]: out-of-memory"), TJERR_FATAL);
-                        return -1;
+                    match deliver_compressed_output(&out, slot, size_slot, norealloc) {
+                        OutputDelivery::Delivered => {}
+                        OutputDelivery::BufferTooSmall { needed, capacity } => {
+                            inst.set_error(
+                                format!(
+                                    "tj3Transform[{i}]: TJPARAM_NOREALLOC is set and the \
+                                     destination buffer is too small ({needed} bytes needed, \
+                                     {capacity} available)"
+                                ),
+                                TJERR_FATAL,
+                            );
+                            return -1;
+                        }
+                        OutputDelivery::NoBufferSupplied => {
+                            inst.set_error(
+                                format!(
+                                    "tj3Transform[{i}]: TJPARAM_NOREALLOC is set but no \
+                                     destination buffer was supplied"
+                                ),
+                                TJERR_FATAL,
+                            );
+                            return -1;
+                        }
+                        OutputDelivery::OutOfMemory => {
+                            inst.set_error(
+                                format!("tj3Transform[{i}]: out-of-memory"),
+                                TJERR_FATAL,
+                            );
+                            return -1;
+                        }
                     }
-
-                    // Free any prior allocation the caller handed us; matches the
-                    // NOREALLOC-off semantics of libjpeg-turbo.
-                    let prior: *mut u8 = *slot;
-                    if !prior.is_null() {
-                        libc_free(prior);
-                    }
-
-                    *slot = out_ptr;
-                    *size_slot = out.len();
                 }
             }
 

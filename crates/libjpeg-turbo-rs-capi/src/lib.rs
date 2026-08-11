@@ -76,22 +76,26 @@
 //!     anything from Rust's allocator.
 //!
 //!   The same rule reaches further than those two functions, and the reach is
-//!   easy to miss: the **reusable output slot** is freed by this library. On
-//!   `tj3Compress12`, `tj3Compress16`, `tj3CompressFromYUV8` and
-//!   `tj3CompressFromYUVPlanes8` that slot is `*jpeg_buf`; on `tj3Transform` it
-//!   is each `*dst_bufs[i]` (its `jpeg_buf` is the const *source* and is never
-//!   freed). Each is passed to `free()` before a new pointer is stored, so a
-//!   non-null slot must have come from `tj3Alloc` (or plain `malloc`) — a stack
-//!   array, a `Vec`'s buffer, or anything from Rust's allocator satisfies every
-//!   validity, size and alignment rule above and is *still* undefined behaviour
-//!   to hand over, because it is freed with the wrong allocator.
+//!   easy to miss: the **reusable output slot** may be freed by this library.
+//!   On `tj3Compress8`, `tj3Compress12`, `tj3Compress16`,
+//!   `tj3CompressFromYUV8` and `tj3CompressFromYUVPlanes8` that slot is
+//!   `*jpeg_buf`; on `tj3Transform` it is each `*dst_bufs[i]` (its `jpeg_buf`
+//!   is the const *source* and is never freed).
 //!
-//!   **`TJPARAM_NOREALLOC` does not protect you on those five.** Only
-//!   `tj3Compress8` consults it (writing in place, and erroring when the buffer
-//!   is too small). The other five ignore it and replace the buffer
-//!   unconditionally, which diverges from upstream TurboJPEG — tracked as
-//!   P4-145. Until that closes, treat a caller-owned output slot on those
-//!   entry points as `malloc`-owned memory you are giving away.
+//!   **`TJPARAM_NOREALLOC` decides which happens**, on all six, as upstream
+//!   TurboJPEG does (P4-145, closed 2026-08-12):
+//!
+//!   - **Set, with a non-null slot** — the library writes *in place* and
+//!     returns your pointer unchanged. `*jpeg_size` is an **input** carrying
+//!     the buffer's capacity; output that does not fit is an error, not a
+//!     resize. Nothing is freed, so the buffer may be a stack array, a `Vec`,
+//!     or anything else you own.
+//!   - **Not set** — the library allocates a replacement, stores it, and
+//!     `free()`s the previous pointee. A non-null slot must therefore have come
+//!     from `tj3Alloc` (or plain `malloc`); a stack array or a `Vec`'s buffer
+//!     satisfies every validity, size and alignment rule above and is *still*
+//!     undefined behaviour to hand over, because it is freed with the wrong
+//!     allocator.
 //! - **Aliasing.** For the duration of a call, no other live reference may
 //!   alias the pointed-to memory. Source and destination buffers must not
 //!   overlap unless a function documents otherwise.

@@ -10,12 +10,16 @@
 //! Behavior contract:
 //! - Returns 0 on success, -1 on failure.
 //! - `pitch == 0` means tightly packed rows (`width * bpp`).
-//! - On success, `*jpegBuf` is either (a) an input buffer pre-supplied by
-//!   the caller (when `TJPARAM_NOREALLOC` is set) or (b) a freshly
-//!   libc-allocated buffer that the caller must release with `tj3Free`
-//!   / `free`. We always take path (b) for now: `TJPARAM_NOREALLOC` is
-//!   accepted but a new buffer is still written so C callers can unify
-//!   on `free()`.
+//! - On success, `*jpegBuf` is either (a) the buffer the caller pre-supplied,
+//!   written **in place**, when `TJPARAM_NOREALLOC` is set, or (b) a freshly
+//!   libc-allocated buffer that the caller must release with `tj3Free` /
+//!   `free`, the previous pointee having been freed. Which one is decided by
+//!   the flag, as upstream decides it (P4-145).
+//!
+//!   This text used to say path (b) was always taken "so C callers can unify
+//!   on `free()`". Unifying was never safe: under the flag the caller may pass
+//!   a stack array or a `Vec`, and following that advice would free memory the
+//!   library never allocated.
 //! - `*jpegSize` must be updated to the compressed byte count.
 
 use std::ffi::{c_int, c_void};
@@ -23,7 +27,7 @@ use std::ffi::{c_int, c_void};
 use libjpeg_turbo_rs::tj3::TjParam;
 use libjpeg_turbo_rs::PixelFormat;
 
-use crate::alloc::libc_from_slice;
+use crate::alloc::{deliver_compressed_output, OutputDelivery};
 use crate::convert::pixel_format_from_tj;
 use crate::tj3::{with_handle, TJERR_FATAL};
 
@@ -247,65 +251,42 @@ pub unsafe extern "C" fn tj3Compress8(
                 }
             };
 
-            // SAFETY: jpeg_buf and jpeg_size validated non-NULL above.
-            // Two ownership paths per libjpeg-turbo semantics:
-            //   (1) NOREALLOC=1 with non-NULL *jpeg_buf: write IN PLACE into the
-            //       caller's pre-allocated buffer. The caller retains ownership
-            //       and later frees it; we must NOT swap the pointer. The
-            //       pre-allocated buffer is at least `tj3JPEGBufSize()` bytes
-            //       (the caller's contract).
-            //   (2) Else: allocate a fresh libc buffer, transfer ownership; any
-            //       prior pointer is treated as stale (leaked — we don't know
-            //       its allocator) per the published contract.
+            // P4-145: one shared implementation for all six compressing entry
+            // points. This function had the only correct one; the other five
+            // freed the caller's slot unconditionally. Keeping six copies is
+            // how the `compress_*` family P4-40 was filed for came about.
             //
-            // tjunittest exercises (1) in a tight loop: one `tj3Alloc` at setup,
-            // then many `tj3Compress8` calls — if we swap the pointer each call
-            // we leak and (worse) the final `tj3Free` releases a different
-            // allocation than the one the caller still believes they own.
+            // tjunittest exercises the in-place path in a tight loop: one
+            // `tj3Alloc` at setup, then many `tj3Compress8` calls — swapping the
+            // pointer each call would leak, and the final `tj3Free` would
+            // release a different allocation than the one the caller still
+            // believes it owns.
             let norealloc: bool = inst.inner.get(libjpeg_turbo_rs::tj3::TjParam::NoRealloc) != 0;
-            let prior: *mut u8 = unsafe { *jpeg_buf };
-
-            if norealloc && !prior.is_null() {
-                // Path (1): in-place write into the caller's buffer.
-                //
-                // `*jpeg_size` is an *input* here: under NOREALLOC it carries
-                // the capacity of `prior`, and upstream raises
-                // `JERR_BUFFER_SIZE` when the output does not fit
-                // (`jdatadst-tj.c:92` — `if (!dest->alloc) ERREXIT(cinfo,
-                // JERR_BUFFER_SIZE)`).
-                //
-                // This used to trust that `prior` was at least
-                // `tj3JPEGBufSize(...)` and copy `jpeg.len()` regardless. That
-                // is a heap overflow for a caller doing exactly what upstream
-                // permits: allocating a smaller buffer, declaring its size, and
-                // relying on the library to refuse rather than overrun. Found
-                // by the codex review of P4-137 (#476).
-                // SAFETY: `jpeg_size` was NULL-checked above.
-                let capacity: usize = unsafe { *jpeg_size };
-                if jpeg.len() > capacity {
+            // SAFETY: both out-pointers were validated non-NULL above; the
+            // caller's contract covers buffer validity and non-aliasing with
+            // `jpeg`, which this function owns.
+            match unsafe { deliver_compressed_output(&jpeg, jpeg_buf, jpeg_size, norealloc) } {
+                OutputDelivery::Delivered => {}
+                OutputDelivery::BufferTooSmall { needed, capacity } => {
                     inst.set_error(
-                        "tj3Compress8: TJPARAM_NOREALLOC is set and the JPEG buffer is too small",
+                        format!(
+                            "tj3Compress8: TJPARAM_NOREALLOC is set and the JPEG buffer is too \
+                             small ({needed} bytes needed, {capacity} available)"
+                        ),
                         TJERR_FATAL,
                     );
                     return -1;
                 }
-                // SAFETY: caller-supplied buffer, non-aliasing with `jpeg` (which
-                // is owned by this function), and `capacity >= jpeg.len()` was
-                // just checked rather than assumed.
-                unsafe {
-                    std::ptr::copy_nonoverlapping(jpeg.as_ptr(), prior, jpeg.len());
-                    *jpeg_size = jpeg.len();
-                }
-            } else {
-                // Path (2): allocate + hand off.
-                let out_ptr: *mut u8 = libc_from_slice(&jpeg);
-                if out_ptr.is_null() {
-                    inst.set_error("tj3Compress8: out-of-memory", TJERR_FATAL);
+                OutputDelivery::NoBufferSupplied => {
+                    inst.set_error(
+                        "tj3Compress8: TJPARAM_NOREALLOC is set but no output buffer was supplied",
+                        TJERR_FATAL,
+                    );
                     return -1;
                 }
-                unsafe {
-                    *jpeg_buf = out_ptr;
-                    *jpeg_size = jpeg.len();
+                OutputDelivery::OutOfMemory => {
+                    inst.set_error("tj3Compress8: out-of-memory", TJERR_FATAL);
+                    return -1;
                 }
             }
 

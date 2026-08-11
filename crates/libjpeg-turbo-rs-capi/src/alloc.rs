@@ -55,6 +55,104 @@ pub(crate) fn libc_from_slice(data: &[u8]) -> *mut u8 {
     p
 }
 
+/// What happened when handing a compressed result to a caller's out-pair.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum OutputDelivery {
+    /// Written. `*jpeg_buf` / `*jpeg_size` now describe the result.
+    Delivered,
+    /// `TJPARAM_NOREALLOC` is set and the caller's buffer cannot hold the
+    /// output. Nothing was written and nothing was freed.
+    BufferTooSmall { needed: usize, capacity: usize },
+    /// `TJPARAM_NOREALLOC` is set and the caller supplied no buffer at all.
+    ///
+    /// Upstream treats this as the same refusal rather than a licence to
+    /// allocate: `jdatadst-tj.c:184-192` takes the `*outbuffer == NULL` branch
+    /// and, with `alloc` false, raises `JERR_BUFFER_SIZE`. The flag is a
+    /// request *not to allocate*, so honouring it half-way — refusing to grow
+    /// a buffer but conjuring one when none was given — is the one behaviour
+    /// no caller asked for.
+    NoBufferSupplied,
+    /// The replacement allocation failed. The caller's slot is untouched.
+    OutOfMemory,
+}
+
+/// Hand `jpeg` to a TurboJPEG `(jpeg_buf, jpeg_size)` out-pair, honouring
+/// `TJPARAM_NOREALLOC`.
+///
+/// Every compressing entry point needs exactly this, and until P4-145 only
+/// `tj3Compress8` did it. The other five allocated a fresh buffer and
+/// `free()`d the previous pointee unconditionally — including when the caller
+/// had set `NOREALLOC`, which is precisely the flag it sets when the buffer is
+/// *not* `malloc`-owned. Handing a stack array or a `Vec`'s buffer to those
+/// entry points was therefore a free with the wrong allocator, and the caller
+/// was doing what upstream permits.
+///
+/// The two paths, per upstream (`turbojpeg.c` + `jdatadst-tj.c`):
+///
+/// - **`NOREALLOC` set** — write in place. `*jpeg_size` is an *input* carrying
+///   the buffer's capacity; too small is `JERR_BUFFER_SIZE`, not a resize
+///   (`jdatadst-tj.c:92`). The caller keeps its pointer, so the slot is
+///   neither swapped nor freed. A **NULL** slot is the same refusal, not a
+///   licence to allocate (`jdatadst-tj.c:184-192`).
+/// - **Otherwise** — allocate, store, and free the previous pointee. Upstream
+///   reaches the same state by `realloc`, which also consumes it.
+///
+/// Six call sites share this rather than six copies; the `compress_*` family
+/// that P4-40 was filed for is what that duplication turns into.
+///
+/// # Safety
+///
+/// `jpeg_buf` and `jpeg_size` must be non-NULL and valid for read and write.
+/// When `norealloc` is set and `*jpeg_buf` is non-NULL, it must be valid for
+/// writes of `*jpeg_size` bytes and must not alias `jpeg`. On the other path a
+/// non-NULL `*jpeg_buf` must have come from `malloc` / `tj3Alloc`.
+pub(crate) unsafe fn deliver_compressed_output(
+    jpeg: &[u8],
+    jpeg_buf: *mut *mut u8,
+    jpeg_size: *mut usize,
+    norealloc: bool,
+) -> OutputDelivery {
+    // SAFETY: the caller guarantees both out-pointers are valid for access.
+    let prior: *mut u8 = unsafe { *jpeg_buf };
+
+    if norealloc {
+        if prior.is_null() {
+            return OutputDelivery::NoBufferSupplied;
+        }
+        // SAFETY: as above; under NOREALLOC this slot is an input.
+        let capacity: usize = unsafe { *jpeg_size };
+        if jpeg.len() > capacity {
+            return OutputDelivery::BufferTooSmall {
+                needed: jpeg.len(),
+                capacity,
+            };
+        }
+        // SAFETY: `capacity >= jpeg.len()` was just checked rather than
+        // assumed, and the caller guarantees the buffer does not alias `jpeg`.
+        unsafe {
+            std::ptr::copy_nonoverlapping(jpeg.as_ptr(), prior, jpeg.len());
+            *jpeg_size = jpeg.len();
+        }
+        return OutputDelivery::Delivered;
+    }
+
+    let fresh: *mut u8 = libc_from_slice(jpeg);
+    if fresh.is_null() && !jpeg.is_empty() {
+        return OutputDelivery::OutOfMemory;
+    }
+    // SAFETY: `prior` came from this same allocator per the documented
+    // ownership contract, and is released only now that its replacement
+    // exists — an early free would strand the caller's slot on the OOM path
+    // above.
+    libc_free(prior);
+    // SAFETY: caller guarantees both out-pointers are writable.
+    unsafe {
+        *jpeg_buf = fresh;
+        *jpeg_size = jpeg.len();
+    }
+    OutputDelivery::Delivered
+}
+
 // ---------------------------------------------------------------------------
 // Public extern "C" wrappers (A1-8 scope, but needed here for tj3Compress8 to
 // hand out a C-freeable buffer).

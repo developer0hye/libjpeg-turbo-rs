@@ -43,7 +43,7 @@ use libjpeg_turbo_rs::api::yuv::{
 use libjpeg_turbo_rs::tj3::FrameInfo;
 use libjpeg_turbo_rs::{yuv_plane_height, yuv_plane_width, PixelFormat, Subsampling};
 
-use crate::alloc::{libc_free, libc_from_slice};
+use crate::alloc::{deliver_compressed_output, OutputDelivery};
 
 /// Byte length of a packed YUV buffer, or `None` if the geometry cannot
 /// describe one.
@@ -438,12 +438,12 @@ pub unsafe extern "C" fn tj3EncodeYUVPlanes8(
 /// optional may be null; any other null is reported through the documented
 /// error value rather than dereferenced.
 ///
-/// A non-null `*jpeg_buf` is additionally **freed by this function**, so it
-/// must have come from `tj3Alloc`/`malloc` — see
-/// [Ownership transfer](crate#pointer-contract). Unlike `tj3Compress8`, this
-/// entry point does **not** consult `TJPARAM_NOREALLOC`: it always allocates a
-/// new buffer and frees the previous pointee, even when that buffer was large
-/// enough. That divergence from upstream is tracked as P4-145.
+/// A non-null `*jpeg_buf` is **freed by this function only when
+/// `TJPARAM_NOREALLOC` is unset** — see
+/// [Ownership transfer](crate#pointer-contract). With the flag set the output
+/// is written in place, your pointer comes back unchanged, and `*jpeg_size` is
+/// an *input* carrying the buffer's capacity: output that does not fit is an
+/// error rather than a resize (P4-145).
 #[no_mangle]
 pub unsafe extern "C" fn tj3CompressFromYUV8(
     handle: *mut c_void,
@@ -517,19 +517,38 @@ pub unsafe extern "C" fn tj3CompressFromYUV8(
                     }
                 };
 
-            let ptr: *mut u8 = libc_from_slice(&jpeg);
-            if ptr.is_null() && !jpeg.is_empty() {
-                inst.set_error("tj3CompressFromYUV8: OOM", TJERR_FATAL);
-                return -1;
-            }
-            // SAFETY: jpeg_buf / jpeg_size validated non-NULL above.
-            unsafe {
-                let prior: *mut u8 = *jpeg_buf;
-                if !prior.is_null() {
-                    libc_free(prior);
+            // P4-145: honour `TJPARAM_NOREALLOC`. This used to allocate a fresh
+            // buffer and `free()` the previous pointee unconditionally — including
+            // when the caller had set the flag, which is exactly when the buffer is
+            // not `malloc`-owned. A stack array handed here was freed with the
+            // wrong allocator.
+            let norealloc: bool = inst.inner.get(libjpeg_turbo_rs::tj3::TjParam::NoRealloc) != 0;
+            // SAFETY: both out-pointers were validated non-NULL above; the caller's
+            // contract covers the buffer's validity and non-aliasing with `jpeg`,
+            // which this function owns.
+            match unsafe { deliver_compressed_output(&jpeg, jpeg_buf, jpeg_size, norealloc) } {
+                OutputDelivery::Delivered => {}
+                OutputDelivery::BufferTooSmall { needed, capacity } => {
+                    inst.set_error(
+                        format!(
+                            "tj3CompressFromYUV8: TJPARAM_NOREALLOC is set and the JPEG buffer is too small \
+                             ({needed} bytes needed, {capacity} available)"
+                        ),
+                        TJERR_FATAL,
+                    );
+                    return -1;
                 }
-                *jpeg_buf = ptr;
-                *jpeg_size = jpeg.len();
+                OutputDelivery::NoBufferSupplied => {
+                    inst.set_error(
+                        "tj3CompressFromYUV8: TJPARAM_NOREALLOC is set but no output buffer was supplied",
+                        TJERR_FATAL,
+                    );
+                    return -1;
+                }
+                OutputDelivery::OutOfMemory => {
+                    inst.set_error("tj3CompressFromYUV8: OOM", TJERR_FATAL);
+                    return -1;
+                }
             }
             inst.clear_error();
             0
@@ -549,12 +568,12 @@ pub unsafe extern "C" fn tj3CompressFromYUV8(
 /// optional may be null; any other null is reported through the documented
 /// error value rather than dereferenced.
 ///
-/// A non-null `*jpeg_buf` is additionally **freed by this function**, so it
-/// must have come from `tj3Alloc`/`malloc` — see
-/// [Ownership transfer](crate#pointer-contract). Unlike `tj3Compress8`, this
-/// entry point does **not** consult `TJPARAM_NOREALLOC`: it always allocates a
-/// new buffer and frees the previous pointee, even when that buffer was large
-/// enough. That divergence from upstream is tracked as P4-145.
+/// A non-null `*jpeg_buf` is **freed by this function only when
+/// `TJPARAM_NOREALLOC` is unset** — see
+/// [Ownership transfer](crate#pointer-contract). With the flag set the output
+/// is written in place, your pointer comes back unchanged, and `*jpeg_size` is
+/// an *input* carrying the buffer's capacity: output that does not fit is an
+/// error rather than a resize (P4-145).
 #[no_mangle]
 pub unsafe extern "C" fn tj3CompressFromYUVPlanes8(
     handle: *mut c_void,
@@ -636,18 +655,38 @@ pub unsafe extern "C" fn tj3CompressFromYUVPlanes8(
                     return -1;
                 }
             };
-            let ptr: *mut u8 = libc_from_slice(&jpeg);
-            if ptr.is_null() && !jpeg.is_empty() {
-                inst.set_error("tj3CompressFromYUVPlanes8: OOM", TJERR_FATAL);
-                return -1;
-            }
-            unsafe {
-                let prior: *mut u8 = *jpeg_buf;
-                if !prior.is_null() {
-                    libc_free(prior);
+            // P4-145: honour `TJPARAM_NOREALLOC`. This used to allocate a fresh
+            // buffer and `free()` the previous pointee unconditionally — including
+            // when the caller had set the flag, which is exactly when the buffer is
+            // not `malloc`-owned. A stack array handed here was freed with the
+            // wrong allocator.
+            let norealloc: bool = inst.inner.get(libjpeg_turbo_rs::tj3::TjParam::NoRealloc) != 0;
+            // SAFETY: both out-pointers were validated non-NULL above; the caller's
+            // contract covers the buffer's validity and non-aliasing with `jpeg`,
+            // which this function owns.
+            match unsafe { deliver_compressed_output(&jpeg, jpeg_buf, jpeg_size, norealloc) } {
+                OutputDelivery::Delivered => {}
+                OutputDelivery::BufferTooSmall { needed, capacity } => {
+                    inst.set_error(
+                        format!(
+                            "tj3CompressFromYUVPlanes8: TJPARAM_NOREALLOC is set and the JPEG buffer is too small \
+                             ({needed} bytes needed, {capacity} available)"
+                        ),
+                        TJERR_FATAL,
+                    );
+                    return -1;
                 }
-                *jpeg_buf = ptr;
-                *jpeg_size = jpeg.len();
+                OutputDelivery::NoBufferSupplied => {
+                    inst.set_error(
+                        "tj3CompressFromYUVPlanes8: TJPARAM_NOREALLOC is set but no output buffer was supplied",
+                        TJERR_FATAL,
+                    );
+                    return -1;
+                }
+                OutputDelivery::OutOfMemory => {
+                    inst.set_error("tj3CompressFromYUVPlanes8: OOM", TJERR_FATAL);
+                    return -1;
+                }
             }
             inst.clear_error();
             0
