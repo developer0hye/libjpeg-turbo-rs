@@ -325,6 +325,21 @@ jobs:
           --test capi_classic_error_codes
           --test capi_error_message_rendering
           --test capi_max_memory_budget -- --nocapture
+      # The C-ABI crate's OWN unit tests, on the stable toolchain.
+      #
+      # `cargo test --lib` in the Unit Tests job selects the default workspace
+      # member only — the root crate — so these 24 tests do not run there.
+      # They are not uncovered: `sanitizers.yml` runs `cargo test --workspace
+      # --lib` under ASan and UBSan on every PR. What this adds is a stable,
+      # *uninstrumented* run, so a failure here is not confounded with
+      # sanitizer instrumentation and does not depend on that workflow.
+      #
+      # Includes P4-104's `every_state_constant_matches_upstream_jpegint_h`,
+      # which cross-checks all 15 `global_state` values against the pinned
+      # `jpegint.h` with exact accounting, so a 16th upstream state fails
+      # rather than passing unnoticed.
+      - name: C-ABI crate unit tests (stable, uninstrumented)
+        run: cargo test -p libjpeg-turbo-rs-capi --lib
       # P4-13/P4-17's documented suspension proof is also in the C-ABI
       # workspace member. Its helper requires cjpeg/djpeg in CI and compilation
       # or oracle failures are fatal, so this cannot report green after a skip.
