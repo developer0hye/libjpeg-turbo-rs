@@ -3020,11 +3020,12 @@ pub unsafe extern "C" fn jpeg_start_decompress(cinfo: *mut c_void) -> CBoolean {
                 // (`jdapistd.c:60-63`) and never reaches the
                 // `raw_data_out ? RAW_OK : SCANNING` line at :170. This shim
                 // publishes SCANNING here instead so `jpeg_input_complete`
-                // (gated on `>= DSTATE_SCANNING`) reports TRUE — a divergence
-                // that predates P4-104 and belongs to its transitions half,
-                // where `DSTATE_BUFIMAGE` gets wired properly. Routing it
-                // through the raw-data helper would have made it publish a
-                // third value that is neither upstream's nor the intended one.
+                // reports TRUE — a divergence that predates P4-104 and
+                // belongs to its transitions half, where `DSTATE_BUFIMAGE`
+                // gets wired properly. Routing it through the raw-data helper
+                // would have made it publish a third value that is neither
+                // upstream's nor the intended one.
+
                 c.global_state = DSTATE_SCANNING;
                 let _ = c; // release the &mut before jpeg_calc_output_dimensions re-borrows
                 unsafe { jpeg_calc_output_dimensions(cinfo) };
@@ -3499,6 +3500,19 @@ pub unsafe extern "C" fn jpeg_finish_decompress(cinfo: *mut c_void) -> CBoolean 
             Some(c) => c,
             None => return 0,
         };
+        // Upstream's `jpeg_finish_decompress` ends with `jpeg_abort`, which
+        // leaves `global_state = DSTATE_START` (`jdapimin.c`: "We can use
+        // jpeg_abort to release memory and reset global_state"). STOPPING is
+        // the state it passes *through* while draining to EOI, not the state a
+        // caller observes afterwards.
+        //
+        // Pinned by `finish_decompress_resets_state_to_start`. `global_state`
+        // is a public field consumers switch on, so this is observable
+        // contract rather than internal bookkeeping.
+        // Order matters, and it is observable: the `free_pool` callback the
+        // cleanup below invokes is public, and upstream lets it see STOPPING.
+        // Publishing START first would show a custom memory manager a state
+        // upstream never shows it.
         c.global_state = DSTATE_STOPPING;
         // Drop the decoded image and any source bytes bridged from a
         // caller-installed `cinfo->src` so the next `jpeg_read_header` on
@@ -3566,6 +3580,10 @@ pub unsafe extern "C" fn jpeg_finish_decompress(cinfo: *mut c_void) -> CBoolean 
             priv_state.raw_image_cache = None;
             priv_state.raw_image_cache_12 = None;
             priv_state.raw_rows_consumed.clear();
+        }
+        // Cleanup done; publish what a caller observes.
+        if let Some(c) = unsafe { cinfo_mut(cinfo) } {
+            c.global_state = DSTATE_START;
         }
         1
     })
@@ -5594,14 +5612,14 @@ pub unsafe extern "C" fn jpeg_consume_input(cinfo: *mut c_void) -> c_int {
                 match result {
                     JPEG_HEADER_OK => {
                         // Our `jpeg_read_header` leaves state at
-                        // `DSTATE_INHEADER` on success (upstream uses
-                        // `DSTATE_READY`, which we don't model
-                        // separately). Advance past the header-parse
-                        // arm so subsequent `consume_input` polls report
-                        // `JPEG_REACHED_EOI` instead of looping forever
-                        // on `JPEG_REACHED_SOS`. `jpeg_start_decompress`
-                        // re-asserts `DSTATE_SCANNING` regardless, so
-                        // skipping ahead is safe.
+                        // `DSTATE_INHEADER` on success where upstream uses
+                        // `DSTATE_READY`, which we do not model separately
+                        // yet — the remaining half of P4-104. Advancing here
+                        // stops subsequent `consume_input` polls looping
+                        // forever on `JPEG_REACHED_SOS`.
+                        //
+                        // This jump is what `DSTATE_READY` replaces when the
+                        // consume_input restructure lands (P4-104).
                         c2.global_state = DSTATE_SCANNING;
                         JPEG_REACHED_SOS
                     }
@@ -5636,9 +5654,19 @@ pub unsafe extern "C" fn jpeg_consume_input(cinfo: *mut c_void) -> c_int {
 
 /// `jpeg_input_complete(cinfo) -> boolean` — see `jpeglib.h:1106`.
 ///
-/// TRUE only once the header has been parsed (state ≥ `DSTATE_SCANNING`).
-/// Earlier states would mislead a caller polling for "input ready"
-/// after just installing a source.
+/// A state outside `DSTATE_START..=DSTATE_STOPPING` raises `JERR_BAD_STATE`,
+/// as upstream does — telling a caller "keep polling" about a corrupt `cinfo`
+/// is the opposite of what it needs.
+///
+/// The *answer*, however, is still derived from `global_state` and
+/// `body_incomplete`, **not** from an EOI flag as upstream's
+/// `inputctl->eoi_reached` is. Two consequences a caller should know about,
+/// both pinned as `#[ignore]`d tests in
+/// `tests/capi_input_complete_contract.rs`: a baseline image reports TRUE
+/// straight after `jpeg_start_decompress` where upstream reports FALSE, and a
+/// successful `jpeg_finish_decompress` reports FALSE where upstream reports
+/// TRUE. Closing both needs `jpeg_consume_input` restructured to upstream's
+/// shape (P4-104).
 ///
 /// # Safety
 ///
@@ -5655,14 +5683,46 @@ pub unsafe extern "C" fn jpeg_input_complete(cinfo: *mut c_void) -> CBoolean {
             Some(c) => c,
             None => return 0,
         };
+        // Upstream's guard is a *range*, and the failure is an error, not a
+        // `FALSE` (`jdapimin.c`):
+        //
+        //     if (global_state < DSTATE_START || global_state > DSTATE_STOPPING)
+        //       ERREXIT1(cinfo, JERR_BAD_STATE, global_state);
+        //     return cinfo->inputctl->eoi_reached;
+        //
+        // Note what it does *not* do: derive the answer from the state. This
+        // used to return `state >= DSTATE_SCANNING && !body_incomplete`, which
+        // only worked because `jpeg_consume_input` jumped to SCANNING on
+        // header completion — a hack that in turn blocked modelling
+        // `DSTATE_READY` (P4-104).
+        // Upstream's guard is a *range*, and the failure is an error rather
+        // than a `FALSE` (`jdapimin.c`):
+        //
+        //     if (global_state < DSTATE_START || global_state > DSTATE_STOPPING)
+        //       ERREXIT1(cinfo, JERR_BAD_STATE, global_state);
+        //     return cinfo->inputctl->eoi_reached;
+        //
+        // The guard is adopted here. **The answer is not, yet** — and that is
+        // a deliberate stopping point rather than an oversight.
+        //
+        // Returning `eoi_seen` requires `eoi_seen` to mean what
+        // `inputctl->eoi_reached` means, and it cannot while
+        // `jpeg_consume_input` diverges: for a fully-buffered stream ours
+        // returns `JPEG_REACHED_EOI` as soon as the header is parsed, where
+        // upstream returns `JPEG_REACHED_SOS` and reaches EOI only on a later
+        // call. Four separate attempts to maintain the flag around that
+        // divergence each got a different shape wrong — baseline versus
+        // progressive, buffered versus not, across abort, across reuse. The
+        // flag can only become the answer once `consume_input` is restructured
+        // to upstream's shape, which is the same work `DSTATE_READY` needs
+        // (P4-104).
+        if c.global_state < DSTATE_START || c.global_state > DSTATE_STOPPING {
+            invoke_error_exit_parm(cinfo, JERR_BAD_STATE, c.global_state);
+            return 0;
+        }
         if c.global_state < DSTATE_SCANNING {
             return 0;
         }
-        // P4-13: while the body is still draining from a suspending source the
-        // input is NOT complete, even though the header is parsed and the state
-        // has advanced — so the buffered-image polling idiom
-        // (`while (!jpeg_input_complete()) jpeg_consume_input();`) keeps driving
-        // until `jpeg_consume_input` reaches EOI and clears `body_incomplete`.
         let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
         if let Some(p) = unsafe { priv_from_ptr(priv_ptr) } {
             if p.body_incomplete {

@@ -2338,12 +2338,16 @@ The 12-bit initialization/order portion remains in P4-98.
 shim's `DSTATE_STOPPING`, the opposite of upstream's abort-reset completion.
 That false oracle was removed in the filing PR.
 
-**Root cause (numbering half corrected 2026-08-11; see below).** Successful
-header parse remains `DSTATE_INHEADER` instead of READY and has no
-repeated-call guard. Finish unconditionally sets STOPPING, clears
-caches/source, and returns TRUE rather than rejecting unread rows/bad state,
-draining EOI with suspension, calling `term_source`, and abort-resetting for
-reuse.
+**Root cause (partially corrected 2026-08-11; see the Progress note below).**
+Successful header parse remains `DSTATE_INHEADER` instead of READY and has no
+repeated-call guard. Finish clears caches/source and returns TRUE rather than
+rejecting unread rows or a bad state, draining EOI with suspension, and calling
+`term_source`.
+
+Two pieces of the original root cause are now fixed and are called out so they
+are not re-implemented: the state **numbering** (all 15 constants match), and
+finish's **final state** — it ends at `DSTATE_START` as upstream's
+`jpeg_abort`-terminated finish does, rather than stopping at STOPPING.
 
 > **The state *numbering* is correct, and the paragraph above used to say
 > otherwise.** It opened by claiming the shim defines `DSTATE_STOPPING = 206`
@@ -2373,6 +2377,64 @@ reuse.
 >
 > **What remains under P4-104 is the transitions**, which the paragraph above
 > now describes on its own.
+
+**Progress (2026-08-11): `jpeg_input_complete`'s state guard adopted; its
+*answer* deliberately not, and the reason is the interesting part.**
+
+Upstream is three lines (`jdapimin.c`):
+
+```c
+if (cinfo->global_state < DSTATE_START || cinfo->global_state > DSTATE_STOPPING)
+  ERREXIT1(cinfo, JERR_BAD_STATE, cinfo->global_state);
+return cinfo->inputctl->eoi_reached;
+```
+
+**Adopted:** the range guard. A state outside `DSTATE_START..=DSTATE_STOPPING`
+now raises `JERR_BAD_STATE` where this shim returned a quiet `FALSE` — telling a
+caller "keep polling" about a corrupt `cinfo` is the opposite of what it needs.
+
+**Also fixed:** `jpeg_finish_decompress` left `DSTATE_STOPPING`. Upstream's
+finish ends with `jpeg_abort` — "We can use jpeg_abort to release memory and
+reset global_state" — so a caller observes `DSTATE_START`; STOPPING is the state
+finish passes *through* while draining to EOI.
+
+**Not adopted, and this is the finding:** returning `eoi_reached`. It requires
+`eoi_seen` to mean what `inputctl->eoi_reached` means, and it cannot while
+`jpeg_consume_input` diverges — for a fully-buffered stream ours returns
+`JPEG_REACHED_EOI` as soon as the header is parsed, where upstream returns
+`JPEG_REACHED_SOS` and reaches EOI only on a later call.
+
+Four successive attempts to maintain the flag around that divergence each got a
+*different* shape wrong, and each was caught by review rather than by the suite:
+
+1. it was never **set** on the fully-buffered or tables-only EOI returns;
+2. nor after the eager decode in `jpeg_start_decompress`, so a non-buffered
+   multi-scan image reported "keep polling" on a finished stream;
+3. it was **cleared too eagerly**, in finish and abort — upstream clears
+   `eoi_reached` only when the next datastream read begins, so its
+   `jpeg_input_complete` still answers TRUE after a successful finish;
+4. gating the startup mark on `progressive_mode` was **too narrow** (a
+   sequential multi-scan SOF0 stream preloads upstream but is not
+   progressive) after being **too broad** (baseline and buffered-image do not
+   preload at all).
+
+That is a model that was wrong four times, not code that was wrong once. The
+flag stays out of the answer until `jpeg_consume_input` is restructured to
+upstream's shape — which is the same work `DSTATE_READY` needs, so the two land
+together.
+
+`capi_input_complete_contract.rs`: **5 passing, 3 `#[ignore]`d**. One of the five, `finish_decompress_resets_state_to_start`, exists because the other two finish-related tests are ignored — without it the `DSTATE_START` change would have had no enabled gate at all, and reverting it would have left every enabled test green. The ignored
+three encode upstream's contract for the cases above and unignore with the
+restructure — executable specification rather than prose, per this repo's rule
+that an unready implementation gets `#[ignore]` with a reason rather than a
+loosened assertion. They are the first product-path ignored tests in the suite;
+the live-gate line in `LAST_MILE.md` records them.
+
+**Next in this item:** restructure `jpeg_consume_input` to upstream's shape
+(`jdapimin.c`) — `jpeg_read_header` calling `jpeg_consume_input` rather than the
+reverse — then `DSTATE_READY`, the repeated-call guard, and
+`jpeg_start_decompress` accepting READY. The three ignored tests are the
+acceptance criteria for that work.
 
 **Acceptance criteria.** Match every upstream state constant and transition
 after create/header/start, buffered/raw/coefficient operation, finish, and
