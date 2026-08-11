@@ -202,6 +202,9 @@ pub mod imageio;
 pub mod jpeglib;
 pub mod legacy;
 pub mod memmgr;
+/// Crate-private: the table is an implementation detail of `jpeg_std_error`,
+/// and exporting it would invite consumers to index it directly.
+pub(crate) mod message_table;
 pub mod mozjpeg_compat;
 pub mod precision;
 pub mod tj3;

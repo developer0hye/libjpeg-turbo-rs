@@ -1202,18 +1202,55 @@ unsafe extern "C" fn default_format_message(cinfo: *mut c_void, buffer: *mut u8)
             let err_pp: *const *mut JpegErrorMgr = cinfo as *const *mut JpegErrorMgr;
             let err_ptr: *mut JpegErrorMgr = err_pp.read();
             if !err_ptr.is_null() {
-                let err: &JpegErrorMgr = &*err_ptr;
                 have_err = true;
-                msg_parm_bytes = err.msg_parm;
-                let code: c_int = err.msg_code;
-                if code > 0 && !err.jpeg_message_table.is_null() && code <= err.last_jpeg_message {
-                    msgtext = err.jpeg_message_table.add(code as usize).read();
-                } else if !err.addon_message_table.is_null()
-                    && code >= err.first_addon_message
-                    && code <= err.last_addon_message
-                {
-                    let idx: c_int = code - err.first_addon_message;
-                    msgtext = err.addon_message_table.add(idx as usize).read();
+                // Read every field through raw pointers rather than binding a
+                // `&JpegErrorMgr`. The fallback below writes `msg_parm` back
+                // into the caller's manager, and holding a shared reference
+                // across that write — then reading through it again — is an
+                // aliasing violation, non-`UnsafeCell` fields being immutable
+                // for the life of a `&T`.
+                let msg_table: *const *const u8 =
+                    std::ptr::addr_of!((*err_ptr).jpeg_message_table).read();
+                let addon_table: *const *const u8 =
+                    std::ptr::addr_of!((*err_ptr).addon_message_table).read();
+                let last_jpeg: c_int = std::ptr::addr_of!((*err_ptr).last_jpeg_message).read();
+                let first_addon: c_int = std::ptr::addr_of!((*err_ptr).first_addon_message).read();
+                let last_addon: c_int = std::ptr::addr_of!((*err_ptr).last_addon_message).read();
+                let code: c_int = std::ptr::addr_of!((*err_ptr).msg_code).read();
+                msg_parm_bytes = std::ptr::addr_of!((*err_ptr).msg_parm).read();
+
+                if code > 0 && !msg_table.is_null() && code <= last_jpeg {
+                    msgtext = msg_table.add(code as usize).read();
+                } else if !addon_table.is_null() && code >= first_addon && code <= last_addon {
+                    let idx: c_int = code - first_addon;
+                    msgtext = addon_table.add(idx as usize).read();
+                }
+
+                // Upstream's fallback, ported exactly (`jerror.c:173-175`):
+                //
+                //     if (msgtext == NULL) {
+                //       err->msg_parm.i[0] = msg_code;
+                //       msgtext = err->jpeg_message_table[0];
+                //     }
+                //
+                // Entry 0 is "Bogus message code %d", so an unknown code
+                // reports *which* code it was. We previously substituted a
+                // fixed `libjpeg-turbo-rs: bogus message code` string that
+                // dropped the number — the one piece of information the
+                // message exists to carry. Found by the whole-table
+                // cross-check added with P4-146, which compares index 0 like
+                // any other entry.
+                if msgtext.is_null() && !msg_table.is_null() {
+                    let parm_bytes: [u8; 4] = code.to_ne_bytes();
+                    msg_parm_bytes[..4].copy_from_slice(&parm_bytes);
+                    // Upstream writes the code into the *caller's* error
+                    // manager, not a local copy, and a consumer may inspect
+                    // `err->msg_parm.i[0]` after `format_message` returns.
+                    // Updating only our snapshot would render the right text
+                    // over diverged public state.
+                    let parm_slot: *mut u8 = std::ptr::addr_of_mut!((*err_ptr).msg_parm).cast();
+                    std::ptr::copy_nonoverlapping(parm_bytes.as_ptr(), parm_slot, 4);
+                    msgtext = msg_table.read();
                 }
             }
         }
@@ -1231,6 +1268,10 @@ unsafe extern "C" fn default_format_message(cinfo: *mut c_void, buffer: *mut u8)
             std::slice::from_raw_parts(msgtext, len)
         }
     } else {
+        // Reached only when there is no message table at all — a caller that
+        // built its own `jpeg_error_mgr` without going through
+        // `jpeg_std_error`. Upstream would dereference a null table here; we
+        // say something instead.
         b"libjpeg-turbo-rs: bogus message code"
     };
 
@@ -1317,6 +1358,39 @@ unsafe extern "C" fn default_format_message(cinfo: *mut c_void, buffer: *mut u8)
 /// `%s`; `int_args` are consumed positionally for non-string specifiers.
 /// Mixing `%s` with integer specifiers is not supported (matches the
 /// jerror.c contract).
+/// Render `value` into `scratch` in the given radix, returning the written
+/// slice. No allocation: see the note at its call site — this runs on the
+/// out-of-memory path, where allocating to describe the failure would abort.
+///
+/// `value` arrives widened to `i64` so the unsigned specifiers can pass a
+/// full `c_uint` without wrapping negative.
+fn format_int(scratch: &mut [u8; 20], value: i64, radix: u32, upper: bool) -> &[u8] {
+    const DIGITS_LOWER: &[u8; 16] = b"0123456789abcdef";
+    const DIGITS_UPPER: &[u8; 16] = b"0123456789ABCDEF";
+    let digits: &[u8; 16] = if upper { DIGITS_UPPER } else { DIGITS_LOWER };
+
+    let negative: bool = value < 0;
+    // `unsigned_abs` rather than `-value`: `i64::MIN` has no positive
+    // counterpart and negating it would overflow.
+    let mut magnitude: u64 = value.unsigned_abs();
+
+    // Fill from the end, then return the tail.
+    let mut cursor: usize = scratch.len();
+    loop {
+        cursor -= 1;
+        scratch[cursor] = digits[(magnitude % radix as u64) as usize];
+        magnitude /= radix as u64;
+        if magnitude == 0 {
+            break;
+        }
+    }
+    if negative {
+        cursor -= 1;
+        scratch[cursor] = b'-';
+    }
+    &scratch[cursor..]
+}
+
 fn snprintf_jpeg(
     out: &mut [u8],
     format: &[u8],
@@ -1384,32 +1458,44 @@ fn snprintf_jpeg(
         }
         let spec: u8 = format[i];
         i += 1;
-        let formatted: Vec<u8> = match spec {
-            b's' => string_arg.unwrap_or(&[]).to_vec(),
+        // Allocation-free, deliberately. This runs inside an `extern "C"`
+        // callback, and the message most likely to need formatting is
+        // `JERR_OUT_OF_MEMORY` — raised precisely when the allocator has
+        // already failed. `to_string()`/`format!()` here would allocate on
+        // that path and abort the process instead of letting the caller
+        // report or `longjmp`. Upstream's `format_message` writes into the
+        // caller's buffer and allocates nothing; so does this.
+        //
+        // 20 bytes covers the widest decimal `c_int` ("-2147483648" is 11)
+        // and any 32-bit hex.
+        let mut scratch: [u8; 20] = [0u8; 20];
+        let formatted: &[u8] = match spec {
+            b's' => string_arg.unwrap_or(&[]),
             b'd' | b'i' => {
                 let v: c_int = int_args.get(int_idx).copied().unwrap_or(0);
                 int_idx += 1;
-                v.to_string().into_bytes()
+                format_int(&mut scratch, v as i64, 10, false)
             }
             b'u' => {
                 let v: c_int = int_args.get(int_idx).copied().unwrap_or(0);
                 int_idx += 1;
-                (v as c_uint).to_string().into_bytes()
+                format_int(&mut scratch, (v as c_uint) as i64, 10, false)
             }
             b'x' => {
                 let v: c_int = int_args.get(int_idx).copied().unwrap_or(0);
                 int_idx += 1;
-                format!("{:x}", v as c_uint).into_bytes()
+                format_int(&mut scratch, (v as c_uint) as i64, 16, false)
             }
             b'X' => {
                 let v: c_int = int_args.get(int_idx).copied().unwrap_or(0);
                 int_idx += 1;
-                format!("{:X}", v as c_uint).into_bytes()
+                format_int(&mut scratch, (v as c_uint) as i64, 16, true)
             }
             b'c' => {
                 let v: c_int = int_args.get(int_idx).copied().unwrap_or(0);
                 int_idx += 1;
-                vec![(v & 0xFF) as u8]
+                scratch[0] = (v & 0xFF) as u8;
+                &scratch[..1]
             }
             other => {
                 // Unrecognised specifier — emit raw `%X` so the caller
@@ -1427,7 +1513,7 @@ fn snprintf_jpeg(
                 push(out, &mut written, pad);
             }
         }
-        push_bytes(out, &mut written, &formatted);
+        push_bytes(out, &mut written, formatted);
     }
     written
 }
@@ -1476,8 +1562,12 @@ pub unsafe extern "C" fn jpeg_std_error(err: *mut JpegErrorMgr) -> *mut JpegErro
             e.msg_parm = [0u8; JMSG_STR_PARM_MAX];
             e.trace_level = 0;
             e.num_warnings = 0;
-            e.jpeg_message_table = std::ptr::null();
-            e.last_jpeg_message = 0;
+            // P4-146 (#518): this was `null()`, so `default_format_message`
+            // always took its "bogus message code" fallback and *every*
+            // classic error rendered as that string for a C consumer calling
+            // `format_message` or `output_message` — the standard error path.
+            e.jpeg_message_table = crate::message_table::message_table_ptr();
+            e.last_jpeg_message = crate::message_table::last_jpeg_message();
             e.addon_message_table = std::ptr::null();
             e.first_addon_message = 0;
             e.last_addon_message = 0;

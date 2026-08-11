@@ -314,6 +314,17 @@ jobs:
           --test capi_span_overflow_guards
           --test norealloc_buffer_capacity
           --test yuv_packed_length_overflow -- --nocapture
+      # P4-146's error-message gates, plus the error-code cross-check they
+      # extend. `capi_classic_error_codes` was never named here either — it
+      # compiled on every PR and executed on none, which is precisely how it
+      # reported "18 codes verified" through the entire period when all 18
+      # rendered as "bogus message code".
+      - name: Classic C-ABI error codes and message rendering (P4-146)
+        run: >
+          cargo test -p libjpeg-turbo-rs-capi
+          --test capi_classic_error_codes
+          --test capi_error_message_rendering
+          --test capi_max_memory_budget -- --nocapture
       # P4-13/P4-17's documented suspension proof is also in the C-ABI
       # workspace member. Its helper requires cjpeg/djpeg in CI and compilation
       # or oracle failures are fatal, so this cannot report green after a skip.
