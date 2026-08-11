@@ -537,38 +537,66 @@ impl<'a> MarkerReader<'a> {
                     .filter(|c| c.guid == guid && c.full_len as usize == full_len)
                     .map(|c| c.data.len())
                     .sum();
+                // The order matters: the ceiling and the "bytes actually
+                // present" test come first, so a tiny file declaring a huge
+                // `full_len` is rejected before anything is allocated.
                 if full_len > 0 && full_len <= MAX_XMP_EXT && available >= full_len {
-                    let mut ext = vec![0u8; full_len];
-                    let mut chunks: Vec<&XmpExtChunk> = xmp_ext_chunks
-                        .iter()
-                        .filter(|c| c.guid == guid && c.full_len as usize == full_len)
-                        .collect();
-                    chunks.sort_by_key(|c| c.offset);
-                    // Exact contiguity: summing lengths would let
-                    // overlapping chunks satisfy the coverage test while
-                    // leaving zero-filled holes — silent corruption an
-                    // attacker controls (review MEDIUM).
-                    let mut cursor: usize = 0;
-                    let mut valid = true;
-                    for c in chunks {
-                        let off = c.offset as usize;
-                        if off != cursor {
-                            valid = false;
-                            break;
+                    // P4-144: three allocations here, and all three used to
+                    // abort the process when the allocator refused — the `ext`
+                    // buffer, the chunk reference list, and growing
+                    // `std_packet` by up to the 64 MiB ceiling.
+                    //
+                    // Refusal *degrades* rather than erroring, unlike the ICC
+                    // path: the contract above is that a broken extension keeps
+                    // the standard packet rather than failing an otherwise-valid
+                    // decode, and "the allocator said no" is a worse reason to
+                    // break that than "the chunks were malformed". An early
+                    // return would be worse still — it would abandon the rest
+                    // of the metadata this function has already parsed.
+                    let mut chunks: Vec<&XmpExtChunk> = Vec::new();
+                    let listed: bool = chunks.try_reserve_exact(xmp_ext_chunks.len()).is_ok();
+                    let buffer =
+                        crate::common::try_alloc::try_filled_vec(full_len, 0u8, "Extended XMP");
+
+                    if let (true, Ok(mut ext)) = (listed, buffer) {
+                        chunks.extend(
+                            xmp_ext_chunks
+                                .iter()
+                                .filter(|c| c.guid == guid && c.full_len as usize == full_len),
+                        );
+                        // `sort_by_key` is stable and allocates scratch, which
+                        // would abort on refusal after both explicit buffers
+                        // were reserved fallibly. Offsets are unique for valid
+                        // data — the contiguity check below rejects anything
+                        // else — so the unstable sort loses nothing.
+                        chunks.sort_unstable_by_key(|c| c.offset);
+                        // Exact contiguity: summing lengths would let
+                        // overlapping chunks satisfy the coverage test while
+                        // leaving zero-filled holes — silent corruption an
+                        // attacker controls (review MEDIUM).
+                        let mut cursor: usize = 0;
+                        let mut valid = true;
+                        for c in chunks {
+                            let off = c.offset as usize;
+                            if off != cursor {
+                                valid = false;
+                                break;
+                            }
+                            let Some(end) = off.checked_add(c.data.len()) else {
+                                valid = false;
+                                break;
+                            };
+                            if end > full_len {
+                                valid = false;
+                                break;
+                            }
+                            ext[off..end].copy_from_slice(&c.data);
+                            cursor = end;
                         }
-                        let Some(end) = off.checked_add(c.data.len()) else {
-                            valid = false;
-                            break;
-                        };
-                        if end > full_len {
-                            valid = false;
-                            break;
+                        if valid && cursor == full_len && std_packet.try_reserve(ext.len()).is_ok()
+                        {
+                            std_packet.extend_from_slice(&ext);
                         }
-                        ext[off..end].copy_from_slice(&c.data);
-                        cursor = end;
-                    }
-                    if valid && cursor == full_len {
-                        std_packet.extend_from_slice(&ext);
                     }
                 }
             }

@@ -1,4 +1,8 @@
 // libjpeg-turbo-rs: alloc prelude (no_std support, issue #356)
+use crate::common::error::{JpegError, Result};
+use crate::common::icc;
+use crate::common::quant_table::QuantTable;
+use crate::common::try_alloc::try_clone_saved_markers;
 /// Progressive buffered output / scan-by-scan decode.
 ///
 /// Matches libjpeg-turbo's `buffered_image` mode: `jpeg_has_multiple_scans()`,
@@ -7,9 +11,9 @@
 ///
 /// Progressive JPEGs are encoded in multiple scans. This decoder allows you to
 /// output the image after each scan, progressively refining the quality.
-use crate::common::error::{JpegError, Result};
-use crate::common::icc;
-use crate::common::quant_table::QuantTable;
+use crate::common::try_alloc::{
+    try_clone_opt, try_clone_opt_string, try_copy_of, try_filled_vec, try_reserved_vec,
+};
 use crate::common::types::*;
 use crate::decode::bitstream::BitReader;
 use crate::decode::marker::{JpegMetadata, MarkerReader, ScanInfo};
@@ -86,73 +90,6 @@ fn checked_plane_size(factors: &[usize], what: &'static str) -> Result<usize> {
         });
     }
     Ok(total)
-}
-
-/// Allocate `len` copies of `value`, reporting allocator refusal as an error.
-///
-/// `vec![value; len]` aborts the process when the allocator refuses, so a
-/// header asking for more memory than the machine has becomes an
-/// uncatchable denial of service. Every size here is derived from the JPEG
-/// stream, so refusal has to be a recoverable [`JpegError`] like the other
-/// limits this decoder enforces (P4-136 criterion 4).
-///
-/// The byte count is checked separately from `try_reserve_exact` so that a
-/// `len` too large to *express* in bytes reports the geometry limit that
-/// caused it rather than being reported as a failed allocation the machine
-/// was never asked to perform. This is the 32-bit hazard: `blocks_x *
-/// blocks_y` fits `usize` on a 32-bit target while `* 128` for the
-/// coefficient buffers does not (P4-136 criterion 5).
-fn try_filled_vec<T: Clone>(len: usize, value: T, what: &'static str) -> Result<Vec<T>> {
-    let elem_size: usize = core::mem::size_of::<T>();
-    let bytes: usize = len
-        .checked_mul(elem_size)
-        .filter(|total| *total <= isize::MAX as usize)
-        .ok_or(JpegError::LimitExceeded {
-            what,
-            // Widen rather than saturate. This product is a *diagnostic*,
-            // never a span — but P4-139 is removing `saturating_*` from this
-            // crate's size arithmetic wholesale, and a saturating call sitting
-            // three lines from a real span computation is precisely what a
-            // grep-based gate cannot tell apart. `u128` cannot overflow for
-            // any `usize` times any element size.
-            actual: ((len as u128) * (elem_size as u128)).min(u64::MAX as u128) as u64,
-            limit: isize::MAX as u64,
-        })?;
-
-    let mut buf: Vec<T> = Vec::new();
-    buf.try_reserve_exact(len)
-        .map_err(|_| JpegError::AllocationFailed {
-            what,
-            bytes: bytes as u64,
-        })?;
-    // Capacity is already reserved, so this fills in place and cannot
-    // reallocate — the abort path `vec![]` would have taken is gone.
-    buf.resize(len, value);
-    Ok(buf)
-}
-
-/// Empty `Vec<u8>` with exactly `len` bytes reserved — the fallible
-/// counterpart to `Vec::with_capacity` for buffers filled by `extend_*`
-/// rather than by indexing. Same rationale as [`try_filled_vec`], without
-/// paying for a zero-fill the caller immediately overwrites.
-///
-/// `len` is bytes, so no element-size product can overflow here; callers
-/// still owe `checked_plane_size` on whatever geometry produced `len`.
-fn try_reserved_vec(len: usize, what: &'static str) -> Result<Vec<u8>> {
-    let mut buf: Vec<u8> = Vec::new();
-    buf.try_reserve_exact(len)
-        .map_err(|_| JpegError::AllocationFailed {
-            what,
-            bytes: len as u64,
-        })?;
-    Ok(buf)
-}
-
-/// Fallible copy of an input slice.
-fn try_copy_of(data: &[u8], what: &'static str) -> Result<Vec<u8>> {
-    let mut buf: Vec<u8> = try_reserved_vec(data.len(), what)?;
-    buf.extend_from_slice(data);
-    Ok(buf)
 }
 
 impl ProgressiveDecoder {
@@ -388,8 +325,11 @@ impl ProgressiveDecoder {
         }
 
         // Assemble into final Image with color conversion
-        let icc_profile: Option<Vec<u8>> = icc::reassemble_icc_profile(&self.metadata.icc_chunks);
-        let exif_data: Option<Vec<u8>> = self.metadata.exif_data.clone();
+        // P4-144: both are input-sized and used to abort on refusal. This
+        // function already returns `Result`, so propagating costs nothing.
+        let icc_profile: Option<Vec<u8>> =
+            icc::try_reassemble_icc_profile(&self.metadata.icc_chunks)?;
+        let exif_data: Option<Vec<u8>> = try_clone_opt(&self.metadata.exif_data, "EXIF metadata")?;
 
         if num_components == 1 {
             self.assemble_grayscale(
@@ -707,8 +647,8 @@ impl ProgressiveDecoder {
             data.extend_from_slice(&component_planes[0][y * comp_w..y * comp_w + out_width]);
         }
         Ok(Image {
-            xmp_data: self.metadata.xmp_data.clone(),
-            iptc_data: self.metadata.iptc_data.clone(),
+            xmp_data: try_clone_opt(&self.metadata.xmp_data, "XMP metadata")?,
+            iptc_data: try_clone_opt(&self.metadata.iptc_data, "IPTC metadata")?,
             width: out_width,
             height: out_height,
             pixel_format: PixelFormat::Grayscale,
@@ -716,9 +656,9 @@ impl ProgressiveDecoder {
             data,
             icc_profile,
             exif_data,
-            comment: self.metadata.comment.clone(),
+            comment: try_clone_opt_string(&self.metadata.comment, "COM comment")?,
             density: self.metadata.density,
-            saved_markers: self.metadata.saved_markers.clone(),
+            saved_markers: try_clone_saved_markers(&self.metadata.saved_markers)?,
             warnings: Vec::new(),
         })
     }
@@ -818,8 +758,8 @@ impl ProgressiveDecoder {
                 );
             }
             Ok(Image {
-                xmp_data: self.metadata.xmp_data.clone(),
-                iptc_data: self.metadata.iptc_data.clone(),
+                xmp_data: try_clone_opt(&self.metadata.xmp_data, "XMP metadata")?,
+                iptc_data: try_clone_opt(&self.metadata.iptc_data, "IPTC metadata")?,
                 width: out_width,
                 height: out_height,
                 pixel_format: out_format,
@@ -827,9 +767,9 @@ impl ProgressiveDecoder {
                 data,
                 icc_profile,
                 exif_data,
-                comment: self.metadata.comment.clone(),
+                comment: try_clone_opt_string(&self.metadata.comment, "COM comment")?,
                 density: self.metadata.density,
-                saved_markers: self.metadata.saved_markers.clone(),
+                saved_markers: try_clone_saved_markers(&self.metadata.saved_markers)?,
                 warnings: Vec::new(),
             })
         } else {
@@ -923,8 +863,8 @@ impl ProgressiveDecoder {
             }
 
             Ok(Image {
-                xmp_data: self.metadata.xmp_data.clone(),
-                iptc_data: self.metadata.iptc_data.clone(),
+                xmp_data: try_clone_opt(&self.metadata.xmp_data, "XMP metadata")?,
+                iptc_data: try_clone_opt(&self.metadata.iptc_data, "IPTC metadata")?,
                 width: out_width,
                 height: out_height,
                 pixel_format: out_format,
@@ -932,9 +872,9 @@ impl ProgressiveDecoder {
                 data,
                 icc_profile,
                 exif_data,
-                comment: self.metadata.comment.clone(),
+                comment: try_clone_opt_string(&self.metadata.comment, "COM comment")?,
                 density: self.metadata.density,
-                saved_markers: self.metadata.saved_markers.clone(),
+                saved_markers: try_clone_saved_markers(&self.metadata.saved_markers)?,
                 warnings: Vec::new(),
             })
         }
@@ -971,8 +911,8 @@ impl ProgressiveDecoder {
         }
 
         Ok(Image {
-            xmp_data: self.metadata.xmp_data.clone(),
-            iptc_data: self.metadata.iptc_data.clone(),
+            xmp_data: try_clone_opt(&self.metadata.xmp_data, "XMP metadata")?,
+            iptc_data: try_clone_opt(&self.metadata.iptc_data, "IPTC metadata")?,
             width: out_width,
             height: out_height,
             pixel_format: PixelFormat::Cmyk,
@@ -980,9 +920,9 @@ impl ProgressiveDecoder {
             data,
             icc_profile,
             exif_data,
-            comment: self.metadata.comment.clone(),
+            comment: try_clone_opt_string(&self.metadata.comment, "COM comment")?,
             density: self.metadata.density,
-            saved_markers: self.metadata.saved_markers.clone(),
+            saved_markers: try_clone_saved_markers(&self.metadata.saved_markers)?,
             warnings: Vec::new(),
         })
     }

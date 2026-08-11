@@ -822,7 +822,8 @@ impl TjHandle {
             _ => {
                 // Level 2 (all) and 4 (ICC only): extract ICC to handle while
                 // leaving the image copy intact (tj3GetICCProfile symmetry).
-                self.icc_profile = img.icc_profile.clone();
+                self.icc_profile =
+                    crate::common::try_alloc::try_clone_opt(&img.icc_profile, "ICC profile")?;
             }
         }
 

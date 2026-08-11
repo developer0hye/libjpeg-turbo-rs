@@ -3,6 +3,7 @@ use super::{Decoder, Image};
 use crate::common::error::{JpegError, Result};
 use crate::common::huffman_table::HuffmanTable;
 use crate::common::icc;
+use crate::common::try_alloc::{try_clone_opt, try_clone_opt_string, try_clone_saved_markers};
 use crate::common::types::{FrameHeader, PixelFormat};
 use crate::decode::bitstream::BitReader;
 use crate::decode::{huffman, lossless as lossless_codec};
@@ -10,8 +11,11 @@ use alloc::{format, string::ToString, vec, vec::Vec};
 
 impl<'a> Decoder<'a> {
     /// Reassemble ICC profile from parsed APP2 chunks.
-    pub(super) fn icc_profile(&self) -> Option<Vec<u8>> {
-        icc::reassemble_icc_profile(&self.metadata.icc_chunks)
+    ///
+    /// `Err` only when the allocator refuses the reassembly buffer; a malformed
+    /// or absent profile is `Ok(None)` and must not fail the decode (P4-144).
+    pub(super) fn icc_profile(&self) -> crate::common::error::Result<Option<Vec<u8>>> {
+        icc::try_reassemble_icc_profile(&self.metadata.icc_chunks)
     }
 
     /// Decode a lossless JPEG (SOF3).
@@ -318,8 +322,8 @@ impl<'a> Decoder<'a> {
                 data.push(val);
             }
             Ok(Image {
-                xmp_data: self.metadata.xmp_data.clone(),
-                iptc_data: self.metadata.iptc_data.clone(),
+                xmp_data: try_clone_opt(&self.metadata.xmp_data, "XMP metadata")?,
+                iptc_data: try_clone_opt(&self.metadata.iptc_data, "IPTC metadata")?,
                 width,
                 height,
                 pixel_format: PixelFormat::Grayscale,
@@ -327,9 +331,9 @@ impl<'a> Decoder<'a> {
                 data,
                 icc_profile,
                 exif_data,
-                comment: self.metadata.comment.clone(),
+                comment: try_clone_opt_string(&self.metadata.comment, "COM comment")?,
                 density: self.metadata.density,
-                saved_markers: self.metadata.saved_markers.clone(),
+                saved_markers: try_clone_saved_markers(&self.metadata.saved_markers)?,
                 warnings: Vec::new(),
             })
         } else {
@@ -377,8 +381,8 @@ impl<'a> Decoder<'a> {
                 }
             }
             Ok(Image {
-                xmp_data: self.metadata.xmp_data.clone(),
-                iptc_data: self.metadata.iptc_data.clone(),
+                xmp_data: try_clone_opt(&self.metadata.xmp_data, "XMP metadata")?,
+                iptc_data: try_clone_opt(&self.metadata.iptc_data, "IPTC metadata")?,
                 width,
                 height,
                 pixel_format: out_format,
@@ -386,9 +390,9 @@ impl<'a> Decoder<'a> {
                 data,
                 icc_profile,
                 exif_data,
-                comment: self.metadata.comment.clone(),
+                comment: try_clone_opt_string(&self.metadata.comment, "COM comment")?,
                 density: self.metadata.density,
-                saved_markers: self.metadata.saved_markers.clone(),
+                saved_markers: try_clone_saved_markers(&self.metadata.saved_markers)?,
                 warnings: Vec::new(),
             })
         }
@@ -479,8 +483,8 @@ impl<'a> Decoder<'a> {
         }
 
         Ok(Image {
-            xmp_data: self.metadata.xmp_data.clone(),
-            iptc_data: self.metadata.iptc_data.clone(),
+            xmp_data: try_clone_opt(&self.metadata.xmp_data, "XMP metadata")?,
+            iptc_data: try_clone_opt(&self.metadata.iptc_data, "IPTC metadata")?,
             width,
             height,
             pixel_format: out_format,
@@ -488,9 +492,9 @@ impl<'a> Decoder<'a> {
             data,
             icc_profile,
             exif_data,
-            comment: self.metadata.comment.clone(),
+            comment: try_clone_opt_string(&self.metadata.comment, "COM comment")?,
             density: self.metadata.density,
-            saved_markers: self.metadata.saved_markers.clone(),
+            saved_markers: try_clone_saved_markers(&self.metadata.saved_markers)?,
             warnings: Vec::new(),
         })
     }

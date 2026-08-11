@@ -1,5 +1,6 @@
 use super::{Decoder, Image};
 use crate::common::error::{DecodeWarning, JpegError, Result};
+use crate::common::try_alloc::{try_clone_opt, try_clone_opt_string, try_clone_saved_markers};
 use crate::common::types::{ColorSpace, DctMethod, FrameHeader, PixelFormat};
 use crate::decode::{idct_extended, idct_scaled};
 use alloc::{borrow::Cow, format, vec, vec::Vec};
@@ -1005,8 +1006,8 @@ impl<'a> Decoder<'a> {
         }
 
         Ok(Image {
-            xmp_data: self.metadata.xmp_data.clone(),
-            iptc_data: self.metadata.iptc_data.clone(),
+            xmp_data: try_clone_opt(&self.metadata.xmp_data, "XMP metadata")?,
+            iptc_data: try_clone_opt(&self.metadata.iptc_data, "IPTC metadata")?,
             width: out_width,
             height: out_height,
             pixel_format: PixelFormat::Grayscale,
@@ -1014,9 +1015,9 @@ impl<'a> Decoder<'a> {
             data,
             icc_profile,
             exif_data,
-            comment: self.metadata.comment.clone(),
+            comment: try_clone_opt_string(&self.metadata.comment, "COM comment")?,
             density: self.metadata.density,
-            saved_markers: self.metadata.saved_markers.clone(),
+            saved_markers: try_clone_saved_markers(&self.metadata.saved_markers)?,
             warnings,
         })
     }

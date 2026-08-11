@@ -57,7 +57,7 @@ pub fn probe(jpeg: &[u8]) -> Result<JpegInfo> {
         has_icc: !metadata.icc_chunks.is_empty(),
         has_xmp: metadata.xmp_data.is_some(),
         has_iptc: metadata.iptc_data.is_some(),
-        comment: metadata.comment.clone(),
+        comment: crate::common::try_alloc::try_clone_opt_string(&metadata.comment, "COM comment")?,
         density: metadata.density,
     })
 }

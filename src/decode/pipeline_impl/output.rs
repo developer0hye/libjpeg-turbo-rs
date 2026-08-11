@@ -2,6 +2,7 @@ use super::color::{fancy_h2v2_row_dispatch, fancy_h2v2_strided_dispatch};
 use super::{upsample_generic_nearest, Decoder, Image, ImageInfo};
 use crate::common::error::{DecodeWarning, JpegError, Result};
 use crate::common::quant_table::QuantTable;
+use crate::common::try_alloc::{try_clone_opt, try_clone_opt_string, try_clone_saved_markers};
 use crate::common::types::{ColorSpace, ComponentInfo, PixelFormat};
 use alloc::{
     borrow::Cow,
@@ -489,8 +490,8 @@ impl<'a> Decoder<'a> {
                 PixelFormat::Cmyk => unreachable!("rejected above"),
             };
             Ok(Image {
-                xmp_data: self.metadata.xmp_data.clone(),
-                iptc_data: self.metadata.iptc_data.clone(),
+                xmp_data: try_clone_opt(&self.metadata.xmp_data, "XMP metadata")?,
+                iptc_data: try_clone_opt(&self.metadata.iptc_data, "IPTC metadata")?,
                 width,
                 height,
                 pixel_format: out_format,
@@ -498,9 +499,9 @@ impl<'a> Decoder<'a> {
                 data,
                 icc_profile,
                 exif_data,
-                comment: self.metadata.comment.clone(),
+                comment: try_clone_opt_string(&self.metadata.comment, "COM comment")?,
                 density: self.metadata.density,
-                saved_markers: self.metadata.saved_markers.clone(),
+                saved_markers: try_clone_saved_markers(&self.metadata.saved_markers)?,
                 warnings: Vec::new(),
             })
         } else {
@@ -552,8 +553,8 @@ impl<'a> Decoder<'a> {
                 }
             }
             Ok(Image {
-                xmp_data: self.metadata.xmp_data.clone(),
-                iptc_data: self.metadata.iptc_data.clone(),
+                xmp_data: try_clone_opt(&self.metadata.xmp_data, "XMP metadata")?,
+                iptc_data: try_clone_opt(&self.metadata.iptc_data, "IPTC metadata")?,
                 width,
                 height,
                 pixel_format: out_format,
@@ -561,9 +562,9 @@ impl<'a> Decoder<'a> {
                 data,
                 icc_profile,
                 exif_data,
-                comment: self.metadata.comment.clone(),
+                comment: try_clone_opt_string(&self.metadata.comment, "COM comment")?,
                 density: self.metadata.density,
-                saved_markers: self.metadata.saved_markers.clone(),
+                saved_markers: try_clone_saved_markers(&self.metadata.saved_markers)?,
                 warnings: Vec::new(),
             })
         }
@@ -602,10 +603,14 @@ impl<'a> Decoder<'a> {
             )));
         }
 
-        let icc_profile = self.icc_profile();
-        let exif_data = self.metadata.exif_data.clone();
-        let xmp_data = self.metadata.xmp_data.clone();
-        let iptc_data = self.metadata.iptc_data.clone();
+        // P4-144: all four are input-sized allocations that used to abort the
+        // process when the allocator refused. This function already returns
+        // `Result`, so making them fallible costs a helper call rather than the
+        // API churn the item anticipated.
+        let icc_profile = self.icc_profile()?;
+        let exif_data = try_clone_opt(&self.metadata.exif_data, "EXIF metadata")?;
+        let xmp_data = try_clone_opt(&self.metadata.xmp_data, "XMP metadata")?;
+        let iptc_data = try_clone_opt(&self.metadata.iptc_data, "IPTC metadata")?;
 
         // Handle 12-bit JPEG transparently: decode via the 12-bit path, then
         // scale samples from 0-4095 to 0-255 so callers get standard 8-bit output.
@@ -819,11 +824,11 @@ impl<'a> Decoder<'a> {
                     &comp_block_sizes,
                     icc_profile,
                     exif_data,
-                    self.metadata.xmp_data.clone(),
-                    self.metadata.iptc_data.clone(),
-                    self.metadata.comment.clone(),
+                    try_clone_opt(&self.metadata.xmp_data, "XMP metadata")?,
+                    try_clone_opt(&self.metadata.iptc_data, "IPTC metadata")?,
+                    try_clone_opt_string(&self.metadata.comment, "COM comment")?,
                     self.metadata.density,
-                    self.metadata.saved_markers.clone(),
+                    try_clone_saved_markers(&self.metadata.saved_markers)?,
                     warnings,
                 );
             }
@@ -863,11 +868,11 @@ impl<'a> Decoder<'a> {
                 &comp_block_sizes,
                 icc_profile,
                 exif_data,
-                self.metadata.xmp_data.clone(),
-                self.metadata.iptc_data.clone(),
-                self.metadata.comment.clone(),
+                try_clone_opt(&self.metadata.xmp_data, "XMP metadata")?,
+                try_clone_opt(&self.metadata.iptc_data, "IPTC metadata")?,
+                try_clone_opt_string(&self.metadata.comment, "COM comment")?,
                 self.metadata.density,
-                self.metadata.saved_markers.clone(),
+                try_clone_saved_markers(&self.metadata.saved_markers)?,
                 warnings,
             );
         }
@@ -925,18 +930,18 @@ impl<'a> Decoder<'a> {
                     data
                 };
                 Ok(Image {
-                    xmp_data: xmp_data.clone(),
-                    iptc_data: iptc_data.clone(),
+                    xmp_data: try_clone_opt(&xmp_data, "XMP metadata")?,
+                    iptc_data: try_clone_opt(&iptc_data, "IPTC metadata")?,
                     width: out_width,
                     height: out_height,
                     pixel_format: PixelFormat::Grayscale,
                     precision: 8,
                     data,
-                    icc_profile: icc_profile.clone(),
-                    exif_data: exif_data.clone(),
-                    comment: self.metadata.comment.clone(),
+                    icc_profile: try_clone_opt(&icc_profile, "ICC profile")?,
+                    exif_data: try_clone_opt(&exif_data, "EXIF metadata")?,
+                    comment: try_clone_opt_string(&self.metadata.comment, "COM comment")?,
                     density: self.metadata.density,
-                    saved_markers: self.metadata.saved_markers.clone(),
+                    saved_markers: try_clone_saved_markers(&self.metadata.saved_markers)?,
                     warnings: warnings.clone(),
                 })
             } else {
@@ -995,18 +1000,18 @@ impl<'a> Decoder<'a> {
                     }
                 }
                 Ok(Image {
-                    xmp_data: xmp_data.clone(),
-                    iptc_data: iptc_data.clone(),
+                    xmp_data: try_clone_opt(&xmp_data, "XMP metadata")?,
+                    iptc_data: try_clone_opt(&iptc_data, "IPTC metadata")?,
                     width: out_width,
                     height: out_height,
                     pixel_format: out_format,
                     precision: 8,
                     data: data.into_vec(),
-                    icc_profile: icc_profile.clone(),
-                    exif_data: exif_data.clone(),
-                    comment: self.metadata.comment.clone(),
+                    icc_profile: try_clone_opt(&icc_profile, "ICC profile")?,
+                    exif_data: try_clone_opt(&exif_data, "EXIF metadata")?,
+                    comment: try_clone_opt_string(&self.metadata.comment, "COM comment")?,
                     density: self.metadata.density,
-                    saved_markers: self.metadata.saved_markers.clone(),
+                    saved_markers: try_clone_saved_markers(&self.metadata.saved_markers)?,
                     warnings: warnings.clone(),
                 })
             }
@@ -1114,18 +1119,18 @@ impl<'a> Decoder<'a> {
                 }
 
                 return Ok(Image {
-                    xmp_data: xmp_data.clone(),
-                    iptc_data: iptc_data.clone(),
+                    xmp_data: try_clone_opt(&xmp_data, "XMP metadata")?,
+                    iptc_data: try_clone_opt(&iptc_data, "IPTC metadata")?,
                     width: out_width,
                     height: out_height,
                     pixel_format: out_format,
                     precision: 8,
                     data: data.into_vec(),
-                    icc_profile: icc_profile.clone(),
-                    exif_data: exif_data.clone(),
-                    comment: self.metadata.comment.clone(),
+                    icc_profile: try_clone_opt(&icc_profile, "ICC profile")?,
+                    exif_data: try_clone_opt(&exif_data, "EXIF metadata")?,
+                    comment: try_clone_opt_string(&self.metadata.comment, "COM comment")?,
                     density: self.metadata.density,
-                    saved_markers: self.metadata.saved_markers.clone(),
+                    saved_markers: try_clone_saved_markers(&self.metadata.saved_markers)?,
                     warnings: warnings.clone(),
                 });
             }
@@ -1189,18 +1194,18 @@ impl<'a> Decoder<'a> {
                 recovered_warnings.push(DecodeWarning::UnsupportedRecovered { detail });
                 let data: Vec<u8> = vec![128u8; out_width * out_height * bpp];
                 return Ok(Image {
-                    xmp_data: xmp_data.clone(),
-                    iptc_data: iptc_data.clone(),
+                    xmp_data: try_clone_opt(&xmp_data, "XMP metadata")?,
+                    iptc_data: try_clone_opt(&iptc_data, "IPTC metadata")?,
                     width: out_width,
                     height: out_height,
                     pixel_format: out_format,
                     precision: 8,
                     data,
-                    icc_profile: icc_profile.clone(),
-                    exif_data: exif_data.clone(),
-                    comment: self.metadata.comment.clone(),
+                    icc_profile: try_clone_opt(&icc_profile, "ICC profile")?,
+                    exif_data: try_clone_opt(&exif_data, "EXIF metadata")?,
+                    comment: try_clone_opt_string(&self.metadata.comment, "COM comment")?,
                     density: self.metadata.density,
-                    saved_markers: self.metadata.saved_markers.clone(),
+                    saved_markers: try_clone_saved_markers(&self.metadata.saved_markers)?,
                     warnings: recovered_warnings,
                 });
             }
@@ -1344,18 +1349,18 @@ impl<'a> Decoder<'a> {
                     };
 
                     return Ok(Image {
-                        xmp_data: self.metadata.xmp_data.clone(),
-                        iptc_data: self.metadata.iptc_data.clone(),
+                        xmp_data: try_clone_opt(&self.metadata.xmp_data, "XMP metadata")?,
+                        iptc_data: try_clone_opt(&self.metadata.iptc_data, "IPTC metadata")?,
                         width: out_width,
                         height: out_height,
                         pixel_format: out_format,
                         precision: 8,
                         data,
-                        icc_profile: icc_profile.clone(),
-                        exif_data: exif_data.clone(),
-                        comment: self.metadata.comment.clone(),
+                        icc_profile: try_clone_opt(&icc_profile, "ICC profile")?,
+                        exif_data: try_clone_opt(&exif_data, "EXIF metadata")?,
+                        comment: try_clone_opt_string(&self.metadata.comment, "COM comment")?,
                         density: self.metadata.density,
-                        saved_markers: self.metadata.saved_markers.clone(),
+                        saved_markers: try_clone_saved_markers(&self.metadata.saved_markers)?,
                         warnings: warnings.clone(),
                     });
                 }
@@ -1454,18 +1459,18 @@ impl<'a> Decoder<'a> {
                     }
 
                     return Ok(Image {
-                        xmp_data: self.metadata.xmp_data.clone(),
-                        iptc_data: self.metadata.iptc_data.clone(),
+                        xmp_data: try_clone_opt(&self.metadata.xmp_data, "XMP metadata")?,
+                        iptc_data: try_clone_opt(&self.metadata.iptc_data, "IPTC metadata")?,
                         width: out_width,
                         height: out_height,
                         pixel_format: out_format,
                         precision: 8,
                         data: data.into_vec(),
-                        icc_profile: icc_profile.clone(),
-                        exif_data: exif_data.clone(),
-                        comment: self.metadata.comment.clone(),
+                        icc_profile: try_clone_opt(&icc_profile, "ICC profile")?,
+                        exif_data: try_clone_opt(&exif_data, "EXIF metadata")?,
+                        comment: try_clone_opt_string(&self.metadata.comment, "COM comment")?,
                         density: self.metadata.density,
-                        saved_markers: self.metadata.saved_markers.clone(),
+                        saved_markers: try_clone_saved_markers(&self.metadata.saved_markers)?,
                         warnings: warnings.clone(),
                     });
                 }
@@ -1529,18 +1534,18 @@ impl<'a> Decoder<'a> {
                     }
 
                     return Ok(Image {
-                        xmp_data: self.metadata.xmp_data.clone(),
-                        iptc_data: self.metadata.iptc_data.clone(),
+                        xmp_data: try_clone_opt(&self.metadata.xmp_data, "XMP metadata")?,
+                        iptc_data: try_clone_opt(&self.metadata.iptc_data, "IPTC metadata")?,
                         width: out_width,
                         height: out_height,
                         pixel_format: out_format,
                         precision: 8,
                         data: data.into_vec(),
-                        icc_profile: icc_profile.clone(),
-                        exif_data: exif_data.clone(),
-                        comment: self.metadata.comment.clone(),
+                        icc_profile: try_clone_opt(&icc_profile, "ICC profile")?,
+                        exif_data: try_clone_opt(&exif_data, "EXIF metadata")?,
+                        comment: try_clone_opt_string(&self.metadata.comment, "COM comment")?,
                         density: self.metadata.density,
-                        saved_markers: self.metadata.saved_markers.clone(),
+                        saved_markers: try_clone_saved_markers(&self.metadata.saved_markers)?,
                         warnings: warnings.clone(),
                     });
                 }
@@ -1609,18 +1614,18 @@ impl<'a> Decoder<'a> {
                     }
 
                     return Ok(Image {
-                        xmp_data: self.metadata.xmp_data.clone(),
-                        iptc_data: self.metadata.iptc_data.clone(),
+                        xmp_data: try_clone_opt(&self.metadata.xmp_data, "XMP metadata")?,
+                        iptc_data: try_clone_opt(&self.metadata.iptc_data, "IPTC metadata")?,
                         width: out_width,
                         height: out_height,
                         pixel_format: out_format,
                         precision: 8,
                         data: data.into_vec(),
-                        icc_profile: icc_profile.clone(),
-                        exif_data: exif_data.clone(),
-                        comment: self.metadata.comment.clone(),
+                        icc_profile: try_clone_opt(&icc_profile, "ICC profile")?,
+                        exif_data: try_clone_opt(&exif_data, "EXIF metadata")?,
+                        comment: try_clone_opt_string(&self.metadata.comment, "COM comment")?,
                         density: self.metadata.density,
-                        saved_markers: self.metadata.saved_markers.clone(),
+                        saved_markers: try_clone_saved_markers(&self.metadata.saved_markers)?,
                         warnings: warnings.clone(),
                     });
                 }
@@ -1734,18 +1739,18 @@ impl<'a> Decoder<'a> {
                     }
 
                     return Ok(Image {
-                        xmp_data: self.metadata.xmp_data.clone(),
-                        iptc_data: self.metadata.iptc_data.clone(),
+                        xmp_data: try_clone_opt(&self.metadata.xmp_data, "XMP metadata")?,
+                        iptc_data: try_clone_opt(&self.metadata.iptc_data, "IPTC metadata")?,
                         width: out_width,
                         height: out_height,
                         pixel_format: out_format,
                         precision: 8,
                         data: data.into_vec(),
-                        icc_profile: icc_profile.clone(),
-                        exif_data: exif_data.clone(),
-                        comment: self.metadata.comment.clone(),
+                        icc_profile: try_clone_opt(&icc_profile, "ICC profile")?,
+                        exif_data: try_clone_opt(&exif_data, "EXIF metadata")?,
+                        comment: try_clone_opt_string(&self.metadata.comment, "COM comment")?,
                         density: self.metadata.density,
-                        saved_markers: self.metadata.saved_markers.clone(),
+                        saved_markers: try_clone_saved_markers(&self.metadata.saved_markers)?,
                         warnings: warnings.clone(),
                     });
                 }
@@ -1897,18 +1902,18 @@ impl<'a> Decoder<'a> {
                 }
 
                 return Ok(Image {
-                    xmp_data: xmp_data.clone(),
-                    iptc_data: iptc_data.clone(),
+                    xmp_data: try_clone_opt(&xmp_data, "XMP metadata")?,
+                    iptc_data: try_clone_opt(&iptc_data, "IPTC metadata")?,
                     width: out_width,
                     height: out_height,
                     pixel_format: out_format,
                     precision: 8,
                     data: data.into_vec(),
-                    icc_profile: icc_profile.clone(),
-                    exif_data: exif_data.clone(),
-                    comment: self.metadata.comment.clone(),
+                    icc_profile: try_clone_opt(&icc_profile, "ICC profile")?,
+                    exif_data: try_clone_opt(&exif_data, "EXIF metadata")?,
+                    comment: try_clone_opt_string(&self.metadata.comment, "COM comment")?,
                     density: self.metadata.density,
-                    saved_markers: self.metadata.saved_markers.clone(),
+                    saved_markers: try_clone_saved_markers(&self.metadata.saved_markers)?,
                     warnings: warnings.clone(),
                 });
             }
@@ -1929,18 +1934,18 @@ impl<'a> Decoder<'a> {
             }
 
             Ok(Image {
-                xmp_data: xmp_data.clone(),
-                iptc_data: iptc_data.clone(),
+                xmp_data: try_clone_opt(&xmp_data, "XMP metadata")?,
+                iptc_data: try_clone_opt(&iptc_data, "IPTC metadata")?,
                 width: out_width,
                 height: out_height,
                 pixel_format: out_format,
                 precision: 8,
                 data: data.into_vec(),
-                icc_profile: icc_profile.clone(),
-                exif_data: exif_data.clone(),
-                comment: self.metadata.comment.clone(),
+                icc_profile: try_clone_opt(&icc_profile, "ICC profile")?,
+                exif_data: try_clone_opt(&exif_data, "EXIF metadata")?,
+                comment: try_clone_opt_string(&self.metadata.comment, "COM comment")?,
                 density: self.metadata.density,
-                saved_markers: self.metadata.saved_markers.clone(),
+                saved_markers: try_clone_saved_markers(&self.metadata.saved_markers)?,
                 warnings: warnings.clone(),
             })
         } else if num_components == 4 {
