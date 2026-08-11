@@ -2338,13 +2338,41 @@ The 12-bit initialization/order portion remains in P4-98.
 shim's `DSTATE_STOPPING`, the opposite of upstream's abort-reset completion.
 That false oracle was removed in the filing PR.
 
-**Root cause.** The shim defines `DSTATE_STOPPING = 206`, but upstream assigns
-206 to `DSTATE_RAW_OK` and STOPPING is 210; several intermediate states are
-missing. Successful header parse remains `DSTATE_INHEADER` instead of READY and
-has no repeated-call guard. Finish unconditionally sets its misnumbered
-STOPPING, clears caches/source, and returns TRUE rather than rejecting unread
-rows/bad state, draining EOI with suspension, calling `term_source`, and
-abort-resetting for reuse.
+**Root cause (numbering half corrected 2026-08-11; see below).** Successful
+header parse remains `DSTATE_INHEADER` instead of READY and has no
+repeated-call guard. Finish unconditionally sets STOPPING, clears
+caches/source, and returns TRUE rather than rejecting unread rows/bad state,
+draining EOI with suspension, calling `term_source`, and abort-resetting for
+reuse.
+
+> **The state *numbering* is correct, and the paragraph above used to say
+> otherwise.** It opened by claiming the shim defines `DSTATE_STOPPING = 206`
+> against upstream's 210 with intermediate states missing. That was fixed —
+> the Status section below documents it, including the red-test proof — but
+> this paragraph was never updated, so the item's own root cause contradicted
+> its own status.
+>
+> **A smaller finding about where that guard runs.** It is a `--lib` unit test
+> in the C-ABI crate, and CI's `Unit Tests` job runs `cargo test --lib`, which
+> selects the default workspace member — the root crate — only. So it does not
+> run *there*. It does run on every PR, under `sanitizers.yml`, whose ASan and
+> UBSan jobs both invoke `cargo test --workspace --lib`.
+>
+> An earlier draft of this note claimed the C-ABI crate's 24 unit tests "never
+> executed in CI". **That was wrong**, and is corrected here rather than
+> quietly dropped — the sanitizer jobs had them covered. What the new
+> `cargo test -p libjpeg-turbo-rs-capi --lib` step adds is coverage on the
+> *stable, uninstrumented* toolchain, so a failure in these tests is not
+> confounded with sanitizer instrumentation and does not depend on the
+> sanitizer workflow being reached.
+>
+> Found by writing a *new* integration test for this criterion, which turned
+> out to be a weaker duplicate of the existing one — it enumerated a hardcoded
+> list, so a sixteenth upstream state would not have failed it — and was
+> deleted rather than merged.
+>
+> **What remains under P4-104 is the transitions**, which the paragraph above
+> now describes on its own.
 
 **Acceptance criteria.** Match every upstream state constant and transition
 after create/header/start, buffered/raw/coefficient operation, finish, and
