@@ -180,6 +180,221 @@ pub fn build_oracle(source_stem: &str) -> Option<PathBuf> {
     Some(oracle)
 }
 
+/// A stock libjpeg development install: `jpeglib.h` plus a linkable
+/// `libjpeg`. Distinct from [`TurboJpegDev`] — the classic `jpeg_*` API and
+/// the TurboJPEG `tj3*` API ship in different libraries.
+pub struct LibJpegDev {
+    /// Every directory that must go on the include path. Multiarch installs
+    /// split the headers: `jpeglib.h` in `include/`, the ABI-specific
+    /// `jconfig.h` in `include/<triplet>/`. Passing only one of them either
+    /// fails to compile or, worse, silently picks up the *host's* `jpeglib.h`
+    /// while linking the prefixed library — a version mismatch that would
+    /// quietly invalidate the comparison the oracle exists to make.
+    pub include_dirs: Vec<PathBuf>,
+    pub lib_dir: PathBuf,
+    /// The static archive, when the install ships one.
+    ///
+    /// Preferred over `-ljpeg`, and not as an optimisation: a shared link
+    /// leaves the choice of library to the runtime loader, and
+    /// `DYLD_LIBRARY_PATH` / `LD_LIBRARY_PATH` outrank the `-rpath` this
+    /// helper sets. An environment pointing at an installed copy of *our own*
+    /// shim would therefore have the oracle load the implementation under
+    /// test and agree with it perfectly. Linking the archive by absolute path
+    /// takes the loader out of the picture: the bytes checked by
+    /// [`is_our_own_shim`] are the bytes that end up in the binary.
+    pub static_lib: Option<PathBuf>,
+}
+
+/// Locate a stock libjpeg(-turbo) development install for the classic API.
+///
+/// **This must not find our own shim.** The capi crate installs a
+/// libjpeg-compatible `libjpeg` of its own — `scripts/install_capi.sh` ships a
+/// `jconfig.h`, a `jpeglib.h` and a `libjpeg` under whatever prefix it is
+/// given — and an oracle linked against that would compare the implementation
+/// with itself, agreeing perfectly while both were wrong. Header presence
+/// therefore proves nothing; the candidate library itself is inspected for our
+/// crate name (see [`is_our_own_shim`]), which no C build can contain.
+pub fn find_libjpeg_dev() -> Option<LibJpegDev> {
+    let prefixes: Vec<PathBuf> = match std::env::var_os("LIBJPEG_TURBO_PREFIX") {
+        Some(prefix) => vec![PathBuf::from(prefix)],
+        None => {
+            let mut prefixes: Vec<PathBuf> = Vec::new();
+            if let Some(prefix) = std::env::var_os("CONDA_PREFIX") {
+                prefixes.push(PathBuf::from(prefix));
+            }
+            prefixes.extend(
+                [
+                    "/opt/libjpeg-turbo",
+                    "/opt/homebrew/opt/jpeg-turbo",
+                    "/opt/homebrew",
+                    "/usr/local",
+                    "/usr",
+                ]
+                .iter()
+                .map(PathBuf::from),
+            );
+            prefixes
+        }
+    };
+
+    let mut lib_subdirs: Vec<PathBuf> = vec![PathBuf::from("lib64"), PathBuf::from("lib")];
+    if let Some(triplet) = host_multiarch_triplet() {
+        lib_subdirs.push(PathBuf::from("lib").join(&triplet));
+        lib_subdirs.push(PathBuf::from("lib64").join(&triplet));
+    }
+
+    for prefix in prefixes {
+        let base_include: PathBuf = prefix.join("include");
+        let Ok(header_text) = std::fs::read_to_string(base_include.join("jpeglib.h")) else {
+            continue;
+        };
+        if !header_text.contains("jpeg_consume_input") {
+            continue;
+        }
+        // Debian/Ubuntu keep the architecture-specific `jconfig.h` under
+        // `/usr/include/<triplet>` while `jpeglib.h` stays in `/usr/include`,
+        // so a plain `include/` test rejects a perfectly good distro install
+        // and silently drops the C comparison. Accept either spelling.
+        //
+        // Reachable only where the compiler reports a multiarch triplet, so it
+        // is untested by this repository's own runs: macOS clang reports none,
+        // and the Linux job points `LIBJPEG_TURBO_PREFIX` at a cmake install
+        // that puts `jconfig.h` in plain `include/`. Treat it as convenience
+        // for a developer's distro box, not as a gate that something checks.
+        let mut candidates: Vec<PathBuf> = vec![base_include.clone()];
+        if let Some(triplet) = host_multiarch_triplet() {
+            candidates.push(base_include.join(&triplet));
+        }
+        let Some(config_dir) = candidates
+            .into_iter()
+            .find(|dir| dir.join("jconfig.h").is_file())
+        else {
+            continue;
+        };
+        let mut include_dirs: Vec<PathBuf> = vec![base_include.clone()];
+        if config_dir != base_include {
+            include_dirs.push(config_dir);
+        }
+        for lib_subdir in &lib_subdirs {
+            let lib_dir: PathBuf = prefix.join(lib_subdir);
+            let static_lib: Option<PathBuf> =
+                Some(lib_dir.join("libjpeg.a")).filter(|path| path.exists());
+            // Check provenance on whichever file the link will actually use.
+            let library: Option<PathBuf> = static_lib.clone().or_else(|| {
+                ["libjpeg.so", "libjpeg.dylib"]
+                    .iter()
+                    .map(|file| lib_dir.join(file))
+                    .find(|path| path.exists())
+            });
+            // Our own installed shim is the one candidate that would make this
+            // gate compare the implementation with itself.
+            let usable: bool = library
+                .as_deref()
+                .is_some_and(|path| !is_our_own_shim(path));
+            if usable {
+                return Some(LibJpegDev {
+                    include_dirs,
+                    lib_dir,
+                    static_lib,
+                });
+            }
+        }
+    }
+    None
+}
+
+/// True when `library` is this crate's own C-ABI shim rather than a C libjpeg.
+///
+/// The Rust build embeds the crate name in the binary — symbol names, panic
+/// location strings, the metadata section — and no C build of libjpeg contains
+/// it. This is provenance rather than a naming or layout convention, which is
+/// what makes it safe to rely on: our shim installs the same header set under
+/// the same library name as the real thing, so nothing about the file system
+/// distinguishes the two.
+fn is_our_own_shim(library: &Path) -> bool {
+    let Ok(bytes) = std::fs::read(library) else {
+        // Unreadable: treat as suspect rather than trusting it.
+        return true;
+    };
+    const CRATE_MARKER: &[u8] = b"libjpeg_turbo_rs";
+    bytes
+        .windows(CRATE_MARKER.len())
+        .any(|window| window == CRATE_MARKER)
+}
+
+/// Build `examples/<source_stem>.c` against stock libjpeg's classic API.
+///
+/// `None` means no install was found, which [`oracle_is_required`] still
+/// forbids when `LIBJPEG_TURBO_PREFIX` says one is provisioned. A compile
+/// failure once an install *is* present is fatal, for the same reason as in
+/// [`build_oracle`]: a skipped comparison that reads as a pass is the failure
+/// mode these gates exist to prevent.
+pub fn build_classic_oracle(source_stem: &str) -> Option<PathBuf> {
+    let install: LibJpegDev = match find_libjpeg_dev() {
+        Some(install) => install,
+        None => {
+            assert!(
+                !oracle_is_required(),
+                "no stock libjpeg development install found under LIBJPEG_TURBO_PREFIX={:?} — \
+                 that variable says one is provisioned, and skipping here would pass the C parity \
+                 gate without checking anything. A candidate needs a jpeglib.h declaring \
+                 jpeg_consume_input, a jconfig.h (in include/ or include/<triplet>/), and a \
+                 libjpeg that is not this crate's own shim — an installed shim is rejected on \
+                 purpose, since linking it would compare the implementation with itself",
+                std::env::var_os("LIBJPEG_TURBO_PREFIX")
+            );
+            return None;
+        }
+    };
+
+    let source: PathBuf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("examples")
+        .join(format!("{source_stem}.c"));
+    assert!(
+        source.exists(),
+        "oracle source missing: {}",
+        source.display()
+    );
+
+    let out_dir: PathBuf = std::env::temp_dir().join(format!(
+        "libjpeg_turbo_rs_oracle_{}_{source_stem}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&out_dir).expect("create oracle build dir");
+    let oracle: PathBuf = out_dir.join(source_stem);
+
+    let compiler: String = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
+    let output = Command::new(&compiler)
+        .arg("-O2")
+        .arg("-o")
+        .arg(&oracle)
+        .arg(&source)
+        .args(
+            install
+                .include_dirs
+                .iter()
+                .map(|dir| format!("-I{}", dir.display())),
+        )
+        .args(match &install.static_lib {
+            // Absolute path, no `-l` search and no loader involvement.
+            Some(archive) => vec![archive.display().to_string()],
+            None => vec![
+                format!("-L{}", install.lib_dir.display()),
+                "-ljpeg".to_string(),
+                format!("-Wl,-rpath,{}", install.lib_dir.display()),
+            ],
+        })
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run {compiler}: {e}"));
+    assert!(
+        output.status.success(),
+        "failed to build the {source_stem} C oracle with {compiler} against {:?}:\n{}",
+        install.include_dirs,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Some(oracle)
+}
+
 /// Run an oracle binary and return its stdout, failing loudly on a non-zero
 /// exit so a broken oracle cannot read as "no differences found".
 pub fn run_oracle(oracle: &Path, args: &[&str]) -> String {

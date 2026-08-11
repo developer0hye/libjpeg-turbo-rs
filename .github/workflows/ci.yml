@@ -340,19 +340,14 @@ jobs:
       # rather than passing unnoticed.
       - name: C-ABI crate unit tests (stable, uninstrumented)
         run: cargo test -p libjpeg-turbo-rs-capi --lib
-      # P4-104's transition work. Named for the same reason as the suites
-      # above: this crate's tests are selected by name.
-      - name: Classic C-ABI input_complete contract (P4-104)
-        run: >
-          cargo test -p libjpeg-turbo-rs-capi
-          --test capi_input_complete_contract -- --nocapture
       # P4-13/P4-17's documented suspension proof is also in the C-ABI
       # workspace member. Its helper requires cjpeg/djpeg in CI and compilation
       # or oracle failures are fatal, so this cannot report green after a skip.
       - name: Classic C-ABI pathological lifecycle parity
         run: >
           cargo test -p libjpeg-turbo-rs-capi
-          --test capi_classic_lifecycle_pathological -- --nocapture
+          --test capi_classic_lifecycle_pathological
+          --test capi_suspended_body_cap -- --nocapture
       # P4-81: the ELF symbol-version leg. This crate's tests are selected by
       # name here, so a suite that is never named never runs -- which is exactly
       # what happened to this one: it reported green on two full CI runs without
@@ -390,6 +385,26 @@ jobs:
             /tmp/ljt8/prefix/include/jconfig.h
       # Ubuntu also provides /dev/full, so the fflush/ferror scenario runs for
       # real here instead of reporting itself unavailable as it does on macOS.
+      # P4-104's transition work. Named for the same reason as the suites
+      # above: this crate's tests are selected by name.
+      #
+      # Two of these compare their `(return code, global_state)` traces against
+      # `examples/consume_input_states_oracle.c` linked to a real C libjpeg,
+      # and skip silently without a development install. Pointing
+      # LIBJPEG_TURBO_PREFIX at the *pinned submodule* build above makes the
+      # oracle both mandatory and version-exact: the C the traces are compared
+      # against is the same source tree the citations in those tests quote,
+      # not whatever libjpeg the runner image ships. This step therefore has to
+      # follow that build.
+      - name: Classic C-ABI state transitions (P4-104)
+        run: >
+          cargo test -p libjpeg-turbo-rs-capi
+          --test capi_input_complete_contract
+          --test capi_consume_input_states
+          --test capi_preload_resume -- --nocapture
+        env:
+          LIBJPEG_TURBO_PREFIX: /tmp/ljt8/prefix
+
       - name: Classic destination ownership + stdio I/O parity (P4-108)
         env:
           LIBJPEG_TURBO_REFERENCE_DIR: /tmp/ljt8/prefix
