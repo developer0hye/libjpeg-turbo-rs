@@ -988,6 +988,15 @@ fn checked_staging_span(samples_per_row: usize, height: usize, elem_size: usize)
 /// "Insufficient memory (case %d)".
 const OOM_CASE_ALLOC_TOO_LARGE: c_int = 8;
 
+/// `JERR_OUT_OF_MEMORY` case for P4-13's 256 MiB suspended-body cap.
+///
+/// Deliberately outside upstream's `jmemmgr.c` range (1..=10): the cap is this
+/// shim's own bound on how much of a suspending source it will buffer, not one
+/// of libjpeg's allocation sites, and reusing one of their numbers would point a
+/// reader at the wrong code. The message renders as
+/// `Insufficient memory (case 100)`.
+const OOM_CASE_SUSPENDED_BODY_CAP: c_int = 100;
+
 /// `jmorecfg.h:158` — the parameter `JERR_IMAGE_TOO_BIG`'s `%u` slot expects
 /// ("Maximum supported image dimension is %u pixels").
 ///
@@ -2139,6 +2148,29 @@ unsafe fn drain_caller_source_mgr(
         }
 
         if accumulator.len() > MAX_BYTES {
+            // Free the 256 MiB before raising. A conforming caller's
+            // `error_exit` ends in `longjmp`, which unwinds the C way and runs
+            // no Rust destructor on this frame — and `accumulator` was moved
+            // out of `bridge_partial`, so nothing else can reach it either.
+            // Left live, every rejected stream would strand a quarter gigabyte
+            // that not even `jpeg_destroy_decompress` could recover. The same
+            // hazard applies to any local allocation live at a raise site.
+            drop(accumulator);
+            // `None` means *suspension* to every caller of this helper, and a
+            // source that has already produced 256 MiB without an EOI will
+            // never be satisfied by another refill — so the honest answer is
+            // an error, not "try again". Without it the header drain reports
+            // the same thing a momentarily-dry socket does, and a conforming
+            // caller retries forever, re-accumulating a fresh 256 MiB each
+            // time (`accumulator` is dropped on this path).
+            raise_classic_error(
+                cinfo_ptr,
+                &mut priv_state.last_error,
+                "jpeg_read_header: source produced more than the 256 MiB \
+                 buffering cap without an EOI marker",
+                JERR_OUT_OF_MEMORY,
+                Some(OOM_CASE_SUSPENDED_BODY_CAP),
+            );
             return None;
         }
 
@@ -2297,9 +2329,21 @@ fn finish_body_drain(c: &mut JpegDecompressPublic, priv_state: &mut DecompressPr
                     // Cap tripped: clear `body_incomplete` so a retry can't
                     // re-enter the drain and append past the cap (bounds memory).
                     priv_state.body_incomplete = false;
-                    priv_state.last_error =
-                        CString::new("jpeg decode: suspended body exceeds 256 MiB cap")
-                            .unwrap_or_default();
+                    // This is terminal, so say so. Returning a bare `false`
+                    // spells *suspension* to a classic caller — "refill and
+                    // retry" — and no refill can ever satisfy a stream that
+                    // has already exceeded the cap. Worse, the drain has
+                    // stopped short of EOI while looking, to every later
+                    // query, exactly like one that finished. A resource limit
+                    // is an error; raise it as one.
+                    let cinfo: *mut c_void = (c as *mut JpegDecompressPublic).cast::<c_void>();
+                    raise_classic_error(
+                        cinfo,
+                        &mut priv_state.last_error,
+                        "jpeg decode: suspended body exceeds the 256 MiB buffering cap",
+                        JERR_OUT_OF_MEMORY,
+                        Some(OOM_CASE_SUSPENDED_BODY_CAP),
+                    );
                     return false;
                 }
             }
@@ -3035,6 +3079,18 @@ pub unsafe extern "C" fn jpeg_start_decompress(cinfo: *mut c_void) -> CBoolean {
             // whole body to EOI now, resuming the live source manager. If it
             // suspends, report suspension (return FALSE) so the caller refills
             // and retries — matching upstream's multi-scan PRELOAD behaviour.
+            //
+            // Publish `DSTATE_PRELOAD` *before* that drain, because the drain
+            // is where suspension happens and the state a suspended caller is
+            // left in decides what it may call next. Upstream leaves READY at
+            // `jdapistd.c:65`, before the absorb loop that can return FALSE,
+            // and `jpeg_consume_input` keeps draining from PRELOAD
+            // (`jdapimin.c:346-353`) while it refuses to advance from READY.
+            // Leaving READY here would strand a caller that resumes by
+            // polling `jpeg_consume_input`: it would take that function's
+            // READY guard, report `REACHED_SOS` without consuming, and never
+            // make progress no matter how many bytes arrive.
+            c.global_state = DSTATE_PRELOAD;
             if !finish_body_drain(c, priv_state) {
                 return 0;
             }
@@ -4115,10 +4171,28 @@ pub unsafe extern "C" fn jpeg_read_coefficients(cinfo: *mut c_void) -> *mut c_vo
             return priv_state.coef_array_ptr;
         }
 
+        // Upstream's `jdtrans.c:54-58`: entering from READY moves to
+        // `DSTATE_RDCOEFS` *before* the absorb loop, so a suspension leaves a
+        // state the caller can resume from. Skipping this would strand a
+        // transcoder that reached SOS through `jpeg_consume_input`: the
+        // coefficient read would complete with the state still READY,
+        // `jpeg_input_complete` would report FALSE, and `jpeg_consume_input`
+        // would take its READY guard and repeat `REACHED_SOS` forever.
+        //
+        // Conditioned on READY, as upstream is. Callers that arrive from
+        // `INHEADER` (a direct `jpeg_read_header`, this shim's remaining
+        // P4-104 divergence) or `SCANNING` keep the state they had; upstream
+        // would `ERREXIT` on those, and tightening that is transition work
+        // this item still owes rather than something to smuggle in here.
+        if c.global_state == DSTATE_READY {
+            c.global_state = DSTATE_RDCOEFS;
+        }
+
         // P4-13: if the header was parsed from a through-SOS prefix of a
         // suspending source, finish draining the body to EOI before parsing
         // coefficients (upstream `jpeg_read_coefficients` consumes to EOI). On
-        // suspension, return null so the caller refills and retries.
+        // suspension, return null so the caller refills and retries — from
+        // `RDCOEFS`, exactly as upstream's `return NULL` does.
         if priv_state.body_incomplete && !finish_body_drain(c, priv_state) {
             return std::ptr::null_mut();
         }
@@ -4308,6 +4382,14 @@ pub unsafe extern "C" fn jpeg_read_coefficients(cinfo: *mut c_void) -> *mut c_vo
         // JpegCoefficients.
         coef_register_array(array_raw as *const c_void, handle_ptr);
         priv_state.coef_array_ptr = array_raw;
+
+        // The whole datastream is now in the coefficient buffer, which is what
+        // upstream's absorb loop ends with: `jdtrans.c` sets `DSTATE_STOPPING`
+        // "so that jpeg_finish_decompress does the right thing". Only for a
+        // read that entered from READY — see the RDCOEFS note above.
+        if c.global_state == DSTATE_RDCOEFS {
+            c.global_state = DSTATE_STOPPING;
+        }
 
         array_raw
     })
@@ -5443,6 +5525,24 @@ const P4_13_MAX_BODY_BYTES: usize = 256 * 1024 * 1024;
 const JPEG_REACHED_SOS: c_int = 1;
 const JPEG_REACHED_EOI: c_int = 2;
 
+/// This shim reports `jpeg_input_complete` from `global_state`, so a drain that
+/// reaches EOI has to publish `DSTATE_SCANNING` for the polling idiom
+/// `while (!jpeg_input_complete()) jpeg_consume_input();` to terminate.
+///
+/// `DSTATE_PRELOAD` is the one state that must not be promoted. Upstream
+/// returns `JPEG_REACHED_EOI` from PRELOAD leaving the state alone
+/// (`jdapimin.c`): the caller still owes the `jpeg_start_decompress` retry
+/// that runs `output_pass_setup` and only then publishes `SCANNING` / `RAW_OK`.
+/// Promoting here would advertise scanline-ready before the pass that makes it
+/// true. `jpeg_input_complete` admits this one state past its sub-SCANNING gate
+/// instead and answers it from `body_incomplete`, as it does every other state
+/// — see the note there.
+fn promote_to_scanning_after_eoi(c: &mut JpegDecompressPublic) {
+    if c.global_state < DSTATE_SCANNING && c.global_state != DSTATE_PRELOAD {
+        c.global_state = DSTATE_SCANNING;
+    }
+}
+
 /// `jpeg_consume_input(cinfo) -> int` — see `jpeglib.h:1108`.
 ///
 /// Stock libjpeg drives the input state machine here: callers may loop
@@ -5452,17 +5552,24 @@ const JPEG_REACHED_EOI: c_int = 2;
 /// callers skip `jpeg_read_header` entirely and then read
 /// uninitialised public fields. We therefore drive the state machine:
 ///
+///   * `DSTATE_READY` → `JPEG_REACHED_SOS`, consuming nothing. Checked
+///     first, before any other work. Upstream cannot advance past the
+///     first SOS until `jpeg_start_decompress` is called, so every
+///     later poll repeats this answer.
 ///   * `DSTATE_START` → invoke `jpeg_read_header` (returns
-///     `JPEG_HEADER_OK` and leaves state at `DSTATE_INHEADER` on
-///     success, or stays at `DSTATE_INHEADER` + returns `JPEG_SUSPENDED`
-///     on a partial source). On success we advance state past
-///     `DSTATE_INHEADER` so the next call surfaces `JPEG_REACHED_EOI`
-///     instead of looping.
+///     `JPEG_HEADER_OK`, or stays at `DSTATE_INHEADER` + returns
+///     `JPEG_SUSPENDED` on a partial source). On success we land on
+///     `DSTATE_READY` and report `JPEG_REACHED_SOS`, as upstream does.
 ///   * `DSTATE_INHEADER` → retry `jpeg_read_header` to resume from a
-///     prior suspension; on success advance state.
-///   * Anything past `DSTATE_INHEADER` (post header-parse) → return
+///     prior suspension; on success, as above.
+///   * Anything past `DSTATE_READY` (post header-parse) → return
 ///     `JPEG_REACHED_EOI` because our shim buffers the entire stream
 ///     up front.
+///
+/// Known remaining divergence (P4-104): a *direct* `jpeg_read_header`
+/// call still leaves `DSTATE_INHEADER` rather than `DSTATE_READY`, so a
+/// poll that follows one reports `JPEG_REACHED_EOI` where upstream would
+/// report `SOS`. Only the consume-driven path above reaches READY.
 ///
 /// # Safety
 ///
@@ -5479,16 +5586,34 @@ pub unsafe extern "C" fn jpeg_consume_input(cinfo: *mut c_void) -> c_int {
             Some(c) => c,
             None => return JPEG_SUSPENDED,
         };
+
+        // Upstream's `DSTATE_READY` arm, and it must be the *first* thing
+        // here — ahead of the body-drain block as well as the header
+        // short-circuit below. `jdapimin.c` returns `JPEG_REACHED_SOS` from
+        // READY and consumes nothing: "Can't advance past first SOS until
+        // start_decompress is called."
+        //
+        // Ahead of the drain specifically because a suspending source can
+        // reach its first SOS with `body_incomplete` still set. Polling from
+        // READY would then call `fill_input_buffer`, drain the body and report
+        // EOI — consuming bytes upstream would not have touched, before the
+        // caller has decided whether to decode at all.
+        if c.global_state == DSTATE_READY {
+            return JPEG_REACHED_SOS;
+        }
+
         // Short-circuit if the header has already been parsed: rerunning
         // `jpeg_read_header` would clobber the caller's post-header
         // tweaks (out_color_space, comp_info, quantize_colors, …). For our
         // fully-buffered shim, EOI is the truthful answer the moment a
         // header is in hand.
         //
-        // We must also advance `global_state` to `DSTATE_SCANNING` here so
-        // that `jpeg_input_complete()` (which gates on
-        // `global_state >= DSTATE_SCANNING`) reports TRUE. Otherwise a
-        // caller polling `while (!jpeg_input_complete()) jpeg_consume_input()`
+        // We must also advance `global_state` to `DSTATE_SCANNING` here —
+        // through `promote_to_scanning_after_eoi`, which exempts
+        // `DSTATE_PRELOAD` — so that `jpeg_input_complete()` (which gates on
+        // `global_state >= DSTATE_SCANNING`, plus `DSTATE_PRELOAD`) reports
+        // TRUE. Otherwise a caller polling
+        // `while (!jpeg_input_complete()) jpeg_consume_input()`
         // — the buffered/progressive idiom — would loop forever even
         // though we keep returning `JPEG_REACHED_EOI`.
         let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
@@ -5523,9 +5648,7 @@ pub unsafe extern "C" fn jpeg_consume_input(cinfo: *mut c_void) -> c_int {
                             priv_state.body_scan_cursor = off;
                             priv_state.eoi_seen = true;
                             priv_state.body_incomplete = false;
-                            if c.global_state < DSTATE_SCANNING {
-                                c.global_state = DSTATE_SCANNING;
-                            }
+                            promote_to_scanning_after_eoi(c);
                             // Body complete: refresh marker_list so a caller that
                             // only drains via consume_input still sees inter-scan
                             // APP/COM markers (P4-13).
@@ -5552,10 +5675,21 @@ pub unsafe extern "C" fn jpeg_consume_input(cinfo: *mut c_void) -> c_int {
                                         // retry can't re-enter this loop and append
                                         // past the cap (bounds memory; terminal).
                                         priv_state.body_incomplete = false;
-                                        priv_state.last_error = CString::new(
-                                            "jpeg_consume_input: suspended body exceeds 256 MiB cap",
-                                        )
-                                        .unwrap_or_default();
+                                        // Terminal, so raise rather than report
+                                        // suspension — see the matching branch in
+                                        // `finish_body_drain`. `JPEG_SUSPENDED` is
+                                        // still the return value for a caller whose
+                                        // `error_exit` returns instead of unwinding.
+                                        let cinfo_ptr: *mut c_void =
+                                            (c as *mut JpegDecompressPublic).cast::<c_void>();
+                                        raise_classic_error(
+                                            cinfo_ptr,
+                                            &mut priv_state.last_error,
+                                            "jpeg_consume_input: suspended body exceeds the \
+                                             256 MiB buffering cap",
+                                            JERR_OUT_OF_MEMORY,
+                                            Some(OOM_CASE_SUSPENDED_BODY_CAP),
+                                        );
                                         return JPEG_SUSPENDED;
                                     }
                                     continue;
@@ -5569,9 +5703,7 @@ pub unsafe extern "C" fn jpeg_consume_input(cinfo: *mut c_void) -> c_int {
                                     // applies to a callback-less source.
                                     priv_state.eoi_seen = true;
                                     priv_state.body_incomplete = false;
-                                    if c.global_state < DSTATE_SCANNING {
-                                        c.global_state = DSTATE_SCANNING;
-                                    }
+                                    promote_to_scanning_after_eoi(c);
                                     rebuild_marker_list_from_source(c, priv_state);
                                     return JPEG_REACHED_EOI;
                                 }
@@ -5587,12 +5719,16 @@ pub unsafe extern "C" fn jpeg_consume_input(cinfo: *mut c_void) -> c_int {
             None => false,
         };
         if header_done {
-            if c.global_state < DSTATE_SCANNING {
-                c.global_state = DSTATE_SCANNING;
-            }
+            promote_to_scanning_after_eoi(c);
             return JPEG_REACHED_EOI;
         }
         match c.global_state {
+            // Upstream (`jdapimin.c`): "Can't advance past first SOS until
+            // start_decompress is called." The poll is idempotent here — this
+            // is the repeated-call guard P4-104 asks for, and it is what keeps
+            // a `while (!jpeg_input_complete()) jpeg_consume_input();` loop
+            // from mistaking a parsed header for a consumed datastream.
+            DSTATE_READY => JPEG_REACHED_SOS,
             DSTATE_START | DSTATE_INHEADER => {
                 // `require_image=FALSE`: stock libjpeg's `jpeg_consume_input`
                 // accepts a tables-only abbreviated datastream as a valid
@@ -5611,16 +5747,19 @@ pub unsafe extern "C" fn jpeg_consume_input(cinfo: *mut c_void) -> c_int {
                 };
                 match result {
                     JPEG_HEADER_OK => {
-                        // Our `jpeg_read_header` leaves state at
-                        // `DSTATE_INHEADER` on success where upstream uses
-                        // `DSTATE_READY`, which we do not model separately
-                        // yet — the remaining half of P4-104. Advancing here
-                        // stops subsequent `consume_input` polls looping
-                        // forever on `JPEG_REACHED_SOS`.
+                        // Upstream lands on `DSTATE_READY` here
+                        // (`jdapimin.c`: "Set global state: ready for
+                        // start_decompress"), and the `DSTATE_READY` arm below
+                        // then returns `JPEG_REACHED_SOS` for every later poll
+                        // without advancing — "can't advance past first SOS
+                        // until start_decompress is called".
                         //
-                        // This jump is what `DSTATE_READY` replaces when the
-                        // consume_input restructure lands (P4-104).
-                        c2.global_state = DSTATE_SCANNING;
+                        // This used to jump to `DSTATE_SCANNING`, which made
+                        // the *second* poll report `JPEG_REACHED_EOI` where
+                        // upstream reports `SOS` indefinitely. Measured, both
+                        // baseline and progressive: see P4-104's divergence
+                        // map.
+                        c2.global_state = DSTATE_READY;
                         JPEG_REACHED_SOS
                     }
                     JPEG_HEADER_TABLES_ONLY => {
@@ -5720,7 +5859,22 @@ pub unsafe extern "C" fn jpeg_input_complete(cinfo: *mut c_void) -> CBoolean {
             invoke_error_exit_parm(cinfo, JERR_BAD_STATE, c.global_state);
             return 0;
         }
-        if c.global_state < DSTATE_SCANNING {
+        // `DSTATE_PRELOAD` is the one sub-SCANNING state that can already have
+        // consumed the whole datastream: it means a suspended
+        // `jpeg_start_decompress` whose body the caller then drained by polling
+        // `jpeg_consume_input`. Upstream's `eoi_reached` is TRUE there while
+        // the state legitimately stays below SCANNING until the
+        // `jpeg_start_decompress` retry, so PRELOAD falls through to the same
+        // `body_incomplete` question every other state answers rather than
+        // getting a rule of its own.
+        //
+        // That uniformity is the point. An earlier version asked PRELOAD for
+        // `eoi_seen` instead, which made the one drain exit that clears
+        // `body_incomplete` *without* reaching EOI — the `P4_13_MAX_BODY_BYTES`
+        // cap — report incomplete forever while `jpeg_consume_input` reported
+        // `REACHED_EOI`, hanging the documented polling loop. Every drain exit
+        // clears `body_incomplete`, so keying on it terminates on all of them.
+        if c.global_state < DSTATE_SCANNING && c.global_state != DSTATE_PRELOAD {
             return 0;
         }
         let priv_ptr: *mut c_void = decompress_private_raw(cinfo);

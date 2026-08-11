@@ -295,7 +295,7 @@ Verified with `cargo test --release --test hard_case_x_byte_and_restart` → 6 p
 **Fix (Option b — incremental input drain, decode stays buffered).** Implemented in `crates/libjpeg-turbo-rs-capi/src/jpeglib.rs`. Two pure marker-scan helpers (`find_first_sos`, `scan_next_boundary`, unit-tested in `marker_scan_tests`) let the shim walk the entropy body. The drain is split, gated on a single runtime signal — *did `fill_input_buffer` return `FALSE` before EOI?*:
 
 - **`jpeg_read_header`**: when `drain_caller_source_mgr` suspends (`None`) but the bytes drained so far already contain a complete header (through the first SOS, per `find_first_sos`), promote to `JPEG_HEADER_OK` with `body_incomplete = true` instead of `JPEG_SUSPENDED`. The header is parsed from the through-SOS prefix plus a *synthetic* `FF D9` (so `read_markers` terminates cleanly for progressive streams without choking on truncation); the real decode later runs on the complete buffer. **A non-suspending source (libtiff, Pillow `mem_src`, djpeg) never returns `None`, so it keeps the original fully-buffered path untouched.**
-- **`jpeg_consume_input`**: while `body_incomplete`, pull from the live source manager one chunk at a time (`pull_more_from_source_mgr`) and report the next boundary — `JPEG_REACHED_SOS` at each scan, `JPEG_REACHED_EOI` at EOI (clearing `body_incomplete`), or `JPEG_SUSPENDED` when the source is dry.
+- **`jpeg_consume_input`**: while `body_incomplete`, pull from the live source manager one chunk at a time (`pull_more_from_source_mgr`) and report the next boundary — `JPEG_REACHED_SOS` at each scan, `JPEG_REACHED_EOI` at EOI (clearing `body_incomplete`), or `JPEG_SUSPENDED` when the source is dry. **Since 2026-08-11 this drain runs only from a state upstream also drains from**: P4-104's `DSTATE_READY` guard returns `REACHED_SOS` ahead of it, because upstream consumes nothing until `jpeg_start_decompress` is called. P4-13's own harness enters from `INHEADER` and is unaffected; a caller that reaches SOS and then wants the body drained calls `jpeg_start_decompress`, which publishes `DSTATE_PRELOAD` and drains from there.
 - **`jpeg_start_decompress`**: in buffered-image mode, publish output dimensions from the header and defer the pixel decode; in non-buffered mode, finish draining the body to EOI now (suspending if dry).
 - **`jpeg_read_scanlines`**: materialise the deferred decode (`ensure_decoded_deferred`) once the body is complete.
 - **`jpeg_input_complete`**: returns `FALSE` while `body_incomplete`, so the `while (!jpeg_input_complete()) jpeg_consume_input()` idiom drives the body to EOI.
@@ -2339,8 +2339,10 @@ shim's `DSTATE_STOPPING`, the opposite of upstream's abort-reset completion.
 That false oracle was removed in the filing PR.
 
 **Root cause (partially corrected 2026-08-11; see the Progress note below).**
-Successful header parse remains `DSTATE_INHEADER` instead of READY and has no
-repeated-call guard. Finish clears caches/source and returns TRUE rather than
+A *direct* `jpeg_read_header` still leaves `DSTATE_INHEADER` instead of READY.
+The consume-driven path now reaches READY and has upstream's repeated-call
+guard, so the two entry points disagree; closing that is the call-direction
+inversion. Finish clears caches/source and returns TRUE rather than
 rejecting unread rows or a bad state, draining EOI with suspension, and calling
 `term_source`.
 
@@ -2430,11 +2432,184 @@ that an unready implementation gets `#[ignore]` with a reason rather than a
 loosened assertion. They are the first product-path ignored tests in the suite;
 the live-gate line in `LAST_MILE.md` records them.
 
-**Next in this item:** restructure `jpeg_consume_input` to upstream's shape
-(`jdapimin.c`) — `jpeg_read_header` calling `jpeg_consume_input` rather than the
-reverse — then `DSTATE_READY`, the repeated-call guard, and
-`jpeg_start_decompress` accepting READY. The three ignored tests are the
-acceptance criteria for that work.
+**Next in this item:** `DSTATE_READY` and the repeated-call guard landed
+2026-08-11 for the consume-driven path (step 2 below). What remains is the
+call-direction inversion — restructuring to upstream's shape (`jdapimin.c`),
+where `jpeg_read_header` calls `jpeg_consume_input` rather than the reverse, so
+a *direct* header read also lands on READY — and then `jpeg_start_decompress`
+accepting READY. The three ignored tests are the acceptance criteria for that
+work.
+
+### Measured divergence map (2026-08-11)
+
+Written before implementing, because the four failed attempts above all came
+from *not* having it: each patched a symptom without a model of what upstream
+actually does. Our side is measured by driving `jpeg_consume_input` on a
+16x16 fixture; upstream's is read from `jdapimin.c`. That probe left no
+artifact, and reading upstream is exactly the step that can go wrong — both
+are now re-derived on every run instead: `capi_consume_input_states.rs`
+(32x32, baseline and progressive) and `capi_preload_resume.rs` (96x96
+progressive) compare our trace against a C oracle rather than against this
+table. Use those; the table stays as the record of what the divergence was.
+
+| Step | Upstream | Ours (measured) |
+| --- | --- | --- |
+| after `jpeg_mem_src` | `DSTATE_START` | `DSTATE_START` (200) ✓ |
+| 1st `consume_input` | reset input ctl, init source, → `INHEADER`, consume → SOS → `default_decompress_parms` → **`READY` (202)**, returns `REACHED_SOS` | → **`SCANNING` (205)**, returns `REACHED_SOS` |
+| 2nd `consume_input` | at READY: returns `REACHED_SOS`, **state unchanged** — "can't advance past first SOS until start_decompress" | returns **`REACHED_EOI`**, state 205 |
+| 3rd `consume_input` | still `REACHED_SOS` at `READY`, indefinitely | `REACHED_EOI`, state 205 |
+
+Identical for baseline and progressive, which is itself a divergence: upstream
+does not distinguish them here either, but *we* reach EOI on call 2 in both
+cases because the whole datastream is already buffered.
+
+So the shape of the fix is not "add a READY state". It is:
+
+1. `jpeg_read_header` becomes the thin wrapper (state guard → `consume_input`
+   → map `REACHED_SOS`→`HEADER_OK`, `REACHED_EOI`→abort + `TABLES_ONLY`,
+   `SUSPENDED` passthrough), and `consume_input` owns the state machine —
+   the inverse of today's call direction.
+2. `consume_input` gains upstream's `DSTATE_READY` arm, which returns
+   `REACHED_SOS` **without advancing**. That is the repeated-call guard, and
+   it is what stops call 2 reporting EOI.
+3. Only then can `jpeg_input_complete` return `eoi_seen`, because only then
+   does `eoi_seen` become reachable at the same moments upstream reaches it.
+4. `jpeg_start_decompress` accepts `READY` and routes
+   `buffered_image ? BUFIMAGE : PRELOAD`, which is also what P4-104's
+   remaining `DSTATE_BUFIMAGE` note needs.
+
+Steps 1-2 are one change; 3 and 4 follow from it. The three ignored tests in
+`capi_input_complete_contract.rs` go green at step 3.
+
+**Step 2 landed 2026-08-11 — partially.** `jpeg_consume_input` now has
+upstream's `DSTATE_READY` arm, and the header-parse arm lands on READY instead
+of jumping to SCANNING. Re-measuring the table above on the same fixture:
+
+| Step | Upstream | Ours, before | Ours, now |
+| --- | --- | --- | --- |
+| 1st `consume_input` | → `READY`, `REACHED_SOS` | → `SCANNING`, SOS | → **`READY`, SOS** ✓ |
+| 2nd | `READY`, `REACHED_SOS` | `SCANNING`, **EOI** | **`READY`, SOS** ✓ |
+| 3rd | `READY`, `REACHED_SOS` | `SCANNING`, EOI | **`READY`, SOS** ✓ |
+
+The READY check had to be hoisted *above* the "header already parsed → body is
+buffered → EOI" short-circuit. Adding the match arm alone was not enough — the
+short-circuit ran first, so the second poll still reported EOI. That is only
+visible by measuring; the arm looked correct in isolation.
+
+**Step 4 landed in part, as a consequence.** The READY guard is only safe if
+nothing that can suspend runs while the state is still READY, so
+`jpeg_start_decompress` now publishes `DSTATE_PRELOAD` before the non-buffered
+body drain — `jdapistd.c:65`, which leaves READY before the absorb loop that
+may return FALSE. Without it the guard *introduced* a deadlock: a custom source
+reaches SOS, startup suspends mid-body, the application feeds more bytes and
+resumes by polling `jpeg_consume_input`, which answers `REACHED_SOS` forever
+without reading a byte. Verified red both ways in
+`capi_preload_resume.rs` — the state assertion fails 202≠203, and with that
+assertion removed all 512 polls still return SOS and never EOI. What step 4
+still owes is READY→`DSTATE_BUFIMAGE` for `buffered_image` (that branch keeps
+publishing `SCANNING`, the pre-existing divergence noted at the top of this
+item).
+
+The same reasoning applies to every entry point that absorbs the datastream,
+and review found a second one: `jpeg_read_coefficients`. A `jpegtran`-shaped
+caller that reaches SOS by polling `jpeg_consume_input` and then transcodes
+finished the coefficient read still at READY, so `jpeg_input_complete` reported
+FALSE and further polls repeated `REACHED_SOS` with nothing left to consume. It
+now walks upstream's READY → `DSTATE_RDCOEFS` → `DSTATE_STOPPING`
+(`jdtrans.c:54-82`) — RDCOEFS published before the drain that can suspend,
+STOPPING once the whole stream is in the coefficient buffer, which is the state
+`jpeg_finish_decompress` expects. Both transitions are conditioned on arriving
+from READY, so callers that enter from `INHEADER` or `SCANNING` are unchanged;
+upstream would `ERREXIT` on those, and that strictness is transition work this
+item still owes rather than something to fold in here.
+
+A third instance came out of the same review: with PRELOAD now reachable, the
+drain's EOI exits promoted it to `SCANNING` along with every other sub-SCANNING
+state, so a resume-by-polling caller was told it was scanline-ready before the
+`jpeg_start_decompress` retry that runs the startup pass. Upstream returns EOI
+from PRELOAD leaving the state alone. The promotion (now
+`promote_to_scanning_after_eoi`) exempts PRELOAD, and `jpeg_input_complete`
+admits that one state past its sub-SCANNING gate, answering it from
+`body_incomplete` as it does every other state. Keying PRELOAD on `eoi_seen`
+instead — the first attempt — left the one drain exit that clears
+`body_incomplete` *without* reaching EOI, the `P4_13_MAX_BODY_BYTES` cap,
+reporting incomplete forever while `jpeg_consume_input` reported
+`REACHED_EOI`. The general move to `eoi_seen` still waits on the
+`consume_input` restructuring.
+
+**The model is now checked against C, not against a reading of C.**
+`examples/consume_input_states_oracle.c` links stock libjpeg and prints the
+real `(return code, global_state)` trace for the same four sequences —
+baseline polling, progressive polling, suspend/resume through a chunked source,
+and the coefficient read. `capi_consume_input_states.rs` and
+`capi_preload_resume.rs` compare their own traces against it line for line.
+This matters because every other assertion in those files was transcribed from
+`jdapimin.c` / `jdapistd.c` / `jdtrans.c` by hand, and a misreading would have
+been copied into the implementation and the expectation together, passing. The
+oracle refuses to build (rather than skip) when `LIBJPEG_TURBO_PREFIX` says an
+install is provisioned. It also refuses to link *this crate's own* `libjpeg`
+and compare the shim with itself — but not by any file-layout test, because
+`scripts/install_capi.sh` ships the same header set (`jconfig.h` included)
+under the same library name as the real thing, so nothing about the file
+system tells them apart. The guard is provenance: `is_our_own_shim` reads the
+candidate library and rejects it if the bytes contain our crate name, which a
+C build cannot. Verified by pointing the mandatory prefix at a directory
+assembled to look exactly like a stock install with our own dylib as
+`libjpeg.dylib` — it fails loudly instead of comparing the shim with itself.
+The `jconfig.h` requirement is only an ABI-header check.
+
+The link is static (`libjpeg.a` by absolute path) wherever the install ships an
+archive, which closes a second way to end up self-comparing: a shared link
+leaves the final choice to the runtime loader, and `DYLD_LIBRARY_PATH` /
+`LD_LIBRARY_PATH` outrank the `-rpath` the helper sets, so an environment
+pointing at an installed shim would load it in place of the library whose bytes
+were checked. Verified with `otool -L`: the built oracle depends on
+`libSystem` alone and names no libjpeg image. In CI the prefix is
+the *pinned submodule* built at the v8 ABI, so the C being compared against is
+the same source tree these tests' citations quote. Measured C output for the suspend/resume sequence, now pinned:
+`create 200 → sos SOS/202 → startup FALSE/203 → drained EOI/203 →
+input_complete TRUE/203 → retry TRUE/205`.
+
+**A fourth instance, one layer down.** Reviewing the PRELOAD answer surfaced
+that P4-13's 256 MiB buffering cap reports a *resource limit* as ordinary
+suspension — `None` from the header drain, `FALSE` from `finish_body_drain`,
+`JPEG_SUSPENDED` from the polling drain. All three tell a classic caller
+"refill and retry", and no refill can ever satisfy a stream that has already
+exceeded the cap; the header-drain site additionally re-accumulated a fresh
+256 MiB on every retry. Whether `jpeg_input_complete` should then answer TRUE
+(a truncated stream reported as consumed) or FALSE (a polling loop that never
+terminates) has no good answer, because the question was wrong: the event is an
+error. All three sites now raise `JERR_OUT_OF_MEMORY` with case 100 —
+deliberately outside upstream's `jmemmgr.c` range of 1..=10, since the cap is
+this shim's own bound and not one of libjpeg's allocation sites.
+`capi_suspended_body_cap.rs` covers all three, each verified red on its own:
+disabling one raise fails exactly one test or phase and leaves the others
+green.
+
+Raising an error is not free of its own hazard: a conforming caller's
+`error_exit` ends in `longjmp`, which runs no Rust destructor on the frame it
+jumps out of. The header-drain site held the whole 256 MiB accumulator in a
+local `Vec` that had already been moved out of `bridge_partial`, so raising
+there would have stranded a quarter gigabyte per rejected stream, unreachable
+even by `jpeg_destroy_decompress`. It is dropped before the raise. **Any raise
+site with a live local allocation has this problem** — the other two sites are
+safe only because their bytes live in `priv_state.source`, which `destroy`
+owns.
+
+**The generalisation worth keeping:** a state that refuses to consume is only
+safe if *every* path that can consume leaves it first. The READY guard is
+upstream-faithful in isolation and still introduced two deadlocks, one per
+entry point that had no transition, and then mis-reported readiness on a third
+path once the new state existed. All three are pinned in
+`capi_preload_resume.rs` and each was verified red without its fix.
+
+**What is still partial:** a *direct* `jpeg_read_header` call still leaves
+`DSTATE_INHEADER`. READY is reached only through `consume_input`, so the two
+entry points disagree about the post-header state where upstream has one
+answer. Making `read_header` land on READY is the remaining half of step 1 —
+the call-direction inversion — and it has a wider blast radius, since several
+sites still test for `INHEADER`. The three ignored tests stay ignored until
+then.
 
 **Acceptance criteria.** Match every upstream state constant and transition
 after create/header/start, buffered/raw/coefficient operation, finish, and
@@ -2450,9 +2625,11 @@ values are now mirrored with upstream's numbering, which corrects
 `DSTATE_STOPPING` from **206** — upstream's `DSTATE_RAW_OK` — to **210**. A
 consumer inspecting `global_state` during `jpeg_finish_decompress` had been
 reading "start_decompress done, read_raw_data OK" from a decompressor that was
-looking for EOI. The six states the shim does not yet transition through
-(`PRELOAD`, `PRESCAN`, `RAW_OK`, `BUFIMAGE`, `BUFPOST`, `RDCOEFS`) are declared
-anyway, because their numbering is what makes the rest correct. The old value
+looking for EOI. The six states the shim did not transition through when this
+note was written (`PRELOAD`, `PRESCAN`, `RAW_OK`, `BUFIMAGE`, `BUFPOST`,
+`RDCOEFS`) are declared anyway, because their numbering is what makes the rest
+correct. `RAW_OK` is published below; `PRELOAD` and `RDCOEFS` followed on
+2026-08-11, leaving `PRESCAN`, `BUFIMAGE` and `BUFPOST`. The old value
 was only ever assigned, never compared, so no shim logic depended on it.
 
 `jpeg_start_decompress` now also publishes `DSTATE_RAW_OK` when `raw_data_out`
@@ -2482,8 +2659,9 @@ comparing against the constants themselves removes the transcription step that
 produced the 206.
 
 Still open: the transition work — `DSTATE_BUFIMAGE` in buffered-image mode,
-`DSTATE_READY` after a successful header parse (the shim stays at `INHEADER`),
-the repeated-call guard, and finish's
+`DSTATE_READY` after a *direct* `jpeg_read_header` (the shim stays at
+`INHEADER`; the consume-driven path and the repeated-call guard landed
+2026-08-11), and finish's
 unread-row rejection, EOI draining with suspension, exactly-once `term_source`
 and abort-reset for reuse, together with the stock-C setjmp harness the criteria
 above require.
