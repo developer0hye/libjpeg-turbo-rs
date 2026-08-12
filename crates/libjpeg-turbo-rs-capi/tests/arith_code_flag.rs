@@ -12,7 +12,7 @@
 //! The shim previously hardcoded `arith_code = 0` regardless of the actual
 //! SOF marker; these tests pin the correct behaviour.
 
-use libjpeg_turbo_rs_capi::jpeglib::JpegDecompressPublic;
+use libjpeg_turbo_rs_capi::jpeglib::{JpegDecompressPublic, JpegErrorMgr};
 use std::ffi::{c_int, c_void};
 use std::mem::MaybeUninit;
 use std::os::raw::c_ulong;
@@ -63,8 +63,7 @@ fn read_arith_code_flag(lib: &libloading::Library, jpeg_bytes: &[u8]) -> c_int {
         let mut cinfo: MaybeUninit<JpegDecompressPublic> = MaybeUninit::zeroed();
         let cinfo_ptr: *mut c_void = cinfo.as_mut_ptr() as *mut c_void;
 
-        const ERR_BYTES: usize = 512;
-        let mut err: MaybeUninit<[u8; ERR_BYTES]> = MaybeUninit::zeroed();
+        let mut err: MaybeUninit<JpegErrorMgr> = MaybeUninit::zeroed();
         let err_ptr: *mut c_void = err.as_mut_ptr() as *mut c_void;
 
         // Set up the error manager (`err` is the first field of cinfo).

@@ -19,8 +19,8 @@
 //! `libjpeg_turbo_rs::raw_data_12::{compress,decompress}_raw_12`
 //! turns the round-trip GREEN.
 
-use libjpeg_turbo_rs_capi::jpeglib::JpegCompressPublic;
 use libjpeg_turbo_rs_capi::jpeglib::JpegDecompressPublic;
+use libjpeg_turbo_rs_capi::jpeglib::{JpegCompressPublic, JpegErrorMgr};
 use std::ffi::{c_int, c_void};
 use std::mem::MaybeUninit;
 use std::os::raw::c_ulong;
@@ -160,8 +160,7 @@ unsafe fn encode_12bit_4_2_0_via_capi(
     let mut cinfo_buf: MaybeUninit<JpegDecompressPublic> = MaybeUninit::zeroed();
     let cinfo_ptr: *mut c_void = cinfo_buf.as_mut_ptr() as *mut c_void;
 
-    const ERR_BYTES: usize = 512;
-    let mut err_buf: MaybeUninit<[u8; ERR_BYTES]> = MaybeUninit::zeroed();
+    let mut err_buf: MaybeUninit<JpegErrorMgr> = MaybeUninit::zeroed();
     let err_ptr: *mut c_void = err_buf.as_mut_ptr() as *mut c_void;
 
     let err_ret: *mut c_void = jpeg_std_error(err_ptr);
@@ -301,8 +300,7 @@ unsafe fn decode_12bit_via_capi(
     let mut cinfo_buf: MaybeUninit<JpegDecompressPublic> = MaybeUninit::zeroed();
     let cinfo_ptr: *mut c_void = cinfo_buf.as_mut_ptr() as *mut c_void;
 
-    const ERR_BYTES: usize = 512;
-    let mut err_buf: MaybeUninit<[u8; ERR_BYTES]> = MaybeUninit::zeroed();
+    let mut err_buf: MaybeUninit<JpegErrorMgr> = MaybeUninit::zeroed();
     let err_ptr: *mut c_void = err_buf.as_mut_ptr() as *mut c_void;
 
     let err_ret: *mut c_void = jpeg_std_error(err_ptr);
@@ -651,8 +649,7 @@ fn jpeg12_read_raw_data_reuse_clears_cache() {
         let mut cinfo_buf: MaybeUninit<JpegDecompressPublic> = MaybeUninit::zeroed();
         let cinfo_ptr: *mut c_void = cinfo_buf.as_mut_ptr() as *mut c_void;
 
-        const ERR_BYTES: usize = 512;
-        let mut err_buf: MaybeUninit<[u8; ERR_BYTES]> = MaybeUninit::zeroed();
+        let mut err_buf: MaybeUninit<JpegErrorMgr> = MaybeUninit::zeroed();
         let err_ptr: *mut c_void = err_buf.as_mut_ptr() as *mut c_void;
         jpeg_std_error(err_ptr);
         (cinfo_ptr as *mut *mut c_void).write(err_ptr);

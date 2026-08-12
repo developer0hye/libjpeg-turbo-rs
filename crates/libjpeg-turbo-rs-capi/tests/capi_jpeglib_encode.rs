@@ -8,7 +8,7 @@
 #[path = "../../../tests/helpers/mod.rs"]
 mod helpers;
 
-use libjpeg_turbo_rs_capi::jpeglib::JpegCompressPublic;
+use libjpeg_turbo_rs_capi::jpeglib::{JpegCompressPublic, JpegErrorMgr};
 use std::ffi::{c_int, c_uint, c_void};
 use std::mem::MaybeUninit;
 use std::os::raw::c_ulong;
@@ -90,10 +90,9 @@ fn classic_scanline_encode(
     case: ClassicEncodeCase,
 ) -> Vec<u8> {
     unsafe {
-        const ERR_BYTES: usize = 512;
         let mut cinfo: MaybeUninit<JpegCompressPublic> = MaybeUninit::zeroed();
         let cinfo_ptr: *mut c_void = cinfo.as_mut_ptr() as *mut c_void;
-        let mut err: MaybeUninit<[u8; ERR_BYTES]> = MaybeUninit::zeroed();
+        let mut err: MaybeUninit<JpegErrorMgr> = MaybeUninit::zeroed();
         let err_ptr: *mut c_void = err.as_mut_ptr() as *mut c_void;
 
         let jpeg_std_error: libloading::Symbol<unsafe extern "C" fn(*mut c_void) -> *mut c_void> =
@@ -233,8 +232,7 @@ fn c2_1_compress_create_setup_destroy() {
         let mut cinfo: MaybeUninit<JpegCompressPublic> = MaybeUninit::zeroed();
         let cinfo_ptr: *mut c_void = cinfo.as_mut_ptr() as *mut c_void;
 
-        const ERR_BYTES: usize = 512;
-        let mut err: MaybeUninit<[u8; ERR_BYTES]> = MaybeUninit::zeroed();
+        let mut err: MaybeUninit<JpegErrorMgr> = MaybeUninit::zeroed();
         let err_ptr: *mut c_void = err.as_mut_ptr() as *mut c_void;
 
         let jpeg_std_error: libloading::Symbol<unsafe extern "C" fn(*mut c_void) -> *mut c_void> =
@@ -296,8 +294,7 @@ fn c2_1_calc_jpeg_dimensions_sets_public_compress_fields() {
         let mut cinfo: MaybeUninit<JpegCompressPublic> = MaybeUninit::zeroed();
         let cinfo_ptr: *mut c_void = cinfo.as_mut_ptr() as *mut c_void;
 
-        const ERR_BYTES: usize = 512;
-        let mut err: MaybeUninit<[u8; ERR_BYTES]> = MaybeUninit::zeroed();
+        let mut err: MaybeUninit<JpegErrorMgr> = MaybeUninit::zeroed();
         let err_ptr: *mut c_void = err.as_mut_ptr() as *mut c_void;
 
         let jpeg_std_error: libloading::Symbol<unsafe extern "C" fn(*mut c_void) -> *mut c_void> =
@@ -359,8 +356,7 @@ fn c2_1_mem_dest_installs_cleanly() {
         let mut cinfo: MaybeUninit<JpegCompressPublic> = MaybeUninit::zeroed();
         let cinfo_ptr: *mut c_void = cinfo.as_mut_ptr() as *mut c_void;
 
-        const ERR_BYTES: usize = 512;
-        let mut err: MaybeUninit<[u8; ERR_BYTES]> = MaybeUninit::zeroed();
+        let mut err: MaybeUninit<JpegErrorMgr> = MaybeUninit::zeroed();
         let err_ptr: *mut c_void = err.as_mut_ptr() as *mut c_void;
 
         let jpeg_std_error: libloading::Symbol<unsafe extern "C" fn(*mut c_void) -> *mut c_void> =
@@ -416,8 +412,7 @@ fn c2_2_write_scanlines_roundtrip_pixel_matches_rust_native() {
         let mut cinfo: MaybeUninit<JpegCompressPublic> = MaybeUninit::zeroed();
         let cinfo_ptr: *mut c_void = cinfo.as_mut_ptr() as *mut c_void;
 
-        const ERR_BYTES: usize = 512;
-        let mut err: MaybeUninit<[u8; ERR_BYTES]> = MaybeUninit::zeroed();
+        let mut err: MaybeUninit<JpegErrorMgr> = MaybeUninit::zeroed();
         let err_ptr: *mut c_void = err.as_mut_ptr() as *mut c_void;
 
         let jpeg_std_error: libloading::Symbol<unsafe extern "C" fn(*mut c_void) -> *mut c_void> =
@@ -581,8 +576,7 @@ fn c2_3_simple_progression_emits_progressive_stream() {
     unsafe {
         let mut cinfo: MaybeUninit<JpegCompressPublic> = MaybeUninit::zeroed();
         let cinfo_ptr: *mut c_void = cinfo.as_mut_ptr() as *mut c_void;
-        const ERR_BYTES: usize = 512;
-        let mut err: MaybeUninit<[u8; ERR_BYTES]> = MaybeUninit::zeroed();
+        let mut err: MaybeUninit<JpegErrorMgr> = MaybeUninit::zeroed();
         let err_ptr: *mut c_void = err.as_mut_ptr() as *mut c_void;
 
         let jpeg_std_error: libloading::Symbol<unsafe extern "C" fn(*mut c_void) -> *mut c_void> =
@@ -956,8 +950,7 @@ fn c2_4_write_marker_inserts_custom_segment_after_soi() {
     unsafe {
         let mut cinfo: MaybeUninit<JpegCompressPublic> = MaybeUninit::zeroed();
         let cinfo_ptr: *mut c_void = cinfo.as_mut_ptr() as *mut c_void;
-        const ERR_BYTES: usize = 512;
-        let mut err: MaybeUninit<[u8; ERR_BYTES]> = MaybeUninit::zeroed();
+        let mut err: MaybeUninit<JpegErrorMgr> = MaybeUninit::zeroed();
         let err_ptr: *mut c_void = err.as_mut_ptr() as *mut c_void;
 
         let jpeg_std_error: libloading::Symbol<unsafe extern "C" fn(*mut c_void) -> *mut c_void> =
@@ -1073,8 +1066,7 @@ fn c2_4_write_icc_profile_roundtrips_bytes() {
     unsafe {
         let mut cinfo: MaybeUninit<JpegCompressPublic> = MaybeUninit::zeroed();
         let cinfo_ptr: *mut c_void = cinfo.as_mut_ptr() as *mut c_void;
-        const ERR_BYTES: usize = 512;
-        let mut err: MaybeUninit<[u8; ERR_BYTES]> = MaybeUninit::zeroed();
+        let mut err: MaybeUninit<JpegErrorMgr> = MaybeUninit::zeroed();
         let err_ptr: *mut c_void = err.as_mut_ptr() as *mut c_void;
 
         let jpeg_std_error: libloading::Symbol<unsafe extern "C" fn(*mut c_void) -> *mut c_void> =
@@ -1247,8 +1239,7 @@ fn c2_4_write_tables_emits_tables_only_datastream() {
     unsafe {
         let mut cinfo: MaybeUninit<JpegCompressPublic> = MaybeUninit::zeroed();
         let cinfo_ptr: *mut c_void = cinfo.as_mut_ptr() as *mut c_void;
-        const ERR_BYTES: usize = 512;
-        let mut err: MaybeUninit<[u8; ERR_BYTES]> = MaybeUninit::zeroed();
+        let mut err: MaybeUninit<JpegErrorMgr> = MaybeUninit::zeroed();
         let err_ptr: *mut c_void = err.as_mut_ptr() as *mut c_void;
 
         let jpeg_std_error: libloading::Symbol<unsafe extern "C" fn(*mut c_void) -> *mut c_void> =
@@ -1344,8 +1335,7 @@ fn sa2_6_stock_abi_cinfo_size_encode_pipeline_works() {
         // Zero just the cinfo region (mirrors the `memset` in jcapimin).
         std::ptr::write_bytes(cinfo_ptr as *mut u8, 0, CINFO_BYTES);
 
-        const ERR_BYTES: usize = 512;
-        let mut err: MaybeUninit<[u8; ERR_BYTES]> = MaybeUninit::zeroed();
+        let mut err: MaybeUninit<JpegErrorMgr> = MaybeUninit::zeroed();
         let err_ptr: *mut c_void = err.as_mut_ptr() as *mut c_void;
 
         let jpeg_std_error: libloading::Symbol<unsafe extern "C" fn(*mut c_void) -> *mut c_void> =

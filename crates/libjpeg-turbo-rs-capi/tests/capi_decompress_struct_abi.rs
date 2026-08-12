@@ -13,7 +13,7 @@
 
 #![cfg(all(target_pointer_width = "64", not(windows)))]
 
-use libjpeg_turbo_rs_capi::jpeglib::JpegDecompressPublic;
+use libjpeg_turbo_rs_capi::jpeglib::{JpegDecompressPublic, JpegErrorMgr};
 use std::ffi::{c_int, c_void};
 use std::mem::MaybeUninit;
 use std::os::raw::c_ulong;
@@ -131,8 +131,7 @@ fn data_precision_is_at_libjpeg_offset_296_after_read_header() {
         let mut cinfo: MaybeUninit<JpegDecompressPublic> = MaybeUninit::zeroed();
         let cinfo_ptr: *mut c_void = cinfo.as_mut_ptr() as *mut c_void;
 
-        const ERR_BYTES: usize = 512;
-        let mut err: MaybeUninit<[u8; ERR_BYTES]> = MaybeUninit::zeroed();
+        let mut err: MaybeUninit<JpegErrorMgr> = MaybeUninit::zeroed();
         let err_ptr: *mut c_void = err.as_mut_ptr() as *mut c_void;
 
         let jpeg_std_error: libloading::Symbol<unsafe extern "C" fn(*mut c_void) -> *mut c_void> =

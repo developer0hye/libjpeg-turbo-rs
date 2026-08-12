@@ -13,7 +13,7 @@
 //! Both tests hard-panic on any Rust library error (CLAUDE.md strict assertion
 //! rule). Skip only when the cdylib cannot be located.
 
-use libjpeg_turbo_rs_capi::jpeglib::JpegCompressPublic;
+use libjpeg_turbo_rs_capi::jpeglib::{JpegCompressPublic, JpegErrorMgr};
 use std::ffi::{c_int, c_void};
 use std::mem::MaybeUninit;
 use std::os::raw::c_ulong;
@@ -159,8 +159,7 @@ unsafe fn encode_raw_planes_via_capi(
     let mut cinfo_buf: MaybeUninit<JpegCompressPublic> = MaybeUninit::zeroed();
     let cinfo_ptr: *mut c_void = cinfo_buf.as_mut_ptr() as *mut c_void;
 
-    const ERR_BYTES: usize = 512;
-    let mut err_buf: MaybeUninit<[u8; ERR_BYTES]> = MaybeUninit::zeroed();
+    let mut err_buf: MaybeUninit<JpegErrorMgr> = MaybeUninit::zeroed();
     let err_ptr: *mut c_void = err_buf.as_mut_ptr() as *mut c_void;
 
     // Install error manager.
