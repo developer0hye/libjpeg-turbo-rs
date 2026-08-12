@@ -20,7 +20,10 @@
 //!
 //! - The JPEG header itself parses (fixture must be well-formed, not a
 //!   truncation).
-//! - Decode of a 256x256 bomb completes within 1 s wall-clock.
+//! - Decode of a 256x256 bomb terminates, with a correct-size image or a
+//!   structured error. (P4-152: the 1 s wall-clock bound this used to assert is
+//!   now a fallback for platforms with no RSS reporting — measured 0.020 ms, so
+//!   as a primary bound it was 50 000x above the workload.)
 //! - Peak RSS delta stays under 100 MiB (measured baseline ~1-2 MiB).
 //! - A decode **without** any limits still terminates — lenient mode may
 //!   either succeed or return an error, but never hang.
@@ -35,8 +38,29 @@ use libjpeg_turbo_rs::decode::pipeline::Decoder;
 const BOMB_WIDTH: usize = 256;
 const BOMB_HEIGHT: usize = 256;
 
-/// Wall-clock upper bound for the bomb decode. Measured locally <20 ms on
-/// darwin arm64 debug build. 1000 ms is ~50x, leaves headroom for CI.
+// P4-152: the wall-clock bound that used to sit here is deleted, not converted
+// to a ratio, and the measurement is why. On darwin arm64 release the bomb
+// decodes in **0.020 ms** (min-of-9, stable to the third decimal over four
+// rounds) — the bound was 1000 ms, fifty thousand times above it. Nothing short
+// of a hang crosses that, and a hang is what the CI job timeout is for.
+//
+// A ratio against a control was measured too, and rejected: an ordinary
+// 256x256 decode takes 0.071 ms, so the bomb runs at 0.29x an *ordinary* image.
+// That is not a slow path being kept honest, it is a fixture with almost no
+// entropy data — the bomb is a pathological Huffman *table*, not a large
+// payload. Comparing the two would pin the ratio of two unrelated workloads.
+//
+// What this fixture actually guards is memory, and that assertion stays:
+// `BOMB_PEAK_RSS_DELTA_LIMIT` catches the "decoder mistakenly allocates a
+// 2^16-entry lookup per symbol" regression, which is the failure a pathological
+// table produces. The test also still requires the decode to terminate with a
+// correct-size image or a structured error.
+//
+// The clock survives as a *fallback* on platforms where RSS cannot be read —
+// `worker_b8_measure` reports none outside Linux and macOS, and its contract
+// says callers "should skip RSS assertions but still run wall-clock bounds so
+// the test remains useful". Deleting it everywhere would have left Windows with
+// no resource bound at all.
 const BOMB_WALL_CLOCK_MS: u128 = 1_000;
 /// Peak RSS delta upper bound. Measured <2 MiB. 100 MiB catches the "decoder
 /// mistakenly allocates 2^16-entry lookup per symbol" regression.
@@ -209,13 +233,15 @@ fn huffman_bomb_256x256_decodes_within_bounds() {
         }
     }
 
-    assert!(
-        m.wall_clock.as_millis() < BOMB_WALL_CLOCK_MS,
-        "huffman bomb decode wall_clock={:?} exceeds {}ms bound — \
-         possible regression in slow-path Huffman decode",
-        m.wall_clock,
-        BOMB_WALL_CLOCK_MS
-    );
+    if !rss_supported() {
+        assert!(
+            m.wall_clock.as_millis() < BOMB_WALL_CLOCK_MS,
+            "huffman bomb decode wall_clock={:?} exceeds fallback bound {}ms \
+             (no RSS on this platform)",
+            m.wall_clock,
+            BOMB_WALL_CLOCK_MS
+        );
+    }
     if rss_supported() {
         assert!(
             m.peak_rss_delta_bytes < BOMB_PEAK_RSS_DELTA_LIMIT,

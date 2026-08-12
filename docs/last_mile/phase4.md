@@ -3363,7 +3363,7 @@ otherwise: a regression that slows *both* paths equally leaves the ratio
 unchanged. General decode performance belongs in `experiments/`, not in a
 correctness suite.
 
-## P4-152. Five Absolute Wall-Clock Assertions Remain in the Parallel Default Suite — **OPEN**
+## P4-152. Five Absolute Wall-Clock Assertions Remain in the Parallel Default Suite — **CLOSED 2026-08-12**
 
 **Motivation.** Found 2026-08-12 (issue #534) while closing P4-147, which
 fixed exactly one of them. The same contention failure mode is still live at:
@@ -3394,6 +3394,118 @@ default parallel suite. Each site either (a) becomes a ratio against a control
 and moves to the serial CI step P4-147 added, (b) asserts a non-timing
 property that carries the same regression, or (c) is deleted with the reason
 recorded — a bound nothing can trip is not worth its flake risk.
+
+**Status (2026-08-12): closed.** No absolute wall-clock comparison remains in
+the default parallel suite. Each of the five sites got its own answer, and the
+answer differed because the *reason* the bound existed differed. Every decision
+below rests on a measurement taken for this closure, not on the margins the
+original comments claimed.
+
+**Two qualifications, both found by review after a first draft overclaimed
+"none remain in any test in this repository".** That grep was too narrow.
+
+A sixth site existed outside the item's table:
+`hard_case_x_byte_and_restart.rs::restart_bomb_4096_terminates_within_budget`,
+a 60 s bound in the default parallel run. It is now `#[ignore]`d into the same
+serial step. It stays an absolute bound rather than becoming a ratio because it
+is a *liveness* assertion — its own comment calls it "a DoS bound, not a perf
+benchmark" — and there is nothing to compare a hang against. At ~6x its expected
+runtime its margin is far tighter than the bounds deleted here, so contention
+could plausibly cross it; serial execution is the fix, not a control.
+
+And the wall-clock assertions are not gone from the three files, they are
+*demoted*: `worker_b8_measure`'s contract says callers "should skip RSS
+assertions but still run wall-clock bounds so the test remains useful" on
+platforms that cannot report RSS, which is everything outside Linux and macOS.
+Deleting them outright left Windows with no resource bound at all — trading a
+flaky assertion for no assertion. They now run only under `!rss_supported()`.
+`worker_b8_measure.rs`'s own harness self-test, which asserts a 5 ms sleep takes
+under 5 s, is left alone: it tests the clock, not a decode.
+
+**Two demoted to fallbacks, because peak RSS already carries the regression**
+(`worker_b8_memory_bounds.rs`, criterion **(b)**). Both assertion helpers
+already asserted `peak_rss_delta` — the bound the file exists for, and a
+deterministic one. The clock beside it added nothing: its own comment described
+500 ms as "~1000x to tolerate contended CI runners" and 2000 ms as "~180x for CI
+jitter". A margin that large cannot fire on a regression the RSS bound would
+miss; it can only fire on contention, which is precisely the false positive. It
+now runs only under `!rss_supported()`, where it is the *only* bound available —
+see the qualification above. `wall_clock_is_the_only_bound` makes that policy a
+pure function with its own test, because CI runs these binaries on Ubuntu only
+and would otherwise never execute the fallback arm at all.
+
+**One demoted, because the bound was 50 000x the measurement**
+(`worker_b8_huffman_bomb.rs`, criterion **(b)**). Measured min-of-9 on darwin
+arm64 release, stable to three decimals over four rounds: the bomb decodes in
+**0.020 ms** against a 1000 ms bound. A ratio against a control was measured and
+*rejected*: an ordinary 256x256 decode takes 0.071 ms, so the bomb runs at 0.29x
+an ordinary image. It is a pathological Huffman *table*, not a large payload, so
+comparing the two would pin the ratio of two unrelated workloads. The memory
+assertion — which catches the "2^16-entry lookup per symbol" regression a
+pathological table actually produces — stays, as does the requirement that the
+decode terminate with a correct-size image or a structured error.
+
+**Two converted to ratios against a control** (`worker_b8_progressive_bomb.rs`,
+criterion **(a)**), `#[ignore]`d out of the default parallel run and executed by
+the serial CI step P4-147 added, now renamed `Timing ratios, serial (P4-147,
+P4-152)`.
+
+`scan_loop_cost_scales_linearly_with_scan_count` quadruples the scan count and
+requires the work to roughly quadruple. This is what the deleted
+`UNLIMITED_PARSE_WALL_CLOCK_MS` was *for* — its comment named an O(N^2) scan
+loop — but a fixed ceiling 1000x above the measurement could only catch a
+catastrophic regression while failing on a loaded runner for no reason. Measured
+min-of-9 over five rounds: 3.87, 3.91, 3.91, 3.91, 3.87 against a linear
+expectation of 4.0; quadratic is ~16. Bound **5.0** — the measured worst case
+plus ~28 %, per the tolerance rule. A first draft used 8.0, reasoning that it
+sat between linear and quadratic; review pointed out that accepting nearly 8x
+work for a 4x input lets a substantial superlinear regression pass, and that the
+rule asks for measured reality plus a small margin, not a midpoint.
+
+The correction then failed to land: the edit that changed the constant was in a
+script whose *next* substitution raised, so the file was never written, and a
+follow-up commit claimed runs "at the tightened bound" that had in fact executed
+against 8.0. Review caught that too. The constant is 5.0 now, verified by
+reading it back and re-running the ratio five times serially against it. The
+2000-to-8000 span is the widest 4x window available, capped by the decoder's own
+8192-scan parse limit.
+
+`scan_limit_stops_early_rather_than_walking_every_scan` compares the limited
+decode against the *same bomb with no limit*, which is what makes "early"
+measurable. Measured 0.278, 0.269, 0.270, 0.269, 0.269 — near the 0.2 the scan
+ratio implies, plus fixed header cost. Bound 0.6. The deleted
+`LIMITED_DECODE_WALL_CLOCK_MS` asserted a millisecond ceiling that a mitigation
+which had **stopped firing entirely** would still have satisfied, since the
+unlimited decode of this fixture also finishes in about a millisecond — so the
+ratio does not merely reduce flakiness here, it tests something the old bound
+could not.
+
+**How the samples are combined, and a reasoning error review caught.** The
+first draft measured each workload as a min-of-9 and then took the *minimum
+ratio* over three rounds, justified as "noise only ever adds time, so an unlucky
+pairing can inflate a ratio but not deflate it". That is wrong. Noise landing on
+the **denominator** inflates the denominator and therefore *deflates* the ratio,
+so minimising across pairs selects for the most-deflated one — which can hide a
+superlinear scan loop or a scan limit that has stopped firing, exactly the
+regressions the tests exist to catch. Each workload is now minimised over 27
+samples on its own, and the ratio is formed once from the two minima; the
+minimum is still right *per workload*, where noise genuinely only adds time.
+
+Running them serially is load-bearing — a ratio cancels machine speed but not
+contention, and two workloads timed while other test binaries compete for the
+same cores are not comparable to each other either.
+
+Verified by `cargo test --release --test worker_b8_progressive_bomb --
+--include-ignored --test-threads=1` — 8 tests, of which the two new ratios were
+run four consecutive times at the tightened bound without variation — plus
+`worker_b8_memory_bounds` (19, including the fallback check), `worker_b8_huffman_bomb` (5) and
+`hard_case_x_byte_and_restart` (5 passing, 1 now ignored in the default run).
+The full workspace release gate is 2600 passing across 295 suites, 0 failures,
+7 ignored: ignored rises by 3, one previously-passing test becomes one of them,
+and one test is added — the fallback check, which drives `check_decode_bounds`
+with RSS availability injected. Red-checked by inverting the availability test
+and by disabling the fallback assertion; both fail it.
+
 
 ## P4-148. Test Error-Manager Blobs Are Under-Aligned `[u8; N]` Buffers — **CLOSED 2026-08-12**
 

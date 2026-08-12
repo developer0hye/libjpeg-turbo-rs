@@ -20,9 +20,14 @@
 //!
 //! - **With `set_scan_limit(1000)`**: decode errors out, error message mentions
 //!   "scan" and "limit" (or the future `ScanLimitExceeded` enum variant).
-//! - **Without limit**: the decoder either completes or surfaces an error, but
-//!   always within a measured wall-clock bound + 20 % (loose-first, tightened
-//!   here) and bounded peak RSS.
+//! - **Without limit**: the decoder either completes or surfaces an error,
+//!   within bounded peak RSS.
+//!
+//! Neither of those asserts a wall-clock ceiling any more (P4-152). The two
+//! timing properties they used to carry — that the scan loop is linear, and
+//! that `scan_limit` stops early — are now ratios against a control, at the
+//! bottom of this file, `#[ignore]`d out of the parallel run and executed by a
+//! serial CI step.
 
 #[path = "worker_b8_measure.rs"]
 mod measure;
@@ -35,16 +40,38 @@ use libjpeg_turbo_rs::{compress_progressive, PixelFormat, Subsampling};
 const TARGET_SCAN_COUNT: usize = 5_000;
 const SCAN_LIMIT_UNDER_TEST: u32 = 1_000;
 
-/// Upper bound on wall-clock for the limited-decode path. Measured < 20 ms
-/// locally; 1000 ms is ~50x headroom.
-const LIMITED_DECODE_WALL_CLOCK_MS: u128 = 1_000;
-/// Upper bound on wall-clock when the decoder is allowed to walk all 5000
-/// scans. Measured 22 ms locally (darwin arm64 debug). Per the brief — "set
-/// loose bound first, tighten to measured + 20 %" — a strict 26 ms bound is
-/// too tight for CI runners, so we use 1000 ms (~45x measured) which still
-/// catches O(N^2) regressions: a quadratic 5000-scan walk at 1 us/iter would
-/// hit 25 s and blow this bound.
-const UNLIMITED_PARSE_WALL_CLOCK_MS: u128 = 1_000;
+/// P4-152: the two absolute wall-clock bounds that used to live here are gone.
+/// Each asserted a fixed millisecond ceiling while `cargo test` runs binaries
+/// and threads in parallel, so a contended runner failed them with a message
+/// naming a regression that did not happen — the cost P4-147 (#523) documented.
+/// They are replaced by the two *ratios* below, which compare a workload
+/// against a control and so cancel machine speed and load.
+///
+/// **Scan-loop scaling.** Quadrupling the scan count must roughly quadruple the
+/// work, not multiply it by sixteen. Measured min-of-9 over five rounds on
+/// darwin arm64 release: 3.87, 3.91, 3.91, 3.91, 3.87 against a linear
+/// expectation of 4.0. A quadratic scan loop — the regression the demoted bound
+/// claimed to catch — gives ~16. The bound is the measured worst case plus a
+/// small margin, per the tolerance rule: 5.0 is 3.91 + ~28 %. It still rejects
+/// quadratic threefold, and unlike a bound placed halfway to 16 it also rejects
+/// a merely *superlinear* regression that doubles the constant factor.
+const SCAN_LOOP_SCALING_RATIO_LIMIT: f64 = 5.0;
+/// Scan counts for that ratio, a 4x span. The upper one is near the decoder's
+/// own 8192-scan parse limit, which is what caps the achievable signal.
+const SCALING_SMALL_SCANS: usize = 1_999;
+const SCALING_LARGE_SCANS: usize = 7_999;
+
+/// **Fail-fast.** A `scan_limit` of 1000 against ~5000 scans must stop early
+/// rather than walk them all, so the limited decode costs a fraction of the
+/// unlimited one. Measured min-of-9 over five rounds: 0.278, 0.269, 0.270,
+/// 0.269, 0.269 — close to the 0.2 the scan ratio implies, plus fixed header
+/// cost. A mitigation that stopped firing would sit near 1.0, so the bound is
+/// set at roughly twice the measurement and well clear of it.
+const FAIL_FAST_RATIO_LIMIT: f64 = 0.6;
+/// Timed repetitions per workload. Each workload's own minimum is taken across
+/// all of them and the ratio is formed from the two minima — see
+/// [`best_decode_ms`] for why the *ratio* must not be minimised directly.
+const RATIO_SAMPLES: usize = 27;
 /// Peak RSS delta bound. Parser stores a ScanInfo per SOS; since issue #351
 /// those hold `Arc<HuffmanTable>` handles, so 5000 scans share one copy of
 /// each table (8 pointers per scan, not ~4 KB). Scan state + coefficient
@@ -184,13 +211,10 @@ fn progressive_bomb_with_scan_limit_errors_out_bounded() {
         err_msg
     );
 
-    assert!(
-        m.wall_clock.as_millis() < LIMITED_DECODE_WALL_CLOCK_MS,
-        "scan_limit rejection wall_clock={:?} exceeds {}ms — mitigation \
-         should fail-fast, not walk all scans",
-        m.wall_clock,
-        LIMITED_DECODE_WALL_CLOCK_MS
-    );
+    // P4-152: the wall-clock bound that used to sit here is now
+    // `scan_limit_stops_early_rather_than_walking_every_scan`, which measures
+    // the same property — fail-fast, not walking all scans — against a control
+    // instead of a fixed ceiling.
     if rss_supported() {
         assert!(
             m.peak_rss_delta_bytes < BOMB_PEAK_RSS_DELTA_LIMIT,
@@ -230,13 +254,9 @@ fn progressive_bomb_without_limit_is_bounded() {
         }
     }
 
-    assert!(
-        m.wall_clock.as_millis() < UNLIMITED_PARSE_WALL_CLOCK_MS,
-        "unlimited progressive bomb wall_clock={:?} exceeds {}ms — \
-         possible O(N^2) regression in scan loop",
-        m.wall_clock,
-        UNLIMITED_PARSE_WALL_CLOCK_MS
-    );
+    // P4-152: the O(N^2) guard is now
+    // `scan_loop_cost_scales_linearly_with_scan_count`, which compares two scan
+    // counts rather than asserting a millisecond ceiling.
     if rss_supported() {
         assert!(
             m.peak_rss_delta_bytes < BOMB_PEAK_RSS_DELTA_LIMIT,
@@ -245,4 +265,113 @@ fn progressive_bomb_without_limit_is_bounded() {
             BOMB_PEAK_RSS_DELTA_LIMIT as f64 / (1024.0 * 1024.0),
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// P4-152: ratios against a control, in place of absolute wall-clock bounds.
+//
+// Both are `#[ignore]`d out of the default parallel run and executed by the
+// serial CI step P4-147 added. A ratio cancels machine speed, but not
+// *contention*: two workloads timed while other test binaries compete for the
+// same cores are not comparable to each other either. Running them serially is
+// what makes the comparison mean anything.
+// ---------------------------------------------------------------------------
+
+/// Best-of-`RATIO_SAMPLES` wall clock for one decode configuration, in
+/// milliseconds.
+///
+/// Minimum rather than mean: scheduler noise only ever *adds* time to a
+/// measurement, so the fastest observation of a workload is the one closest to
+/// the work it actually did.
+///
+/// That reasoning applies to each workload on its own, and **not** to the ratio
+/// between two of them — a distinction the first version of this file got
+/// wrong. Noise landing on the denominator inflates it and therefore *deflates*
+/// the ratio, so taking the minimum across several (numerator, denominator)
+/// pairs selects for the most-deflated one and can hide the very regression the
+/// test exists to catch. Each workload is minimised here; the ratio is formed
+/// once, from two numbers that are each already the least-noisy estimate
+/// available.
+fn best_decode_ms(scans: usize, scan_limit: Option<u32>) -> f64 {
+    let bomb: Vec<u8> = build_progressive_scan_bomb(scans);
+    let mut best: f64 = f64::MAX;
+    for _ in 0..RATIO_SAMPLES {
+        let (_result, m) = measure("ratio", || {
+            let mut decoder: Decoder = Decoder::new(&bomb).unwrap();
+            decoder.set_max_memory(256 * 1024 * 1024);
+            if let Some(limit) = scan_limit {
+                decoder.set_scan_limit(limit);
+            }
+            decoder.decode_image()
+        });
+        best = best.min(m.wall_clock_ms());
+    }
+    best
+}
+
+/// Quadrupling the scan count must roughly quadruple the work.
+///
+/// This is what the deleted `UNLIMITED_PARSE_WALL_CLOCK_MS` bound was *for* —
+/// its comment named an O(N^2) scan loop as the regression — but a fixed
+/// ceiling could only ever catch a regression large enough to cross it from a
+/// measurement 1000x below, while failing on a loaded runner for no reason.
+/// A ratio between two sizes of the same fixture measures the scaling directly.
+///
+/// The span is capped by the decoder's own 8192-scan parse limit, so 2000 to
+/// 8000 is the widest 4x window available.
+#[ignore = "timing ratio — runs serially in CI's --test-threads=1 step (P4-152)"]
+#[test]
+fn scan_loop_cost_scales_linearly_with_scan_count() {
+    // Warm the allocator and instruction caches so the first size measured is
+    // not charged for them.
+    let _ = best_decode_ms(SCALING_LARGE_SCANS, None);
+
+    let small: f64 = best_decode_ms(SCALING_SMALL_SCANS, None);
+    let large: f64 = best_decode_ms(SCALING_LARGE_SCANS, None);
+    assert!(
+        small > 0.0,
+        "the small decode measured 0 ms, so the ratio would be meaningless"
+    );
+    let ratio: f64 = large / small;
+
+    assert!(
+        ratio < SCAN_LOOP_SCALING_RATIO_LIMIT,
+        "scan-loop cost scaled {ratio:.2}x for a 4x scan count ({} -> {}), \
+         over the {SCAN_LOOP_SCALING_RATIO_LIMIT} bound. Linear is ~4.0 and \
+         measured 3.87-3.91; quadratic is ~16. \
+         small={small:.3}ms large={large:.3}ms, each the best of {RATIO_SAMPLES}.",
+        SCALING_SMALL_SCANS,
+        SCALING_LARGE_SCANS,
+    );
+}
+
+/// A `scan_limit` must stop the decode early, not walk every scan and then
+/// report.
+///
+/// The control is the same bomb decoded with no limit, which is what makes
+/// "early" measurable: the mitigation is supposed to do a fraction of that
+/// work. The deleted `LIMITED_DECODE_WALL_CLOCK_MS` asserted a millisecond
+/// ceiling instead, which a mitigation that had stopped firing entirely would
+/// still have satisfied — the unlimited decode of this fixture also finishes in
+/// about a millisecond.
+#[ignore = "timing ratio — runs serially in CI's --test-threads=1 step (P4-152)"]
+#[test]
+fn scan_limit_stops_early_rather_than_walking_every_scan() {
+    let _ = best_decode_ms(TARGET_SCAN_COUNT - 1, None);
+
+    let unlimited: f64 = best_decode_ms(TARGET_SCAN_COUNT - 1, None);
+    let limited: f64 = best_decode_ms(TARGET_SCAN_COUNT - 1, Some(SCAN_LIMIT_UNDER_TEST));
+    assert!(
+        unlimited > 0.0,
+        "the unlimited decode measured 0 ms, so the ratio would be meaningless"
+    );
+    let ratio: f64 = limited / unlimited;
+
+    assert!(
+        ratio < FAIL_FAST_RATIO_LIMIT,
+        "a scan_limit of {SCAN_LIMIT_UNDER_TEST} against ~{TARGET_SCAN_COUNT} scans cost \
+         {ratio:.3} of an unlimited decode, over the {FAIL_FAST_RATIO_LIMIT} bound. \
+         Measured 0.269-0.278; a mitigation that no longer fires early sits near 1.0. \
+         limited={limited:.3}ms unlimited={unlimited:.3}ms, each the best of {RATIO_SAMPLES}.",
+    );
 }

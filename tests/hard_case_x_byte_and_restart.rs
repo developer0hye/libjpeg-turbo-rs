@@ -248,6 +248,17 @@ fn build_restart_bomb(cjpeg: &Path, dst: &Path) -> bool {
     matches!(out, Ok(o) if o.status.success())
 }
 
+/// P4-152: `#[ignore]`d out of the default parallel run and executed by the
+/// serial CI step, like the other timing assertions.
+///
+/// This one is a *liveness* bound, not a performance one — its own comment
+/// calls it "a DoS bound, not a perf benchmark" — so unlike the progressive
+/// bomb's ratios it needs no control: there is nothing to compare a hang
+/// against. What it does need is not to race other test binaries. At 60 s
+/// against an expected sub-10 s decode the margin is ~6x, far tighter than the
+/// bounds P4-152 deleted, so contention can plausibly cross it; and a decode
+/// that genuinely hangs is caught by the CI job timeout either way.
+#[ignore = "timing bound — runs serially in CI's --test-threads=1 step (P4-152)"]
 #[test]
 fn restart_bomb_4096_terminates_within_budget() {
     let cjpeg: PathBuf = require_c_tool!("cjpeg");
