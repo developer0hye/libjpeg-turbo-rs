@@ -18,13 +18,21 @@
  * `kept` is the whole point: it is the difference between a library that
  * honours the flag and one that merely succeeds.
  *
- * The *byte count* is deliberately not compared. Two independent encoders do
- * not agree on it — this port and upstream differ on entropy-coded output for
- * the same image — and a trace that bakes in one implementation's sizes would
- * fail for a reason that has nothing to do with the ownership contract under
- * test. What is contractual here is the return code and the pointer.
+ * The *byte count* is deliberately not compared in the cases above. Two
+ * independent encoders do not agree on it — this port and upstream differ on
+ * entropy-coded output for the same image — and a trace that bakes in one
+ * implementation's sizes would fail for a reason that has nothing to do with
+ * the ownership contract under test. What is contractual there is the return
+ * code and the pointer.
  *
- * Usage: norealloc_oracle
+ * The `fx_*` family (P4-156, #544) is the exception, and prints
+ * `case rc kept size` with the exact byte count: both sides transform the
+ * *same fixture bytes* (argv[1], generated once by the Rust harness), and an
+ * identity transform of identical input is byte-exact between the two
+ * implementations, so any size difference is precisely the marker policy
+ * those cases exist to compare.
+ *
+ * Usage: norealloc_oracle [gray_icc_fixture.jpg]
  */
 
 #include <stdio.h>
@@ -294,76 +302,161 @@ static void legacy_transform_case(const char *label)
   tj3Destroy(h);
 }
 
-/* A **grayscale** source under the legacy wrapper, carrying an ICC profile
- * large enough that the transformed output exceeds the grayscale bound but not
- * the 4:4:4 one. That window is where a capacity derived as 4:4:4 lets the
- * library write past a buffer sized `tjBufSize(w, h, TJSAMP_GRAY)`, which is
- * what a compliant caller allocates.
- *
- * The destination is allocated at exactly the grayscale bound here, as C, so
- * whether upstream succeeds or refuses is the comparison. It sizes the same way
- * this port now does, so it is expected to refuse — and a refusal is the
- * correct outcome, not a limitation. */
-static void legacy_gray_transform_case(const char *label)
+/* Read the shared fixture the Rust harness generated (argv[1]). Both sides
+ * must transform *identical bytes* for the exact-size lines below to compare —
+ * each side's own encoder produces different streams for the same pixels. */
+static unsigned char *read_fixture(const char *path, size_t *out_size)
+{
+  FILE *f = fopen(path, "rb");
+  long len;
+  unsigned char *buf;
+
+  if (!f) { fprintf(stderr, "fixture open %s\n", path); exit(2); }
+  if (fseek(f, 0, SEEK_END) != 0 || (len = ftell(f)) <= 0 ||
+      fseek(f, 0, SEEK_SET) != 0) { fprintf(stderr, "fixture seek\n"); exit(2); }
+  buf = (unsigned char *)malloc((size_t)len);
+  if (!buf || fread(buf, 1, (size_t)len, f) != (size_t)len) {
+    fprintf(stderr, "fixture read\n"); exit(2);
+  }
+  fclose(f);
+  *out_size = (size_t)len;
+  return buf;
+}
+
+/* P4-156 (#544): one exact-parity line per (entry point, flags, options)
+ * shape over the shared ICC-carrying grayscale fixture — `label rc kept size`,
+ * with the *exact byte count* in the trace. That is comparable because a
+ * transform of identical input is byte-exact between this library and the
+ * port (the stock-tool gate pins that for `jpegtran -copy all -rotate 90`
+ * over the upstream corpus), so the size differences here are purely the
+ * marker policy under test:
+ *   - legacy NOREALLOC drops every marker — the ordering quirk: the wrapper's
+ *     capacity pre-read (`turbojpeg.c:3112-3134`) parses the header before
+ *     `jcopy_markers_setup` (`turbojpeg.c:2976-2979`) can register anything;
+ *   - legacy flags=0 and tj3Transform copy them (saveMarkers default ALL);
+ *   - TJXOPT_COPYNONE drops them on every shape. */
+static void fixture_case(const char *label, const unsigned char *jpeg,
+                         size_t jpeg_size, int use_legacy, int norealloc,
+                         int copynone)
 {
   tjhandle h = tj3Init(TJINIT_TRANSFORM);
-  tjhandle enc = tj3Init(TJINIT_COMPRESS);
-  unsigned char *gray = (unsigned char *)malloc((size_t)WIDTH * HEIGHT);
-  unsigned char *icc = (unsigned char *)malloc(5000);
-  unsigned char *jpeg = NULL;
-  size_t jpeg_size = 0;
   tjtransform t[1];
-  unsigned long gray_bound;
+  unsigned char *original = NULL;
+  unsigned char *dst_bufs[1];
+  int rc;
+
+  if (!h) { fprintf(stderr, "tj3Init\n"); exit(2); }
+  memset(t, 0, sizeof(t));
+  if (copynone) t[0].options |= TJXOPT_COPYNONE;
+  dst_bufs[0] = NULL;
+
+  if (use_legacy) {
+    unsigned long dst_sizes[1];
+    dst_sizes[0] = 0;
+    if (norealloc) {
+      /* What a compliant legacy caller allocates for a grayscale source. */
+      unsigned long bound = tjBufSize(WIDTH, HEIGHT, TJSAMP_GRAY);
+      if (bound == 0) { fprintf(stderr, "tjBufSize\n"); exit(2); }
+      original = (unsigned char *)tj3Alloc(bound);
+      if (!original) { fprintf(stderr, "oom\n"); exit(2); }
+      dst_bufs[0] = original;
+    }
+    rc = tjTransform(h, jpeg, (unsigned long)jpeg_size, 1, dst_bufs, dst_sizes,
+                     t, norealloc ? TJFLAG_NOREALLOC : 0);
+    /* `kept` is meaningful only under NOREALLOC; the reallocating lines pin
+     * rc and exact size, and print 1 to keep the line shape uniform. */
+    printf("%s %d %d %lu\n", label, rc,
+           norealloc ? (dst_bufs[0] == original ? 1 : 0) : 1,
+           rc == 0 ? dst_sizes[0] : 0);
+  } else {
+    size_t dst_sizes[1];
+    dst_sizes[0] = 0;
+    rc = tj3Transform(h, jpeg, jpeg_size, 1, dst_bufs, dst_sizes, t);
+    printf("%s %d 1 %lu\n", label, rc,
+           rc == 0 ? (unsigned long)dst_sizes[0] : 0UL);
+  }
+
+  if (dst_bufs[0] != NULL && dst_bufs[0] != original) tj3Free(dst_bufs[0]);
+  if (original) tj3Free(original);
+  tj3Destroy(h);
+}
+
+/* One legacy-NOREALLOC identity transform of the fixture on an EXISTING
+ * handle, in the fx_* line shape. The marker-registration state the handle
+ * carries decides the outcome, which is what the state cases below compare. */
+static void fixture_norealloc_on(tjhandle h, const char *label,
+                                 const unsigned char *jpeg, size_t jpeg_size)
+{
+  tjtransform t[1];
+  unsigned long bound = tjBufSize(WIDTH, HEIGHT, TJSAMP_GRAY);
   unsigned char *original;
   unsigned char *dst_bufs[1];
   unsigned long dst_sizes[1];
-  size_t i;
   int rc;
 
-  if (!h || !enc || !gray || !icc) { fprintf(stderr, "oom\n"); exit(2); }
-  for (i = 0; i < (size_t)WIDTH * HEIGHT; i++) gray[i] = (unsigned char)(i % 251);
-  memset(icc, 0x5A, 5000);
-
-  if (tj3Set(enc, TJPARAM_QUALITY, 80) != 0 ||
-      tj3Set(enc, TJPARAM_SUBSAMP, TJSAMP_GRAY) != 0 ||
-      tj3SetICCProfile(enc, icc, 5000) != 0) {
-    fprintf(stderr, "gray encode setup\n"); exit(2);
-  }
-  if (tj3Compress8(enc, gray, WIDTH, 0, HEIGHT, TJPF_GRAY, &jpeg, &jpeg_size) != 0) {
-    fprintf(stderr, "gray encode: %s\n", tj3GetErrorStr(enc)); exit(2);
-  }
-
-  memset(t, 0, sizeof(t));
-  gray_bound = tjBufSize(WIDTH, HEIGHT, TJSAMP_GRAY);
-  original = (unsigned char *)tj3Alloc(gray_bound);
+  if (bound == 0) { fprintf(stderr, "tjBufSize\n"); exit(2); }
+  original = (unsigned char *)tj3Alloc(bound);
   if (!original) { fprintf(stderr, "oom\n"); exit(2); }
+  memset(t, 0, sizeof(t));
   dst_bufs[0] = original;
   dst_sizes[0] = 0;
 
-  rc = tjTransform(h, jpeg, (unsigned long)jpeg_size, 1, dst_bufs, dst_sizes, t,
-                   TJFLAG_NOREALLOC);
-  /* The **invariant**, not the outcome. Upstream succeeds here (601 bytes) and
-   * this port refuses (5619) — on this path only: the legacy-NOREALLOC
-   * capacity pre-read skips marker registration, so upstream's transform drops
-   * the profile with every other marker, while both libraries copy it on
-   * legacy flags=0 and tj3Transform. A separate defect (P4-156) scoped to that
-   * ordering quirk, and one that would make a trace of `rc` fail for a reason
-   * unrelated to the capacity rule.
-   *
-   * What both must satisfy, and what a port sizing grayscale as 4:4:4 would
-   * violate, is narrower: never report success having written past the bound a
-   * compliant caller allocated. Comparing that keeps the cross-validation
-   * honest without enshrining the divergence, and it still fails on the bug
-   * this case exists for. Exact size parity is P4-156's to pin. */
-  printf("%s %d %d\n", label, dst_bufs[0] == original ? 1 : 0,
-         (rc == 0 && dst_sizes[0] > gray_bound) ? 1 : 0);
+  rc = tjTransform(h, jpeg, (unsigned long)jpeg_size, 1, dst_bufs, dst_sizes,
+                   t, TJFLAG_NOREALLOC);
+  printf("%s %d %d %lu\n", label, rc, dst_bufs[0] == original ? 1 : 0,
+         rc == 0 ? dst_sizes[0] : 0);
 
-  if (dst_bufs[0] != original && dst_bufs[0] != NULL) tj3Free(dst_bufs[0]);
+  if (dst_bufs[0] != NULL && dst_bufs[0] != original) tj3Free(dst_bufs[0]);
   tj3Free(original);
-  tj3Free(jpeg);
-  free(gray);
-  free(icc);
-  tj3Destroy(enc);
+}
+
+/* P4-156's warm-handle state machine (#548 review): `jcopy_markers_setup`
+ * registration is per-handle and permanent, so the NOREALLOC ordering quirk
+ * drops markers only on a *cold* handle. Three transitions:
+ *   (a) a flags=0 marker-copying warm-up registers processors, so the
+ *       following NOREALLOC pre-read saves markers and the copy exceeds the
+ *       grayscale bound — refusal;
+ *   (b) the cold NOREALLOC call itself registers processors for *later*
+ *       calls even though its own read was starved, so the second identical
+ *       call is warm;
+ *   (c) a COPYNONE-only warm-up registers nothing — the handle stays cold. */
+static void fixture_state_cases(const unsigned char *jpeg, size_t jpeg_size)
+{
+  tjtransform t[1];
+  unsigned char *dst_bufs[1];
+  unsigned long dst_sizes[1];
+  tjhandle h;
+
+  /* (a) warm via flags=0. */
+  h = tj3Init(TJINIT_TRANSFORM);
+  if (!h) { fprintf(stderr, "tj3Init\n"); exit(2); }
+  memset(t, 0, sizeof(t));
+  dst_bufs[0] = NULL;
+  dst_sizes[0] = 0;
+  if (tjTransform(h, jpeg, (unsigned long)jpeg_size, 1, dst_bufs, dst_sizes,
+                  t, 0) != 0) { fprintf(stderr, "warm-up\n"); exit(2); }
+  if (dst_bufs[0]) tj3Free(dst_bufs[0]);
+  fixture_norealloc_on(h, "fx_warm_after_flags0", jpeg, jpeg_size);
+  tj3Destroy(h);
+
+  /* (b) the first NOREALLOC call warms the handle for the second. */
+  h = tj3Init(TJINIT_TRANSFORM);
+  if (!h) { fprintf(stderr, "tj3Init\n"); exit(2); }
+  fixture_norealloc_on(h, "fx_norealloc_first", jpeg, jpeg_size);
+  fixture_norealloc_on(h, "fx_norealloc_second", jpeg, jpeg_size);
+  tj3Destroy(h);
+
+  /* (c) COPYNONE-only history keeps the handle cold. */
+  h = tj3Init(TJINIT_TRANSFORM);
+  if (!h) { fprintf(stderr, "tj3Init\n"); exit(2); }
+  memset(t, 0, sizeof(t));
+  t[0].options |= TJXOPT_COPYNONE;
+  dst_bufs[0] = NULL;
+  dst_sizes[0] = 0;
+  if (tjTransform(h, jpeg, (unsigned long)jpeg_size, 1, dst_bufs, dst_sizes,
+                  t, 0) != 0) { fprintf(stderr, "copynone warm-up\n"); exit(2); }
+  if (dst_bufs[0]) tj3Free(dst_bufs[0]);
+  fixture_norealloc_on(h, "fx_cold_after_copynone", jpeg, jpeg_size);
   tj3Destroy(h);
 }
 
@@ -394,7 +487,7 @@ static void legacy_null_source_case(const char *label)
   tj3Destroy(h);
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
   /* Roomy: honoured, pointer kept. */
   compress8_case("compress8_roomy", ROOMY);
@@ -439,9 +532,25 @@ int main(void)
   /* P4-151: the legacy wrapper's output-vs-capacity bridge. */
   legacy_transform_case("legacy_transform_zero_size");
   legacy_null_source_case("legacy_transform_null_source");
-  /* Compared on the no-overrun invariant only — see the note in the case
-   * itself. Exact size parity waits on P4-156 (#544). */
-  legacy_gray_transform_case("legacy_transform_gray_no_overrun");
+
+  /* P4-156 (#544): exact marker-policy parity over the shared fixture the
+   * Rust harness passes as argv[1] — an ICC-carrying grayscale source. The
+   * six lines cover the one divergent path this item fixed (legacy
+   * NOREALLOC's drop-everything ordering quirk), the two paths that were
+   * already correct (legacy flags=0 and tj3Transform copy markers), and
+   * TJXOPT_COPYNONE on all three shapes. */
+  if (argc > 1) {
+    size_t fx_size = 0;
+    unsigned char *fx = read_fixture(argv[1], &fx_size);
+    fixture_case("fx_legacy_norealloc", fx, fx_size, 1, 1, 0);
+    fixture_case("fx_legacy_norealloc_copynone", fx, fx_size, 1, 1, 1);
+    fixture_case("fx_legacy_flags0", fx, fx_size, 1, 0, 0);
+    fixture_case("fx_legacy_flags0_copynone", fx, fx_size, 1, 0, 1);
+    fixture_case("fx_tj3_realloc", fx, fx_size, 0, 0, 0);
+    fixture_case("fx_tj3_realloc_copynone", fx, fx_size, 0, 0, 1);
+    fixture_state_cases(fx, fx_size);
+    free(fx);
+  }
 
   return 0;
 }

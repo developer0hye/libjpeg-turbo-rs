@@ -324,7 +324,12 @@ pub unsafe extern "C" fn tjDecompressHeader3(
 ///
 /// The substituted capacity comes from geometry alone — never from metadata —
 /// so it cannot exceed the buffer a `tjTransformBufSize()`-sized allocation
-/// describes. Otherwise identical to `tj3Transform`.
+/// describes.
+///
+/// `TJFLAG_NOREALLOC` also drops **every** marker, ICC included, reproducing
+/// the ordering quirk that pre-read causes upstream (P4-156). Without the flag,
+/// and through `tj3Transform`, markers are copied. Otherwise identical to
+/// `tj3Transform`.
 ///
 /// # Safety
 ///
@@ -390,7 +395,7 @@ pub unsafe extern "C" fn tjTransform(
         //    handle transforming an S444 source would come back reporting S444
         //    and silently compress differently afterwards. `probe` parses the
         //    source header into its own decoder and leaves the instance alone.
-        let sizes: Option<Vec<usize>> = if norealloc {
+        let prepared: Option<(Vec<usize>, Option<Vec<TjTransform>>)> = if norealloc {
             // `tj3Transform` validates the source itself, but not before this
             // runs — and `from_raw_parts` requires a non-null pointer even for
             // a zero-length slice, so reaching it first turns a documented -1
@@ -419,45 +424,100 @@ pub unsafe extern "C" fn tjTransform(
                     return -1;
                 }
             };
-            // A grayscale source must size as `TJSAMP_GRAY`, not as whatever
-            // `to_tjsamp` makes of `Subsampling::Unknown`. `probe` reports
-            // `Unknown` for single-component images — there are no chroma
-            // planes to describe — and mapping that to 4:4:4 would hand
-            // `tj3Transform` a capacity *larger* than the caller's buffer,
-            // which is sized `tjBufSize(w, h, TJSAMP_GRAY)`. Output landing
-            // between the two bounds would then be written past the end of it.
-            //
-            // The direction matters: over-stating a bound you *allocate* is
-            // merely wasteful, while over-stating a capacity you *trust* is an
-            // overrun. This is the only place the value is used as the latter.
-            const TJSAMP_GRAY: c_int = 3;
-            let src_subsamp: c_int = if info.components == 1 {
-                TJSAMP_GRAY
-            } else {
-                info.subsampling.to_tjsamp()
+            // SAFETY: `transforms` points to `n` entries per the caller's
+            // contract, checked non-NULL above with `n >= 1`.
+            let caller_transforms: &[TjTransform] =
+                unsafe { std::slice::from_raw_parts(transforms, n as usize) };
+            let Some(sizes) = legacy_norealloc_capacities(
+                info.width as c_int,
+                info.height as c_int,
+                info.components,
+                info.subsampling.to_tjsamp(),
+                caller_transforms,
+            ) else {
+                // Upstream's wrapper THROWs "Memory allocation failure" when
+                // its own temporary array cannot be allocated; `n` is
+                // caller-controlled, so aborting through Rust's infallible
+                // allocation path is not an option for a C ABI.
+                // SAFETY: `with_handle` NULL-checks the handle itself.
+                let _ = unsafe {
+                    crate::tj3::with_handle(handle, |inst: &mut crate::tj3::TjInstance| {
+                        inst.set_error(
+                            "tjTransform: Memory allocation failure",
+                            crate::tj3::TJERR_FATAL,
+                        );
+                    })
+                };
+                return -1;
             };
-            let mut sizes: Vec<usize> = Vec::with_capacity(n as usize);
-            for index in 0..n as usize {
-                // SAFETY: `transforms` points to `n` entries per the caller's
-                // contract, checked non-NULL above.
-                let xform: &TjTransform = unsafe { &*transforms.add(index) };
-                let (w, h, subsamp) = crate::transform::transformed_specs(
-                    info.width as c_int,
-                    info.height as c_int,
-                    src_subsamp,
-                    xform,
-                );
-                sizes.push(crate::bufsize::tj3JPEGBufSize(w, h, subsamp));
-            }
-            Some(sizes)
+            // Upstream's legacy NOREALLOC path drops *every* marker on a
+            // *cold* handle, not by policy but by ordering: the wrapper
+            // pre-reads the header to derive these same capacities
+            // (`turbojpeg.c:3112-3134`), so when `tj3Transform` later calls
+            // `jcopy_markers_setup` (`turbojpeg.c:2976-2979`) the header is
+            // already parsed, the guarded re-read is skipped, and nothing was
+            // registered — `jcopy_markers_execute` copies nothing, ICC
+            // included. Registration is per-handle and permanent, though, so
+            // on a *warm* handle — one whose earlier batch registered marker
+            // processors — the pre-read saves markers and they survive.
+            // Reproduced by forcing COPYNONE on a local copy of the caller's
+            // transforms only while the handle is cold; never on the caller's
+            // array (P4-156, #544, warm-handle state from the #548 review's
+            // differential probe).
+            //
+            // The starved read still registers processors for *later* calls —
+            // upstream's setup runs regardless — so the caller's own options
+            // warm the handle here exactly as they would in `tj3Transform`.
+            let markers_registered: bool = match unsafe {
+                crate::tj3::with_handle(handle, |inst: &mut crate::tj3::TjInstance| {
+                    let was: bool = inst.transform_markers_registered;
+                    if caller_transforms
+                        .iter()
+                        .any(|t: &TjTransform| (t.options & crate::transform::TJXOPT_COPYNONE) == 0)
+                        && inst.inner.get(libjpeg_turbo_rs::tj3::TjParam::SaveMarkers) != 0
+                    {
+                        inst.transform_markers_registered = true;
+                    }
+                    was
+                })
+            } {
+                Some(was) => was,
+                None => return -1,
+            };
+            let quirk: Option<Vec<TjTransform>> = if markers_registered {
+                None
+            } else {
+                let mut copy: Vec<TjTransform> = Vec::new();
+                if copy.try_reserve_exact(caller_transforms.len()).is_err() {
+                    // SAFETY: `with_handle` NULL-checks the handle itself.
+                    let _ = unsafe {
+                        crate::tj3::with_handle(handle, |inst: &mut crate::tj3::TjInstance| {
+                            inst.set_error(
+                                "tjTransform: Memory allocation failure",
+                                crate::tj3::TJERR_FATAL,
+                            );
+                        })
+                    };
+                    return -1;
+                }
+                copy.extend(caller_transforms.iter().map(|t: &TjTransform| {
+                    let mut t: TjTransform = *t;
+                    t.options |= crate::transform::TJXOPT_COPYNONE;
+                    t
+                }));
+                Some(copy)
+            };
+            Some((sizes, quirk))
         } else {
             None
         };
 
-        let rc: c_int = match sizes {
-            Some(mut sizes) => {
+        let rc: c_int = match prepared {
+            Some((mut sizes, quirk)) => {
                 // SAFETY: as the direct call below, with a local capacity array
-                // standing in for the caller's output slots.
+                // standing in for the caller's output slots and, on a cold
+                // handle, the COPYNONE-forced copy standing in for the
+                // caller's transforms.
                 let rc: c_int = unsafe {
                     tj3Transform(
                         handle,
@@ -466,7 +526,9 @@ pub unsafe extern "C" fn tjTransform(
                         n,
                         dst_bufs,
                         sizes.as_mut_ptr(),
-                        transforms,
+                        quirk
+                            .as_ref()
+                            .map_or(transforms, |q: &Vec<TjTransform>| q.as_ptr()),
                     )
                 };
                 // Upstream copies the produced sizes back unconditionally
@@ -488,6 +550,48 @@ pub unsafe extern "C" fn tjTransform(
         };
         rc
     })
+}
+
+/// Geometry-only destination capacities for the legacy NOREALLOC bridge,
+/// one per transform (P4-151).
+///
+/// Two review-rejected attempts made these constraints load-bearing:
+/// `tj3JPEGBufSize` over `transformed_specs`, never the metadata-adding
+/// `tj3TransformBufSize`; and a single-component source sized as
+/// `TJSAMP_GRAY`, not as whatever `to_tjsamp` makes of
+/// `Subsampling::Unknown` (4:4:4). The direction matters: over-stating a
+/// bound you *allocate* is merely wasteful, while over-stating a capacity
+/// you *trust* against the caller's `tjTransformBufSize()`-sized buffer is
+/// an overrun. Since P4-156 no marker survives a cold handle's call on this
+/// path, so no C-comparable payload can cross the grayscale bound to observe
+/// a misderivation end-to-end — the unit tests below pin it directly
+/// (P4-156 criterion 5, #544).
+///
+/// `None` means the array itself could not be allocated — `transforms.len()`
+/// is the caller's `n`, so the allocation must be fallible rather than
+/// aborting the process (#548 review).
+fn legacy_norealloc_capacities(
+    width: c_int,
+    height: c_int,
+    components: usize,
+    subsamp_from_probe: c_int,
+    transforms: &[TjTransform],
+) -> Option<Vec<usize>> {
+    /// `turbojpeg.h`: `TJSAMP_GRAY`.
+    const TJSAMP_GRAY: c_int = 3;
+    let src_subsamp: c_int = if components == 1 {
+        TJSAMP_GRAY
+    } else {
+        subsamp_from_probe
+    };
+    let mut sizes: Vec<usize> = Vec::new();
+    sizes.try_reserve_exact(transforms.len()).ok()?;
+    sizes.extend(transforms.iter().map(|xform: &TjTransform| {
+        let (w, h, subsamp) =
+            crate::transform::transformed_specs(width, height, src_subsamp, xform);
+        crate::bufsize::tj3JPEGBufSize(w, h, subsamp)
+    }));
+    Some(sizes)
 }
 
 // ---------------------------------------------------------------------------
@@ -991,3 +1095,72 @@ const _TJREGION_MARKER: TjRegion = TjRegion {
     w: 0,
     h: 0,
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `turbojpeg.h`: `TJSAMP_444` / `TJSAMP_420` / `TJSAMP_GRAY`.
+    const TJSAMP_444: c_int = 0;
+    const TJSAMP_420: c_int = 2;
+    const TJSAMP_GRAY: c_int = 3;
+
+    fn identity() -> TjTransform {
+        // SAFETY: `#[repr(C)]` plain data; all-zero is the identity transform.
+        unsafe { std::mem::zeroed() }
+    }
+
+    /// P4-156 criterion 5 (#544): a single-component source is sized as
+    /// `TJSAMP_GRAY`. `probe` reports `Subsampling::Unknown` for grayscale
+    /// (no chroma planes to describe), and `to_tjsamp` maps that to 4:4:4 —
+    /// a capacity larger than the caller's `tjBufSize(w, h, TJSAMP_GRAY)`
+    /// buffer, which `tj3Transform` would then trust. The end-to-end
+    /// observation of that overrun needed an ICC-inflated payload, which the
+    /// P4-156 marker parity removed; this pins the derivation itself.
+    #[test]
+    fn single_component_source_is_sized_as_gray() {
+        let caps: Vec<usize> =
+            legacy_norealloc_capacities(32, 32, 1, TJSAMP_444, &[identity()]).expect("capacities");
+        assert_eq!(
+            caps,
+            vec![crate::bufsize::tj3JPEGBufSize(32, 32, TJSAMP_GRAY)]
+        );
+        assert!(
+            caps[0] < crate::bufsize::tj3JPEGBufSize(32, 32, TJSAMP_444),
+            "the 4:4:4 bound would over-state a capacity the bridge trusts \
+             against the caller's gray-sized buffer"
+        );
+    }
+
+    /// Multi-component sources keep the probe's subsampling — the gray
+    /// override must not leak past `components == 1`.
+    #[test]
+    fn three_component_source_keeps_the_probed_subsampling() {
+        let caps: Vec<usize> =
+            legacy_norealloc_capacities(64, 48, 3, TJSAMP_420, &[identity()]).expect("capacities");
+        assert_eq!(
+            caps,
+            vec![crate::bufsize::tj3JPEGBufSize(64, 48, TJSAMP_420)]
+        );
+    }
+
+    /// One capacity per transform, each from its own transformed geometry —
+    /// a 90° rotation of a non-square image swaps the dimensions.
+    #[test]
+    fn each_transform_gets_its_own_transformed_geometry() {
+        /// `turbojpeg.h`: `TJXOP_ROT90`.
+        const TJXOP_ROT90: c_int = 5;
+        let mut rot: TjTransform = identity();
+        rot.op = TJXOP_ROT90;
+        let caps: Vec<usize> =
+            legacy_norealloc_capacities(64, 48, 3, TJSAMP_444, &[identity(), rot])
+                .expect("capacities");
+        assert_eq!(
+            caps,
+            vec![
+                crate::bufsize::tj3JPEGBufSize(64, 48, TJSAMP_444),
+                crate::bufsize::tj3JPEGBufSize(48, 64, TJSAMP_444),
+            ]
+        );
+    }
+}
