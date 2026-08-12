@@ -3080,7 +3080,7 @@ item's one new suite of 5.
 The classic C API has the same acceptance gap, one layer over — filed
 separately as P4-154 (#538), since it needs a different fix and a different oracle.
 
-## P4-151. Legacy `tjTransform` Does Not Bridge `dstSizes` Output-vs-Capacity Semantics — **OPEN**
+## P4-151. Legacy `tjTransform` Does Not Bridge `dstSizes` Output-vs-Capacity Semantics — **CLOSED 2026-08-12**
 
 **Motivation.** Split out of P4-145 (2026-08-12, issue #529) after two attempts
 at it were rejected in review. Legacy `dstSizes[i]` are **outputs**: a caller that sized
@@ -3121,6 +3121,53 @@ compression parameters are unchanged across the call (assert one that differs
 from the source, e.g. S420 handle over an S444 source); and the P4-145 oracle
 gains a legacy-wrapper case so the comparison is against C rather than against
 this description.
+
+**Status (2026-08-12): closed.** A legacy `tjTransform` with `TJFLAG_NOREALLOC`
+and `dstSizes[i] = 0` now transforms, filling a temporary capacity array from
+the transformed geometry and copying the produced sizes back, as upstream does
+(`turbojpeg.c:3118-3132`).
+
+Both rejected attempts were the acceptance criteria in disguise, and both
+constraints are met by construction rather than by care:
+
+**Capacity from geometry alone.** `transformed_specs` was factored out of
+`tj3TransformBufSize` so the two callers share one definition of the transform
+rules while differing where they must: that entry point adds the handle's ICC
+length to what it returns, and the bridge does not. Using it would hand
+`tj3Transform` a capacity larger than the buffer the caller sized — the measured
+case is an 8192-byte destination against a 132320-byte capacity at a 32x32
+source with a 128 KiB profile.
+
+**No handle mutation.** The bridge reads the source through
+`libjpeg_turbo_rs::probe`, which parses the header into its own decoder. A
+`tj3DecompressHeader` here would write shared state a later `tj3Compress*`
+reads.
+
+`Subsampling::to_tjsamp` now carries the single `TJSAMP_*` mapping, because the
+bridge lives in a different crate from the TJ3 parameter accessor that also
+needs it and two copies would drift.
+
+**Which parameter proves "no mutation" was measured, not assumed.** The obvious
+guess — that `TJPARAM_SUBSAMP` would come back holding the source's value — is
+wrong in this port: a header parse leaves it alone. The first version of the
+test asserted exactly that and **passed with the rejected approach injected**.
+What a parse actually moves, measured on this fixture, is `TJPARAM_JPEGHEIGHT`
+(0 -> 32) and `TJPARAM_COLORSPACE` (-1 -> 1). `TJPARAM_JPEGHEIGHT` is the sharp
+one: nothing but a header parse sets it, so zero afterwards says the handle was
+never used to read the source.
+
+Verified by `norealloc_all_entry_points` (16 passing, up from 14) with two new
+tests and a new oracle case, each Red-checked by reintroducing the defect it
+targets. The full workspace release gate is 2602 passing across 295 suites, 0
+failures, 7 ignored:
+
+- `legacy_tj_transform_fills_a_zero_dst_size_from_geometry` — fails with the
+  bridge disabled.
+- `legacy_tj_transform_does_not_parse_the_source_into_the_handle` — fails with
+  `tj3DecompressHeader` injected, reporting `left: 32, right: 0`.
+- The oracle gained `legacy_transform_zero_size`, so criterion 4's comparison is
+  against real TurboJPEG rather than against this description. C reports
+  `0 1 1`; with the bridge disabled this port reports `-1 1 0`.
 
 ## P4-153. Marker-Parse Metadata Copies Are Still Infallible — **CLOSED 2026-08-12**
 

@@ -246,6 +246,54 @@ static void transform_case(const char *label, size_t capacity)
   tj3Destroy(h);
 }
 
+/* The **legacy** wrapper, whose `dstSizes` are *outputs* rather than
+ * capacities. A caller that sized its destination with `tjTransformBufSize()`
+ * has no reason to fill them in, so upstream fills a temporary capacity array
+ * from the transformed geometry (`turbojpeg.c:3118-3132`). This port passed the
+ * zeros straight through until P4-151, and TJ3 read them as capacities of zero.
+ *
+ * `dstSizes[0]` starts at 0 deliberately — that is the case under test. The
+ * reported `produced` field therefore also says whether the bridge copied the
+ * real size back, which upstream does unconditionally. */
+static void legacy_transform_case(const char *label)
+{
+  tjhandle h = tj3Init(TJINIT_TRANSFORM);
+  size_t jpeg_size = 0;
+  unsigned char *jpeg = make_source(&jpeg_size);
+  tjtransform t[1];
+  unsigned long bound;
+  unsigned char *original;
+  unsigned char *dst_bufs[1];
+  unsigned long dst_sizes[1];
+  int rc;
+
+  if (!h) { fprintf(stderr, "tj3Init\n"); exit(2); }
+  memset(t, 0, sizeof(t));
+
+  /* What a legacy caller allocates. TurboJPEG 3 no longer declares
+   * `tjTransformBufSize`, so this uses `tjBufSize` on the transformed
+   * geometry — which is what that function computed, and exactly the
+   * geometry-only bound P4-151 says the capacity must not exceed. An identity
+   * transform leaves the specs unchanged, and the source is 4:4:4. */
+  bound = tjBufSize(WIDTH, HEIGHT, TJSAMP_444);
+  if (bound == 0) { fprintf(stderr, "tjTransformBufSize\n"); exit(2); }
+  original = (unsigned char *)tj3Alloc(bound);
+  if (!original) { fprintf(stderr, "oom\n"); exit(2); }
+
+  dst_bufs[0] = original;
+  dst_sizes[0] = 0;
+
+  rc = tjTransform(h, jpeg, (unsigned long)jpeg_size, 1, dst_bufs, dst_sizes, t,
+                   TJFLAG_NOREALLOC);
+  printf("%s %d %d %d\n", label, rc, dst_bufs[0] == original ? 1 : 0,
+         (rc == 0 && dst_sizes[0] > 0) ? 1 : 0);
+
+  if (dst_bufs[0] != original && dst_bufs[0] != NULL) tj3Free(dst_bufs[0]);
+  tj3Free(original);
+  tj3Free(jpeg);
+  tj3Destroy(h);
+}
+
 int main(void)
 {
   /* Roomy: honoured, pointer kept. */
@@ -287,6 +335,9 @@ int main(void)
   transform_case("transform_roomy", ROOMY);
   transform_case("transform_cramped", CRAMPED);
   transform_case("transform_null", 0);
+
+  /* P4-151: the legacy wrapper's output-vs-capacity bridge. */
+  legacy_transform_case("legacy_transform_zero_size");
 
   return 0;
 }

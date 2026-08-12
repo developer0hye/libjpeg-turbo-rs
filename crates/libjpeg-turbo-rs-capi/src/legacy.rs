@@ -367,26 +367,94 @@ pub unsafe extern "C" fn tjTransform(
         // buffers with `tjTransformBufSize()` may leave them at zero — and TJ3
         // reads that slot as a capacity. Upstream bridges the gap by filling a
         // temporary array with each transformed image's worst case
-        // (`turbojpeg.c:3118-3132`).
+        // (`turbojpeg.c:3118-3132`) and copying the real sizes back afterwards.
         //
-        // **That bridge is deliberately not built here — see P4-151.** Two
-        // attempts at it were rejected in review, for reasons specific to this
-        // wrapper rather than to the ownership rule: the capacity must come
-        // from the transformed *geometry* alone (upstream uses bare
-        // `tj3JPEGBufSize`, while this port's `tj3TransformBufSize` adds the
-        // extracted ICC length, which overruns a `tjBufSize()`-sized buffer),
-        // and deriving the geometry must not mutate the handle's compression
-        // state the way a plain `tj3DecompressHeader` does.
+        // P4-151. Two earlier attempts were rejected in review, and both
+        // constraints they exposed are load-bearing here:
         //
-        // So a legacy caller that leaves `dstSizes[i]` at zero gets "buffer too
-        // small" rather than a transform. That is a smaller divergence than the
-        // alternative: before the flag reached the parameter at all, those same
-        // callers had their own buffers passed to `free()`.
-        unsafe {
-            tj3Transform(
-                handle, jpeg_buf, jpeg_size, n, dst_bufs, dst_sizes, transforms,
-            )
-        }
+        // 1. **The capacity comes from geometry alone.** Upstream uses bare
+        //    `tj3JPEGBufSize` on the transformed specs. This port's
+        //    `tj3TransformBufSize` also adds the extracted ICC length, so using
+        //    it would hand `tj3Transform` a capacity larger than the buffer the
+        //    caller sized with `tjTransformBufSize()` — measured at a 32x32
+        //    source with a 128 KiB profile as an 8192-byte destination against
+        //    a 132320-byte capacity. `transformed_specs` + `tj3JPEGBufSize` is
+        //    the geometry-only path.
+        //
+        // 2. **Deriving the geometry must not touch the handle.** A
+        //    `tj3DecompressHeader` here would overwrite compression state the
+        //    caller set — subsampling, colour space, density, ICC — so an S420
+        //    handle transforming an S444 source would come back reporting S444
+        //    and silently compress differently afterwards. `probe` parses the
+        //    source header into its own decoder and leaves the instance alone.
+        let sizes: Option<Vec<usize>> = if norealloc {
+            // SAFETY: `jpeg_buf`/`jpeg_size` describe the source image; the
+            // caller's contract covers their validity for the whole call.
+            let jpeg: &[u8] = unsafe { std::slice::from_raw_parts(jpeg_buf, jpeg_size) };
+            let info: libjpeg_turbo_rs::JpegInfo = match libjpeg_turbo_rs::probe(jpeg) {
+                Ok(info) => info,
+                Err(e) => {
+                    // SAFETY: `with_handle` NULL-checks the handle itself.
+                    let _ = unsafe {
+                        crate::tj3::with_handle(handle, |inst: &mut crate::tj3::TjInstance| {
+                            inst.set_error(format!("tjTransform: {e}"), crate::tj3::TJERR_FATAL);
+                        })
+                    };
+                    return -1;
+                }
+            };
+            let src_subsamp: c_int = info.subsampling.to_tjsamp();
+            let mut sizes: Vec<usize> = Vec::with_capacity(n as usize);
+            for index in 0..n as usize {
+                // SAFETY: `transforms` points to `n` entries per the caller's
+                // contract, checked non-NULL above.
+                let xform: &TjTransform = unsafe { &*transforms.add(index) };
+                let (w, h, subsamp) = crate::transform::transformed_specs(
+                    info.width as c_int,
+                    info.height as c_int,
+                    src_subsamp,
+                    xform,
+                );
+                sizes.push(crate::bufsize::tj3JPEGBufSize(w, h, subsamp));
+            }
+            Some(sizes)
+        } else {
+            None
+        };
+
+        let rc: c_int = match sizes {
+            Some(mut sizes) => {
+                // SAFETY: as the direct call below, with a local capacity array
+                // standing in for the caller's output slots.
+                let rc: c_int = unsafe {
+                    tj3Transform(
+                        handle,
+                        jpeg_buf,
+                        jpeg_size,
+                        n,
+                        dst_bufs,
+                        sizes.as_mut_ptr(),
+                        transforms,
+                    )
+                };
+                // Upstream copies the produced sizes back unconditionally
+                // (`turbojpeg.c:3135-3136`), so a caller reading `dstSizes`
+                // after a partial failure sees what was written.
+                for (index, size) in sizes.iter().enumerate() {
+                    // SAFETY: `dst_sizes` has `n` entries per the contract.
+                    unsafe { *dst_sizes.add(index) = *size };
+                }
+                rc
+            }
+            // SAFETY: the caller's slots carry their own capacities when the
+            // flag is unset, which is the reallocating path.
+            None => unsafe {
+                tj3Transform(
+                    handle, jpeg_buf, jpeg_size, n, dst_bufs, dst_sizes, transforms,
+                )
+            },
+        };
+        rc
     })
 }
 
