@@ -30,6 +30,16 @@ pub(crate) struct TjInstance {
     pub(crate) init_type: c_int,
     pub(crate) last_error: CString,
     pub(crate) last_error_code: c_int,
+    /// Upstream registers marker processors on the handle's shared dinfo the
+    /// first time a transform batch saves markers (`jcopy_markers_setup`,
+    /// `turbojpeg.c:2976-2979`), and there is no unregister API — the
+    /// registration outlives `jpeg_abort_decompress` for the handle's whole
+    /// life. The legacy NOREALLOC bridge consults this to tell a *cold*
+    /// handle (the capacity pre-read starves marker saving — the P4-156
+    /// ordering quirk) from a *warm* one, where the pre-read finds processors
+    /// already registered and markers survive. Set whenever a batch would
+    /// have registered processors upstream; never cleared (P4-156, #544).
+    pub(crate) transform_markers_registered: bool,
 }
 
 impl TjInstance {
@@ -39,6 +49,7 @@ impl TjInstance {
             init_type,
             last_error: CString::new("No error").expect("static string"),
             last_error_code: 0,
+            transform_markers_registered: false,
         }
     }
 

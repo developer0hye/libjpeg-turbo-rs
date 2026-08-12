@@ -169,6 +169,22 @@ pub unsafe extern "C" fn tj3Transform(
             let txforms: &[TjTransform] =
                 unsafe { std::slice::from_raw_parts(transforms, n as usize) };
 
+            // Upstream registers marker processors before reading the header
+            // whenever any transform in the batch saves markers
+            // (`jcopy_markers_setup` with the handle's saveMarkers option,
+            // `turbojpeg.c:2973-2977`); registration is per-handle and
+            // permanent. Recorded so the legacy NOREALLOC bridge can tell a
+            // cold handle — where upstream's capacity pre-read starves marker
+            // saving, the P4-156 ordering quirk — from a warm one
+            // (P4-156, #544).
+            if txforms
+                .iter()
+                .any(|t: &TjTransform| (t.options & TJXOPT_COPYNONE) == 0)
+                && inst.inner.get(libjpeg_turbo_rs::tj3::TjParam::SaveMarkers) != 0
+            {
+                inst.transform_markers_registered = true;
+            }
+
             // Process each transform independently. libjpeg-turbo does this in a
             // loop too; there's no shared decode state across transforms.
             for (i, t) in txforms.iter().enumerate() {

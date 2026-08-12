@@ -610,32 +610,17 @@ fn release(handle: *mut c_void, produced: *mut u8, original: *mut u8) {
     }
 }
 
-/// A grayscale ICC-carrying source, compared on the **no-overrun invariant**.
-///
-/// Upstream succeeds here and this port refuses — on this path only. Upstream's
-/// legacy-NOREALLOC capacity pre-read skips marker registration, so its
-/// transform drops the profile (601 bytes); ours carries it (5619), exactly as
-/// both libraries do on legacy `flags=0` and `tj3Transform` — P4-156 (#544), a
-/// separate defect scoped to that ordering quirk. Tracing `rc` would fail for
-/// that reason rather than for anything P4-151 governs.
-///
-/// What both must satisfy, and what sizing grayscale as 4:4:4 violates, is
-/// narrower: never report success having written past the bound a compliant
-/// caller allocated. That is what this line compares, so the cross-validation
-/// is real without enshrining the divergence.
-fn legacy_gray_no_overrun_case(label: &str) -> String {
+/// The shared ICC-carrying grayscale fixture for the `fx_*` exact-parity
+/// family (P4-156, #544): both sides transform *these bytes*, so the exact
+/// output sizes are comparable and any difference is the marker policy.
+fn gray_icc_fixture() -> Vec<u8> {
     use libjpeg_turbo_rs_capi::inner::{Encoder, PixelFormat};
-    use libjpeg_turbo_rs_capi::{tjBufSize, tjTransform};
-
-    const TJFLAG_NOREALLOC: c_int = 1024;
-    /// `turbojpeg.h`: `TJSAMP_GRAY`.
-    const TJSAMP_GRAY: c_int = 3;
 
     let gray_pixels: Vec<u8> = (0..(WIDTH as usize * HEIGHT as usize))
         .map(|i| (i % 251) as u8)
         .collect();
     let icc: Vec<u8> = vec![0x5Au8; 5_000];
-    let jpeg: Vec<u8> = Encoder::new(
+    Encoder::new(
         &gray_pixels,
         WIDTH as usize,
         HEIGHT as usize,
@@ -644,43 +629,96 @@ fn legacy_gray_no_overrun_case(label: &str) -> String {
     .quality(80)
     .icc_profile(&icc)
     .encode()
-    .expect("encode grayscale source");
+    .expect("encode grayscale fixture")
+}
 
-    let gray_bound: usize = tjBufSize(WIDTH, HEIGHT, TJSAMP_GRAY);
+/// One `fx_*` line — `label rc kept size` with the exact byte count — over
+/// the shared fixture, mirroring the C oracle's `fixture_case` shape for
+/// shape (P4-156, #544).
+///
+/// The exact size is comparable because a transform of identical input is
+/// byte-exact between the two implementations (the stock-tool gate pins that
+/// for `jpegtran -copy all -rotate 90` over the upstream corpus), so the
+/// lines differ only if the marker policy does: legacy
+/// NOREALLOC must drop every marker (upstream's capacity pre-read skips
+/// `jcopy_markers_setup` registration — an ordering quirk, not a policy),
+/// legacy `flags=0` and `tj3Transform` must copy them, and `TJXOPT_COPYNONE`
+/// must drop them on every shape.
+fn fixture_case(
+    label: &str,
+    jpeg: &[u8],
+    use_legacy: bool,
+    norealloc: bool,
+    copynone: bool,
+) -> String {
+    use libjpeg_turbo_rs_capi::{tjBufSize, tjTransform};
+
+    const TJFLAG_NOREALLOC: c_int = 1024;
+    /// `turbojpeg.h`: `TJSAMP_GRAY` / `TJXOPT_COPYNONE`.
+    const TJSAMP_GRAY: c_int = 3;
+    const TJXOPT_COPYNONE: c_int = 64;
+
     let handle: *mut c_void = tj3Init(TJINIT_TRANSFORM);
     assert!(!handle.is_null(), "tj3Init(TJINIT_TRANSFORM)");
-    // Over-allocated for the same reason as the standalone test: a port with
-    // the bug must be caught reporting the overrun, not by performing it.
-    let slack: usize = tjBufSize(WIDTH, HEIGHT, TJSAMP_444) + 4096;
-    let original: *mut u8 = caller_buffer(gray_bound + slack);
+    // SAFETY: `#[repr(C)]` plain data; all-zero is identity.
+    let mut transform: TjTransform = unsafe { std::mem::zeroed() };
+    if copynone {
+        transform.options |= TJXOPT_COPYNONE;
+    }
+    let transforms: [TjTransform; 1] = [transform];
+
+    let original: *mut u8 = if use_legacy && norealloc {
+        // What a compliant legacy caller allocates for a grayscale source.
+        caller_buffer(tjBufSize(WIDTH, HEIGHT, TJSAMP_GRAY))
+    } else {
+        std::ptr::null_mut()
+    };
     let mut dst_bufs: [*mut u8; 1] = [original];
     let mut dst_sizes: [usize; 1] = [0];
-    // SAFETY: `#[repr(C)]` plain data; all-zero is identity.
-    let transforms: [TjTransform; 1] = [unsafe { std::mem::zeroed() }];
 
-    // SAFETY: each array has the one slot `n = 1` declares.
-    let rc: c_int = unsafe {
-        tjTransform(
-            handle,
-            jpeg.as_ptr(),
-            jpeg.len(),
-            1,
-            dst_bufs.as_mut_ptr(),
-            dst_sizes.as_mut_ptr(),
-            transforms.as_ptr(),
-            TJFLAG_NOREALLOC,
-        )
+    // SAFETY: each array has the one slot `n = 1` declares; `jpeg` is a
+    // complete datastream.
+    let rc: c_int = if use_legacy {
+        unsafe {
+            tjTransform(
+                handle,
+                jpeg.as_ptr(),
+                jpeg.len(),
+                1,
+                dst_bufs.as_mut_ptr(),
+                dst_sizes.as_mut_ptr(),
+                transforms.as_ptr(),
+                if norealloc { TJFLAG_NOREALLOC } else { 0 },
+            )
+        }
+    } else {
+        unsafe {
+            tj3Transform(
+                handle,
+                jpeg.as_ptr(),
+                jpeg.len(),
+                1,
+                dst_bufs.as_mut_ptr(),
+                dst_sizes.as_mut_ptr(),
+                transforms.as_ptr(),
+            )
+        }
     };
-    let line: String = format!(
-        "{label} {} {}\n",
-        i32::from(dst_bufs[0] == original),
-        i32::from(rc == 0 && dst_sizes[0] > gray_bound)
-    );
+    // `kept` is meaningful only under NOREALLOC; reallocating lines print 1
+    // to keep the shape uniform, as the C side does.
+    let kept: i32 = if use_legacy && norealloc {
+        i32::from(dst_bufs[0] == original)
+    } else {
+        1
+    };
+    let size: usize = if rc == 0 { dst_sizes[0] } else { 0 };
+    let line: String = format!("{label} {rc} {kept} {size}\n");
+
     if dst_bufs[0] != original && !dst_bufs[0].is_null() {
-        // SAFETY: library-allocated on a replacing path; freed once.
+        // SAFETY: library-allocated on a replacing/reallocating path.
         unsafe { tj3Free(dst_bufs[0] as *mut c_void) };
     }
-    // SAFETY: ours, freed once; destroyed once.
+    // SAFETY: ours (or null, a no-op), freed once; destroyed once.
     unsafe {
         tj3Free(original as *mut c_void);
         tj3Destroy(handle);
@@ -807,7 +845,15 @@ fn norealloc_contract_matches_upstream_turbojpeg() {
         );
         return;
     };
-    let c_trace: String = helpers::run_oracle(&oracle, &[]);
+    // The shared fixture for the `fx_*` exact-parity family (P4-156, #544):
+    // the C side must transform the same bytes ours does, or the exact sizes
+    // in those lines would compare two different sources.
+    let fixture: Vec<u8> = gray_icc_fixture();
+    let fixture_dir: tempfile::TempDir = tempfile::tempdir().expect("tempdir");
+    let fixture_path: std::path::PathBuf = fixture_dir.path().join("gray_icc_fixture.jpg");
+    std::fs::write(&fixture_path, &fixture).expect("write fixture");
+    let c_trace: String =
+        helpers::run_oracle(&oracle, &[fixture_path.to_str().expect("utf-8 path")]);
 
     let mut ours: String = String::new();
     for (label, capacity) in [("roomy", ROOMY), ("cramped", CRAMPED), ("null", 0)] {
@@ -845,14 +891,194 @@ fn norealloc_contract_matches_upstream_turbojpeg() {
     // P4-151: the legacy wrapper's output-vs-capacity bridge.
     ours.push_str(&legacy_transform_case("legacy_transform_zero_size"));
     ours.push_str(&legacy_null_source_case("legacy_transform_null_source"));
-    ours.push_str(&legacy_gray_no_overrun_case(
-        "legacy_transform_gray_no_overrun",
+
+    // P4-156 (#544): exact marker-policy parity over the shared fixture —
+    // the one divergent path this item fixed (legacy NOREALLOC drops every
+    // marker via upstream's ordering quirk), the two that were already
+    // correct (legacy flags=0 and tj3Transform copy markers), and
+    // TJXOPT_COPYNONE on all three shapes.
+    ours.push_str(&fixture_case(
+        "fx_legacy_norealloc",
+        &fixture,
+        true,
+        true,
+        false,
     ));
+    ours.push_str(&fixture_case(
+        "fx_legacy_norealloc_copynone",
+        &fixture,
+        true,
+        true,
+        true,
+    ));
+    ours.push_str(&fixture_case(
+        "fx_legacy_flags0",
+        &fixture,
+        true,
+        false,
+        false,
+    ));
+    ours.push_str(&fixture_case(
+        "fx_legacy_flags0_copynone",
+        &fixture,
+        true,
+        false,
+        true,
+    ));
+    ours.push_str(&fixture_case(
+        "fx_tj3_realloc",
+        &fixture,
+        false,
+        false,
+        false,
+    ));
+    ours.push_str(&fixture_case(
+        "fx_tj3_realloc_copynone",
+        &fixture,
+        false,
+        false,
+        true,
+    ));
+    ours.push_str(&fixture_state_cases(&fixture));
 
     assert_eq!(
         ours, c_trace,
         "TJPARAM_NOREALLOC behaviour diverges from upstream TurboJPEG"
     );
+}
+
+/// One legacy-NOREALLOC identity transform of the fixture on an **existing**
+/// handle, in the `fx_*` line shape — the marker-registration state the
+/// handle carries decides the outcome.
+fn fixture_norealloc_on(handle: *mut c_void, label: &str, jpeg: &[u8]) -> String {
+    use libjpeg_turbo_rs_capi::{tjBufSize, tjTransform};
+
+    const TJFLAG_NOREALLOC: c_int = 1024;
+    /// `turbojpeg.h`: `TJSAMP_GRAY`.
+    const TJSAMP_GRAY: c_int = 3;
+
+    let original: *mut u8 = caller_buffer(tjBufSize(WIDTH, HEIGHT, TJSAMP_GRAY));
+    let mut dst_bufs: [*mut u8; 1] = [original];
+    let mut dst_sizes: [usize; 1] = [0];
+    // SAFETY: `#[repr(C)]` plain data; all-zero is identity.
+    let transforms: [TjTransform; 1] = [unsafe { std::mem::zeroed() }];
+
+    // SAFETY: each array has the one slot `n = 1` declares; `jpeg` is a
+    // complete datastream; the handle is live per the caller.
+    let rc: c_int = unsafe {
+        tjTransform(
+            handle,
+            jpeg.as_ptr(),
+            jpeg.len(),
+            1,
+            dst_bufs.as_mut_ptr(),
+            dst_sizes.as_mut_ptr(),
+            transforms.as_ptr(),
+            TJFLAG_NOREALLOC,
+        )
+    };
+    let size: usize = if rc == 0 { dst_sizes[0] } else { 0 };
+    let line: String = format!(
+        "{label} {rc} {} {size}\n",
+        i32::from(dst_bufs[0] == original)
+    );
+    if dst_bufs[0] != original && !dst_bufs[0].is_null() {
+        // SAFETY: library-allocated on a replacing path.
+        unsafe { tj3Free(dst_bufs[0] as *mut c_void) };
+    }
+    // SAFETY: ours, freed once.
+    unsafe { tj3Free(original as *mut c_void) };
+    line
+}
+
+/// P4-156's warm-handle state machine (#548 review): marker-processor
+/// registration is per-handle and permanent upstream, so the NOREALLOC
+/// ordering quirk drops markers only on a **cold** handle. Mirrors the C
+/// oracle's `fixture_state_cases` shape for shape:
+/// (a) a `flags=0` marker-copying warm-up registers processors, so the next
+/// NOREALLOC pre-read saves markers and the copy exceeds the grayscale bound;
+/// (b) the cold NOREALLOC call itself registers processors for *later* calls
+/// even though its own read was starved, so the second identical call is
+/// warm; (c) a COPYNONE-only warm-up registers nothing.
+fn fixture_state_cases(jpeg: &[u8]) -> String {
+    use libjpeg_turbo_rs_capi::tjTransform;
+
+    const TJXOPT_COPYNONE: c_int = 64;
+
+    let mut out: String = String::new();
+
+    // (a) warm via flags=0.
+    let handle: *mut c_void = tj3Init(TJINIT_TRANSFORM);
+    assert!(!handle.is_null(), "tj3Init(TJINIT_TRANSFORM)");
+    let mut dst_bufs: [*mut u8; 1] = [std::ptr::null_mut()];
+    let mut dst_sizes: [usize; 1] = [0];
+    // SAFETY: `#[repr(C)]` plain data; all-zero is identity.
+    let transforms: [TjTransform; 1] = [unsafe { std::mem::zeroed() }];
+    // SAFETY: one slot per the arrays; reallocating path (flags = 0).
+    let rc: c_int = unsafe {
+        tjTransform(
+            handle,
+            jpeg.as_ptr(),
+            jpeg.len(),
+            1,
+            dst_bufs.as_mut_ptr(),
+            dst_sizes.as_mut_ptr(),
+            transforms.as_ptr(),
+            0,
+        )
+    };
+    assert_eq!(rc, 0, "flags=0 warm-up transform");
+    if !dst_bufs[0].is_null() {
+        // SAFETY: library-allocated on the reallocating path.
+        unsafe { tj3Free(dst_bufs[0] as *mut c_void) };
+    }
+    out.push_str(&fixture_norealloc_on(handle, "fx_warm_after_flags0", jpeg));
+    // SAFETY: destroyed once.
+    unsafe { tj3Destroy(handle) };
+
+    // (b) the first NOREALLOC call warms the handle for the second.
+    let handle: *mut c_void = tj3Init(TJINIT_TRANSFORM);
+    assert!(!handle.is_null(), "tj3Init(TJINIT_TRANSFORM)");
+    out.push_str(&fixture_norealloc_on(handle, "fx_norealloc_first", jpeg));
+    out.push_str(&fixture_norealloc_on(handle, "fx_norealloc_second", jpeg));
+    // SAFETY: destroyed once.
+    unsafe { tj3Destroy(handle) };
+
+    // (c) COPYNONE-only history keeps the handle cold.
+    let handle: *mut c_void = tj3Init(TJINIT_TRANSFORM);
+    assert!(!handle.is_null(), "tj3Init(TJINIT_TRANSFORM)");
+    let mut copynone: TjTransform = unsafe { std::mem::zeroed() };
+    copynone.options |= TJXOPT_COPYNONE;
+    let transforms: [TjTransform; 1] = [copynone];
+    let mut dst_bufs: [*mut u8; 1] = [std::ptr::null_mut()];
+    let mut dst_sizes: [usize; 1] = [0];
+    // SAFETY: as the warm-up above.
+    let rc: c_int = unsafe {
+        tjTransform(
+            handle,
+            jpeg.as_ptr(),
+            jpeg.len(),
+            1,
+            dst_bufs.as_mut_ptr(),
+            dst_sizes.as_mut_ptr(),
+            transforms.as_ptr(),
+            0,
+        )
+    };
+    assert_eq!(rc, 0, "COPYNONE warm-up transform");
+    if !dst_bufs[0].is_null() {
+        // SAFETY: library-allocated on the reallocating path.
+        unsafe { tj3Free(dst_bufs[0] as *mut c_void) };
+    }
+    out.push_str(&fixture_norealloc_on(
+        handle,
+        "fx_cold_after_copynone",
+        jpeg,
+    ));
+    // SAFETY: destroyed once.
+    unsafe { tj3Destroy(handle) };
+
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -1362,23 +1588,25 @@ fn legacy_tj_transform_does_not_parse_the_source_into_the_handle() {
     }
 }
 
-/// A grayscale source must be sized as `TJSAMP_GRAY`, not as 4:4:4.
+/// A grayscale ICC-carrying source under legacy NOREALLOC: success within the
+/// grayscale bound, and nothing past it touched.
 ///
-/// P4-151 review found this: `probe` reports `Subsampling::Unknown` for a
-/// single-component image — there are no chroma planes to describe — and the
-/// generic mapping turns `Unknown` into `TJSAMP_444`. A legacy caller allocates
-/// `tjBufSize(w, h, TJSAMP_GRAY)`, which for 32x32 is 4096 bytes against 8192
-/// for 4:4:4. Handing `tj3Transform` the larger figure as a *capacity* means
-/// output between the two bounds is written past the end of the caller's
-/// allocation.
+/// P4-151 review found the sizing half: `probe` reports
+/// `Subsampling::Unknown` for a single-component image and the generic
+/// mapping turns `Unknown` into `TJSAMP_444` — a capacity larger than the
+/// `tjBufSize(w, h, TJSAMP_GRAY)` buffer a compliant caller allocates, which
+/// `tj3Transform` would then trust (over-stating a bound you allocate costs
+/// memory; over-stating a capacity you trust is an overrun). P4-156 (#544)
+/// added the marker half: upstream drops *every* marker on this path (its
+/// capacity pre-read skips `jcopy_markers_setup` registration), so the call
+/// succeeds within the bound rather than refusing at the ICC-inflated size.
 ///
-/// The direction is what makes it a defect rather than waste: over-stating a
-/// bound you allocate costs memory, over-stating a capacity you trust is an
-/// overrun.
-///
-/// The destination here is deliberately sized at the grayscale bound — what a
-/// compliant caller allocates — so a capacity computed as 4:4:4 is not merely
-/// wrong on paper.
+/// Post-P4-156 no marker can push a legal payload across the grayscale bound,
+/// so the sizing misderivation is no longer observable here — the
+/// `legacy_norealloc_capacities` unit tests pin it directly. What this test
+/// pins end-to-end is the quirk parity (success, size within the bound) and,
+/// via the canary past the bound, that nothing the caller never owned was
+/// written.
 #[test]
 fn legacy_tj_transform_sizes_a_grayscale_source_as_gray() {
     use libjpeg_turbo_rs_capi::inner::{Encoder, PixelFormat};
@@ -1391,12 +1619,12 @@ fn legacy_tj_transform_sizes_a_grayscale_source_as_gray() {
     let gray_pixels: Vec<u8> = (0..(WIDTH as usize * HEIGHT as usize))
         .map(|i| (i % 251) as u8)
         .collect();
-    // A profile large enough that the transformed output crosses the grayscale
-    // bound but stays under the 4:4:4 one — the window where a capacity
-    // computed as 4:4:4 lets `tj3Transform` write past the caller's buffer.
-    // Without it the output of a 32x32 gray image is far below both bounds and
-    // the test passes whether or not the gate is there; that is how the first
-    // version of it failed to catch the defect.
+    // The profile is what the quirk must drop: with it carried, the output is
+    // 5619 bytes against a 4096-byte grayscale bound (the pre-P4-156 refusal);
+    // with it dropped, 601. Its size still targets the window between the
+    // grayscale and 4:4:4 bounds so that a capacity-derivation regression
+    // *combined* with a marker-drop regression reports as an overrun rather
+    // than passing silently.
     let icc: Vec<u8> = vec![0x5Au8; 5_000];
     let jpeg: Vec<u8> = Encoder::new(
         &gray_pixels,
@@ -1450,22 +1678,26 @@ fn legacy_tj_transform_sizes_a_grayscale_source_as_gray() {
             TJFLAG_NOREALLOC,
         )
     };
-    // The invariant, stated directly: never report success having written more
-    // than the caller's buffer holds. Refusing is a correct outcome *for the
-    // bytes we produce* — the profile makes the output genuinely larger than a
-    // grayscale-sized destination. Upstream instead succeeds at 601 bytes on
-    // this exact path: its legacy-NOREALLOC capacity pre-read skips marker
-    // registration, so the profile (and every other marker) is dropped —
-    // P4-156 (#544) tracks matching that quirk, and its criterion 5 re-pins
-    // this test's mechanism once no marker can inflate the payload. What must
-    // not happen on either side is `rc == 0` with a size past the bound, which
-    // is the overrun a 4:4:4 capacity permits.
+    // Since P4-156 (#544) this call *succeeds within the grayscale bound*, as
+    // upstream does: the legacy NOREALLOC path drops every marker (upstream's
+    // capacity pre-read skips registration; the bridge forces COPYNONE to
+    // match), so the profile no longer inflates the output past 4096. Before
+    // that fix this was a refusal at 5619 bytes — asserting success here is
+    // what pins the quirk parity from the caller's side. The ICC fixture
+    // stays because the *source* still carries markers the path must drop;
+    // the capacity-derivation regression itself (gray vs 4:4:4) is pinned by
+    // the `legacy_norealloc_capacities` unit tests, since no marker can
+    // inflate a payload across the bound anymore (P4-156 criterion 5).
+    assert_eq!(
+        rc, 0,
+        "a compliant caller's gray-bound buffer must be accepted — upstream \
+         drops every marker on this path and succeeds within the bound"
+    );
     assert!(
-        !(rc == 0 && dst_sizes[0] > gray_bound),
-        "reported success after producing {} bytes into a {gray_bound}-byte \
-         buffer: the capacity handed to tj3Transform came from the 4:4:4 bound, \
-         so everything past {gray_bound} was written outside the caller's \
-         allocation",
+        dst_sizes[0] <= gray_bound,
+        "reported {} bytes against the {gray_bound}-byte grayscale bound: \
+         either the marker-drop quirk regressed (the ICC survived) or the \
+         capacity came from the 4:4:4 bound",
         dst_sizes[0]
     );
     // The direct evidence, independent of the reported size: nothing beyond

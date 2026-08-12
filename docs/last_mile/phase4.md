@@ -3199,18 +3199,18 @@ size.
 than papered over.** Upstream's grayscale case succeeds within the 4096-byte
 grayscale bound — on *this path only*, its capacity pre-read skips marker
 registration, so the transform drops the source's 5000-byte ICC profile (with
-every other marker) and emits 601 bytes. This port copies the profile on every
-path — which upstream also does on legacy `flags=0` and `tj3Transform`, both
-probed identical at 5619 bytes — so here it produces 5619 and refuses. The
+every other marker) and emits 601 bytes. This port then copied the profile on
+every path — which upstream also does on legacy `flags=0` and `tj3Transform`,
+both probed identical at 5619 bytes — so here it produced 5619 and refused. The
 refusal is *correct for the size produced*; the divergence is confined to the
-legacy NOREALLOC ordering quirk. Filed as P4-156 (#544).
-`legacy_transform_gray_no_overrun` is compared, but narrowed to the invariant
-both libraries satisfy — never report success having written past the bound a
-compliant caller allocated — since tracing `rc` would fail for the divergence
-rather than for anything this item governs. That still catches sizing grayscale
-as 4:4:4, which is what the case exists for, though only while the ICC keeps
-the payload above the grayscale bound; P4-156's criteria 3 and 5 widen the line
-back to exact parity and re-pin the capacity derivation by mechanism.
+legacy NOREALLOC ordering quirk. Filed as P4-156 (#544). At this item's
+closure the gray line was compared narrowed to the no-overrun invariant —
+never report success having written past the bound a compliant caller
+allocated — since tracing `rc` would have failed for the divergence rather
+than for anything this item governs. P4-156's closure (2026-08-13) replaced
+that narrowed line with the shared-fixture `fx_*` family, which compares `rc`
+and exact byte size on all three call shapes, and re-pinned the capacity
+derivation with the `legacy_norealloc_capacities` unit tests.
 
 Verified by `norealloc_all_entry_points` (18 passing, up from 14) with four new
 tests and three new oracle cases, each Red-checked by reintroducing the defect it
@@ -6742,7 +6742,7 @@ the same question.
 4. Legacy `tjCompress2` and friends, which set quality on every call, keep
    working and must not become sensitive to the default.
 
-## P4-156. Legacy NOREALLOC Transform Copies the Source ICC Profile Where Upstream Drops Every Marker — **OPEN**
+## P4-156. Legacy NOREALLOC Transform Copies the Source ICC Profile Where Upstream Drops Every Marker — **CLOSED 2026-08-13**
 
 **Motivation.** Found 2026-08-12 (issue #544) while adding C-oracle coverage for
 P4-151; scoped by the review's probe of real TurboJPEG 3.1.4.1. **The divergence
@@ -6806,3 +6806,55 @@ The other paths need no change: a fix that strips the ICC generally would
    or not the Unknown→S444 sizing bug returns. Whoever closes this item must
    replace the ICC-inflation mechanism with a direct pin of the derived
    subsampling (or an equivalent observable), not merely delete the fixtures.
+
+**Status (2026-08-13): closed.** The bridge reproduces the ordering quirk by
+forcing `TJXOPT_COPYNONE` on a local copy of the caller's transforms — only on
+the legacy NOREALLOC path, never on the caller's array (`legacy.rs`,
+`tjTransform`). Our `MarkerCopyMode::None` matches the quirk's whole effect
+because this port's transform writes no handle-level ICC either, exactly as
+upstream's `copyOption == JCOPYOPT_ALL` guard skips `jpeg_write_icc_profile`.
+
+**The quirk is per-handle state, not per-call** — the #548 review's
+differential probe caught the first version treating it as unconditional.
+Upstream's `jcopy_markers_setup` registration is permanent for the handle's
+life (there is no unregister API and it outlives `jpeg_abort_decompress`), so
+the pre-read starves marker saving only on a *cold* handle; on a *warm* one
+the processors are already registered, markers survive, and the ICC-carrying
+copy exceeds the grayscale bound — upstream refuses where the unconditional
+version succeeded markerless. Modeled as
+`TjInstance::transform_markers_registered`, set by any batch that would have
+registered processors upstream (a non-COPYNONE transform with
+`TJPARAM_SAVEMARKERS` nonzero) in both `tj3Transform` and the bridge — the
+starved read still registers for *later* calls, so the first cold NOREALLOC
+call warms the handle for the second. Trace-verified transitions
+(`fixture_state_cases`, both sides): `fx_warm_after_flags0 -1 1 0`,
+`fx_norealloc_first 0 1 601` then `fx_norealloc_second -1 1 0`,
+`fx_cold_after_copynone 0 1 601`. Red-checked by making the quirk
+unconditional again: the two warm lines read `0 1 601` against C's `-1 1 0`.
+The same review also made both bridge allocations fallible
+(`try_reserve_exact` → `"Memory allocation failure"`, matching upstream's
+THROW) since `n` is caller-controlled and Rust's infallible path aborts a C
+host.
+
+Criteria 1–4 are delivered by the oracle's `fx_*` family, which supersedes the
+narrowed `legacy_transform_gray_no_overrun` line criterion 3 named: the Rust
+harness now generates one ICC-carrying grayscale fixture, hands it to
+`norealloc_oracle` as `argv[1]`, and both sides transform *identical bytes*,
+so the six lines compare `rc` and **exact byte size** (transforms of identical
+input are byte-exact between the implementations; the stock-tool gate pins that
+for `jpegtran -copy all -rotate 90` over the upstream corpus).
+Measured against TurboJPEG 3.1.4.1: `fx_legacy_norealloc` 601 bytes both
+sides (quirk parity — criterion 1/4), `fx_legacy_flags0` and `fx_tj3_realloc`
+5619 both sides (the correct paths stayed correct — criterion 2), and the
+three `*_copynone` variants 601 each (COPYNONE traced on every shape —
+criterion 2). Red-checked by disabling the injection: ours reads `-1 1 0`
+against C's `0 1 601` on the first line only. Four state-transition lines
+join them per the warm-handle model above.
+
+Criterion 5 is the `legacy_norealloc_capacities` unit tests in `legacy.rs`
+(gray-vs-4:4:4 derivation, probe-subsampling passthrough, per-transform
+geometry), extracted from the bridge so the derivation is pinned without any
+payload crossing a bound; the standalone
+`legacy_tj_transform_sizes_a_grayscale_source_as_gray` now asserts the
+post-quirk contract (success within the grayscale bound, canary untouched).
+`norealloc_all_entry_points`: 18/18.
