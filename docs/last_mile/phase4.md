@@ -3500,9 +3500,11 @@ Verified by `cargo test --release --test worker_b8_progressive_bomb --
 run four consecutive times at the tightened bound without variation — plus
 `worker_b8_memory_bounds` (18), `worker_b8_huffman_bomb` (5) and
 `hard_case_x_byte_and_restart` (5 passing, 1 now ignored in the default run).
-The full workspace release gate is 2599 passing across 295 suites, 0 failures,
-7 ignored — the passing count falls by 1 and ignored rises by 3 because this
-item moved assertions rather than adding any.
+The full workspace release gate is 2600 passing across 295 suites, 0 failures,
+7 ignored: ignored rises by 3, one previously-passing test becomes one of them,
+and one test is added — the fallback check, which drives `check_decode_bounds`
+with RSS availability injected. Red-checked by inverting the availability test
+and by disabling the fallback assertion; both fail it.
 
 
 ## P4-148. Test Error-Manager Blobs Are Under-Aligned `[u8; N]` Buffers — **CLOSED 2026-08-12**
