@@ -30,6 +30,18 @@
 //! storage now *is* the struct. What no compiler can prevent is someone
 //! reintroducing the byte-array idiom later, and that is what this gate holds.
 //!
+//! **It matches the bug, not one spelling of it.** The first version pinned
+//! literals, so `MaybeUninit::<[u8; 512]>::zeroed()` — the more common
+//! turbofish construction — matched nothing, and a `type ErrBlob = [u8; 512];`
+//! alias would have laundered any form past it. Lines are normalised before
+//! matching and byte-array aliases are banned outright; the self-check below
+//! carries six real spellings that must be flagged and five legitimate lines
+//! that must not.
+//!
+//! **What this gate is not.** A determined author can still defeat a source
+//! scan. The guarantee is the type; this only catches the accidental
+//! copy-paste of the old idiom, which is the realistic regression.
+//!
 //! **Environment:** this reads the repository source tree, so it is skipped
 //! where that tree is not reachable — `wasm32-wasip1` under wasmtime (which
 //! preopens only `.` and `/tmp`) and a packaged crate. It runs on every native
@@ -37,14 +49,40 @@
 
 use std::path::{Path, PathBuf};
 
-/// Storage shapes that have no legitimate use in this crate's tests.
+/// Storage shapes that have no legitimate use in this crate's tests, written
+/// against [`normalize`]d text so a different but equivalent spelling does not
+/// slip past.
 ///
-/// Both are fixed-size byte arrays used as struct backing, which is the exact
-/// defect. A genuine byte *buffer* — JPEG output, a scanline row — is a
-/// `Vec<u8>` or a slice here, so this bans nothing anyone needs. `Vec<u8>` is
-/// deliberately not listed: it is the legitimate shape, and its heap block is
-/// only ever handed to functions that take `*mut u8`.
-const BANNED_SHAPES: [&str; 3] = ["MaybeUninit<[u8;", "Box<[u8;", "as *mut [u8;"];
+/// Each is a fixed-size byte array used as *struct backing*, which is the
+/// defect. A genuine byte **buffer** — a JPEG stream, a scanline row, a
+/// four-byte marker — is a bare `[u8; N]`, a `Vec<u8>` or a slice, and those
+/// are untouched: several tests legitimately declare `let src: [u8; 12]`. What
+/// makes these three different is that the array is standing in for a struct
+/// the library will write through, which is what makes its alignment load
+/// bearing.
+const BANNED_SHAPES: [&str; 4] = [
+    "MaybeUninit<[u8;",
+    "Box<[u8;",
+    "as*mut[u8;",
+    // A type alias would otherwise launder any of the above past a substring
+    // scan: `type ErrBlob = [u8; 512];` then `MaybeUninit<ErrBlob>`. There is
+    // no legitimate byte-array alias in these tests, so banning the alias
+    // itself closes the hole without having to resolve it.
+    "=[u8;",
+];
+
+/// Collapse the spellings Rust accepts for the same type into one form.
+///
+/// Removing whitespace folds `MaybeUninit < [u8 ; 512] >` together with the
+/// rustfmt-normalised form, and dropping the turbofish `::` before `<` folds
+/// `MaybeUninit::<[u8; 512]>::zeroed()` — the common construction spelling —
+/// into `MaybeUninit<[u8;512]>`. Without this the gate would pin one way of
+/// writing the bug rather than the bug, which is the failure mode of every
+/// substring lint.
+fn normalize(line: &str) -> String {
+    let dense: String = line.chars().filter(|c| !c.is_whitespace()).collect();
+    dense.replace("::<", "<")
+}
 
 /// This file, which necessarily contains the banned shapes as *data* — the
 /// list above and the self-check below. Excluding it is the usual cost of a
@@ -117,8 +155,9 @@ fn no_byte_array_stands_in_for_a_libjpeg_struct() {
             if is_comment(line) {
                 continue;
             }
+            let normalized: String = normalize(line);
             for shape in BANNED_SHAPES {
-                if line.contains(shape) {
+                if normalized.contains(shape) {
                     offenders.push(format!("  {name}:{}\t{}", index + 1, line.trim()));
                 }
             }
@@ -146,18 +185,44 @@ fn no_byte_array_stands_in_for_a_libjpeg_struct() {
 /// gate. This feeds it the real shapes and requires a hit.
 #[test]
 fn the_gate_detects_the_pattern_it_bans() {
-    for shape in BANNED_SHAPES {
-        let line: String = format!("    let mut err: {shape} 512]> = MaybeUninit::zeroed();");
+    /// Real lines a future test could plausibly write, each recreating the
+    /// under-aligned storage in a *different* spelling. Pinning only the one
+    /// form this change happened to remove would be overfitting: the turbofish
+    /// construction below is the more common way to write it, and matched
+    /// nothing until `normalize` was added.
+    const MUST_FLAG: [&str; 6] = [
+        "        let mut err: MaybeUninit<[u8; 512]> = MaybeUninit::zeroed();",
+        "        let mut err = MaybeUninit::<[u8; 512]>::zeroed();",
+        "        let mut err = MaybeUninit :: < [u8 ; 512] > :: uninit();",
+        "        let err: Box<[u8; 512]> = Box::new([0u8; 512]);",
+        "        let err_box = unsafe { Box::from_raw(err_ptr as *mut [u8; 512]) };",
+        "        type ErrBlob = [u8; 512];",
+    ];
+    for line in MUST_FLAG {
+        let normalized: String = normalize(line);
         assert!(
-            !is_comment(&line) && line.contains(shape),
-            "the scanner would not flag {shape}"
+            !is_comment(line) && BANNED_SHAPES.iter().any(|s| normalized.contains(s)),
+            "the scanner would not flag: {line}"
         );
     }
-    // ...and must not flag the prose that explains them.
-    assert!(
-        is_comment("    // a `MaybeUninit<[u8; 512]>` is align-1"),
-        "commented explanations must not trip the gate"
-    );
+
+    /// Lines that must **not** trip it: genuine byte buffers, which several
+    /// suites legitimately declare, and the prose that explains the ban. A gate
+    /// that fired on these would be deleted rather than obeyed.
+    const MUST_NOT_FLAG: [&str; 5] = [
+        "        let src: [u8; 12] = [0u8; 12];",
+        "        let mut dst: [u8; 64] = [0u8; 64];",
+        "    let data: [u8; 4] = [0xFF, 0xD8, 0xFF, 0xD9];",
+        "        let mut err: MaybeUninit<JpegErrorMgr> = MaybeUninit::zeroed();",
+        "    // a `MaybeUninit<[u8; 512]>` is align-1",
+    ];
+    for line in MUST_NOT_FLAG {
+        let normalized: String = normalize(line);
+        assert!(
+            is_comment(line) || !BANNED_SHAPES.iter().any(|s| normalized.contains(s)),
+            "the scanner would wrongly flag: {line}"
+        );
+    }
 
     // The scan must reach the suites that carried the defect. Checking for a
     // real one rather than for this file matters: this file is skipped, so
