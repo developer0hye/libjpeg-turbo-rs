@@ -8161,6 +8161,25 @@ pub unsafe extern "C" fn jpeg_start_compress(cinfo: *mut c_void, _write_all_tabl
                 return;
             }
         };
+        // Lossy JPEG admits 8 or 12 bits per sample, lossless 2..=16
+        // (`jcmaster.c:196-208`, `ERREXIT1` with the offending value). The
+        // order matters and is pinned by the oracle's mixed-invalid case:
+        // upstream's `initial_setup` raises `JERR_WIDTH_OVERFLOW` for an
+        // unrepresentable row *before* it looks at precision
+        // (`jcmaster.c:190-208`), so this gate sits after the row check.
+        // Until P4-154 (#538) the field was never read on the scanline path:
+        // precision 9/12/16 all produced byte-identical 8-bit output with no
+        // error.
+        let lossless: bool = priv_state.lossless_predictor != 0;
+        let precision_ok: bool = if lossless {
+            (2..=16).contains(&c.data_precision)
+        } else {
+            c.data_precision == 8 || c.data_precision == 12
+        };
+        if !precision_ok {
+            invoke_error_exit_parm(cinfo, JERR_BAD_PRECISION, c.data_precision);
+            return;
+        }
         priv_state.pixels_u8.clear();
         priv_state.pixels_u16.clear();
         // In raw-data mode we don't pre-allocate a pixel buffer — rows come
@@ -8236,6 +8255,22 @@ pub unsafe extern "C" fn jpeg_write_scanlines(
             Some(p) => p,
             None => return 0,
         };
+        // This is the *8-bit* entry point: a lossy compress requires exactly
+        // `BITS_IN_JSAMPLE` (8), a lossless one 2..=8 (`jcapistd.c:92-105`,
+        // `ERREXIT1`), checked before anything else — upstream raises it even
+        // ahead of its state check. The gates disagree about lossy 12:
+        // `jpeg_start_compress` admits it and this refuses it, an order the
+        // C oracle pins (P4-154, #538).
+        let lossless: bool = priv_state.lossless_predictor != 0;
+        let precision_ok: bool = if lossless {
+            (2..=8).contains(&c.data_precision)
+        } else {
+            c.data_precision == 8
+        };
+        if !precision_ok {
+            invoke_error_exit_parm(cinfo, JERR_BAD_PRECISION, c.data_precision);
+            return 0;
+        }
         if scanlines.is_null() || num_lines == 0 {
             return 0;
         }
@@ -8325,7 +8360,11 @@ fn run_encoder_and_flush(c: &mut JpegCompressPublic, priv_state: &mut CompressPr
 
     // Choose encode variant based on parameters captured earlier.
     let bytes_result = if priv_state.lossless_predictor != 0 {
-        libjpeg_turbo_rs::encode::pipeline::compress_lossless_extended(
+        // The precision the P4-154 gate accepted (2..=8 on this 8-bit path)
+        // reaches the encoder: SOF3 and the predictor arithmetic use it.
+        // Hardcoding 8 here silently substituted an 8-bit stream for an
+        // accepted low-precision request (#538 review).
+        libjpeg_turbo_rs::encode::pipeline::compress_lossless_extended_precision(
             &priv_state.pixels_u8,
             width,
             height,
@@ -8333,6 +8372,7 @@ fn run_encoder_and_flush(c: &mut JpegCompressPublic, priv_state: &mut CompressPr
             priv_state.lossless_predictor,
             priv_state.lossless_point_transform,
             baseline_restart_interval,
+            c.data_precision as u8,
         )
     } else if c.progressive_mode != 0 && c.arith_code != 0 {
         libjpeg_turbo_rs::encode::pipeline::compress_arithmetic_progressive(

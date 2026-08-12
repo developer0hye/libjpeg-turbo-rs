@@ -489,6 +489,17 @@ jobs:
         env:
           LIBJPEG_TURBO_PREFIX: /tmp/ljt8/prefix
 
+      # P4-154 (#538): the data_precision matrix, stage + code + parm + exact
+      # output bytes, against the stock libjpeg the step above provisioned.
+      # Named explicitly for the standing reason: a suite nothing names never
+      # runs and reports green forever.
+      - name: Classic C-ABI data_precision gates (P4-154)
+        run: >
+          cargo test -p libjpeg-turbo-rs-capi
+          --test capi_classic_compress_precision -- --nocapture
+        env:
+          LIBJPEG_TURBO_PREFIX: /tmp/ljt8/prefix
+
       - name: Classic C-ABI state transitions (P4-104)
         run: >
           cargo test -p libjpeg-turbo-rs-capi
