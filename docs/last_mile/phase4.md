@@ -361,7 +361,7 @@ removed. `capi_classic_error_codes.rs` cross-validates code 51 and the message
 this pinned the *constant*, not what a C consumer saw. When this was written,
 `format_message` rendered "bogus message code" for every error — filed and
 since fixed as
-[P4-146](#p4-146-jpeg_std_error-leaves-jpeg_message_table-null-so-every-classic-error-formats-as-bogus-message-code--partial-rendering-fixed-output_messagetrace-gating-outstanding),
+[P4-146](#p4-146-jpeg_std_error-leaves-jpeg_message_table-null-so-every-classic-error-formats-as-bogus-message-code--closed-2026-08-13),
 which also made that test render each code through our own formatter. The
 message check is still how the first draft was caught guessing "Backing store
 not supported" from the macro name; the real text is "Memory limit exceeded".
@@ -6547,13 +6547,14 @@ together)", contradicting `tj3Init`'s own doc twelve lines below, the
 are a plain enum. Corrected. The first draft of the new test believed the
 module doc and failed at `tj3Init(4)`.
 
-## P4-146. `jpeg_std_error` Leaves `jpeg_message_table` Null, So Every Classic Error Formats as "bogus message code" — **PARTIAL: rendering fixed; `output_message`/trace gating outstanding**
+## P4-146. `jpeg_std_error` Leaves `jpeg_message_table` Null, So Every Classic Error Formats as "bogus message code" — **CLOSED 2026-08-13**
 
 **GitHub:** [#518](https://github.com/developer0hye/libjpeg-turbo-rs/issues/518) — filed 2026-08-11 from the P4-14 review. Affects every classic
 `JERR_*`, not one code.
 
 **Motivation.** `jpeg_std_error` sets `jpeg_message_table = std::ptr::null()`
-(`jpeglib.rs:1479`). `default_format_message` therefore always takes its
+(`jpeglib.rs:1479` as of filing; that assignment is now the table install at
+`jpeglib.rs:1684`). `default_format_message` therefore always takes its
 fallback and writes `"libjpeg-turbo-rs: bogus message code"` into the caller's
 buffer — for *every* error, whatever `msg_code` says.
 
@@ -6634,17 +6635,33 @@ the payload is not.
   built a `jpeg_error_mgr` without `jpeg_std_error`, where upstream would
   dereference a null table.
 
-* **Criterion 4 — not done, and this item stays PARTIAL because of it.**
-  `output_message`'s stderr format and the `trace_level` gating on
-  `emit_message` are untouched.
+* **Criterion 4 — done 2026-08-13, closing the item.** `default_output_message`
+  was a documented no-op; it now renders through the *installed*
+  `format_message` and prints `%s\n` to stderr, exactly `jerror.c:95-110` —
+  allocation-free (it runs on the paths that report allocation failure), with
+  the assembled line issued as one raw `write(2)` to fd 2 rather than through
+  `std::io::stderr()`, whose Rust-side lock cannot exclude a host's own
+  `fprintf(stderr, …)`. `default_emit_message`'s display
+  policy already matched `jerror.c:113-143`; it now also holds no Rust
+  reference across the `output_message` callback (raw field reads/writes
+  only), since that callback may be a caller's hook inspecting the same
+  `jpeg_error_mgr`. Pinned by `capi_output_message.rs` (3 child-process tests,
+  Red-verified against the no-op): formatted-text-plus-newline on stderr with
+  `%02x` parameter substitution, routing through an overridden formatter, and
+  the emit policy — trace above `trace_level` silent, level-0 advisory shown,
+  first warning only, both warnings counted. The suite is named in `ci.yml`
+  beside the other two, for the reason recorded above.
 
   An earlier draft closed this item and said criterion 4 was "tracked under
-  P4-100's error-reporting scope". **That was wrong and is corrected here:**
+  P4-100's error-reporting scope". **That was wrong and was corrected here:**
   P4-100 is about failures surfacing as suspension or silent success — error
   *propagation* — and its acceptance criteria say nothing about `output_message`
-  formatting or trace gating. Delegating to it would have retired a criterion
-  into an item that does not cover it, which is how work disappears. Criterion 4
-  stays here, measurable, until someone does it.
+  formatting or trace gating. Criterion 4 stayed here, measurable, until it was
+  done.
+
+**Status (2026-08-13): closed.** Criteria 1–3 delivered 2026-08-11 (rendering,
+generated 129-entry table, whole-table gate); criterion 4 delivered 2026-08-13
+by `capi_output_message.rs` as above.
 
 ## P4-154. Classic `jpeg_write_scanlines` / `jpeg_start_compress` Ignore `data_precision` Entirely — **CLOSED 2026-08-13**
 

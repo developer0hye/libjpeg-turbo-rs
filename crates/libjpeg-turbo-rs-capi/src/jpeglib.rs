@@ -857,42 +857,128 @@ unsafe extern "C" fn default_emit_message(cinfo: *mut c_void, msg_level: c_int) 
     // that follow the documented protocol (counting warnings via
     // `num_warnings`, gating "first warning" printing on
     // `num_warnings == 0`) interoperate correctly:
-    //   * msg_level < 0 → warning. Bump `num_warnings`; route to
-    //     `output_message` only when this is the first warning OR
-    //     trace_level >= 3.
+    //   * msg_level < 0 → warning. Route to `output_message` only when this
+    //     is the first warning OR trace_level >= 3, then bump
+    //     `num_warnings` — that order is upstream's, and the note at the
+    //     call site below says why it is load-bearing.
     //   * msg_level >= 0 → trace. Route to `output_message` only when
     //     `msg_level <= trace_level`.
     if cinfo.is_null() {
         return;
     }
+    // Raw reads/writes only: `output_message` may be a caller's hook that
+    // inspects or mutates the same `jpeg_error_mgr`, so no Rust reference may
+    // be live across that call.
     unsafe {
         let err_pp: *const *mut JpegErrorMgr = cinfo as *const *mut JpegErrorMgr;
         let err_ptr: *mut JpegErrorMgr = err_pp.read();
         if err_ptr.is_null() {
             return;
         }
-        let err: &mut JpegErrorMgr = &mut *err_ptr;
+        let trace_level: c_int = std::ptr::addr_of!((*err_ptr).trace_level).read();
         if msg_level < 0 {
             // Match libjpeg-turbo's jerror.c::emit_message order: route
             // to `output_message` first (so a custom output hook still
             // sees `num_warnings == 0` on the first warning, the way
             // libjpeg's example callers expect), then increment.
-            if err.num_warnings == 0 || err.trace_level >= 3 {
-                if let Some(out) = err.output_message {
+            let num_warnings: c_long = std::ptr::addr_of!((*err_ptr).num_warnings).read();
+            if num_warnings == 0 || trace_level >= 3 {
+                if let Some(out) = std::ptr::addr_of!((*err_ptr).output_message).read() {
                     out(cinfo);
                 }
             }
-            err.num_warnings = err.num_warnings.saturating_add(1);
-        } else if msg_level <= err.trace_level {
-            if let Some(out) = err.output_message {
+            // Re-read before incrementing: the hook above may have touched
+            // the counter, and upstream increments whatever is there.
+            let after: c_long = std::ptr::addr_of!((*err_ptr).num_warnings).read();
+            std::ptr::addr_of_mut!((*err_ptr).num_warnings).write(after.saturating_add(1));
+        } else if msg_level <= trace_level {
+            if let Some(out) = std::ptr::addr_of!((*err_ptr).output_message).read() {
                 out(cinfo);
             }
         }
     }
 }
 
-unsafe extern "C" fn default_output_message(_cinfo: *mut c_void) {
-    // No-op by default — real libjpeg routes through stderr.
+/// One raw `write` of the whole line to file descriptor 2.
+///
+/// Not `std::io::stderr()`: its lock is Rust-side only, so in a mixed C/Rust
+/// process a host's `fprintf(stderr, ...)` can land between two locked Rust
+/// writes and corrupt the line — and on a Windows console the Rust handle
+/// round-trips through UTF-16, rejecting the non-UTF-8 bytes a
+/// caller-installed formatter or a locale-encoded `%s` may produce. C's
+/// `stderr` is unbuffered, so upstream's `fprintf(stderr, "%s\n", buffer)`
+/// reaches the descriptor as one write; assembling the line first and issuing
+/// one `write(2)` is byte-preserving on every platform and cannot be split by
+/// the host's own stdio output. Partial writes advance; errors stop, as
+/// unchecked as upstream's `fprintf`.
+fn write_line_to_stderr_fd(line: &[u8]) {
+    #[cfg(unix)]
+    extern "C" {
+        fn write(fd: c_int, buf: *const c_void, count: usize) -> isize;
+    }
+    #[cfg(windows)]
+    extern "C" {
+        #[link_name = "_write"]
+        fn write(fd: c_int, buf: *const c_void, count: c_uint) -> c_int;
+    }
+    let mut sent: usize = 0;
+    while sent < line.len() {
+        // SAFETY: the range is inside `line`; fd 2 is the process's stderr.
+        let n: isize = unsafe {
+            #[cfg(unix)]
+            {
+                write(2, line[sent..].as_ptr() as *const c_void, line.len() - sent)
+            }
+            #[cfg(windows)]
+            {
+                write(
+                    2,
+                    line[sent..].as_ptr() as *const c_void,
+                    (line.len() - sent) as c_uint,
+                ) as isize
+            }
+        };
+        if n <= 0 {
+            return;
+        }
+        sent += n as usize;
+    }
+}
+
+unsafe extern "C" fn default_output_message(cinfo: *mut c_void) {
+    // Upstream (`jerror.c:95-110`): render through the *installed*
+    // `format_message` — a caller that overrides only the formatter still
+    // owns the text — then `fprintf(stderr, "%s\n", buffer)`. P4-146
+    // criterion 4 (#518).
+    //
+    // Allocation-free on purpose: this runs on error paths, including the
+    // ones that report allocation failure.
+    if cinfo.is_null() {
+        return;
+    }
+    // SAFETY: the error path reads only the leading `err` pointer, which
+    // every caller-shaped cinfo carries; raw reads only, since the formatter
+    // callback may inspect the same object.
+    unsafe {
+        let err_pp: *const *mut JpegErrorMgr = cinfo as *const *mut JpegErrorMgr;
+        let err_ptr: *mut JpegErrorMgr = err_pp.read();
+        if err_ptr.is_null() {
+            return;
+        }
+        let Some(fmt) = std::ptr::addr_of!((*err_ptr).format_message).read() else {
+            return;
+        };
+        // One extra slot for the newline: the line goes to the descriptor as
+        // a single write (see `write_line_to_stderr_fd`).
+        let mut buffer: [u8; JMSG_LENGTH_MAX + 1] = [0; JMSG_LENGTH_MAX + 1];
+        fmt(cinfo, buffer.as_mut_ptr());
+        let len: usize = buffer[..JMSG_LENGTH_MAX]
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(JMSG_LENGTH_MAX);
+        buffer[len] = b'\n';
+        write_line_to_stderr_fd(&buffer[..len + 1]);
+    }
 }
 
 // Upstream `JERR_*` message codes as they resolve at `JPEG_LIB_VERSION = 80`.

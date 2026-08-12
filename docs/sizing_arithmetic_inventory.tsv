@@ -35,7 +35,7 @@ crates/libjpeg-turbo-rs-capi/src/jpeglib.rs	1	counter	*discarded = discarded.sat
 crates/libjpeg-turbo-rs-capi/src/jpeglib.rs	1	counter	*discarded = discarded.saturating_add(2);
 crates/libjpeg-turbo-rs-capi/src/jpeglib.rs	1	counter	c.output_scanline = c.output_scanline.saturating_add(skip);
 crates/libjpeg-turbo-rs-capi/src/jpeglib.rs	1	counter	c.output_scanline = c.output_scanline.saturating_add(skipped);
-crates/libjpeg-turbo-rs-capi/src/jpeglib.rs	1	counter	err.num_warnings = err.num_warnings.saturating_add(1);
+crates/libjpeg-turbo-rs-capi/src/jpeglib.rs	1	counter	std::ptr::addr_of_mut!((*err_ptr).num_warnings).write(after.saturating_add(1));
 crates/libjpeg-turbo-rs-capi/src/jpeglib.rs	1	geometry-count	.saturating_mul(mcus_per_row)
 crates/libjpeg-turbo-rs-capi/src/jpeglib.rs	1	geometry-count	let imcu_row_height: u32 = (max_v as u32).saturating_mul(data_unit).max(1);
 crates/libjpeg-turbo-rs-capi/src/jpeglib.rs	1	geometry-count	let interval: u32 = (c.restart_in_rows as u32).saturating_mul(mcus_per_row);

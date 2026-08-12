@@ -59,7 +59,9 @@ Features:
 - The codec underneath is cross-validated against C libjpeg-turbo
   (`djpeg` / `cjpeg` / `jpegtran`) by the repository test suite.
 - Error messages reproduce the C `format_message` table so callers that
-  parse message strings keep working.
+  parse message strings keep working. The default `output_message` prints
+  them to stderr as upstream does; a caller wanting silence installs its own
+  callback.
 - The crate is `unsafe` at the boundary by nature (C ABI); the underlying
   codec is pure Rust.
 
