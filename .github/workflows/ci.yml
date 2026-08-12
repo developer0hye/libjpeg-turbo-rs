@@ -435,9 +435,11 @@ jobs:
       # failure mode. They are tracked as P4-152, not fixed here: P4-147 is
       # scoped to the test that actually flaked, and each of the others needs
       # its own answer to "what is the deterministic measure?".
-      - name: Restart-marker cost ratio, serial (P4-147)
+      - name: Timing ratios, serial (P4-147, P4-152)
         run: >
-          cargo test --release --test worker_b8_restart_bomb --
+          cargo test --release
+          --test worker_b8_restart_bomb
+          --test worker_b8_progressive_bomb --
           --include-ignored --test-threads=1
         # Sub-second once built. A generous cap that still fails promptly: the
         # regression this guards is an `O(MCUs * RST)` scan over 65,536

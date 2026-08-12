@@ -3122,6 +3122,66 @@ from the source, e.g. S420 handle over an S444 source); and the P4-145 oracle
 gains a legacy-wrapper case so the comparison is against C rather than against
 this description.
 
+**Status (2026-08-12): closed.** No absolute wall-clock comparison remains in
+any test in this repository — verified by grep, not by inspection. Each of the
+five sites got its own answer, and the answer differed because the *reason* the
+bound existed differed. Every decision below rests on a measurement taken for
+this closure, not on the margins the original comments claimed.
+
+**Two deleted, because peak RSS already carries the regression**
+(`worker_b8_memory_bounds.rs`, criterion **(b)**/**(c)**). Both assertion
+helpers already asserted `peak_rss_delta` — the bound the file exists for, and a
+deterministic one. The clock beside it added nothing: its own comment described
+500 ms as "~1000x to tolerate contended CI runners" and 2000 ms as "~180x for CI
+jitter". A margin that large cannot fire on a regression the RSS bound would
+miss; it can only fire on contention, which is precisely the false positive.
+
+**One deleted, because the bound was 50 000x the measurement**
+(`worker_b8_huffman_bomb.rs`, criterion **(c)**). Measured min-of-9 on darwin
+arm64 release, stable to three decimals over four rounds: the bomb decodes in
+**0.020 ms** against a 1000 ms bound. A ratio against a control was measured and
+*rejected*: an ordinary 256x256 decode takes 0.071 ms, so the bomb runs at 0.29x
+an ordinary image. It is a pathological Huffman *table*, not a large payload, so
+comparing the two would pin the ratio of two unrelated workloads. The memory
+assertion — which catches the "2^16-entry lookup per symbol" regression a
+pathological table actually produces — stays, as does the requirement that the
+decode terminate with a correct-size image or a structured error.
+
+**Two converted to ratios against a control** (`worker_b8_progressive_bomb.rs`,
+criterion **(a)**), `#[ignore]`d out of the default parallel run and executed by
+the serial CI step P4-147 added, now renamed `Timing ratios, serial (P4-147,
+P4-152)`.
+
+`scan_loop_cost_scales_linearly_with_scan_count` quadruples the scan count and
+requires the work to roughly quadruple. This is what the deleted
+`UNLIMITED_PARSE_WALL_CLOCK_MS` was *for* — its comment named an O(N^2) scan
+loop — but a fixed ceiling 1000x above the measurement could only catch a
+catastrophic regression while failing on a loaded runner for no reason. Measured
+min-of-9 over five rounds: 3.87, 3.91, 3.91, 3.91, 3.87 against a linear
+expectation of 4.0; quadratic is ~16. Bound 8.0, between the two and nearer the
+measurement. The 2000-to-8000 span is the widest 4x window available, capped by
+the decoder's own 8192-scan parse limit.
+
+`scan_limit_stops_early_rather_than_walking_every_scan` compares the limited
+decode against the *same bomb with no limit*, which is what makes "early"
+measurable. Measured 0.278, 0.269, 0.270, 0.269, 0.269 — near the 0.2 the scan
+ratio implies, plus fixed header cost. Bound 0.6. The deleted
+`LIMITED_DECODE_WALL_CLOCK_MS` asserted a millisecond ceiling that a mitigation
+which had **stopped firing entirely** would still have satisfied, since the
+unlimited decode of this fixture also finishes in about a millisecond — so the
+ratio does not merely reduce flakiness here, it tests something the old bound
+could not.
+
+Both ratios take the *minimum* over rounds of a min-of-9: noise only ever adds
+time, so an unlucky pairing can inflate a ratio but not deflate it below the
+true scaling. Running them serially is load-bearing — a ratio cancels machine
+speed but not contention, and two workloads timed while other test binaries
+compete for the same cores are not comparable to each other either.
+
+Verified by `cargo test --release --test worker_b8_progressive_bomb --
+--include-ignored --test-threads=1` (3 passing, stable over three consecutive
+runs) plus `worker_b8_memory_bounds` (18) and `worker_b8_huffman_bomb` (5).
+
 ## P4-153. Marker-Parse Metadata Copies Are Still Infallible — **CLOSED 2026-08-12**
 
 **Motivation.** Found 2026-08-12 (issue #536) in review while closing P4-144,
@@ -3363,7 +3423,7 @@ otherwise: a regression that slows *both* paths equally leaves the ratio
 unchanged. General decode performance belongs in `experiments/`, not in a
 correctness suite.
 
-## P4-152. Five Absolute Wall-Clock Assertions Remain in the Parallel Default Suite — **OPEN**
+## P4-152. Five Absolute Wall-Clock Assertions Remain in the Parallel Default Suite — **CLOSED 2026-08-12**
 
 **Motivation.** Found 2026-08-12 (issue #534) while closing P4-147, which
 fixed exactly one of them. The same contention failure mode is still live at:
