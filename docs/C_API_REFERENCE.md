@@ -85,7 +85,7 @@
 |---|---|---|---|
 | `tj3Compress8(handle, src, w, pitch, h, pf, &dst, &size)` | Compress 8-bit pixels to JPEG | `compress()`, `compress_optimized()`, etc. | ✅ |
 | `tj3Compress12(handle, src, w, pitch, h, pf, &dst, &size)` | Compress 12-bit pixels | `TjHandle::compress_12bit()` / `compress_12bit()` | ✅ |
-| `tj3Compress16(handle, src, w, pitch, h, pf, &dst, &size)` | Compress 16-bit pixels (lossless only) | `TjHandle::compress_16bit()` / `compress_16bit()` | ✅ |
+| `tj3Compress16(handle, src, w, pitch, h, pf, &dst, &size)` | Compress 16-bit pixels — lossless only: fails with `JERR_BAD_PRECISION` unless `TJPARAM_LOSSLESS` is set, as upstream does (P4-150) | `TjHandle::compress_16bit()` / `compress_16bit()` | ✅ |
 
 ### Compression from YUV
 

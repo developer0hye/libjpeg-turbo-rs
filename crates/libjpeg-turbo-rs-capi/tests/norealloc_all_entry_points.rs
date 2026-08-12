@@ -165,11 +165,11 @@ fn tj3_compress16_keeps_the_callers_buffer() {
     const TJPARAM_LOSSLESS: c_int = 15;
 
     let handle: *mut c_void = compressor(TJINIT_COMPRESS);
-    // 16-bit samples are for *lossless* JPEG upstream; a lossy 16-bit compress
-    // is refused there. This port accepts it today — that divergence is
-    // P4-150 — so testing the ownership contract in the lossy configuration
-    // would enshrine the bug and break when P4-150 is fixed. The oracle uses
-    // lossless for the same reason.
+    // 16-bit samples are for *lossless* JPEG upstream, and a lossy 16-bit
+    // compress is refused (`jcmaster.c:206`) before ownership matters — so
+    // lossless is the only configuration in which this contract is observable
+    // at all. P4-150 (#531) made the port agree on that refusal; the oracle
+    // traces it as `compress16_lossy_roomy`.
     // SAFETY: live handle from `compressor`.
     unsafe {
         assert_eq!(tj3Set(handle, TJPARAM_LOSSLESS, 1), 0, "set lossless");
@@ -482,16 +482,20 @@ fn compress12_case(label: &str, capacity: usize) -> String {
 }
 
 /// `tj3Compress16`. 16-bit samples are for *lossless* JPEG upstream — a lossy
-/// 16-bit compress is refused before ownership matters — so lossless is the
-/// configuration compared here.
-fn compress16_case(label: &str, capacity: usize) -> String {
+/// 16-bit compress is refused before ownership matters (`jcmaster.c:206`) — so
+/// lossless is the configuration the contract is exercised in. `lossless =
+/// false` traces the refusal, which has an ownership contract of its own: the
+/// caller's buffer must come back untouched.
+fn compress16_case(label: &str, capacity: usize, lossless: bool) -> String {
     /// `turbojpeg.h`: `TJPARAM_LOSSLESS`.
     const TJPARAM_LOSSLESS: c_int = 15;
 
     let handle: *mut c_void = compressor(TJINIT_COMPRESS);
-    // SAFETY: live handle.
-    unsafe {
-        assert_eq!(tj3Set(handle, TJPARAM_LOSSLESS, 1), 0, "set lossless");
+    if lossless {
+        // SAFETY: live handle.
+        unsafe {
+            assert_eq!(tj3Set(handle, TJPARAM_LOSSLESS, 1), 0, "set lossless");
+        }
     }
     let src: Vec<u16> = (0..(WIDTH as usize * HEIGHT as usize * 3))
         .map(|i| (i % 65535) as u16)
@@ -639,8 +643,19 @@ fn norealloc_contract_matches_upstream_turbojpeg() {
         ours.push_str(&compress12_case(&format!("compress12_{label}"), capacity));
     }
     for (label, capacity) in [("roomy", ROOMY), ("cramped", CRAMPED), ("null", 0)] {
-        ours.push_str(&compress16_case(&format!("compress16_{label}"), capacity));
+        ours.push_str(&compress16_case(
+            &format!("compress16_{label}"),
+            capacity,
+            true,
+        ));
     }
+    // Lossy 16-bit, which upstream refuses outright. This line needed the
+    // lossless flag to agree until P4-150 (#531): the port accepted the
+    // configuration and encoded a lossless stream anyway, so a trace taken here
+    // would have disagreed for a reason unrelated to buffer ownership. That it
+    // now agrees with no flag set is the proof the acceptance rule was fixed,
+    // and it pins the refusal path's ownership behaviour too.
+    ours.push_str(&compress16_case("compress16_lossy_roomy", ROOMY, false));
     for (label, capacity) in [("roomy", ROOMY), ("cramped", CRAMPED), ("null", 0)] {
         ours.push_str(&yuv_planes_case(&format!("yuvplanes_{label}"), capacity));
     }

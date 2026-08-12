@@ -351,8 +351,10 @@ pub unsafe extern "C" fn tj3Decompress12(
 /// `tj3Compress16(handle, srcBuf, width, pitch, height, pixelFormat,
 ///                jpegBuf, jpegSize) -> int`.
 ///
-/// 16-bit is lossless-only. Uses the handle's `LOSSLESSPSV` /
-/// `LOSSLESSPT` parameters.
+/// 16-bit is lossless-only: with `TJPARAM_LOSSLESS` unset this fails with
+/// libjpeg's `JERR_BAD_PRECISION` (`jcmaster.c:206` admits precision 8 or 12
+/// for a lossy compress), rather than silently encoding a lossless stream —
+/// P4-150. Uses the handle's `LOSSLESSPSV` / `LOSSLESSPT` parameters.
 ///
 /// # Safety
 ///
@@ -432,6 +434,107 @@ pub unsafe extern "C" fn tj3Compress16(
                     return -1;
                 }
             };
+
+            let is_lossless: bool = inst.inner.get(TjParam::Lossless) != 0;
+
+            // Which precision the encode will actually use. Upstream honours
+            // `TJPARAM_PRECISION` only when lossless is set and only inside
+            // `BITS_IN_JSAMPLE - 3 ..= BITS_IN_JSAMPLE` (`turbojpeg-mp.c:111-115`),
+            // and *silently ignores* anything else, falling back to 16 rather
+            // than erroring — so a caller who set an out-of-range value still
+            // gets a stream.
+            let raw_precision: i32 = inst.inner.get(TjParam::Precision);
+            let effective_precision: i32 = if is_lossless && (13..=16).contains(&raw_precision) {
+                raw_precision
+            } else {
+                16
+            };
+
+            // ITU-T T.81 / Annex H: in lossless mode the point transform Pt
+            // shifts the lower Pt bits off each sample, so Pt must be strictly
+            // less than the sample precision. Mirror C's encode-side Al checks
+            // in `jcparam.c::jpeg_enable_lossless` (jcparam.c:586-589) and
+            // `jcmaster.c::validate_script` (jcmaster.c:396-399).
+            //
+            // This runs *before* the destination preflight below because
+            // upstream reaches it first: `setCompDefaults` — which calls
+            // `jpeg_enable_lossless` — precedes `jpeg_mem_dest_tj`
+            // (`turbojpeg-mp.c:117-120`). Measured, since the two errors are
+            // otherwise indistinguishable from the call site: with `PRECISION=13`,
+            // `LOSSLESSPT=13`, `NOREALLOC` and an empty slot, TurboJPEG 3 reports
+            // the lossless-parameter error, not the buffer one.
+            let point_transform: i32 = inst.inner.get(TjParam::LosslessPt);
+            if is_lossless && point_transform >= effective_precision {
+                inst.set_error(
+                    format!(
+                        "tj3Compress16: TJPARAM_LOSSLESSPT {point_transform} must be < \
+                         TJPARAM_PRECISION {effective_precision}"
+                    ),
+                    TJERR_FATAL,
+                );
+                return -1;
+            }
+
+            // Upstream sets the destination up *before* `jpeg_start_compress`
+            // (`turbojpeg-mp.c:118-120`), so a `TJPARAM_NOREALLOC` slot that
+            // cannot be used at all is reported before the precision rule is
+            // ever consulted: `jdatadst-tj.c:184-192` raises `JERR_BUFFER_SIZE`
+            // when the slot is NULL, or its capacity is zero, and `alloc` is
+            // false.
+            //
+            // The distinction is narrower than "destination before precision".
+            // Measured against TurboJPEG 3, a lossy 16-bit call with a NULL
+            // slot reports the buffer error — but the same call with a non-NULL
+            // slot of *too small but non-zero* capacity reports the precision
+            // error, because that capacity is only tested when output overflows
+            // it, which never happens once the compress is refused. Both
+            // orderings are traced in `tests/capi_compress_precision.rs`; only
+            // the first needs this check.
+            let norealloc: bool = inst.inner.get(TjParam::NoRealloc) != 0;
+            if norealloc {
+                // SAFETY: `jpeg_buf` and `jpeg_size` were both NULL-checked
+                // above; the caller's contract covers their validity.
+                let slot_unusable: bool = unsafe { (*jpeg_buf).is_null() || *jpeg_size == 0 };
+                if slot_unusable {
+                    // The same message the delivery path below raises for a NULL
+                    // slot, and the same one the other four compressing entry
+                    // points use — one phrase for both conditions, as upstream
+                    // has one `JERR_BUFFER_SIZE` for both: to `jdatadst-tj.c` a
+                    // NULL pointer and a zero capacity are the same thing, a
+                    // slot it may not grow and cannot write into.
+                    inst.set_error(
+                        "tj3Compress16: TJPARAM_NOREALLOC is set but no output buffer was supplied",
+                        TJERR_FATAL,
+                    );
+                    return -1;
+                }
+            }
+
+            // P4-150: 16-bit samples are legal only for a *lossless* compress.
+            //
+            // Upstream imposes no precision rule of its own here — it sets
+            // `cinfo->data_precision = 16` (`turbojpeg-mp.c:107`) and lets
+            // `jpeg_start_compress` decide, where `jcmaster.c:199-208` admits
+            // 2..=16 for a lossless compress and only 8 or 12 for a lossy one.
+            // Reading `turbojpeg-mp.c` alone therefore suggests 16-bit lossy is
+            // fine, which is how this function came to encode a *lossless*
+            // stream for a caller who had asked for quality 80: it returned
+            // neither the requested format nor the documented error.
+            //
+            // The gate is the lossless flag, not `TJPARAM_PRECISION`: that
+            // parameter is read only when the flag is set
+            // (`turbojpeg-mp.c:111-115`), so requesting 12 bits here leaves the
+            // effective precision at 16 and the call still fails.
+            if !is_lossless {
+                // libjpeg's own `JERR_BAD_PRECISION` text. An error raised
+                // inside libjpeg reaches `errStr` through `CATCH_LIBJPEG`
+                // verbatim, so it carries none of TurboJPEG's usual
+                // `function():` prefix — compared byte-for-byte against the C
+                // oracle in `tests/capi_compress_precision.rs`.
+                inst.set_error("Unsupported JPEG data precision 16", TJERR_FATAL);
+                return -1;
+            }
+
             // SAFETY: caller guarantees `src_buf` is valid for `total` u16s.
             let raw: &[u16] = unsafe { std::slice::from_raw_parts(src_buf, total) };
             let dense: Vec<u16> = if line_samples == w * components {
@@ -445,35 +548,6 @@ pub unsafe extern "C" fn tj3Compress16(
                 out
             };
 
-            // 16-bit is always lossless (SOF3) — upstream
-            // `references/libjpeg-turbo/src/turbojpeg-mp.c::tj3Compress16`
-            // gates `TJPARAM_PRECISION` on the lossless flag and silently
-            // ignores out-of-range values, falling back to BITS_IN_JSAMPLE.
-            // We mirror that behaviour so a caller that only ever called
-            // `tj3Set(handle, TJPARAM_LOSSLESSPSV, 1)` continues to encode
-            // a 16-bit lossless stream.
-            let is_lossless: bool = inst.inner.get(TjParam::Lossless) != 0;
-            let raw_precision: i32 = inst.inner.get(TjParam::Precision);
-            let effective_precision: i32 = if is_lossless && (13..=16).contains(&raw_precision) {
-                raw_precision
-            } else {
-                16
-            };
-            // ITU-T T.81 / Annex H: in lossless mode the point transform Pt
-            // shifts the lower Pt bits off each sample, so Pt must be strictly
-            // less than the sample precision. Mirror C's encode-side Al checks
-            // in `jcparam.c::jpeg_enable_lossless` (jcparam.c:586-589) and
-            // `jcmaster.c::validate_script` (jcmaster.c:396-399).
-            let point_transform: i32 = inst.inner.get(TjParam::LosslessPt);
-            if point_transform >= effective_precision {
-                inst.set_error(
-                format!(
-                    "tj3Compress16: TJPARAM_LOSSLESSPT {point_transform} must be < TJPARAM_PRECISION {effective_precision}"
-                ),
-                TJERR_FATAL,
-            );
-                return -1;
-            }
             let jpeg: Vec<u8> = match inst.inner.compress_16bit_with_precision(
                 &dense,
                 w,
@@ -493,7 +567,8 @@ pub unsafe extern "C" fn tj3Compress16(
             // when the caller had set the flag, which is exactly when the buffer is
             // not `malloc`-owned. A stack array handed here was freed with the
             // wrong allocator.
-            let norealloc: bool = inst.inner.get(libjpeg_turbo_rs::tj3::TjParam::NoRealloc) != 0;
+            // `norealloc` was read before the precision gate, which needs it to
+            // order its own error against the destination's.
             // SAFETY: both out-pointers were validated non-NULL above; the caller's
             // contract covers the buffer's validity and non-aliasing with `jpeg`,
             // which this function owns.
@@ -509,6 +584,11 @@ pub unsafe extern "C" fn tj3Compress16(
                     );
                     return -1;
                 }
+                // Unreachable in practice since the precedence check above
+                // rejects an unusable slot before the encode, but kept: the
+                // condition belongs to the delivery contract, and the arm is
+                // what makes that true independently of a caller-ordering
+                // check elsewhere in the function.
                 OutputDelivery::NoBufferSupplied => {
                     inst.set_error(
                         "tj3Compress16: TJPARAM_NOREALLOC is set but no output buffer was supplied",

@@ -2964,7 +2964,7 @@ forming `&mut` over the caller's struct entirely and write every field through
 raw pointers, with the existing Miri case still passing and no `client_data`
 behaviour change.
 
-## P4-150. `tj3Compress16` Accepts Lossy 16-bit Where Upstream Refuses — **OPEN**
+## P4-150. `tj3Compress16` Accepts Lossy 16-bit Where Upstream Refuses — **CLOSED 2026-08-12**
 
 **Motivation.** Found 2026-08-12 (issue #531) while extending P4-145's C
 oracle to every compressing entry point. 16-bit samples exist for *lossless* JPEG in TurboJPEG;
@@ -2991,6 +2991,94 @@ applies to it — verify rather than assume) rejects the configurations upstream
 rejects, with upstream's error, cross-validated by an oracle case rather than a
 transcription. The P4-145 oracle's `compress16_*` lines then no longer need
 `TJPARAM_LOSSLESS` to agree, which is the observable proof.
+
+**Root cause.** TurboJPEG imposes no precision rule of its own. It sets
+`cinfo->data_precision = 16` (`turbojpeg-mp.c:107`) and lets
+`jpeg_start_compress` decide, where `jcmaster.c:199-208` admits 2..=16 for a
+lossless compress and only 8 or 12 for a lossy one. Reading `turbojpeg-mp.c`
+alone — which is what the original port did — correctly concludes that
+TurboJPEG has no such check, and misses that libjpeg does two calls down. This
+is the second time a "transcribe the layer the function lives in" reading has
+produced a divergence in this family (the first was P4-145's NULL-slot case),
+which is why the fix is pinned by an oracle rather than by assertions.
+
+**Status (2026-08-12): closed.** `tj3Compress16` now refuses a compress with
+`TJPARAM_LOSSLESS` unset, reporting libjpeg's own `JERR_BAD_PRECISION` text —
+`Unsupported JPEG data precision 16`, with no `function():` prefix, because an
+error raised inside libjpeg reaches `errStr` through `CATCH_LIBJPEG` verbatim.
+The gate is the lossless flag, not `TJPARAM_PRECISION`: that parameter is read
+only when the flag is set (`turbojpeg-mp.c:111-115`), so requesting 12 bits does
+not make a lossy 16-bit call legal — traced as `c16_lossy_prec12`.
+
+Verified by `crates/libjpeg-turbo-rs-capi/tests/capi_compress_precision.rs`
+(5 tests), whose `precision_rules_match_upstream_turbojpeg` compares a
+sixteen-case matrix line-for-line against
+`examples/compress_precision_oracle.c` linked to real TurboJPEG 3. Before the
+fix exactly two lines diverged (`c16_lossy`, `c16_lossy_prec12`), both
+`0 kind=none` against C's `-1 kind=precision`.
+
+**Where the refusal sits in the chain.** Review found that a gate placed
+naively last gets the *precedence* wrong. Upstream installs the destination
+before `jpeg_start_compress` (`turbojpeg-mp.c:118-120`), so a
+`TJPARAM_NOREALLOC` slot that cannot be used at all — empty, or present with
+zero capacity — is refused by `jdatadst-tj.c:184-192` first, and the buffer
+error wins. The rule is narrower than "destination before precision", though: a
+slot that is merely *too small* still reports the precision error, because its
+capacity is only tested when output overflows it, which never happens once the
+compress is refused. Both orderings are traced
+(`c16_lossy_norealloc_null` vs `c16_lossy_norealloc_cramped`); with the
+ordering check removed exactly the first line flips, so a fix that checked the
+destination unconditionally would have been caught too.
+
+Review then found a *third* stage above both. `setCompDefaults` calls
+`jpeg_enable_lossless` before `jpeg_mem_dest_tj` (`turbojpeg-mp.c:117-120`), so
+an out-of-range point transform beats the buffer error too: with
+`PRECISION=13`, `LOSSLESSPT=13`, `NOREALLOC` and an empty slot, TurboJPEG 3
+reports the lossless-parameter error. The port's Pt check had to move above the
+destination preflight; `c16_pt_ge_prec_norealloc_null`,
+`c16_pt_ge_prec_roomy` and `c16_pt_lt_prec_norealloc_null` trace it, and with
+that check disabled the first two flip to `buffer`/`other`.
+
+Three groups that disagree with each other, so no single ordering satisfies
+them by accident — which is the point. Each was measured, not reasoned: two of
+the three orderings contradict the reading a careful person would take from
+`turbojpeg-mp.c`.
+
+The trace compares `rc` and an error *kind* for every line, plus the exact
+message for the precision refusal — the one string the port owes byte for byte.
+Pinning the ordering by raw text would have dragged in TurboJPEG's own
+`function():` messages, which carry per-call detail this port words differently
+on purpose (the same reason `norealloc_oracle.c` does not compare byte counts).
+
+`tests/precision.rs::tj3_compress16_decompress16_is_lossless` had to change: it
+set `TJPARAM_LOSSLESSPSV`/`PT` but never `TJPARAM_LOSSLESS`, and passed only
+because 16-bit was unconditionally lossless. Upstream reads `TJPARAM_LOSSLESS`
+back as 0 after `PSV` alone and refuses, so the test now sets the flag a real
+caller sets.
+
+Steps 2-3 of that chain — `TJPARAM_QUALITY`/`TJPARAM_SUBSAMP` "must be
+specified" — remain unpinnable here, because this port's defaults make the
+branch unreachable. Filed as P4-155 (#539).
+
+The rule does **not** generalise: `c12_lossy` and `c8_lossy` succeed in both,
+since 8 and 12 are the two precisions `jcmaster.c:206` admits — answering the
+"verify rather than assume" criterion. `lossy_12bit_and_8bit_compress_still_succeed`
+guards against a fix written as "wide samples imply lossless".
+
+The observable proof the criterion asked for: `norealloc_oracle.c` gained
+`compress16_lossy_roomy`, a lossy 16-bit case with **no** `TJPARAM_LOSSLESS`
+set. It agrees now and would not have before, and it pins the refusal path's
+ownership behaviour as well — a caller's buffer must survive a rejected call
+untouched.
+
+Run with `LIBJPEG_TURBO_PREFIX=/opt/homebrew/opt/jpeg-turbo cargo test -p
+libjpeg-turbo-rs-capi --test capi_compress_precision --test
+norealloc_all_entry_points --test precision` (29 passing). The full workspace
+release gate is 2597 passing across 294 suites, 0 failures — 2592/293 plus this
+item's one new suite of 5.
+
+The classic C API has the same acceptance gap, one layer over — filed
+separately as P4-154 (#538), since it needs a different fix and a different oracle.
 
 ## P4-151. Legacy `tjTransform` Does Not Bridge `dstSizes` Output-vs-Capacity Semantics — **OPEN**
 
@@ -5805,8 +5893,9 @@ one buffer) and is the instance to measure first.
    clones, or whether criterion 2 should stop at the reassembly buffers. Decide
    it here; do not leave it implicit.
 
-**Status (2026-08-12): closed.** `cargo test --workspace --release` passes 2592
-tests. The three helpers P4-136 left in `api::progressive_output` moved to
+**Status (2026-08-12): closed.** `cargo test --workspace --release` passed 2592
+tests at this closure; the live figure is the one in `LAST_MILE.md`, which later
+closures move. The three helpers P4-136 left in `api::progressive_output` moved to
 `common::try_alloc` — copying them into `common::icc` and `decode::marker`
 would have been the `compress_*` family P4-40 was filed for, one file later.
 
@@ -6139,3 +6228,123 @@ the payload is not.
   formatting or trace gating. Delegating to it would have retired a criterion
   into an item that does not cover it, which is how work disappears. Criterion 4
   stays here, measurable, until someone does it.
+
+## P4-154. Classic `jpeg_write_scanlines` / `jpeg_start_compress` Ignore `data_precision` Entirely — **OPEN**
+
+**Motivation.** Found 2026-08-12 while closing P4-150. That item fixed the
+TurboJPEG entry point; the same acceptance rule is missing one layer over, on
+the classic C API, where it is broader and easier for a real caller to hit.
+
+Measured against this shim, encoding a 16x16 RGB image at quality 80 through
+`jpeg_set_defaults` → `cinfo.data_precision = N` → `jpeg_start_compress` →
+`jpeg_write_scanlines`:
+
+```
+data_precision  8    629 bytes, no error
+data_precision  9    629 bytes, no error
+data_precision 12    629 bytes, no error
+data_precision 16    629 bytes, no error
+```
+
+Byte-identical output for every value: the field is not read at all on this
+path. Upstream has two gates, and the caller above trips the second one first:
+
+- `jcapistd.c:92-105` — `jpeg_write_scanlines`, the *8-bit* entry point,
+  raises `JERR_BAD_PRECISION` unless `data_precision == BITS_IN_JSAMPLE` (8),
+  or, for a lossless compress, unless it is in `2..=8`.
+- `jcmaster.c:199-208` — reached from `jpeg_start_compress`, admits 2..=16 for
+  a lossless compress and only 8 or 12 for a lossy one.
+
+So upstream rejects 9, 12 and 16 here; only 8 survives. We accept all four and
+silently produce the same 8-bit stream.
+
+**Why it matters.** Same class as P4-150 and P4-39: a caller gets output where
+the library it replaced gave a documented error. Two things make the classic
+surface worse than the TurboJPEG one. `data_precision` is a *public struct
+field* a caller sets directly, with no setter to funnel validation through, so
+the mistake is easy to make and invisible. And the 12-bit case is not merely a
+missing error — a caller that sets `data_precision = 12` and calls the 8-bit
+`jpeg_write_scanlines` is asking for something upstream refuses, while we
+answer with an 8-bit stream that looks like success; a caller comparing file
+sizes or bit depth downstream sees plausible, wrong output.
+
+Note this is *not* the 12-bit encode path itself, which works and is tested:
+`jpeg12_write_scanlines` / `jpeg12_write_raw_data` already gate on
+`data_precision == 12` (`jpeglib.rs:5587`, `:10016`), and
+`jpeg_write_raw_data` already gates on `== 8` (`jpeglib.rs:9550`). It is
+specifically the 8-bit *scanline* entry point and `jpeg_start_compress` that
+have no gate — the two upstream added them to.
+
+**Acceptance criteria.**
+
+1. `jpeg_write_scanlines` raises `JERR_BAD_PRECISION` with the offending
+   precision as `msg_parm.i[0]` when `data_precision != 8` on a lossy
+   compress, mirroring `jcapistd.c:102-103`; and accepts `2..=8` when the
+   compress is lossless, mirroring `jcapistd.c:93-98`.
+2. `jpeg_start_compress` raises `JERR_BAD_PRECISION` for a lossy compress whose
+   `data_precision` is neither 8 nor 12, and for a lossless compress outside
+   `2..=16`, mirroring `jcmaster.c:199-208`.
+3. Which of the two fires first, for a caller that trips both, is decided by a
+   C oracle rather than by reading — the error a caller sees is the first one,
+   and the two gates disagree about 12.
+4. Cross-validated by an oracle binary linked against real libjpeg (the
+   `build_classic_oracle` path already used by P4-104 and P4-110), not by
+   assertions transcribed from the C source. P4-145 and P4-150 both had their
+   first version pass a self-consistent suite while diverging.
+
+**Why deferred.** P4-150's PR is a TurboJPEG-scoped fix with its own oracle;
+folding a second gate into a different API surface would put two unrelated
+acceptance rules behind one review. Splitting is the same call made for P4-151.
+
+## P4-155. `TJPARAM_QUALITY` / `TJPARAM_SUBSAMP` Default to Set Values, So Upstream's "must be specified" Errors Can Never Fire — **OPEN**
+
+**Motivation.** Found 2026-08-12 (issue #539) while closing P4-150. Upstream
+initialises a TurboJPEG instance with `TJPARAM_QUALITY = -1` and
+`TJPARAM_SUBSAMP = TJSAMP_UNKNOWN`, both meaning *unset*, and every lossy
+compress entry point refuses until the caller supplies them
+(`turbojpeg-mp.c:95-97`). This port initialises them to `quality = 75` and
+`subsampling = 2` (S420) — `src/api/tj3.rs:141-142` — so neither error can fire.
+
+Measured against TurboJPEG 3, calling `tj3Compress16` after setting only
+`TJPARAM_LOSSLESSPSV` and `TJPARAM_LOSSLESSPT`:
+
+```
+TJPARAM_LOSSLESS reads back as 0
+compress16 rc=-1 err="tj3Compress16(): TJPARAM_QUALITY must be specified"
+```
+
+**Why it matters.** Two consequences. *Silent substitution*: same class as
+P4-150 and P4-39 — a caller who forgot to set quality gets 75 where upstream
+gives a documented error. *Error precedence*: these checks sit at the top of
+the refusal chain, above the destination setup and `jpeg_start_compress`.
+Upstream's full order for a compress entry point is
+
+1. argument validation (NULL, dims, pitch, pixel format)
+2. `TJPARAM_QUALITY must be specified` (lossy only)
+3. `TJPARAM_SUBSAMP must be specified` (lossy only)
+4. destination setup — `Buffer passed to JPEG library is too small` under
+   `TJPARAM_NOREALLOC` with a NULL or zero-capacity slot (`jdatadst-tj.c:184-192`)
+5. `jpeg_start_compress` — e.g. `Unsupported JPEG data precision 16`
+   (`jcmaster.c:199-208`)
+
+P4-150 pinned steps 4 and 5 against a C oracle. Steps 2 and 3 cannot be pinned
+while the defaults differ, because the branch is unreachable.
+
+**Why deferred.** The defaults are read by every compress path in the crate, and
+`tj3Get(TJPARAM_QUALITY)` returns 75 on a fresh handle today — a value callers
+may already read back. Changing them flips behaviour for every entry point at
+once, so it needs its own oracle matrix rather than riding along with a
+precision fix. Whether `tj3Get` on a fresh handle should report `-1` is part of
+the same question.
+
+**Acceptance criteria.**
+
+1. A fresh `TJINIT_COMPRESS` handle reports `TJPARAM_QUALITY = -1` and
+   `TJPARAM_SUBSAMP = TJSAMP_UNKNOWN` through `tj3Get`.
+2. Every lossy compress entry point refuses with upstream's message when either
+   is unset; a lossless compress does not consult them.
+3. The refusal order above is verified end to end by a C oracle covering all
+   five steps, extending `examples/compress_precision_oracle.c` rather than
+   duplicating it.
+4. Legacy `tjCompress2` and friends, which set quality on every call, keep
+   working and must not become sensitive to the default.
