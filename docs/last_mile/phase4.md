@@ -3498,7 +3498,7 @@ same cores are not comparable to each other either.
 Verified by `cargo test --release --test worker_b8_progressive_bomb --
 --include-ignored --test-threads=1` — 8 tests, of which the two new ratios were
 run four consecutive times at the tightened bound without variation — plus
-`worker_b8_memory_bounds` (18), `worker_b8_huffman_bomb` (5) and
+`worker_b8_memory_bounds` (19, including the fallback check), `worker_b8_huffman_bomb` (5) and
 `hard_case_x_byte_and_restart` (5 passing, 1 now ignored in the default run).
 The full workspace release gate is 2600 passing across 295 suites, 0 failures,
 7 ignored: ignored rises by 3, one previously-passing test becomes one of them,
