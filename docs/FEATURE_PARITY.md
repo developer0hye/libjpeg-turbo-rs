@@ -422,11 +422,11 @@
 - [x] Custom error handler — `ErrorHandler` trait
 - [ ] Classic codec failures consistently reach `error_exit()` — native typed errors exist; P4-100
 - [x] `emit_message()` callback — `ErrorHandler::emit_warning()` + `ErrorHandler::trace()`
-- [x] `output_message()` / `format_message()` — N/A (Rust `Display` trait on `JpegError` replaces C message callbacks)
+- [x] `output_message()` / `format_message()` — Rust `Display` trait on `JpegError` replaces the callbacks for the native API; the C ABI implements both per `jerror.c` — `format_message` renders upstream's text (P4-146, 2026-08-11), `output_message` writes it to stderr through the installed formatter (P4-146 criterion 4, 2026-08-13)
 - [x] `reset_error_mgr()` — N/A (Rust `Result` is stateless; no accumulated error state to reset)
 - [x] `trace_level` control — `ErrorHandler::trace()` callback with level parameter
 - [x] `num_warnings` counter — `Image.warnings` vec (count via `.len()`)
-- [x] `msg_code` / `msg_parm` / `jpeg_message_table` — N/A (Rust uses typed `JpegError` / `DecodeWarning` enums instead of C integer codes + format strings)
+- [x] `msg_code` / `msg_parm` / `jpeg_message_table` — the native API uses typed `JpegError` / `DecodeWarning` enums instead of C integer codes + format strings; the C ABI carries all three, `jpeg_std_error` installing the 129-entry upstream table (P4-146, 2026-08-11)
 - [x] `tj3GetErrorStr()` / `tj3GetErrorCode()` — Rust `Result<T, JpegError>` with `Display` impl replaces C per-handle error getters
 - [ ] Classic `jpeg_resync_to_restart()` default algorithm — native strategy extension exists; C callback behavior remains P4-97
 

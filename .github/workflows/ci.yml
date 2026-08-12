@@ -341,6 +341,7 @@ jobs:
           cargo test -p libjpeg-turbo-rs-capi
           --test capi_classic_error_codes
           --test capi_error_message_rendering
+          --test capi_output_message
           --test capi_max_memory_budget -- --nocapture
       # The C-ABI crate's OWN unit tests, on the stable toolchain.
       #
