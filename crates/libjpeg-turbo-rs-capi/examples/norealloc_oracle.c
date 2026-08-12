@@ -276,7 +276,7 @@ static void legacy_transform_case(const char *label)
    * geometry-only bound P4-151 says the capacity must not exceed. An identity
    * transform leaves the specs unchanged, and the source is 4:4:4. */
   bound = tjBufSize(WIDTH, HEIGHT, TJSAMP_444);
-  if (bound == 0) { fprintf(stderr, "tjTransformBufSize\n"); exit(2); }
+  if (bound == 0) { fprintf(stderr, "tjBufSize\n"); exit(2); }
   original = (unsigned char *)tj3Alloc(bound);
   if (!original) { fprintf(stderr, "oom\n"); exit(2); }
 
@@ -342,10 +342,13 @@ static void legacy_gray_transform_case(const char *label)
 
   rc = tjTransform(h, jpeg, (unsigned long)jpeg_size, 1, dst_bufs, dst_sizes, t,
                    TJFLAG_NOREALLOC);
-  /* The **invariant**, not the outcome. Upstream succeeds here and this port
-   * refuses, because the two disagree about whether a transform carries the
-   * source's ICC profile — a separate defect (P4-156), and one that would make
-   * a trace of `rc` fail for a reason unrelated to the capacity rule.
+  /* The **invariant**, not the outcome. Upstream succeeds here (601 bytes) and
+   * this port refuses (5619) — on this path only: the legacy-NOREALLOC
+   * capacity pre-read skips marker registration, so upstream's transform drops
+   * the profile with every other marker, while both libraries copy it on
+   * legacy flags=0 and tj3Transform. A separate defect (P4-156) scoped to that
+   * ordering quirk, and one that would make a trace of `rc` fail for a reason
+   * unrelated to the capacity rule.
    *
    * What both must satisfy, and what a port sizing grayscale as 4:4:4 would
    * violate, is narrower: never report success having written past the bound a

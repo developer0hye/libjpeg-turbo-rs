@@ -3099,9 +3099,10 @@ are the acceptance criteria in disguise:**
 1. **The capacity must come from geometry alone.** Upstream uses bare
    `tj3JPEGBufSize` on the transformed specs. This port's
    `tj3TransformBufSize` additionally adds the extracted ICC length
-   (`transform.rs:395-403`), so using it as the caller's capacity overruns a
+   (`transform.rs:428-436`), so using it as the caller's capacity overruns a
    `tjTransformBufSize()`-sized buffer — measured at a 32x32 source with a
-   128 KiB ICC profile: an 8192-byte bound against a 132320-byte copy.
+   128 KiB ICC profile: an 8192-byte bound against a 139264-byte copy
+   (8192 + the 131072 profile bytes).
 2. **Deriving the geometry must not mutate the handle.** A plain
    `tj3DecompressHeader` overwrites shared compression state — subsampling,
    colour space, density, ICC. Setting a `TJINIT_TRANSFORM` handle to S420 and
@@ -3135,7 +3136,7 @@ constraints are met by construction rather than by care:
 rules while differing where they must: that entry point adds the handle's ICC
 length to what it returns, and the bridge does not. Using it would hand
 `tj3Transform` a capacity larger than the buffer the caller sized — the measured
-case is an 8192-byte destination against a 132320-byte capacity at a 32x32
+case is an 8192-byte destination against a 139264-byte capacity at a 32x32
 source with a 128 KiB profile.
 
 **No handle mutation.** The bridge reads the source through
@@ -3195,16 +3196,21 @@ than performed, and the canary is direct evidence independent of the reported
 size.
 
 **A divergence surfaced while adding the oracle coverage, and is filed rather
-than papered over.** Upstream's grayscale case reports `0 1 1` — it succeeds
-within the 4096-byte grayscale bound — because it does not copy the source's ICC
-profile into the transformed image. This port does, producing 5619 bytes, so it
-refuses. The refusal is *correct for the size produced*; the defect is that the
-size is wrong. Filed as P4-156 (#544). `legacy_transform_gray_no_overrun` is compared, but
-narrowed to the invariant both libraries satisfy — never report success having
-written past the bound a compliant caller allocated — since tracing `rc` would
-fail for the divergence rather than for anything this item governs. That still
-catches sizing grayscale as 4:4:4, which is what the case exists for. Widening
-it to exact size and return code is P4-156's criterion 3.
+than papered over.** Upstream's grayscale case succeeds within the 4096-byte
+grayscale bound — on *this path only*, its capacity pre-read skips marker
+registration, so the transform drops the source's 5000-byte ICC profile (with
+every other marker) and emits 601 bytes. This port copies the profile on every
+path — which upstream also does on legacy `flags=0` and `tj3Transform`, both
+probed identical at 5619 bytes — so here it produces 5619 and refuses. The
+refusal is *correct for the size produced*; the divergence is confined to the
+legacy NOREALLOC ordering quirk. Filed as P4-156 (#544).
+`legacy_transform_gray_no_overrun` is compared, but narrowed to the invariant
+both libraries satisfy — never report success having written past the bound a
+compliant caller allocated — since tracing `rc` would fail for the divergence
+rather than for anything this item governs. That still catches sizing grayscale
+as 4:4:4, which is what the case exists for, though only while the ICC keeps
+the payload above the grayscale bound; P4-156's criteria 3 and 5 widen the line
+back to exact parity and re-pin the capacity derivation by mechanism.
 
 Verified by `norealloc_all_entry_points` (18 passing, up from 14) with four new
 tests and three new oracle cases, each Red-checked by reintroducing the defect it
@@ -4657,8 +4663,8 @@ begins" therefore has nowhere to live in this port.
 
 1. **`TJPARAM_MAXPIXELS` is not enforced on these two entry points.** Upstream
    checks it at `turbojpeg.c:2219-2222`, *before* the component guard. The
-   handle stores the value (`src/api/tj3.rs:682-683` maps it into `Limits`, and
-   `src/common/types.rs:411` enforces it "before any plane allocation"), but
+   handle stores the value (`src/api/tj3.rs:697-699` maps it into `Limits`, and
+   `src/common/types.rs:441` enforces it "before any plane allocation"), but
    that plumbing is bypassed: `Decoder::new` uses `Limits::default`. A caller
    setting `TJPARAM_MAXPIXELS` as a DoS bound gets no effect here. Not
    unbounded — the 2,147,483,647-pixel default still applies — but not the
@@ -5851,7 +5857,7 @@ instance; this entry is the common cause.
   no reachable path was found — it needs `total_blocks > usize::MAX / 4` to
   wrap — so this is hardening, not a live defect.
 - **`ScalingFactor` is a public panic/overflow surface**
-  (`src/common/types.rs:305-335`): `num` and `denom` are `pub`, and `new()`
+  (`src/common/types.rs:335-365`): `num` and `denom` are `pub`, and `new()`
   accepts `denom == 0`, so `block_size()` and `scale_dim()` defend with
   `assert!` — a panic on a public API, not a `Result`. Both then multiply
   unchecked (`self.num * 8`, `input_dim * self.num as usize`). Because the
@@ -6736,45 +6742,54 @@ the same question.
 4. Legacy `tjCompress2` and friends, which set quality on every call, keep
    working and must not become sensitive to the default.
 
-## P4-156. Lossless Transform Copies the Source ICC Profile Where Upstream Does Not — **OPEN**
+## P4-156. Legacy NOREALLOC Transform Copies the Source ICC Profile Where Upstream Drops Every Marker — **OPEN**
 
 **Motivation.** Found 2026-08-12 (issue #544) while adding C-oracle coverage for
-P4-151. A lossless transform copies the source's ICC profile into the output
-here; upstream does not. Measured with a 32x32 grayscale source carrying a
-5000-byte profile, identity transform, `TJFLAG_NOREALLOC`:
+P4-151; scoped by the review's probe of real TurboJPEG 3.1.4.1. **The divergence
+is confined to legacy `tjTransform` under `TJFLAG_NOREALLOC`.** Measured with a
+32x32 grayscale source carrying a 5000-byte profile, identity transform:
 
 ```
-                       rc   output bytes
-  C (TurboJPEG 3)       0   <= 4096   (tjBufSize(32,32,TJSAMP_GRAY))
-  ours                 -1   5619      (refused: exceeds the 4096 capacity)
+                              C 3.1.4.1   ours
+  legacy tjTransform, NOREALLOC   601     5619   <- the only divergent path
+  legacy tjTransform, flags=0    5619     5619   matches
+  tj3Transform                   5619     5619   matches
 ```
 
-Both size the destination the same way, so the difference is entirely in what
-the transform writes. Upstream's output fits the grayscale bound because it
-carries no profile; ours does not because it carries the source's.
+Under NOREALLOC we refuse (5619 does not fit the 4096-byte
+`tjBufSize(32,32,TJSAMP_GRAY)` capacity) where C succeeds at 601 bytes. The
+refusal is **correct for the size produced** — P4-151's bridge computes capacity
+from geometry alone, as upstream does. The defect is upstream of that: on this
+path we should not have produced 5619.
 
-The refusal is **correct for the size produced** — P4-151's bridge computes
-capacity from geometry alone, as upstream does, and 5619 bytes genuinely do not
-fit 4096. The defect is upstream of that: we should not have produced 5619.
+**Root cause in upstream, which parity must mimic.** Upstream's marker copying
+is gated by `jcopy_markers_setup(dinfo, saveMarkers)` — registration that must
+run *before* the header is parsed (`turbojpeg.c:2976-2979`, default
+`saveMarkers = 2` = `JCOPYOPT_ALL`). The legacy NOREALLOC wrapper, uniquely,
+pre-reads the header to derive per-transform capacities
+(`turbojpeg.c:3112-3134`) — so when `tj3Transform` later calls
+`jcopy_markers_setup` and finds `global_state > DSTATE_INHEADER`, the guarded
+re-read is skipped, nothing was registered, and `jcopy_markers_execute` copies
+*no* markers at all (not just ICC: COM and every APPn die too). On the other
+two paths registration precedes the read and everything is copied — which this
+port already matches. The C behaviour to replicate is an emergent ordering
+quirk, not a marker policy.
 
-**Why it matters.** A caller that allocates `tjTransformBufSize()`, as the API
-documents, is refused for any source carrying a profile larger than the slack in
-that bound. Worse, on the *reallocating* path there is no capacity to refuse
-against, so the transform silently returns a larger file than upstream would,
-carrying metadata a caller expecting `jpegtran`-equivalent behaviour may have
-assumed was dropped.
-
-**Where to look.** Upstream gates marker copying on `TJXOPT_COPYNONE` and on
-what `jpeg_save_markers` was asked to retain (`turbojpeg.c`, and `jpegtran`'s
-`jcopy_markers_setup`). This port appears to reattach the parsed profile
-unconditionally.
+**Why it matters.** A legacy NOREALLOC caller that allocates
+`tjTransformBufSize()`, as the API documents, is refused for any source
+carrying a profile larger than the slack in that bound — upstream succeeds.
+The other paths need no change: a fix that strips the ICC generally would
+*create* divergence on `flags=0` and `tj3Transform`, where copying is correct.
 
 **Acceptance criteria.**
 
-1. An identity transform of an ICC-carrying source produces the same marker set
-   as `jpegtran`, cross-validated against it rather than against a reading of
-   the source.
-2. `TJXOPT_COPYNONE` and the default path are both traced.
+1. On legacy `tjTransform` + `TJFLAG_NOREALLOC`, an identity transform of an
+   ICC-carrying source drops markers exactly as upstream's ordering quirk does,
+   cross-validated against the C library's trace rather than against a reading
+   of this description.
+2. Legacy `flags=0` and direct `tj3Transform` keep copying markers byte-
+   identically, and `TJXOPT_COPYNONE` is traced on both shapes — the fix must
+   be provably scoped to the one divergent path.
 3. `examples/norealloc_oracle.c`'s `legacy_transform_gray_no_overrun` line
    compares exact size and return code, not just the no-overrun invariant it is
    narrowed to today. The helper is already written and compiled; the narrowing
@@ -6782,3 +6797,12 @@ unconditionally.
    unrelated to P4-151.
 4. Whether the grayscale case then succeeds or refuses must match C, not merely
    be self-consistent.
+5. **Re-pin P4-151's capacity-derivation regression by mechanism.** Both
+   `legacy_tj_transform_sizes_a_grayscale_source_as_gray` and the oracle's
+   gray line currently force the payload across the grayscale bound with a
+   5000-byte ICC profile. Once this item lands, no marker survives that path
+   and no legal Huffman payload of a 32x32 grayscale image can cross
+   `tjBufSize`'s 2-bytes/px + 2048 slack — the fixtures pass vacuously whether
+   or not the Unknown→S444 sizing bug returns. Whoever closes this item must
+   replace the ICC-inflation mechanism with a direct pin of the derived
+   subsampling (or an equivalent observable), not merely delete the fixtures.

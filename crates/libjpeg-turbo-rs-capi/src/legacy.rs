@@ -381,7 +381,7 @@ pub unsafe extern "C" fn tjTransform(
         //    it would hand `tj3Transform` a capacity larger than the buffer the
         //    caller sized with `tjTransformBufSize()` — measured at a 32x32
         //    source with a 128 KiB profile as an 8192-byte destination against
-        //    a 132320-byte capacity. `transformed_specs` + `tj3JPEGBufSize` is
+        //    a 139264-byte capacity. `transformed_specs` + `tj3JPEGBufSize` is
         //    the geometry-only path.
         //
         // 2. **Deriving the geometry must not touch the handle.** A
@@ -470,7 +470,7 @@ pub unsafe extern "C" fn tjTransform(
                     )
                 };
                 // Upstream copies the produced sizes back unconditionally
-                // (`turbojpeg.c:3135-3136`), so a caller reading `dstSizes`
+                // (`turbojpeg.c:3136-3137`), so a caller reading `dstSizes`
                 // after a partial failure sees what was written.
                 for (index, size) in sizes.iter().enumerate() {
                     // SAFETY: `dst_sizes` has `n` entries per the contract.

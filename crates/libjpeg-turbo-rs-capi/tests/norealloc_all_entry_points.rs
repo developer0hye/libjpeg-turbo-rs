@@ -612,10 +612,12 @@ fn release(handle: *mut c_void, produced: *mut u8, original: *mut u8) {
 
 /// A grayscale ICC-carrying source, compared on the **no-overrun invariant**.
 ///
-/// Upstream succeeds here and this port refuses, because the two disagree about
-/// whether a transform carries the source's ICC profile — P4-156 (#544), a
-/// separate defect. Tracing `rc` would fail for that reason rather than for
-/// anything P4-151 governs.
+/// Upstream succeeds here and this port refuses — on this path only. Upstream's
+/// legacy-NOREALLOC capacity pre-read skips marker registration, so its
+/// transform drops the profile (601 bytes); ours carries it (5619), exactly as
+/// both libraries do on legacy `flags=0` and `tj3Transform` — P4-156 (#544), a
+/// separate defect scoped to that ordering quirk. Tracing `rc` would fail for
+/// that reason rather than for anything P4-151 governs.
 ///
 /// What both must satisfy, and what sizing grayscale as 4:4:4 violates, is
 /// narrower: never report success having written past the bound a compliant
@@ -1020,16 +1022,19 @@ fn legacy_tj_compress2_treats_the_size_slot_as_an_output() {
     }
 }
 
-/// The legacy transform wrapper maps the flag, and says so when it cannot
-/// help further.
+/// The legacy transform wrapper maps the flag, and a nonzero size slot does
+/// not change that.
 ///
 /// Mapping `TJFLAG_NOREALLOC` is what stops the caller's destination buffers
 /// being `free()`d, and P4-151 bridged the *size* semantics beside it: legacy
 /// `dstSizes` are outputs, TJ3's are capacities, so a caller that sized its
 /// destination with `tjTransformBufSize()` and left the slot at zero now gets a
-/// transform rather than "buffer too small".
+/// transform rather than "buffer too small". A nonzero slot is *not* honoured
+/// as a capacity — upstream replaces every slot with the geometry bound under
+/// NOREALLOC (`turbojpeg.c:3122-3132`), and so does the bridge; this case pins
+/// that a caller passing one is served identically.
 #[test]
-fn legacy_tj_transform_maps_the_flag_and_honours_a_declared_capacity() {
+fn legacy_tj_transform_maps_the_flag_with_a_nonzero_size_slot() {
     use libjpeg_turbo_rs_capi::tjTransform;
 
     const TJFLAG_NOREALLOC: c_int = 1024;
@@ -1039,7 +1044,8 @@ fn legacy_tj_transform_maps_the_flag_and_honours_a_declared_capacity() {
     let jpeg: Vec<u8> = source_jpeg();
     let original: *mut u8 = caller_buffer(ROOMY);
 
-    // With a real capacity the flag is honoured and the pointer survives.
+    // The slot is nonzero; the bridge replaces it with the geometry bound
+    // (as upstream does) and the pointer survives.
     let mut dst_bufs: [*mut u8; 1] = [original];
     let mut dst_sizes: [usize; 1] = [ROOMY];
     // SAFETY: `TjTransform` is `#[repr(C)]` plain data; all-zero is identity.
@@ -1059,7 +1065,7 @@ fn legacy_tj_transform_maps_the_flag_and_honours_a_declared_capacity() {
             TJFLAG_NOREALLOC,
         )
     };
-    assert_eq!(rc, 0, "a declared capacity must be honoured");
+    assert_eq!(rc, 0, "a nonzero size slot must not fail the call");
     assert_eq!(
         dst_bufs[0], original,
         "the flag must reach TJPARAM_NOREALLOC — otherwise the caller's \
@@ -1445,10 +1451,14 @@ fn legacy_tj_transform_sizes_a_grayscale_source_as_gray() {
         )
     };
     // The invariant, stated directly: never report success having written more
-    // than the caller's buffer holds. Refusing is a correct outcome here — the
-    // profile makes the output genuinely larger than a grayscale-sized
-    // destination — and it is what upstream does too, since it sizes the same
-    // way. What must not happen is `rc == 0` with a size past the bound, which
+    // than the caller's buffer holds. Refusing is a correct outcome *for the
+    // bytes we produce* — the profile makes the output genuinely larger than a
+    // grayscale-sized destination. Upstream instead succeeds at 601 bytes on
+    // this exact path: its legacy-NOREALLOC capacity pre-read skips marker
+    // registration, so the profile (and every other marker) is dropped —
+    // P4-156 (#544) tracks matching that quirk, and its criterion 5 re-pins
+    // this test's mechanism once no marker can inflate the payload. What must
+    // not happen on either side is `rc == 0` with a size past the bound, which
     // is the overrun a 4:4:4 capacity permits.
     assert!(
         !(rc == 0 && dst_sizes[0] > gray_bound),

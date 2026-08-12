@@ -349,7 +349,7 @@
 
 | C Function | TJ3 Equivalent | Description |
 |---|---|---|
-| `tjTransform(handle, jpeg, size, n, &dstBufs, &dstSizes, transforms, flags)` | `tj3Transform` | TJ 1.2 lossless transform. `dstSizes` are *outputs*: under `TJFLAG_NOREALLOC` a zero slot is filled from the transformed geometry, not read as a capacity (P4-151) |
+| `tjTransform(handle, jpeg, size, n, &dstBufs, &dstSizes, transforms, flags)` | `tj3Transform` | TJ 1.2 lossless transform. `dstSizes` are *outputs*: under `TJFLAG_NOREALLOC` every slot's capacity comes from the transformed geometry — the value passed in is never read, as upstream — and is overwritten with the produced size (P4-151) |
 
 ### Legacy Buffer Size
 

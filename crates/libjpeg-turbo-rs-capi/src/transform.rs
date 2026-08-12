@@ -316,7 +316,7 @@ pub unsafe extern "C" fn tj3Transform(
 /// sized its destination with `tjTransformBufSize()` gets a buffer derived from
 /// geometry only, and adding metadata to the capacity handed to `tj3Transform`
 /// overruns it. Measured at a 32x32 source with a 128 KiB ICC profile: an
-/// 8192-byte destination against a 132320-byte capacity (P4-151).
+/// 8192-byte destination against a 139264-byte capacity (P4-151).
 ///
 /// Taking `(w, h, subsamp)` as parameters rather than reading them from a
 /// handle is the other half of that separation: the legacy wrapper derives them
