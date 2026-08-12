@@ -607,10 +607,17 @@ impl TjHandle {
         )
     }
 
-    /// Compress 16-bit pixels to lossless JPEG (like `tj3Compress16`).
+    /// Compress 16-bit pixels to lossless JPEG (the encode `tj3Compress16`
+    /// performs).
     ///
     /// 16-bit is always lossless (SOF3). Uses handle lossless predictor
     /// and point transform parameters.
+    ///
+    /// Note this is *not* the C entry point's full contract: `tj3Compress16`
+    /// first rejects a handle with `TJPARAM_LOSSLESS` unset, because upstream
+    /// does (`jcmaster.c:206`). Encoding lossless anyway was P4-150. This
+    /// method is a Rust API whose signature already says lossless, so it has
+    /// nothing to reject — the acceptance rule belongs to the shim.
     pub fn compress_16bit(
         &self,
         pixels: &[u16],

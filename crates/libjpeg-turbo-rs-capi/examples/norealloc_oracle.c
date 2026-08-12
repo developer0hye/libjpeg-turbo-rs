@@ -141,13 +141,13 @@ static void compress12_case(const char *label, size_t capacity)
 }
 
 /* 16-bit samples exist for *lossless* JPEG upstream: a lossy 16-bit compress
- * is refused before any of this matters, which would make the trace disagree
- * for a reason that has nothing to do with buffer ownership. Lossless is
- * therefore the configuration under test here. */
-static void compress16_case(const char *label, size_t capacity)
+ * is refused before any of this matters (`jcmaster.c:206`), so lossless is the
+ * configuration the ownership contract is exercised in. `lossless = 0` traces
+ * the refusal itself — see the note at the call site. */
+static void compress16_case(const char *label, size_t capacity, int lossless)
 {
   tjhandle h = compressor();
-  if (tj3Set(h, TJPARAM_LOSSLESS, 1) != 0) { fprintf(stderr, "lossless\n"); exit(2); }
+  if (lossless && tj3Set(h, TJPARAM_LOSSLESS, 1) != 0) { fprintf(stderr, "lossless\n"); exit(2); }
   unsigned short *src =
     (unsigned short *)malloc((size_t)WIDTH * HEIGHT * 3 * sizeof(unsigned short));
   unsigned char *original = capacity ? (unsigned char *)tj3Alloc(capacity) : NULL;
@@ -268,9 +268,17 @@ int main(void)
   compress12_case("compress12_cramped", CRAMPED);
   compress12_case("compress12_null", 0);
 
-  compress16_case("compress16_roomy", ROOMY);
-  compress16_case("compress16_cramped", CRAMPED);
-  compress16_case("compress16_null", 0);
+  compress16_case("compress16_roomy", ROOMY, 1);
+  compress16_case("compress16_cramped", CRAMPED, 1);
+  compress16_case("compress16_null", 0, 1);
+  /* Lossy 16-bit, which upstream refuses outright. This line needed the
+   * lossless flag to agree until P4-150 (#531): the port used to accept the
+   * configuration and encode a lossless stream anyway, so a trace taken here
+   * would have disagreed for a reason unrelated to buffer ownership. That it
+   * now agrees with no flag set is the proof the acceptance rule was fixed,
+   * and it pins the refusal path's ownership behaviour too — a caller's
+   * buffer must survive a rejected call untouched. */
+  compress16_case("compress16_lossy_roomy", ROOMY, 0);
 
   yuv_planes_case("yuvplanes_roomy", ROOMY);
   yuv_planes_case("yuvplanes_cramped", CRAMPED);

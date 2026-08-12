@@ -458,6 +458,18 @@ jobs:
           # fix — every self-consistent assertion accepted it.
           LIBJPEG_TURBO_PREFIX: /opt/libjpeg-turbo
 
+      - name: TurboJPEG compress precision rules (P4-150)
+        run: >
+          cargo test -p libjpeg-turbo-rs-capi
+          --test capi_compress_precision -- --nocapture
+        env:
+          # Which precisions upstream accepts is decided by libjpeg two calls
+          # below TurboJPEG, so the rule is invisible in the layer the entry
+          # point lives in. Reading that layer alone is what produced the bug;
+          # only the oracle comparison catches a repeat, and it skips without a
+          # development install.
+          LIBJPEG_TURBO_PREFIX: /opt/libjpeg-turbo
+
       - name: Classic C-ABI create guards (P4-110)
         run: >
           cargo test -p libjpeg-turbo-rs-capi
