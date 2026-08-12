@@ -610,6 +610,186 @@ fn release(handle: *mut c_void, produced: *mut u8, original: *mut u8) {
     }
 }
 
+/// A grayscale ICC-carrying source, compared on the **no-overrun invariant**.
+///
+/// Upstream succeeds here and this port refuses — on this path only. Upstream's
+/// legacy-NOREALLOC capacity pre-read skips marker registration, so its
+/// transform drops the profile (601 bytes); ours carries it (5619), exactly as
+/// both libraries do on legacy `flags=0` and `tj3Transform` — P4-156 (#544), a
+/// separate defect scoped to that ordering quirk. Tracing `rc` would fail for
+/// that reason rather than for anything P4-151 governs.
+///
+/// What both must satisfy, and what sizing grayscale as 4:4:4 violates, is
+/// narrower: never report success having written past the bound a compliant
+/// caller allocated. That is what this line compares, so the cross-validation
+/// is real without enshrining the divergence.
+fn legacy_gray_no_overrun_case(label: &str) -> String {
+    use libjpeg_turbo_rs_capi::inner::{Encoder, PixelFormat};
+    use libjpeg_turbo_rs_capi::{tjBufSize, tjTransform};
+
+    const TJFLAG_NOREALLOC: c_int = 1024;
+    /// `turbojpeg.h`: `TJSAMP_GRAY`.
+    const TJSAMP_GRAY: c_int = 3;
+
+    let gray_pixels: Vec<u8> = (0..(WIDTH as usize * HEIGHT as usize))
+        .map(|i| (i % 251) as u8)
+        .collect();
+    let icc: Vec<u8> = vec![0x5Au8; 5_000];
+    let jpeg: Vec<u8> = Encoder::new(
+        &gray_pixels,
+        WIDTH as usize,
+        HEIGHT as usize,
+        PixelFormat::Grayscale,
+    )
+    .quality(80)
+    .icc_profile(&icc)
+    .encode()
+    .expect("encode grayscale source");
+
+    let gray_bound: usize = tjBufSize(WIDTH, HEIGHT, TJSAMP_GRAY);
+    let handle: *mut c_void = tj3Init(TJINIT_TRANSFORM);
+    assert!(!handle.is_null(), "tj3Init(TJINIT_TRANSFORM)");
+    // Over-allocated for the same reason as the standalone test: a port with
+    // the bug must be caught reporting the overrun, not by performing it.
+    let slack: usize = tjBufSize(WIDTH, HEIGHT, TJSAMP_444) + 4096;
+    let original: *mut u8 = caller_buffer(gray_bound + slack);
+    let mut dst_bufs: [*mut u8; 1] = [original];
+    let mut dst_sizes: [usize; 1] = [0];
+    // SAFETY: `#[repr(C)]` plain data; all-zero is identity.
+    let transforms: [TjTransform; 1] = [unsafe { std::mem::zeroed() }];
+
+    // SAFETY: each array has the one slot `n = 1` declares.
+    let rc: c_int = unsafe {
+        tjTransform(
+            handle,
+            jpeg.as_ptr(),
+            jpeg.len(),
+            1,
+            dst_bufs.as_mut_ptr(),
+            dst_sizes.as_mut_ptr(),
+            transforms.as_ptr(),
+            TJFLAG_NOREALLOC,
+        )
+    };
+    let line: String = format!(
+        "{label} {} {}\n",
+        i32::from(dst_bufs[0] == original),
+        i32::from(rc == 0 && dst_sizes[0] > gray_bound)
+    );
+    if dst_bufs[0] != original && !dst_bufs[0].is_null() {
+        // SAFETY: library-allocated on a replacing path; freed once.
+        unsafe { tj3Free(dst_bufs[0] as *mut c_void) };
+    }
+    // SAFETY: ours, freed once; destroyed once.
+    unsafe {
+        tj3Free(original as *mut c_void);
+        tj3Destroy(handle);
+    }
+    line
+}
+
+/// A NULL source under the legacy wrapper, in the oracle's line format.
+///
+/// P4-151 review: the bridge sliced `jpeg_buf` before `tj3Transform` could
+/// validate it. Comparing against C pins that the guard added for that agrees
+/// with upstream's answer rather than merely avoiding the panic.
+fn legacy_null_source_case(label: &str) -> String {
+    use libjpeg_turbo_rs_capi::tjTransform;
+
+    const TJFLAG_NOREALLOC: c_int = 1024;
+
+    let handle: *mut c_void = tj3Init(TJINIT_TRANSFORM);
+    assert!(!handle.is_null(), "tj3Init(TJINIT_TRANSFORM)");
+    let original: *mut u8 = caller_buffer(ROOMY);
+    let mut dst_bufs: [*mut u8; 1] = [original];
+    let mut dst_sizes: [usize; 1] = [0];
+    // SAFETY: `#[repr(C)]` plain data; all-zero is identity.
+    let transforms: [TjTransform; 1] = [unsafe { std::mem::zeroed() }];
+
+    // SAFETY: the source pointer is deliberately NULL, which is the case under
+    // test; the other arrays each have the one slot `n = 1` declares.
+    let rc: c_int = unsafe {
+        tjTransform(
+            handle,
+            std::ptr::null(),
+            0,
+            1,
+            dst_bufs.as_mut_ptr(),
+            dst_sizes.as_mut_ptr(),
+            transforms.as_ptr(),
+            TJFLAG_NOREALLOC,
+        )
+    };
+    let line: String = format!(
+        "{label} {} {} {}\n",
+        if rc == 0 { 0 } else { -1 },
+        i32::from(dst_bufs[0] == original),
+        i32::from(rc == 0 && dst_sizes[0] > 0)
+    );
+    // SAFETY: untouched, freed once; destroyed once.
+    unsafe {
+        tj3Free(original as *mut c_void);
+        tj3Destroy(handle);
+    }
+    line
+}
+
+/// The **legacy** wrapper with `dstSizes[0] = 0`, in the oracle's line format.
+///
+/// P4-151: legacy `dstSizes` are outputs, so a caller that sized its buffer
+/// with `tjTransformBufSize()` leaves them at zero. TJ3 reads the same slot as
+/// a capacity, so before the bridge this failed with "buffer too small".
+///
+/// The destination is sized with `tjBufSize` on the source geometry — the
+/// geometry-only bound, which is what upstream's wrapper computes and what the
+/// capacity must not exceed.
+fn legacy_transform_case(label: &str) -> String {
+    use libjpeg_turbo_rs_capi::{tjBufSize, tjTransform};
+
+    const TJFLAG_NOREALLOC: c_int = 1024;
+
+    let handle: *mut c_void = tj3Init(TJINIT_TRANSFORM);
+    assert!(!handle.is_null(), "tj3Init(TJINIT_TRANSFORM)");
+    let jpeg: Vec<u8> = source_jpeg();
+    // SAFETY: `#[repr(C)]` plain data; all-zero is identity.
+    let transforms: [TjTransform; 1] = [unsafe { std::mem::zeroed() }];
+
+    let bound: usize = tjBufSize(WIDTH, HEIGHT, TJSAMP_444);
+    assert!(bound > 0, "tjBufSize must report a bound");
+    let original: *mut u8 = caller_buffer(bound);
+    let mut dst_bufs: [*mut u8; 1] = [original];
+    let mut dst_sizes: [usize; 1] = [0];
+
+    // SAFETY: each array has the one slot `n = 1` declares.
+    let rc: c_int = unsafe {
+        tjTransform(
+            handle,
+            jpeg.as_ptr(),
+            jpeg.len(),
+            1,
+            dst_bufs.as_mut_ptr(),
+            dst_sizes.as_mut_ptr(),
+            transforms.as_ptr(),
+            TJFLAG_NOREALLOC,
+        )
+    };
+    let line: String = format!(
+        "{label} {rc} {} {}\n",
+        i32::from(dst_bufs[0] == original),
+        i32::from(rc == 0 && dst_sizes[0] > 0)
+    );
+    if dst_bufs[0] != original && !dst_bufs[0].is_null() {
+        // SAFETY: library-allocated on a replacing path; freed once.
+        unsafe { tj3Free(dst_bufs[0] as *mut c_void) };
+    }
+    // SAFETY: ours, freed once; destroyed once.
+    unsafe {
+        tj3Free(original as *mut c_void);
+        tj3Destroy(handle);
+    }
+    line
+}
+
 /// The ownership contract, compared line for line against real TurboJPEG.
 ///
 /// The tests above assert what *this* port does. That is necessary and not
@@ -662,6 +842,12 @@ fn norealloc_contract_matches_upstream_turbojpeg() {
     for (label, capacity) in [("roomy", ROOMY), ("cramped", CRAMPED), ("null", 0)] {
         ours.push_str(&transform_case(&format!("transform_{label}"), capacity));
     }
+    // P4-151: the legacy wrapper's output-vs-capacity bridge.
+    ours.push_str(&legacy_transform_case("legacy_transform_zero_size"));
+    ours.push_str(&legacy_null_source_case("legacy_transform_null_source"));
+    ours.push_str(&legacy_gray_no_overrun_case(
+        "legacy_transform_gray_no_overrun",
+    ));
 
     assert_eq!(
         ours, c_trace,
@@ -836,17 +1022,19 @@ fn legacy_tj_compress2_treats_the_size_slot_as_an_output() {
     }
 }
 
-/// The legacy transform wrapper maps the flag, and says so when it cannot
-/// help further.
+/// The legacy transform wrapper maps the flag, and a nonzero size slot does
+/// not change that.
 ///
 /// Mapping `TJFLAG_NOREALLOC` is what stops the caller's destination buffers
-/// being `free()`d. Bridging the *size* semantics — legacy `dstSizes` are
-/// outputs, TJ3's are capacities — is deliberately not attempted here; see
-/// P4-151 for why, and what it needs. A caller that leaves the slot at zero
-/// therefore gets an error rather than a transform, which is the smaller
-/// divergence: the alternative it replaced freed the caller's own memory.
+/// being `free()`d, and P4-151 bridged the *size* semantics beside it: legacy
+/// `dstSizes` are outputs, TJ3's are capacities, so a caller that sized its
+/// destination with `tjTransformBufSize()` and left the slot at zero now gets a
+/// transform rather than "buffer too small". A nonzero slot is *not* honoured
+/// as a capacity — upstream replaces every slot with the geometry bound under
+/// NOREALLOC (`turbojpeg.c:3122-3132`), and so does the bridge; this case pins
+/// that a caller passing one is served identically.
 #[test]
-fn legacy_tj_transform_maps_the_flag_and_refuses_a_zero_capacity() {
+fn legacy_tj_transform_maps_the_flag_with_a_nonzero_size_slot() {
     use libjpeg_turbo_rs_capi::tjTransform;
 
     const TJFLAG_NOREALLOC: c_int = 1024;
@@ -856,7 +1044,8 @@ fn legacy_tj_transform_maps_the_flag_and_refuses_a_zero_capacity() {
     let jpeg: Vec<u8> = source_jpeg();
     let original: *mut u8 = caller_buffer(ROOMY);
 
-    // With a real capacity the flag is honoured and the pointer survives.
+    // The slot is nonzero; the bridge replaces it with the geometry bound
+    // (as upstream does) and the pointer survives.
     let mut dst_bufs: [*mut u8; 1] = [original];
     let mut dst_sizes: [usize; 1] = [ROOMY];
     // SAFETY: `TjTransform` is `#[repr(C)]` plain data; all-zero is identity.
@@ -876,7 +1065,7 @@ fn legacy_tj_transform_maps_the_flag_and_refuses_a_zero_capacity() {
             TJFLAG_NOREALLOC,
         )
     };
-    assert_eq!(rc, 0, "a declared capacity must be honoured");
+    assert_eq!(rc, 0, "a nonzero size slot must not fail the call");
     assert_eq!(
         dst_bufs[0], original,
         "the flag must reach TJPARAM_NOREALLOC — otherwise the caller's \
@@ -984,4 +1173,360 @@ fn legacy_null_size_pointer_is_rejected() {
 
     // SAFETY: destroyed once.
     unsafe { tj3Destroy(handle) };
+}
+
+// ---------------------------------------------------------------------------
+// P4-151: the legacy `dstSizes` bridge.
+// ---------------------------------------------------------------------------
+
+/// A zero `dstSizes[i]` under `TJFLAG_NOREALLOC` must transform, not fail.
+///
+/// This is the convenience half of the legacy contract: `dstSizes` are
+/// *outputs* there, so a caller that sized its buffer with
+/// `tjTransformBufSize()` has no reason to fill them in. Upstream fills a
+/// temporary capacity array from the transformed geometry
+/// (`turbojpeg.c:3118-3132`); before P4-151 this port passed the zeros straight
+/// through and TJ3 read them as capacities.
+///
+/// The destination is sized with `tj3TransformBufSize`, which is what a legacy
+/// caller's `tjTransformBufSize()` maps to — so this also pins that the
+/// capacity the bridge computes never exceeds the buffer that call describes.
+#[test]
+fn legacy_tj_transform_fills_a_zero_dst_size_from_geometry() {
+    use libjpeg_turbo_rs_capi::{tj3DecompressHeader, tj3TransformBufSize, tjTransform};
+
+    const TJFLAG_NOREALLOC: c_int = 1024;
+
+    let handle: *mut c_void = tj3Init(TJINIT_TRANSFORM);
+    assert!(!handle.is_null(), "tj3Init(TJINIT_TRANSFORM)");
+    let jpeg: Vec<u8> = source_jpeg();
+    // SAFETY: `TjTransform` is `#[repr(C)]` plain data; all-zero is identity.
+    let transforms: [TjTransform; 1] = [unsafe { std::mem::zeroed() }];
+
+    // What a legacy caller sizes its destination with. Uses its own handle, so
+    // the header parse here cannot be what makes the call under test work.
+    let sizing_handle: *mut c_void = tj3Init(TJINIT_TRANSFORM);
+    assert!(!sizing_handle.is_null(), "tj3Init for sizing");
+    // SAFETY: live handle; `jpeg` is a complete datastream.
+    let bound: usize = unsafe {
+        assert_eq!(
+            tj3DecompressHeader(sizing_handle, jpeg.as_ptr(), jpeg.len()),
+            0,
+            "header parse for sizing"
+        );
+        tj3TransformBufSize(sizing_handle, transforms.as_ptr())
+    };
+    assert!(bound > 0, "tj3TransformBufSize must report a bound");
+    // SAFETY: destroyed once.
+    unsafe { tj3Destroy(sizing_handle) };
+
+    let original: *mut u8 = caller_buffer(bound);
+    let mut dst_bufs: [*mut u8; 1] = [original];
+    // The whole point: left at zero, as the legacy contract permits.
+    let mut dst_sizes: [usize; 1] = [0];
+
+    // SAFETY: each array has the one slot `n = 1` declares; `original` is
+    // `bound` bytes, which is what a legacy caller would have allocated.
+    let rc: c_int = unsafe {
+        tjTransform(
+            handle,
+            jpeg.as_ptr(),
+            jpeg.len(),
+            1,
+            dst_bufs.as_mut_ptr(),
+            dst_sizes.as_mut_ptr(),
+            transforms.as_ptr(),
+            TJFLAG_NOREALLOC,
+        )
+    };
+
+    assert_eq!(
+        rc, 0,
+        "a zero dstSizes slot must be filled from the transformed geometry, \
+         not passed through as a capacity of zero"
+    );
+    assert_eq!(
+        dst_bufs[0], original,
+        "the caller's destination must still be the one written"
+    );
+    assert!(
+        dst_sizes[0] > 0 && dst_sizes[0] <= bound,
+        "dstSizes must come back as the produced size ({}), within the bound \
+         the caller sized against ({bound})",
+        dst_sizes[0]
+    );
+
+    // SAFETY: still ours, freed once.
+    unsafe {
+        tj3Free(original as *mut c_void);
+        tj3Destroy(handle);
+    }
+}
+
+/// The bridge must not parse the source header into the handle.
+///
+/// The rejected attempt used `tj3DecompressHeader` to learn the source
+/// geometry. That writes shared state a later `tj3Compress*` on the same handle
+/// would read, so the transform would silently reconfigure the caller's
+/// compressor.
+///
+/// **Which parameter to watch was measured, not assumed.** The obvious guess —
+/// that `TJPARAM_SUBSAMP` would be overwritten with the source's — is wrong in
+/// this port: a header parse leaves it alone. What it *does* move, measured on
+/// a 32x32 4:4:4 source with the handle pre-set, is `TJPARAM_JPEGHEIGHT`
+/// (0 -> 32) and `TJPARAM_COLORSPACE` (-1 -> 1). An earlier version of this
+/// test asserted `TJPARAM_SUBSAMP` and passed with the rejected approach
+/// injected, which is how the mistake surfaced.
+///
+/// `TJPARAM_JPEGHEIGHT` is the sharper of the two: nothing but a header parse
+/// sets it, so it staying at zero says the handle was never used to read the
+/// source at all.
+#[test]
+fn legacy_tj_transform_does_not_parse_the_source_into_the_handle() {
+    use libjpeg_turbo_rs_capi::{tj3Get, tjTransform};
+
+    const TJFLAG_NOREALLOC: c_int = 1024;
+    /// `turbojpeg.h`: `TJPARAM_JPEGHEIGHT`, set only by a header parse.
+    const TJPARAM_JPEGHEIGHT: c_int = 6;
+    /// `turbojpeg.h`: `TJPARAM_COLORSPACE`.
+    const TJPARAM_COLORSPACE: c_int = 8;
+    /// `turbojpeg.h`: `TJCS_YCbCr`, deliberately not what a parse would leave.
+    const TJCS_YCBCR: c_int = 1;
+    /// `turbojpeg.h`: `TJCS_GRAY`.
+    const TJCS_GRAY: c_int = 2;
+
+    let handle: *mut c_void = tj3Init(TJINIT_TRANSFORM);
+    assert!(!handle.is_null(), "tj3Init(TJINIT_TRANSFORM)");
+    // SAFETY: live handle.
+    unsafe {
+        assert_eq!(
+            tj3Set(handle, TJPARAM_COLORSPACE, TJCS_GRAY),
+            0,
+            "pre-set a colour space the source parse would overwrite"
+        );
+        assert_eq!(
+            tj3Get(handle, TJPARAM_JPEGHEIGHT),
+            0,
+            "no header has been parsed on this handle yet"
+        );
+    }
+
+    let jpeg: Vec<u8> = source_jpeg();
+    let original: *mut u8 = caller_buffer(ROOMY);
+    let mut dst_bufs: [*mut u8; 1] = [original];
+    let mut dst_sizes: [usize; 1] = [0];
+    // SAFETY: `#[repr(C)]` plain data; all-zero is identity.
+    let transforms: [TjTransform; 1] = [unsafe { std::mem::zeroed() }];
+
+    // SAFETY: each array has the one slot `n = 1` declares.
+    let rc: c_int = unsafe {
+        tjTransform(
+            handle,
+            jpeg.as_ptr(),
+            jpeg.len(),
+            1,
+            dst_bufs.as_mut_ptr(),
+            dst_sizes.as_mut_ptr(),
+            transforms.as_ptr(),
+            TJFLAG_NOREALLOC,
+        )
+    };
+    assert_eq!(rc, 0, "the transform itself must succeed");
+
+    // SAFETY: live handle.
+    let (height_after, colorspace_after): (c_int, c_int) = unsafe {
+        (
+            tj3Get(handle, TJPARAM_JPEGHEIGHT),
+            tj3Get(handle, TJPARAM_COLORSPACE),
+        )
+    };
+    assert_eq!(
+        height_after, 0,
+        "TJPARAM_JPEGHEIGHT is set only by a header parse, so a non-zero value \
+         means the size bridge parsed the source into the caller's handle"
+    );
+    assert_ne!(
+        colorspace_after, TJCS_YCBCR,
+        "the handle's colour space was set to TJCS_GRAY; a parse of this \
+         4:4:4 source leaves TJCS_YCbCr, which a later tj3Compress* would use"
+    );
+    assert_eq!(
+        colorspace_after, TJCS_GRAY,
+        "the caller's colour space must survive the transform unchanged"
+    );
+
+    // SAFETY: still ours, freed once.
+    unsafe {
+        tj3Free(original as *mut c_void);
+        tj3Destroy(handle);
+    }
+}
+
+/// A grayscale source must be sized as `TJSAMP_GRAY`, not as 4:4:4.
+///
+/// P4-151 review found this: `probe` reports `Subsampling::Unknown` for a
+/// single-component image — there are no chroma planes to describe — and the
+/// generic mapping turns `Unknown` into `TJSAMP_444`. A legacy caller allocates
+/// `tjBufSize(w, h, TJSAMP_GRAY)`, which for 32x32 is 4096 bytes against 8192
+/// for 4:4:4. Handing `tj3Transform` the larger figure as a *capacity* means
+/// output between the two bounds is written past the end of the caller's
+/// allocation.
+///
+/// The direction is what makes it a defect rather than waste: over-stating a
+/// bound you allocate costs memory, over-stating a capacity you trust is an
+/// overrun.
+///
+/// The destination here is deliberately sized at the grayscale bound — what a
+/// compliant caller allocates — so a capacity computed as 4:4:4 is not merely
+/// wrong on paper.
+#[test]
+fn legacy_tj_transform_sizes_a_grayscale_source_as_gray() {
+    use libjpeg_turbo_rs_capi::inner::{Encoder, PixelFormat};
+    use libjpeg_turbo_rs_capi::{tjBufSize, tjTransform};
+
+    const TJFLAG_NOREALLOC: c_int = 1024;
+    /// `turbojpeg.h`: `TJSAMP_GRAY`.
+    const TJSAMP_GRAY: c_int = 3;
+
+    let gray_pixels: Vec<u8> = (0..(WIDTH as usize * HEIGHT as usize))
+        .map(|i| (i % 251) as u8)
+        .collect();
+    // A profile large enough that the transformed output crosses the grayscale
+    // bound but stays under the 4:4:4 one — the window where a capacity
+    // computed as 4:4:4 lets `tj3Transform` write past the caller's buffer.
+    // Without it the output of a 32x32 gray image is far below both bounds and
+    // the test passes whether or not the gate is there; that is how the first
+    // version of it failed to catch the defect.
+    let icc: Vec<u8> = vec![0x5Au8; 5_000];
+    let jpeg: Vec<u8> = Encoder::new(
+        &gray_pixels,
+        WIDTH as usize,
+        HEIGHT as usize,
+        PixelFormat::Grayscale,
+    )
+    .quality(80)
+    .icc_profile(&icc)
+    .encode()
+    .expect("encode grayscale source");
+
+    let gray_bound: usize = tjBufSize(WIDTH, HEIGHT, TJSAMP_GRAY);
+    assert!(
+        gray_bound < tjBufSize(WIDTH, HEIGHT, TJSAMP_444),
+        "the grayscale bound must be the smaller of the two, or this test \
+         cannot distinguish them"
+    );
+
+    // Over-allocate and canary, rather than allocating exactly `gray_bound`.
+    // The bug this guards against makes `tj3Transform` write ~5.6 KiB into what
+    // a compliant caller sizes at 4096, so a test that allocated exactly that
+    // would *commit* the heap overflow whenever the regression returned —
+    // corrupting the allocator, or aborting under a sanitizer, before its own
+    // assertion could run. The extra room means the overrun is **observed**
+    // instead: the canary past `gray_bound` records that bytes the caller never
+    // owned were written.
+    const CANARY: u8 = 0x5A;
+    let slack: usize = tjBufSize(WIDTH, HEIGHT, TJSAMP_444) + 4096;
+    let handle: *mut c_void = tj3Init(TJINIT_TRANSFORM);
+    assert!(!handle.is_null(), "tj3Init(TJINIT_TRANSFORM)");
+    let original: *mut u8 = caller_buffer(gray_bound + slack);
+    // SAFETY: `original` is `gray_bound + slack` bytes from `tj3Alloc`.
+    unsafe { std::ptr::write_bytes(original.add(gray_bound), CANARY, slack) };
+    let mut dst_bufs: [*mut u8; 1] = [original];
+    let mut dst_sizes: [usize; 1] = [0];
+    // SAFETY: `#[repr(C)]` plain data; all-zero is identity.
+    let transforms: [TjTransform; 1] = [unsafe { std::mem::zeroed() }];
+
+    // SAFETY: each array has the one slot `n = 1` declares; `original` is at
+    // least the bound a compliant legacy caller would have allocated.
+    let rc: c_int = unsafe {
+        tjTransform(
+            handle,
+            jpeg.as_ptr(),
+            jpeg.len(),
+            1,
+            dst_bufs.as_mut_ptr(),
+            dst_sizes.as_mut_ptr(),
+            transforms.as_ptr(),
+            TJFLAG_NOREALLOC,
+        )
+    };
+    // The invariant, stated directly: never report success having written more
+    // than the caller's buffer holds. Refusing is a correct outcome *for the
+    // bytes we produce* — the profile makes the output genuinely larger than a
+    // grayscale-sized destination. Upstream instead succeeds at 601 bytes on
+    // this exact path: its legacy-NOREALLOC capacity pre-read skips marker
+    // registration, so the profile (and every other marker) is dropped —
+    // P4-156 (#544) tracks matching that quirk, and its criterion 5 re-pins
+    // this test's mechanism once no marker can inflate the payload. What must
+    // not happen on either side is `rc == 0` with a size past the bound, which
+    // is the overrun a 4:4:4 capacity permits.
+    assert!(
+        !(rc == 0 && dst_sizes[0] > gray_bound),
+        "reported success after producing {} bytes into a {gray_bound}-byte \
+         buffer: the capacity handed to tj3Transform came from the 4:4:4 bound, \
+         so everything past {gray_bound} was written outside the caller's \
+         allocation",
+        dst_sizes[0]
+    );
+    // The direct evidence, independent of the reported size: nothing beyond
+    // what the caller allocated may have been touched.
+    // SAFETY: the canary region is in bounds of the over-allocation above.
+    let canary: &[u8] = unsafe { std::slice::from_raw_parts(original.add(gray_bound), slack) };
+    let clobbered: Option<usize> = canary.iter().position(|byte| *byte != CANARY);
+    assert!(
+        clobbered.is_none(),
+        "byte {} past the {gray_bound}-byte grayscale bound was overwritten — \
+         a compliant caller allocates exactly that many, so this is a heap \
+         overflow in its buffer",
+        clobbered.unwrap_or(0)
+    );
+
+    // SAFETY: still ours, freed once.
+    unsafe {
+        tj3Free(original as *mut c_void);
+        tj3Destroy(handle);
+    }
+}
+
+/// A NULL source under `TJFLAG_NOREALLOC` must return -1, not abort.
+///
+/// P4-151 review: the bridge sliced `jpeg_buf` before `tj3Transform` validated
+/// it, and `from_raw_parts` requires a non-null pointer even for a zero-length
+/// slice — a non-unwinding abort in debug, UB in release, where the API
+/// documents -1.
+#[test]
+fn legacy_tj_transform_rejects_a_null_source_under_norealloc() {
+    use libjpeg_turbo_rs_capi::tjTransform;
+
+    const TJFLAG_NOREALLOC: c_int = 1024;
+
+    let handle: *mut c_void = tj3Init(TJINIT_TRANSFORM);
+    assert!(!handle.is_null(), "tj3Init(TJINIT_TRANSFORM)");
+    let original: *mut u8 = caller_buffer(ROOMY);
+    let mut dst_bufs: [*mut u8; 1] = [original];
+    let mut dst_sizes: [usize; 1] = [0];
+    // SAFETY: `#[repr(C)]` plain data; all-zero is identity.
+    let transforms: [TjTransform; 1] = [unsafe { std::mem::zeroed() }];
+
+    // SAFETY: the source pointer is deliberately NULL, which is the case under
+    // test; the remaining arrays each have the one slot `n = 1` declares.
+    let rc: c_int = unsafe {
+        tjTransform(
+            handle,
+            std::ptr::null(),
+            0,
+            1,
+            dst_bufs.as_mut_ptr(),
+            dst_sizes.as_mut_ptr(),
+            transforms.as_ptr(),
+            TJFLAG_NOREALLOC,
+        )
+    };
+    assert_eq!(rc, -1, "a NULL source must be reported, not dereferenced");
+
+    // SAFETY: untouched, freed once.
+    unsafe {
+        tj3Free(original as *mut c_void);
+        tj3Destroy(handle);
+    }
 }

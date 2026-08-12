@@ -307,6 +307,67 @@ pub unsafe extern "C" fn tj3Transform(
     })
 }
 
+/// Geometry of the image a transform produces, from geometry alone.
+///
+/// Mirrors upstream `turbojpeg.c::getTransformedSpecs`. Kept separate from
+/// [`tj3TransformBufSize`] because the two callers need different things from
+/// it: that entry point adds the handle's stored ICC length to the bound it
+/// returns, while the legacy `tjTransform` wrapper must **not** — a caller that
+/// sized its destination with `tjTransformBufSize()` gets a buffer derived from
+/// geometry only, and adding metadata to the capacity handed to `tj3Transform`
+/// overruns it. Measured at a 32x32 source with a 128 KiB ICC profile: an
+/// 8192-byte destination against a 139264-byte capacity (P4-151).
+///
+/// Taking `(w, h, subsamp)` as parameters rather than reading them from a
+/// handle is the other half of that separation: the legacy wrapper derives them
+/// from a header probe, because parsing into the handle would overwrite
+/// compression state the caller set — subsampling, colour space, density, ICC.
+pub(crate) fn transformed_specs(
+    mut w: c_int,
+    mut h: c_int,
+    mut subsamp: c_int,
+    xform: &TjTransform,
+) -> (c_int, c_int, c_int) {
+    // `TJXOPT_GRAY` forces grayscale output regardless of source subsampling
+    // (mirrors `references/libjpeg-turbo/src/turbojpeg.c::getDstSubsamp`).
+    if (xform.options & TJXOPT_GRAY) != 0 {
+        subsamp = TJSAMP_GRAY;
+    }
+    // Transpose-class ops swap the H and V chroma factors, so e.g. 4:2:2 →
+    // 4:4:0 and 4:1:1 → 4:4:1. Without this swap the post-transform buffer
+    // estimate underflows for non-square chroma layouts and `tj3Transform`
+    // can overrun.
+    if matches!(
+        xform.op,
+        TJXOP_TRANSPOSE | TJXOP_TRANSVERSE | TJXOP_ROT90 | TJXOP_ROT270
+    ) {
+        std::mem::swap(&mut w, &mut h);
+        subsamp = match subsamp {
+            TJSAMP_422 => TJSAMP_440,
+            TJSAMP_440 => TJSAMP_422,
+            TJSAMP_411 => TJSAMP_441,
+            TJSAMP_441 => TJSAMP_411,
+            TJSAMP_410 => TJSAMP_24,
+            TJSAMP_24 => TJSAMP_410,
+            other => other,
+        };
+    }
+    // Crop detection: upstream gates on `TJXOPT_CROP` and treats `r.w == 0`
+    // as "remainder of width post-x". `tjbench` only takes the `IS_CROPPED`
+    // path when at least one of x/y/w/h is non-zero, so the simpler "any of
+    // r.{w,h} positive" heuristic matches its usage; a stricter caller that
+    // wants the remainder-mode behaviour can pass an explicit `r.w` / `r.h`.
+    if (xform.options & TJXOPT_CROP) != 0 {
+        if xform.r.w > 0 {
+            w = xform.r.w;
+        }
+        if xform.r.h > 0 {
+            h = xform.r.h;
+        }
+    }
+    (w, h, subsamp)
+}
+
 /// `tj3TransformBufSize(handle, *transform) -> size_t`.
 ///
 /// Returns an upper bound on the bytes needed to hold the JPEG produced
@@ -352,8 +413,8 @@ pub unsafe extern "C" fn tj3TransformBufSize(
             // POD-like (raw layout matches `tjtransform`), so reading it is safe.
             let xform: &TjTransform = unsafe { &*transform };
 
-            let mut w: c_int = inst.inner.get(TjParam::Width);
-            let mut h: c_int = inst.inner.get(TjParam::Height);
+            let w: c_int = inst.inner.get(TjParam::Width);
+            let h: c_int = inst.inner.get(TjParam::Height);
             if w <= 0 || h <= 0 {
                 inst.set_error(
                     "tj3TransformBufSize: dimensions not set; call tj3DecompressHeader first",
@@ -361,45 +422,8 @@ pub unsafe extern "C" fn tj3TransformBufSize(
                 );
                 return 0;
             }
-            let mut subsamp: c_int = inst.inner.get(TjParam::Subsampling);
-            // `TJXOPT_GRAY` forces grayscale output regardless of source subsampling
-            // (mirrors `references/libjpeg-turbo/src/turbojpeg.c::getDstSubsamp`).
-            if (xform.options & TJXOPT_GRAY) != 0 {
-                subsamp = TJSAMP_GRAY;
-            }
-            // Transpose-class ops swap the H and V chroma factors, so e.g. 4:2:2 →
-            // 4:4:0 and 4:1:1 → 4:4:1. Without this swap the post-transform buffer
-            // estimate underflows for non-square chroma layouts and `tj3Transform`
-            // can overrun. Mirrors upstream `turbojpeg.c::getTransformedSpecs`.
-            if matches!(
-                xform.op,
-                TJXOP_TRANSPOSE | TJXOP_TRANSVERSE | TJXOP_ROT90 | TJXOP_ROT270
-            ) {
-                std::mem::swap(&mut w, &mut h);
-                subsamp = match subsamp {
-                    TJSAMP_422 => TJSAMP_440,
-                    TJSAMP_440 => TJSAMP_422,
-                    TJSAMP_411 => TJSAMP_441,
-                    TJSAMP_441 => TJSAMP_411,
-                    TJSAMP_410 => TJSAMP_24,
-                    TJSAMP_24 => TJSAMP_410,
-                    other => other,
-                };
-            }
-            // Crop detection: upstream gates on `TJXOPT_CROP` and treats `r.w == 0`
-            // as "remainder of width post-x". `tjbench` only takes the
-            // `IS_CROPPED` path when at least one of x/y/w/h is non-zero, so the
-            // simpler "any of r.{w,h} positive" heuristic matches its usage; a
-            // stricter caller that wants the remainder-mode behaviour can pass an
-            // explicit `r.w` / `r.h`.
-            if (xform.options & TJXOPT_CROP) != 0 {
-                if xform.r.w > 0 {
-                    w = xform.r.w;
-                }
-                if xform.r.h > 0 {
-                    h = xform.r.h;
-                }
-            }
+            let subsamp: c_int = inst.inner.get(TjParam::Subsampling);
+            let (w, h, subsamp) = transformed_specs(w, h, subsamp, xform);
             inst.clear_error();
             let base: usize = crate::bufsize::tj3JPEGBufSize(w, h, subsamp);
             // Mirrors upstream `turbojpeg.c::tj3TransformBufSize`: add the stored ICC

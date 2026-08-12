@@ -52,6 +52,36 @@ pub enum Subsampling {
 }
 
 impl Subsampling {
+    /// The `TJSAMP_*` integer for this mode.
+    ///
+    /// One definition, because two would drift: the TJ3 parameter accessor and
+    /// the legacy `tjTransform` size bridge (P4-151) both need it, and the
+    /// bridge lives in a different crate. `Unknown` maps to `TJSAMP_444`,
+    /// which never *under*-states a bound you are about to allocate.
+    ///
+    /// Callers using the result as a **capacity to trust** need more care: a
+    /// grayscale image probes as `Unknown`, and 4:4:4 over-states it, so a
+    /// buffer sized `TJSAMP_GRAY` would be overrun. Decide grayscale from the
+    /// component count before calling this — see the legacy `tjTransform`
+    /// bridge, which does.
+    ///
+    /// Note `TJSAMP_GRAY` (3) is absent: grayscale is not a variant here, and a
+    /// transform that forces it applies `TJXOPT_GRAY` to the *result*, which
+    /// the caller handles.
+    pub fn to_tjsamp(self) -> i32 {
+        match self {
+            Subsampling::S444 => 0,
+            Subsampling::S422 => 1,
+            Subsampling::S420 => 2,
+            Subsampling::S440 => 4,
+            Subsampling::S411 => 5,
+            Subsampling::S441 => 6,
+            Subsampling::S410 => 7,
+            Subsampling::S24 => 8,
+            Subsampling::Unknown => 0,
+        }
+    }
+
     /// Max horizontal sampling factor (luma blocks per MCU row).
     pub fn mcu_width_blocks(self) -> usize {
         match self {

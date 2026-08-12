@@ -246,6 +246,154 @@ static void transform_case(const char *label, size_t capacity)
   tj3Destroy(h);
 }
 
+/* The **legacy** wrapper, whose `dstSizes` are *outputs* rather than
+ * capacities. A caller that sized its destination with `tjTransformBufSize()`
+ * has no reason to fill them in, so upstream fills a temporary capacity array
+ * from the transformed geometry (`turbojpeg.c:3118-3132`). This port passed the
+ * zeros straight through until P4-151, and TJ3 read them as capacities of zero.
+ *
+ * `dstSizes[0]` starts at 0 deliberately — that is the case under test. The
+ * reported `produced` field therefore also says whether the bridge copied the
+ * real size back, which upstream does unconditionally. */
+static void legacy_transform_case(const char *label)
+{
+  tjhandle h = tj3Init(TJINIT_TRANSFORM);
+  size_t jpeg_size = 0;
+  unsigned char *jpeg = make_source(&jpeg_size);
+  tjtransform t[1];
+  unsigned long bound;
+  unsigned char *original;
+  unsigned char *dst_bufs[1];
+  unsigned long dst_sizes[1];
+  int rc;
+
+  if (!h) { fprintf(stderr, "tj3Init\n"); exit(2); }
+  memset(t, 0, sizeof(t));
+
+  /* What a legacy caller allocates. TurboJPEG 3 no longer declares
+   * `tjTransformBufSize`, so this uses `tjBufSize` on the transformed
+   * geometry — which is what that function computed, and exactly the
+   * geometry-only bound P4-151 says the capacity must not exceed. An identity
+   * transform leaves the specs unchanged, and the source is 4:4:4. */
+  bound = tjBufSize(WIDTH, HEIGHT, TJSAMP_444);
+  if (bound == 0) { fprintf(stderr, "tjBufSize\n"); exit(2); }
+  original = (unsigned char *)tj3Alloc(bound);
+  if (!original) { fprintf(stderr, "oom\n"); exit(2); }
+
+  dst_bufs[0] = original;
+  dst_sizes[0] = 0;
+
+  rc = tjTransform(h, jpeg, (unsigned long)jpeg_size, 1, dst_bufs, dst_sizes, t,
+                   TJFLAG_NOREALLOC);
+  printf("%s %d %d %d\n", label, rc, dst_bufs[0] == original ? 1 : 0,
+         (rc == 0 && dst_sizes[0] > 0) ? 1 : 0);
+
+  if (dst_bufs[0] != original && dst_bufs[0] != NULL) tj3Free(dst_bufs[0]);
+  tj3Free(original);
+  tj3Free(jpeg);
+  tj3Destroy(h);
+}
+
+/* A **grayscale** source under the legacy wrapper, carrying an ICC profile
+ * large enough that the transformed output exceeds the grayscale bound but not
+ * the 4:4:4 one. That window is where a capacity derived as 4:4:4 lets the
+ * library write past a buffer sized `tjBufSize(w, h, TJSAMP_GRAY)`, which is
+ * what a compliant caller allocates.
+ *
+ * The destination is allocated at exactly the grayscale bound here, as C, so
+ * whether upstream succeeds or refuses is the comparison. It sizes the same way
+ * this port now does, so it is expected to refuse — and a refusal is the
+ * correct outcome, not a limitation. */
+static void legacy_gray_transform_case(const char *label)
+{
+  tjhandle h = tj3Init(TJINIT_TRANSFORM);
+  tjhandle enc = tj3Init(TJINIT_COMPRESS);
+  unsigned char *gray = (unsigned char *)malloc((size_t)WIDTH * HEIGHT);
+  unsigned char *icc = (unsigned char *)malloc(5000);
+  unsigned char *jpeg = NULL;
+  size_t jpeg_size = 0;
+  tjtransform t[1];
+  unsigned long gray_bound;
+  unsigned char *original;
+  unsigned char *dst_bufs[1];
+  unsigned long dst_sizes[1];
+  size_t i;
+  int rc;
+
+  if (!h || !enc || !gray || !icc) { fprintf(stderr, "oom\n"); exit(2); }
+  for (i = 0; i < (size_t)WIDTH * HEIGHT; i++) gray[i] = (unsigned char)(i % 251);
+  memset(icc, 0x5A, 5000);
+
+  if (tj3Set(enc, TJPARAM_QUALITY, 80) != 0 ||
+      tj3Set(enc, TJPARAM_SUBSAMP, TJSAMP_GRAY) != 0 ||
+      tj3SetICCProfile(enc, icc, 5000) != 0) {
+    fprintf(stderr, "gray encode setup\n"); exit(2);
+  }
+  if (tj3Compress8(enc, gray, WIDTH, 0, HEIGHT, TJPF_GRAY, &jpeg, &jpeg_size) != 0) {
+    fprintf(stderr, "gray encode: %s\n", tj3GetErrorStr(enc)); exit(2);
+  }
+
+  memset(t, 0, sizeof(t));
+  gray_bound = tjBufSize(WIDTH, HEIGHT, TJSAMP_GRAY);
+  original = (unsigned char *)tj3Alloc(gray_bound);
+  if (!original) { fprintf(stderr, "oom\n"); exit(2); }
+  dst_bufs[0] = original;
+  dst_sizes[0] = 0;
+
+  rc = tjTransform(h, jpeg, (unsigned long)jpeg_size, 1, dst_bufs, dst_sizes, t,
+                   TJFLAG_NOREALLOC);
+  /* The **invariant**, not the outcome. Upstream succeeds here (601 bytes) and
+   * this port refuses (5619) — on this path only: the legacy-NOREALLOC
+   * capacity pre-read skips marker registration, so upstream's transform drops
+   * the profile with every other marker, while both libraries copy it on
+   * legacy flags=0 and tj3Transform. A separate defect (P4-156) scoped to that
+   * ordering quirk, and one that would make a trace of `rc` fail for a reason
+   * unrelated to the capacity rule.
+   *
+   * What both must satisfy, and what a port sizing grayscale as 4:4:4 would
+   * violate, is narrower: never report success having written past the bound a
+   * compliant caller allocated. Comparing that keeps the cross-validation
+   * honest without enshrining the divergence, and it still fails on the bug
+   * this case exists for. Exact size parity is P4-156's to pin. */
+  printf("%s %d %d\n", label, dst_bufs[0] == original ? 1 : 0,
+         (rc == 0 && dst_sizes[0] > gray_bound) ? 1 : 0);
+
+  if (dst_bufs[0] != original && dst_bufs[0] != NULL) tj3Free(dst_bufs[0]);
+  tj3Free(original);
+  tj3Free(jpeg);
+  free(gray);
+  free(icc);
+  tj3Destroy(enc);
+  tj3Destroy(h);
+}
+
+/* A NULL source under the legacy wrapper: -1, and the caller's destination
+ * untouched. Cheap, and it pins that the port's own pointer validation — added
+ * because it sliced before `tj3Transform` could check — agrees with upstream
+ * rather than merely avoiding a panic. */
+static void legacy_null_source_case(const char *label)
+{
+  tjhandle h = tj3Init(TJINIT_TRANSFORM);
+  unsigned char *original = (unsigned char *)tj3Alloc(ROOMY);
+  unsigned char *dst_bufs[1];
+  unsigned long dst_sizes[1];
+  tjtransform t[1];
+  int rc;
+
+  if (!h || !original) { fprintf(stderr, "oom\n"); exit(2); }
+  memset(t, 0, sizeof(t));
+  dst_bufs[0] = original;
+  dst_sizes[0] = 0;
+
+  rc = tjTransform(h, NULL, 0, 1, dst_bufs, dst_sizes, t, TJFLAG_NOREALLOC);
+  printf("%s %d %d %d\n", label, rc == 0 ? 0 : -1,
+         dst_bufs[0] == original ? 1 : 0, (rc == 0 && dst_sizes[0] > 0) ? 1 : 0);
+
+  if (dst_bufs[0] != original && dst_bufs[0] != NULL) tj3Free(dst_bufs[0]);
+  tj3Free(original);
+  tj3Destroy(h);
+}
+
 int main(void)
 {
   /* Roomy: honoured, pointer kept. */
@@ -287,6 +435,13 @@ int main(void)
   transform_case("transform_roomy", ROOMY);
   transform_case("transform_cramped", CRAMPED);
   transform_case("transform_null", 0);
+
+  /* P4-151: the legacy wrapper's output-vs-capacity bridge. */
+  legacy_transform_case("legacy_transform_zero_size");
+  legacy_null_source_case("legacy_transform_null_source");
+  /* Compared on the no-overrun invariant only — see the note in the case
+   * itself. Exact size parity waits on P4-156 (#544). */
+  legacy_gray_transform_case("legacy_transform_gray_no_overrun");
 
   return 0;
 }

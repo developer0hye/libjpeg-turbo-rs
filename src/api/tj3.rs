@@ -404,17 +404,7 @@ impl TjHandle {
 
     /// Convert `Subsampling` enum to TJ3 integer (TJSAMP_* constants).
     fn subsampling_to_tj(ss: Subsampling) -> i32 {
-        match ss {
-            Subsampling::S444 => 0, // TJSAMP_444
-            Subsampling::S422 => 1, // TJSAMP_422
-            Subsampling::S420 => 2, // TJSAMP_420
-            Subsampling::S440 => 4, // TJSAMP_440
-            Subsampling::S411 => 5, // TJSAMP_411
-            Subsampling::S441 => 6, // TJSAMP_441
-            Subsampling::S410 => 7, // TJSAMP_410
-            Subsampling::S24 => 8,  // TJSAMP_24
-            Subsampling::Unknown => 0,
-        }
+        ss.to_tjsamp()
     }
 
     /// Convert TJ3 integer to `ColorSpace` enum. -1 (TJCS_DEFAULT) returns None.
