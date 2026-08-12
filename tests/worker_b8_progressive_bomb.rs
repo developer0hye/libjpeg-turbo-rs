@@ -20,9 +20,14 @@
 //!
 //! - **With `set_scan_limit(1000)`**: decode errors out, error message mentions
 //!   "scan" and "limit" (or the future `ScanLimitExceeded` enum variant).
-//! - **Without limit**: the decoder either completes or surfaces an error, but
-//!   always within a measured wall-clock bound + 20 % (loose-first, tightened
-//!   here) and bounded peak RSS.
+//! - **Without limit**: the decoder either completes or surfaces an error,
+//!   within bounded peak RSS.
+//!
+//! Neither of those asserts a wall-clock ceiling any more (P4-152). The two
+//! timing properties they used to carry — that the scan loop is linear, and
+//! that `scan_limit` stops early — are now ratios against a control, at the
+//! bottom of this file, `#[ignore]`d out of the parallel run and executed by a
+//! serial CI step.
 
 #[path = "worker_b8_measure.rs"]
 mod measure;
@@ -61,10 +66,10 @@ const SCALING_LARGE_SCANS: usize = 7_999;
 /// cost. A mitigation that stopped firing would sit near 1.0, so the bound is
 /// set at roughly twice the measurement and well clear of it.
 const FAIL_FAST_RATIO_LIMIT: f64 = 0.6;
-/// Rounds of min-of-N for the ratios. Min-of-N rejects scheduler noise; the
-/// outer rounds let a single unlucky pairing be retried rather than failing.
-const RATIO_ROUNDS: usize = 3;
-const RATIO_MIN_OF: usize = 9;
+/// Timed repetitions per workload. Each workload's own minimum is taken across
+/// all of them and the ratio is formed from the two minima — see
+/// [`best_decode_ms`] for why the *ratio* must not be minimised directly.
+const RATIO_SAMPLES: usize = 27;
 /// Peak RSS delta bound. Parser stores a ScanInfo per SOS; since issue #351
 /// those hold `Arc<HuffmanTable>` handles, so 5000 scans share one copy of
 /// each table (8 pointers per scan, not ~4 KB). Scan state + coefficient
@@ -270,13 +275,25 @@ fn progressive_bomb_without_limit_is_bounded() {
 // what makes the comparison mean anything.
 // ---------------------------------------------------------------------------
 
-/// Best-of-`RATIO_MIN_OF` wall clock for one decode configuration, in
-/// milliseconds. Minimum rather than mean: scheduler noise only ever adds time,
-/// so the fastest observation is the one closest to the work actually done.
+/// Best-of-`RATIO_SAMPLES` wall clock for one decode configuration, in
+/// milliseconds.
+///
+/// Minimum rather than mean: scheduler noise only ever *adds* time to a
+/// measurement, so the fastest observation of a workload is the one closest to
+/// the work it actually did.
+///
+/// That reasoning applies to each workload on its own, and **not** to the ratio
+/// between two of them — a distinction the first version of this file got
+/// wrong. Noise landing on the denominator inflates it and therefore *deflates*
+/// the ratio, so taking the minimum across several (numerator, denominator)
+/// pairs selects for the most-deflated one and can hide the very regression the
+/// test exists to catch. Each workload is minimised here; the ratio is formed
+/// once, from two numbers that are each already the least-noisy estimate
+/// available.
 fn best_decode_ms(scans: usize, scan_limit: Option<u32>) -> f64 {
     let bomb: Vec<u8> = build_progressive_scan_bomb(scans);
     let mut best: f64 = f64::MAX;
-    for _ in 0..RATIO_MIN_OF {
+    for _ in 0..RATIO_SAMPLES {
         let (_result, m) = measure("ratio", || {
             let mut decoder: Decoder = Decoder::new(&bomb).unwrap();
             decoder.set_max_memory(256 * 1024 * 1024);
@@ -307,25 +324,20 @@ fn scan_loop_cost_scales_linearly_with_scan_count() {
     // not charged for them.
     let _ = best_decode_ms(SCALING_LARGE_SCANS, None);
 
-    let mut ratios: Vec<f64> = Vec::with_capacity(RATIO_ROUNDS);
-    for _ in 0..RATIO_ROUNDS {
-        let small: f64 = best_decode_ms(SCALING_SMALL_SCANS, None);
-        let large: f64 = best_decode_ms(SCALING_LARGE_SCANS, None);
-        assert!(
-            small > 0.0,
-            "the small decode measured 0 ms, so the ratio would be meaningless"
-        );
-        ratios.push(large / small);
-    }
-    // The best round: an unlucky pairing inflates the ratio, it cannot deflate
-    // it below the true scaling, so the minimum is the least noisy estimate.
-    let ratio: f64 = ratios.iter().copied().fold(f64::MAX, f64::min);
+    let small: f64 = best_decode_ms(SCALING_SMALL_SCANS, None);
+    let large: f64 = best_decode_ms(SCALING_LARGE_SCANS, None);
+    assert!(
+        small > 0.0,
+        "the small decode measured 0 ms, so the ratio would be meaningless"
+    );
+    let ratio: f64 = large / small;
 
     assert!(
         ratio < SCAN_LOOP_SCALING_RATIO_LIMIT,
         "scan-loop cost scaled {ratio:.2}x for a 4x scan count ({} -> {}), \
          over the {SCAN_LOOP_SCALING_RATIO_LIMIT} bound. Linear is ~4.0 and \
-         measured 3.87-3.91; quadratic is ~16. Rounds: {ratios:?}",
+         measured 3.87-3.91; quadratic is ~16. \
+         small={small:.3}ms large={large:.3}ms, each the best of {RATIO_SAMPLES}.",
         SCALING_SMALL_SCANS,
         SCALING_LARGE_SCANS,
     );
@@ -345,23 +357,19 @@ fn scan_loop_cost_scales_linearly_with_scan_count() {
 fn scan_limit_stops_early_rather_than_walking_every_scan() {
     let _ = best_decode_ms(TARGET_SCAN_COUNT - 1, None);
 
-    let mut ratios: Vec<f64> = Vec::with_capacity(RATIO_ROUNDS);
-    for _ in 0..RATIO_ROUNDS {
-        let unlimited: f64 = best_decode_ms(TARGET_SCAN_COUNT - 1, None);
-        let limited: f64 = best_decode_ms(TARGET_SCAN_COUNT - 1, Some(SCAN_LIMIT_UNDER_TEST));
-        assert!(
-            unlimited > 0.0,
-            "the unlimited decode measured 0 ms, so the ratio would be meaningless"
-        );
-        ratios.push(limited / unlimited);
-    }
-    let ratio: f64 = ratios.iter().copied().fold(f64::MAX, f64::min);
+    let unlimited: f64 = best_decode_ms(TARGET_SCAN_COUNT - 1, None);
+    let limited: f64 = best_decode_ms(TARGET_SCAN_COUNT - 1, Some(SCAN_LIMIT_UNDER_TEST));
+    assert!(
+        unlimited > 0.0,
+        "the unlimited decode measured 0 ms, so the ratio would be meaningless"
+    );
+    let ratio: f64 = limited / unlimited;
 
     assert!(
         ratio < FAIL_FAST_RATIO_LIMIT,
         "a scan_limit of {SCAN_LIMIT_UNDER_TEST} against ~{TARGET_SCAN_COUNT} scans cost \
          {ratio:.3} of an unlimited decode, over the {FAIL_FAST_RATIO_LIMIT} bound. \
          Measured 0.269-0.278; a mitigation that no longer fires early sits near 1.0. \
-         Rounds: {ratios:?}",
+         limited={limited:.3}ms unlimited={unlimited:.3}ms, each the best of {RATIO_SAMPLES}.",
     );
 }

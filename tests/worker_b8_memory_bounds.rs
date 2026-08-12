@@ -4,6 +4,11 @@
 //! and wall-clock for every test, asserting against DOCUMENTED measured
 //! baselines rather than hand-picked magic numbers.
 //!
+//! P4-152: peak RSS is the asserted bound. The wall-clock baselines below are
+//! still measured and reported, but only *asserted* on platforms that cannot
+//! report RSS — a ~1000x margin beside a real memory bound catches nothing and
+//! fails under contention.
+//!
 //! Measured baselines (darwin arm64, debug test build, --test-threads=1):
 //!
 //! | Test                                    | wall (ms) | RSS delta (MiB) |
@@ -50,10 +55,17 @@ use libjpeg_turbo_rs::{
 /// observed delta is 0.73 MiB (scan_limit_allow 320x240 prog). 32 MiB absorbs
 /// process-wide peak drift from sibling tests sharing the binary.
 const SMALL_DECODE_PEAK_RSS_DELTA_LIMIT: u64 = 32 * 1024 * 1024;
+/// Wall-clock fallback for platforms with no RSS reporting (P4-152). Measured
+/// worst case 0.43 ms; 500 ms is ~1000x, which is why it is a fallback and not
+/// a bound worth asserting beside a real memory measurement.
+const SMALL_DECODE_WALL_CLOCK_MS: u128 = 500;
 
 /// Upper bound for peak RSS delta during a 320x240 progressive decode. Same
 /// 32 MiB bound — the 320x240 fixture measured only 0.73 MiB delta.
 const MEDIUM_PROG_DECODE_PEAK_RSS_DELTA_LIMIT: u64 = 32 * 1024 * 1024;
+/// Wall-clock fallback, as above. Measured worst case 10.92 ms; 2000 ms is
+/// ~180x.
+const MEDIUM_PROG_DECODE_WALL_CLOCK_MS: u128 = 2_000;
 
 // --------------------------------------------------------------------------
 // Fixtures
@@ -71,14 +83,32 @@ fn make_64x64_jpeg() -> Vec<u8> {
     compress(&pixels, 64, 64, PixelFormat::Rgb, 75, Subsampling::S420).unwrap()
 }
 
-/// P4-152: peak RSS only. The wall-clock bound this used to assert first was
-/// deleted rather than converted, because it never carried a regression this
-/// file is about — the bound is *memory*, it is asserted below, and it is
-/// deterministic. A 500 ms clock on a 64x64 decode measures how loaded the
-/// machine is: `cargo test` runs binaries and threads in parallel, so a
-/// contended runner fails it with a message naming a decode regression that did
-/// not happen. That cost is what P4-147 (#523) documented.
+/// P4-152: peak RSS where it can be measured, wall clock only where it cannot.
+///
+/// The bound this file is about is *memory*, and where RSS is available that is
+/// both asserted and deterministic. The 500 ms clock that used to run first
+/// added nothing there — its own comment called it "~1000x to tolerate
+/// contended CI runners", a margin that cannot fire on a regression the RSS
+/// bound would miss, only on contention. That is the failure P4-147 (#523)
+/// documented: a green-on-rerun failure naming a regression that did not
+/// happen.
+///
+/// It is kept as a *fallback* rather than deleted outright, because
+/// `worker_b8_measure` reports no RSS on platforms other than Linux and macOS
+/// and its contract says callers "should skip RSS assertions but still run
+/// wall-clock bounds so the test remains useful". Dropping it everywhere would
+/// have left Windows with no resource bound at all — trading a flaky assertion
+/// for no assertion. The same loose margin that makes it useless beside a real
+/// memory bound is what makes it tolerable as the only one.
 fn assert_within_small_decode_bounds(label: &str, m: measure::Measurement) {
+    if !rss_supported() {
+        assert!(
+            m.wall_clock.as_millis() < SMALL_DECODE_WALL_CLOCK_MS,
+            "{label}: wall_clock={:?} exceeds fallback bound {}ms (no RSS on this platform)",
+            m.wall_clock,
+            SMALL_DECODE_WALL_CLOCK_MS
+        );
+    }
     if rss_supported() {
         assert!(
             m.peak_rss_delta_bytes < SMALL_DECODE_PEAK_RSS_DELTA_LIMIT,
@@ -89,9 +119,17 @@ fn assert_within_small_decode_bounds(label: &str, m: measure::Measurement) {
     }
 }
 
-/// P4-152: peak RSS only, for the reason given on
-/// [`assert_within_small_decode_bounds`].
+/// P4-152: peak RSS where measurable, wall clock as a fallback only — see
+/// [`assert_within_small_decode_bounds`] for why.
 fn assert_within_medium_prog_bounds(label: &str, m: measure::Measurement) {
+    if !rss_supported() {
+        assert!(
+            m.wall_clock.as_millis() < MEDIUM_PROG_DECODE_WALL_CLOCK_MS,
+            "{label}: wall_clock={:?} exceeds fallback bound {}ms (no RSS on this platform)",
+            m.wall_clock,
+            MEDIUM_PROG_DECODE_WALL_CLOCK_MS
+        );
+    }
     if rss_supported() {
         assert!(
             m.peak_rss_delta_bytes < MEDIUM_PROG_DECODE_PEAK_RSS_DELTA_LIMIT,

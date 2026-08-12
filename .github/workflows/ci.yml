@@ -439,13 +439,23 @@ jobs:
         run: >
           cargo test --release
           --test worker_b8_restart_bomb
-          --test worker_b8_progressive_bomb --
+          --test worker_b8_progressive_bomb
+          --test hard_case_x_byte_and_restart --
           --include-ignored --test-threads=1
-        # Sub-second once built. A generous cap that still fails promptly: the
-        # regression this guards is an `O(MCUs * RST)` scan over 65,536
-        # restarts, which does not slow the decode — it hangs it, and without a
-        # cap the ratio assertion is never reached and the runner sits until the
-        # job limit.
+        # Every timing assertion in the suite runs here and nowhere else, so a
+        # ratio is never taken while sibling test binaries compete for the same
+        # cores — a ratio cancels machine speed, but not contention.
+        #
+        # P4-147: the restart-marker cost ratio.
+        # P4-152: the progressive bomb's scan-loop scaling and scan-limit
+        # fail-fast ratios, plus `restart_bomb_4096_terminates_within_budget`,
+        # a 60 s liveness bound moved out of the parallel run.
+        #
+        # Sub-second once built, except the 4096² restart bomb. A generous cap
+        # that still fails promptly: the regression P4-147 guards is an
+        # `O(MCUs * RST)` scan over 65,536 restarts, which does not slow the
+        # decode — it hangs it, and without a cap the ratio assertion is never
+        # reached and the runner sits until the job limit.
         timeout-minutes: 15
 
       - name: TurboJPEG NOREALLOC ownership (P4-145)
