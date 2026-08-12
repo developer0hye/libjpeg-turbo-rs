@@ -3122,7 +3122,7 @@ from the source, e.g. S420 handle over an S444 source); and the P4-145 oracle
 gains a legacy-wrapper case so the comparison is against C rather than against
 this description.
 
-## P4-153. Marker-Parse Metadata Copies Are Still Infallible — **OPEN**
+## P4-153. Marker-Parse Metadata Copies Are Still Infallible — **CLOSED 2026-08-12**
 
 **Motivation.** Found 2026-08-12 (issue #536) in review while closing P4-144,
 and deliberately not folded into it. P4-144 made the metadata *copies* fallible —
@@ -3152,6 +3152,102 @@ stated — matching P4-144's precedent, where the choice followed the local
 contract rather than a blanket rule. A test proves at least one degrade path
 and one error path, in the shape of P4-136's
 `allocator_refusal_is_an_error_not_an_abort`.
+
+**Status (2026-08-12): closed.** All seven input-sized copies in
+`decode/marker.rs` now allocate through `common::try_alloc`, and all three
+input-derived *lists* grow through `try_reserve` before pushing —
+`icc_chunks`, `xmp_ext_chunks`, and `saved_markers`.
+
+**`saved_markers` was the one that mattered, and review found it.** The first
+version guarded the two chunk lists and missed it, while the closure text
+claimed the lists were the unbounded exposure — so the item would have closed
+with its own stated risk still live. With marker saving on, and TJ3 defaults to
+`TJSM_ALL`, every APP/COM segment in a stream lands in that list through seven
+`push` sites. It now goes through `Self::push_saved_marker`, which reserves
+first and errors as `saved marker list`: `saved_markers` is read back through
+the C API, so a silently dropped entry is indistinguishable from a file that
+never carried the marker.
+
+**Two smaller defects from the same review.** The `IccChunk` size used
+`std::mem::size_of` in a crate that is `#![no_std]` without the `std` feature,
+breaking `cargo check --no-default-features` and its CI leg; it is
+`core::mem::size_of` now, verified by running that check. And the COM path
+made its fallible copy and then *another* infallible one, because
+`from_utf8_lossy(&text).into_owned()` copies again for valid UTF-8 — the fix
+doubled peak storage for every well-formed comment. `String::from_utf8` takes
+the buffer instead, so the common case is one allocation. The invalid-UTF-8
+branch still allocates infallibly inside `from_utf8_lossy`, which has no
+fallible form; bounded at ~192 KiB (a 64 KiB segment, 3x replacement-character
+expansion) and reachable only by a malformed comment.
+
+**The per-segment choice, and the rule behind it.** The decisive fact is that
+there is no warning channel at this layer: `exif_data`, `xmp_data`,
+`iptc_data`, `icc_chunks` and `comment` are fields the caller reads, so a
+silently dropped one is indistinguishable from a file that never carried the
+data — the failure mode with nothing to notice, the same class as P4-39 and
+P4-150. Degrading is therefore reserved for the case where the caller still
+holds the data:
+
+| Segment | On refusal | Why |
+| --- | --- | --- |
+| EXIF (APP1) | error | caller-visible field; a silent drop is undetectable |
+| Standard XMP (APP1) | error | same |
+| IPTC (APP13) | error | same |
+| COM | error | same; `from_utf8_lossy` copies either way |
+| ICC chunk (APP2) | error | worse than the others — reassembly requires sequence numbers 1..=N, so one dropped chunk turns a valid profile into a missing one |
+| **Extended XMP chunk (APP1)** | **degrade** | an optional *enlargement* of a packet the caller already holds; dropping it leaves the standard packet, which erroring would discard too. P4-144 made this same call for the reassembly buffers |
+| `peek_marker_data` | degrade | returns `Option`, and `None` already means "not readable" — every caller handles it |
+
+**How each is verified, including what is not verifiable.** The degrade path is
+covered end to end by
+`tests/xmp_iptc_metadata.rs::incomplete_extended_xmp_falls_back_to_the_standard_packet`:
+a chunk dropped at parse time leaves exactly the state that test pins — an
+extension that cannot be assembled, with the standard packet surviving.
+
+The error path is **not** deterministically reachable, and the criterion's
+suggested shape does not fit. Every parse copy is bounded by its segment's
+`u16` length — at most 65 533 bytes — so no host refuses one and no JPEG can be
+built that makes it; the refusal exists for a memory-constrained allocator,
+which is the caller this item is for. A test calling `try_copy_of` with an
+unservable length would prove the *helper* works, which
+`api::progressive_output::allocator_refusal_is_an_error_not_an_abort` already
+does, and would pass unchanged if this file reverted to `.to_vec()` — the drift
+it is meant to catch. The first version of this test did exactly that and was
+discarded as vacuous.
+
+What can regress is the wiring, so that is what is gated:
+`no_metadata_copy_bypasses_the_fallible_allocator` fails if any *statement* in
+the production half of `marker.rs` slices `self.data` into a `to_vec()`,
+`to_owned()`, `into_owned()` or `from_utf8_lossy` without routing through
+`try_alloc`.
+
+Statements, not lines, and that distinction was earned: the first version
+scanned lines and false-greened the COM path, because rustfmt had put
+`from_utf8_lossy` and its argument on different lines. Review caught it. Three
+evasion forms are now Red-checked by planting each in the IPTC site — a
+single-line `.to_vec()`, a multi-line `.to_owned()`, and a multi-line
+`from_utf8_lossy` — and all three fail the gate. It scans only above the
+`#[cfg(test)]` module, since the predicate is itself source.
+
+**Residual limit, stated rather than implied.** A source scan cannot be
+exhaustive; an infallible helper called from here would still evade it. Fault
+injection would be the exhaustive answer and is not available: forcing a 64 KiB
+allocation to fail needs a failing global allocator, which would apply to the
+whole test binary. The gate covers the realistic regression, which is someone
+reverting one of these statements to the idiom that was there before.
+
+Note the copies were never the unbounded exposure at this layer: at 64 KiB
+apiece they are defensive uniformity. The unbounded growth is the *lists* — a
+stream can carry arbitrarily many APP/COM segments — which is why missing
+`saved_markers` in the first version was the real defect and the copies were
+the easy part.
+
+Verified by `cargo test --lib decode::marker` (7 passing) plus the metadata
+suites: `xmp_iptc_metadata` (9), `cross_check_metadata` (10),
+`cross_check_metadata_edge` (11), `icc_exif_edge_cases` (21), `metadata_write`
+(5). The full workspace release gate is 2600 passing across 295 suites, 0
+failures — 2599 plus this item's single test, which joined an existing lib
+module rather than adding a suite.
 
 ## P4-147. `worker_b8_restart_bomb` Asserts a Wall-Clock Bound and Flakes Under Parallel Load — **CLOSED 2026-08-12**
 
