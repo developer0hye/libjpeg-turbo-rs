@@ -3186,8 +3186,26 @@ code, since refusing is a *correct* outcome when the caller's buffer genuinely
 cannot hold the result. What must never happen is `rc == 0` with a produced size
 past the bound.
 
+**The Red check itself was unsafe, and review caught that too.** Allocating
+exactly `gray_bound` meant that whenever the regression returned, the test
+*committed* the 5619-byte overflow before its own assertion could run —
+corrupting the allocator, or aborting under a sanitizer. It now over-allocates
+and canaries the bytes past the bound, so the overrun is **observed** rather
+than performed, and the canary is direct evidence independent of the reported
+size.
+
+**A divergence surfaced while adding the oracle coverage, and is filed rather
+than papered over.** Upstream's grayscale case reports `0 1 1` — it succeeds
+within the 4096-byte grayscale bound — because it does not copy the source's ICC
+profile into the transformed image. This port does, producing 5619 bytes, so it
+refuses. The refusal is *correct for the size produced*; the defect is that the
+size is wrong. Filed as P4-156 (#544). `legacy_gray_transform_case` is written
+and passing on the C side but deliberately not emitted into the compared trace,
+since it would fail for a reason unrelated to this item; it is kept compiled so
+the fix has its oracle ready, and adding the call is P4-156's criterion 3.
+
 Verified by `norealloc_all_entry_points` (18 passing, up from 14) with four new
-tests and a new oracle case, each Red-checked by reintroducing the defect it
+tests and two new oracle cases, each Red-checked by reintroducing the defect it
 targets. The full workspace release gate is 2604 passing across 295 suites, 0
 failures, 7 ignored:
 

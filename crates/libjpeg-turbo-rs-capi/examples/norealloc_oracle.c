@@ -294,6 +294,94 @@ static void legacy_transform_case(const char *label)
   tj3Destroy(h);
 }
 
+/* A **grayscale** source under the legacy wrapper, carrying an ICC profile
+ * large enough that the transformed output exceeds the grayscale bound but not
+ * the 4:4:4 one. That window is where a capacity derived as 4:4:4 lets the
+ * library write past a buffer sized `tjBufSize(w, h, TJSAMP_GRAY)`, which is
+ * what a compliant caller allocates.
+ *
+ * The destination is allocated at exactly the grayscale bound here, as C, so
+ * whether upstream succeeds or refuses is the comparison. It sizes the same way
+ * this port now does, so it is expected to refuse — and a refusal is the
+ * correct outcome, not a limitation. */
+static void legacy_gray_transform_case(const char *label)
+{
+  tjhandle h = tj3Init(TJINIT_TRANSFORM);
+  tjhandle enc = tj3Init(TJINIT_COMPRESS);
+  unsigned char *gray = (unsigned char *)malloc((size_t)WIDTH * HEIGHT);
+  unsigned char *icc = (unsigned char *)malloc(5000);
+  unsigned char *jpeg = NULL;
+  size_t jpeg_size = 0;
+  tjtransform t[1];
+  unsigned long gray_bound;
+  unsigned char *original;
+  unsigned char *dst_bufs[1];
+  unsigned long dst_sizes[1];
+  size_t i;
+  int rc;
+
+  if (!h || !enc || !gray || !icc) { fprintf(stderr, "oom\n"); exit(2); }
+  for (i = 0; i < (size_t)WIDTH * HEIGHT; i++) gray[i] = (unsigned char)(i % 251);
+  memset(icc, 0x5A, 5000);
+
+  if (tj3Set(enc, TJPARAM_QUALITY, 80) != 0 ||
+      tj3Set(enc, TJPARAM_SUBSAMP, TJSAMP_GRAY) != 0 ||
+      tj3SetICCProfile(enc, icc, 5000) != 0) {
+    fprintf(stderr, "gray encode setup\n"); exit(2);
+  }
+  if (tj3Compress8(enc, gray, WIDTH, 0, HEIGHT, TJPF_GRAY, &jpeg, &jpeg_size) != 0) {
+    fprintf(stderr, "gray encode: %s\n", tj3GetErrorStr(enc)); exit(2);
+  }
+
+  memset(t, 0, sizeof(t));
+  gray_bound = tjBufSize(WIDTH, HEIGHT, TJSAMP_GRAY);
+  original = (unsigned char *)tj3Alloc(gray_bound);
+  if (!original) { fprintf(stderr, "oom\n"); exit(2); }
+  dst_bufs[0] = original;
+  dst_sizes[0] = 0;
+
+  rc = tjTransform(h, jpeg, (unsigned long)jpeg_size, 1, dst_bufs, dst_sizes, t,
+                   TJFLAG_NOREALLOC);
+  printf("%s %d %d %d\n", label, rc == 0 ? 0 : -1,
+         dst_bufs[0] == original ? 1 : 0,
+         (rc == 0 && dst_sizes[0] > 0 && dst_sizes[0] <= gray_bound) ? 1 : 0);
+
+  if (dst_bufs[0] != original && dst_bufs[0] != NULL) tj3Free(dst_bufs[0]);
+  tj3Free(original);
+  tj3Free(jpeg);
+  free(gray);
+  free(icc);
+  tj3Destroy(enc);
+  tj3Destroy(h);
+}
+
+/* A NULL source under the legacy wrapper: -1, and the caller's destination
+ * untouched. Cheap, and it pins that the port's own pointer validation — added
+ * because it sliced before `tj3Transform` could check — agrees with upstream
+ * rather than merely avoiding a panic. */
+static void legacy_null_source_case(const char *label)
+{
+  tjhandle h = tj3Init(TJINIT_TRANSFORM);
+  unsigned char *original = (unsigned char *)tj3Alloc(ROOMY);
+  unsigned char *dst_bufs[1];
+  unsigned long dst_sizes[1];
+  tjtransform t[1];
+  int rc;
+
+  if (!h || !original) { fprintf(stderr, "oom\n"); exit(2); }
+  memset(t, 0, sizeof(t));
+  dst_bufs[0] = original;
+  dst_sizes[0] = 0;
+
+  rc = tjTransform(h, NULL, 0, 1, dst_bufs, dst_sizes, t, TJFLAG_NOREALLOC);
+  printf("%s %d %d %d\n", label, rc == 0 ? 0 : -1,
+         dst_bufs[0] == original ? 1 : 0, (rc == 0 && dst_sizes[0] > 0) ? 1 : 0);
+
+  if (dst_bufs[0] != original && dst_bufs[0] != NULL) tj3Free(dst_bufs[0]);
+  tj3Free(original);
+  tj3Destroy(h);
+}
+
 int main(void)
 {
   /* Roomy: honoured, pointer kept. */
@@ -338,6 +426,15 @@ int main(void)
 
   /* P4-151: the legacy wrapper's output-vs-capacity bridge. */
   legacy_transform_case("legacy_transform_zero_size");
+  legacy_null_source_case("legacy_transform_null_source");
+  /* `legacy_gray_transform_case` is written and passes on this side, but is
+   * **not** emitted into the compared trace: this port copies the source's ICC
+   * profile into a transformed image and upstream does not, so its output is
+   * 5619 bytes against upstream's <=4096 and the line would fail for a reason
+   * unrelated to P4-151's size bridge. Filed as P4-156 (#544), whose criterion
+   * 3 is to add this call here. Kept compiled rather than deleted so the fix
+   * has its oracle ready and cannot be declared done without one. */
+  (void)legacy_gray_transform_case;
 
   return 0;
 }

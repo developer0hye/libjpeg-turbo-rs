@@ -610,6 +610,52 @@ fn release(handle: *mut c_void, produced: *mut u8, original: *mut u8) {
     }
 }
 
+/// A NULL source under the legacy wrapper, in the oracle's line format.
+///
+/// P4-151 review: the bridge sliced `jpeg_buf` before `tj3Transform` could
+/// validate it. Comparing against C pins that the guard added for that agrees
+/// with upstream's answer rather than merely avoiding the panic.
+fn legacy_null_source_case(label: &str) -> String {
+    use libjpeg_turbo_rs_capi::tjTransform;
+
+    const TJFLAG_NOREALLOC: c_int = 1024;
+
+    let handle: *mut c_void = tj3Init(TJINIT_TRANSFORM);
+    assert!(!handle.is_null(), "tj3Init(TJINIT_TRANSFORM)");
+    let original: *mut u8 = caller_buffer(ROOMY);
+    let mut dst_bufs: [*mut u8; 1] = [original];
+    let mut dst_sizes: [usize; 1] = [0];
+    // SAFETY: `#[repr(C)]` plain data; all-zero is identity.
+    let transforms: [TjTransform; 1] = [unsafe { std::mem::zeroed() }];
+
+    // SAFETY: the source pointer is deliberately NULL, which is the case under
+    // test; the other arrays each have the one slot `n = 1` declares.
+    let rc: c_int = unsafe {
+        tjTransform(
+            handle,
+            std::ptr::null(),
+            0,
+            1,
+            dst_bufs.as_mut_ptr(),
+            dst_sizes.as_mut_ptr(),
+            transforms.as_ptr(),
+            TJFLAG_NOREALLOC,
+        )
+    };
+    let line: String = format!(
+        "{label} {} {} {}\n",
+        if rc == 0 { 0 } else { -1 },
+        i32::from(dst_bufs[0] == original),
+        i32::from(rc == 0 && dst_sizes[0] > 0)
+    );
+    // SAFETY: untouched, freed once; destroyed once.
+    unsafe {
+        tj3Free(original as *mut c_void);
+        tj3Destroy(handle);
+    }
+    line
+}
+
 /// The **legacy** wrapper with `dstSizes[0] = 0`, in the oracle's line format.
 ///
 /// P4-151: legacy `dstSizes` are outputs, so a caller that sized its buffer
@@ -720,6 +766,7 @@ fn norealloc_contract_matches_upstream_turbojpeg() {
     }
     // P4-151: the legacy wrapper's output-vs-capacity bridge.
     ours.push_str(&legacy_transform_case("legacy_transform_zero_size"));
+    ours.push_str(&legacy_null_source_case("legacy_transform_null_source"));
 
     assert_eq!(
         ours, c_trace,
@@ -1284,16 +1331,28 @@ fn legacy_tj_transform_sizes_a_grayscale_source_as_gray() {
          cannot distinguish them"
     );
 
+    // Over-allocate and canary, rather than allocating exactly `gray_bound`.
+    // The bug this guards against makes `tj3Transform` write ~5.6 KiB into what
+    // a compliant caller sizes at 4096, so a test that allocated exactly that
+    // would *commit* the heap overflow whenever the regression returned —
+    // corrupting the allocator, or aborting under a sanitizer, before its own
+    // assertion could run. The extra room means the overrun is **observed**
+    // instead: the canary past `gray_bound` records that bytes the caller never
+    // owned were written.
+    const CANARY: u8 = 0x5A;
+    let slack: usize = tjBufSize(WIDTH, HEIGHT, TJSAMP_444) + 4096;
     let handle: *mut c_void = tj3Init(TJINIT_TRANSFORM);
     assert!(!handle.is_null(), "tj3Init(TJINIT_TRANSFORM)");
-    let original: *mut u8 = caller_buffer(gray_bound);
+    let original: *mut u8 = caller_buffer(gray_bound + slack);
+    // SAFETY: `original` is `gray_bound + slack` bytes from `tj3Alloc`.
+    unsafe { std::ptr::write_bytes(original.add(gray_bound), CANARY, slack) };
     let mut dst_bufs: [*mut u8; 1] = [original];
     let mut dst_sizes: [usize; 1] = [0];
     // SAFETY: `#[repr(C)]` plain data; all-zero is identity.
     let transforms: [TjTransform; 1] = [unsafe { std::mem::zeroed() }];
 
-    // SAFETY: each array has the one slot `n = 1` declares; `original` holds
-    // exactly the bound a compliant legacy caller would have allocated.
+    // SAFETY: each array has the one slot `n = 1` declares; `original` is at
+    // least the bound a compliant legacy caller would have allocated.
     let rc: c_int = unsafe {
         tjTransform(
             handle,
@@ -1319,6 +1378,18 @@ fn legacy_tj_transform_sizes_a_grayscale_source_as_gray() {
          so everything past {gray_bound} was written outside the caller's \
          allocation",
         dst_sizes[0]
+    );
+    // The direct evidence, independent of the reported size: nothing beyond
+    // what the caller allocated may have been touched.
+    // SAFETY: the canary region is in bounds of the over-allocation above.
+    let canary: &[u8] = unsafe { std::slice::from_raw_parts(original.add(gray_bound), slack) };
+    let clobbered: Option<usize> = canary.iter().position(|byte| *byte != CANARY);
+    assert!(
+        clobbered.is_none(),
+        "byte {} past the {gray_bound}-byte grayscale bound was overwritten — \
+         a compliant caller allocates exactly that many, so this is a heap \
+         overflow in its buffer",
+        clobbered.unwrap_or(0)
     );
 
     // SAFETY: still ours, freed once.
