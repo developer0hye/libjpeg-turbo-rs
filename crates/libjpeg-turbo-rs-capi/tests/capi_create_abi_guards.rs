@@ -612,3 +612,62 @@ fn create_never_loads_an_uninitialized_client_data() {
 /// An `error_exit` for the case above: it must not touch `cinfo`, whose
 /// `client_data` is uninitialized on purpose.
 unsafe extern "C" fn trap_error_exit_boxed(_cinfo: *mut c_void) {}
+
+/// Issue #527 (P4-149): neither create function may form a reference over the
+/// caller's struct — `client_data` is legitimately uninitialized under
+/// upstream's preservation contract, and whether a `&mut` over a
+/// partially-uninitialized struct is valid is unsettled in the UCG.
+///
+/// This is a *source* gate because no runtime observable exists: Miri accepts
+/// the pre-fix `cinfo_mut`/`&mut` implementation (retagging does not descend
+/// into plain-data fields), so `create_never_loads_an_uninitialized_client_data`
+/// stayed green across the defect. Reintroducing either whole-struct reference
+/// fails here instead.
+#[test]
+fn create_functions_form_no_reference_over_the_callers_struct() {
+    let source_path: std::path::PathBuf =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/jpeglib.rs");
+    let source: String = std::fs::read_to_string(&source_path)
+        .unwrap_or_else(|e| panic!("read {}: {e}", source_path.display()));
+
+    for fn_name in ["jpeg_CreateDecompress", "jpeg_CreateCompress"] {
+        let sig: String = format!("pub unsafe extern \"C\" fn {fn_name}(");
+        let start: usize = source
+            .find(&sig)
+            .unwrap_or_else(|| panic!("{fn_name} not found in jpeglib.rs"));
+        // Body extent by brace balance from the signature.
+        let open: usize = start + source[start..].find('{').expect("fn body opens");
+        let mut depth: usize = 0;
+        let mut end: usize = open;
+        for (i, b) in source[open..].bytes().enumerate() {
+            match b {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = open + i;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert!(end > open, "{fn_name} body not delimited");
+        let body: &str = &source[open..end];
+
+        // Comments may legitimately discuss `&mut`; code may not contain it.
+        let code_only: String = body
+            .lines()
+            .map(|line: &str| line.split("//").next().unwrap_or(""))
+            .collect::<Vec<&str>>()
+            .join("\n");
+        for forbidden in ["cinfo_mut", "cinfo_compress_mut", "&mut "] {
+            assert!(
+                !code_only.contains(forbidden),
+                "{fn_name} contains `{forbidden}`: create must stay \
+                 raw-pointer-only so no reference spans the possibly-\
+                 uninitialized client_data (issue #527, P4-149)"
+            );
+        }
+    }
+}
