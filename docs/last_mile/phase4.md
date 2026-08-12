@@ -3101,7 +3101,8 @@ release gate is 2597 passing across 294 suites, 0 failures — 2592/293 plus thi
 item's one new suite of 5.
 
 The classic C API has the same acceptance gap, one layer over — filed
-separately as P4-154 (#538), since it needs a different fix and a different oracle.
+separately as P4-154 (#538), since it needs a different fix and a different
+oracle. Closed 2026-08-13.
 
 ## P4-151. Legacy `tjTransform` Does Not Bridge `dstSizes` Output-vs-Capacity Semantics — **CLOSED 2026-08-12**
 
@@ -6645,7 +6646,7 @@ the payload is not.
   into an item that does not cover it, which is how work disappears. Criterion 4
   stays here, measurable, until someone does it.
 
-## P4-154. Classic `jpeg_write_scanlines` / `jpeg_start_compress` Ignore `data_precision` Entirely — **OPEN**
+## P4-154. Classic `jpeg_write_scanlines` / `jpeg_start_compress` Ignore `data_precision` Entirely — **CLOSED 2026-08-13**
 
 **Motivation.** Found 2026-08-12 while closing P4-150. That item fixed the
 TurboJPEG entry point; the same acceptance rule is missing one layer over, on
@@ -6684,12 +6685,18 @@ missing error — a caller that sets `data_precision = 12` and calls the 8-bit
 answer with an 8-bit stream that looks like success; a caller comparing file
 sizes or bit depth downstream sees plausible, wrong output.
 
-Note this is *not* the 12-bit encode path itself, which works and is tested:
-`jpeg12_write_scanlines` / `jpeg12_write_raw_data` already gate on
-`data_precision == 12` (`jpeglib.rs:5587`, `:10016`), and
-`jpeg_write_raw_data` already gates on `== 8` (`jpeglib.rs:9550`). It is
-specifically the 8-bit *scanline* entry point and `jpeg_start_compress` that
-have no gate — the two upstream added them to.
+Note this is *not* the 12-bit raw-data encode path, which works and is tested:
+`jpeg12_write_raw_data` already gates on `data_precision == 12`
+(`jpeglib.rs:10059`), and `jpeg_write_raw_data` already gates on `== 8`
+(`jpeglib.rs:9590`). It is specifically the 8-bit *scanline* entry point and
+`jpeg_start_compress` that have no gate — the two upstream added them to.
+`jpeg12_write_scanlines` / `jpeg16_write_scanlines` have none either: both
+delegate to `write_scanlines_highprec` (`jpeglib.rs:10264`), which takes the
+precision from the entry point and never reads `data_precision`, where
+upstream's is the same `jcapistd.c:92-105` check compiled with
+`BITS_IN_JSAMPLE` 12 and 16. Those two entry points are
+[P4-94](#p4-94-classic-1216-bit-scanline-buffers-never-reach-a-high-precision-encoder--open)'s
+subject; this item does not gate them.
 
 **Acceptance criteria.**
 
@@ -6711,6 +6718,34 @@ have no gate — the two upstream added them to.
 **Why deferred.** P4-150's PR is a TurboJPEG-scoped fix with its own oracle;
 folding a second gate into a different API surface would put two unrelated
 acceptance rules behind one review. Splitting is the same call made for P4-151.
+
+**Status (2026-08-13): closed** (issue #538). Both gates are ported to where
+upstream raises them: `jpeg_start_compress` admits {8, 12} for lossy and
+2..=16 for lossless (`jcmaster.c:196-208`), and the 8-bit
+`jpeg_write_scanlines` entry admits exactly 8 for lossy and 2..=8 for
+lossless ahead of even its argument checks
+(`jcapistd.c:92-105`) — both `ERREXIT1`-shaped, `JERR_BAD_PRECISION` with the
+offending value in `msg_parm.i[0]`. Criteria 3-4's ordering question is
+decided by `examples/classic_precision_oracle.c` (stock-libjpeg-linked via
+`build_classic_oracle`), whose full 10-case (precision × lossless) trace —
+stage, code, parm — is compared verbatim by
+`capi_classic_compress_precision.rs`. Measured: lossy 2/9/16 and nothing else
+fail at `start`; lossy 12 and lossless 9/12/16 fail at `write` (the two gates
+disagree about lossy 12, which is why transcription was not an option);
+lossy 8 and lossless 2/8 encode. Red-verified: before the gates every case
+read `ok 0 0`.
+
+The #538 review hardened three things. The accepted lines print **exact
+output size and byte checksum**, and the accepted precision now reaches the
+encoder (`compress_lossless_extended_precision`): the first version accepted
+a 2-bit lossless request and silently emitted an 8-bit SOF3 stream, which an
+`ok`-only trace cannot see — with the routing in place the checksummed trace
+matches stock libjpeg byte-for-byte on every accepted case. The gate order
+inside `jpeg_start_compress` is pinned by `mixed_width_overflow_precision_9`
+(row wider than `JDIMENSION` *and* precision 9): upstream raises
+`JERR_WIDTH_OVERFLOW` first (`jcmaster.c:190-208`), so the precision gate
+sits after the row check. And the suite is named in `ci.yml` (P4-154 step) —
+a suite nothing names never runs.
 
 ## P4-155. `TJPARAM_QUALITY` / `TJPARAM_SUBSAMP` Default to Set Values, So Upstream's "must be specified" Errors Can Never Fire — **OPEN**
 
