@@ -100,8 +100,19 @@ fn make_64x64_jpeg() -> Vec<u8> {
 /// have left Windows with no resource bound at all — trading a flaky assertion
 /// for no assertion. The same loose margin that makes it useless beside a real
 /// memory bound is what makes it tolerable as the only one.
+/// Which bound applies on a platform, given whether RSS can be read.
+///
+/// Split out as a pure function because the `false` arm is the one CI never
+/// executes: the integration binaries run on Ubuntu, where RSS *is* available,
+/// and the Windows job builds them with `--no-run`. Without this the fallback
+/// would be untested code that only ever runs on a developer's machine —
+/// exactly the shape of thing that is discovered broken years later.
+fn wall_clock_is_the_only_bound(rss_available: bool) -> bool {
+    !rss_available
+}
+
 fn assert_within_small_decode_bounds(label: &str, m: measure::Measurement) {
-    if !rss_supported() {
+    if wall_clock_is_the_only_bound(rss_supported()) {
         assert!(
             m.wall_clock.as_millis() < SMALL_DECODE_WALL_CLOCK_MS,
             "{label}: wall_clock={:?} exceeds fallback bound {}ms (no RSS on this platform)",
@@ -122,7 +133,7 @@ fn assert_within_small_decode_bounds(label: &str, m: measure::Measurement) {
 /// P4-152: peak RSS where measurable, wall clock as a fallback only — see
 /// [`assert_within_small_decode_bounds`] for why.
 fn assert_within_medium_prog_bounds(label: &str, m: measure::Measurement) {
-    if !rss_supported() {
+    if wall_clock_is_the_only_bound(rss_supported()) {
         assert!(
             m.wall_clock.as_millis() < MEDIUM_PROG_DECODE_WALL_CLOCK_MS,
             "{label}: wall_clock={:?} exceeds fallback bound {}ms (no RSS on this platform)",
@@ -416,4 +427,35 @@ fn max_pixels_and_max_memory_both_enforced_bounded() {
             .expect_err("memory limit must fire independently")
     });
     assert_within_small_decode_bounds("combined_memory", m2);
+}
+
+/// P4-152: the no-RSS fallback must actually be reachable, and the two bounds
+/// must be mutually exclusive.
+///
+/// CI runs these binaries on Ubuntu only, where `rss_supported()` is always
+/// true, so the fallback arm is never taken there. Asserting the *policy*
+/// rather than the platform is what keeps it from rotting: a refactor that
+/// dropped the `!` — leaving a platform with both bounds, or with neither —
+/// fails here on every runner.
+#[test]
+fn the_wall_clock_fallback_applies_exactly_when_rss_is_unavailable() {
+    assert!(
+        wall_clock_is_the_only_bound(false),
+        "a platform that cannot report RSS must still get a bound, per the \
+         worker_b8_measure contract; otherwise this file asserts nothing there"
+    );
+    assert!(
+        !wall_clock_is_the_only_bound(true),
+        "where peak RSS is measurable it is the bound, and the wall clock must \
+         not also be asserted — that is the flaky ~1000x margin P4-152 removed"
+    );
+    // And the constants the fallback would use must be non-zero, since a bound
+    // of 0 ms would fail every decode it is meant to permit. A `const` block
+    // makes that a compile-time guarantee rather than a runtime assertion that
+    // can only ever hold — clippy's `assertions_on_constants` is right that the
+    // latter tests nothing.
+    const {
+        assert!(SMALL_DECODE_WALL_CLOCK_MS > 0);
+        assert!(MEDIUM_PROG_DECODE_WALL_CLOCK_MS > 0);
+    }
 }

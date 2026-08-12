@@ -3422,16 +3422,20 @@ flaky assertion for no assertion. They now run only under `!rss_supported()`.
 `worker_b8_measure.rs`'s own harness self-test, which asserts a 5 ms sleep takes
 under 5 s, is left alone: it tests the clock, not a decode.
 
-**Two deleted, because peak RSS already carries the regression**
-(`worker_b8_memory_bounds.rs`, criterion **(b)**/**(c)**). Both assertion
-helpers already asserted `peak_rss_delta` — the bound the file exists for, and a
+**Two demoted to fallbacks, because peak RSS already carries the regression**
+(`worker_b8_memory_bounds.rs`, criterion **(b)**). Both assertion helpers
+already asserted `peak_rss_delta` — the bound the file exists for, and a
 deterministic one. The clock beside it added nothing: its own comment described
 500 ms as "~1000x to tolerate contended CI runners" and 2000 ms as "~180x for CI
 jitter". A margin that large cannot fire on a regression the RSS bound would
-miss; it can only fire on contention, which is precisely the false positive.
+miss; it can only fire on contention, which is precisely the false positive. It
+now runs only under `!rss_supported()`, where it is the *only* bound available —
+see the qualification above. `wall_clock_is_the_only_bound` makes that policy a
+pure function with its own test, because CI runs these binaries on Ubuntu only
+and would otherwise never execute the fallback arm at all.
 
-**One deleted, because the bound was 50 000x the measurement**
-(`worker_b8_huffman_bomb.rs`, criterion **(c)**). Measured min-of-9 on darwin
+**One demoted, because the bound was 50 000x the measurement**
+(`worker_b8_huffman_bomb.rs`, criterion **(b)**). Measured min-of-9 on darwin
 arm64 release, stable to three decimals over four rounds: the bomb decodes in
 **0.020 ms** against a 1000 ms bound. A ratio against a control was measured and
 *rejected*: an ordinary 256x256 decode takes 0.071 ms, so the bomb runs at 0.29x
@@ -3456,7 +3460,13 @@ expectation of 4.0; quadratic is ~16. Bound **5.0** — the measured worst case
 plus ~28 %, per the tolerance rule. A first draft used 8.0, reasoning that it
 sat between linear and quadratic; review pointed out that accepting nearly 8x
 work for a 4x input lets a substantial superlinear regression pass, and that the
-rule asks for measured reality plus a small margin, not a midpoint. The
+rule asks for measured reality plus a small margin, not a midpoint.
+
+The correction then failed to land: the edit that changed the constant was in a
+script whose *next* substitution raised, so the file was never written, and a
+follow-up commit claimed runs "at the tightened bound" that had in fact executed
+against 8.0. Review caught that too. The constant is 5.0 now, verified by
+reading it back and re-running the ratio five times serially against it. The
 2000-to-8000 span is the widest 4x window available, capped by the decoder's own
 8192-scan parse limit.
 

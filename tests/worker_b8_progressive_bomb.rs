@@ -50,10 +50,12 @@ const SCAN_LIMIT_UNDER_TEST: u32 = 1_000;
 /// **Scan-loop scaling.** Quadrupling the scan count must roughly quadruple the
 /// work, not multiply it by sixteen. Measured min-of-9 over five rounds on
 /// darwin arm64 release: 3.87, 3.91, 3.91, 3.91, 3.87 against a linear
-/// expectation of 4.0. A quadratic scan loop — the regression the deleted bound
-/// claimed to catch — gives ~16. The bound is set between the two, nearer the
-/// measurement: twice what linear costs, half of what quadratic costs.
-const SCAN_LOOP_SCALING_RATIO_LIMIT: f64 = 8.0;
+/// expectation of 4.0. A quadratic scan loop — the regression the demoted bound
+/// claimed to catch — gives ~16. The bound is the measured worst case plus a
+/// small margin, per the tolerance rule: 5.0 is 3.91 + ~28 %. It still rejects
+/// quadratic threefold, and unlike a bound placed halfway to 16 it also rejects
+/// a merely *superlinear* regression that doubles the constant factor.
+const SCAN_LOOP_SCALING_RATIO_LIMIT: f64 = 5.0;
 /// Scan counts for that ratio, a 4x span. The upper one is near the decoder's
 /// own 8192-scan parse limit, which is what caps the achievable signal.
 const SCALING_SMALL_SCANS: usize = 1_999;
