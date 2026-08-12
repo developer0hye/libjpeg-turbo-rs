@@ -195,6 +195,26 @@ impl<'a> MarkerReader<'a> {
         }
     }
 
+    /// Append a saved marker, growing the list fallibly.
+    ///
+    /// P4-153: a stream may carry arbitrarily many APP/COM segments, and with
+    /// marker saving on — TJ3 defaults to `TJSM_ALL` — each one lands here. The
+    /// list is the unbounded exposure at this layer; the per-segment payloads
+    /// are capped at 64 KiB apiece. Erroring matches `icc_chunks` and the rest
+    /// of the caller-visible metadata: `saved_markers` is read back through the
+    /// C API, so a silently dropped entry is indistinguishable from a file that
+    /// never carried the marker.
+    fn push_saved_marker(saved: &mut Vec<SavedMarker>, marker: SavedMarker) -> Result<()> {
+        saved
+            .try_reserve(1)
+            .map_err(|_| JpegError::AllocationFailed {
+                what: "saved marker list",
+                bytes: ((saved.len() + 1) * core::mem::size_of::<SavedMarker>()) as u64,
+            })?;
+        saved.push(marker);
+        Ok(())
+    }
+
     /// Read a marker segment's raw data without advancing pos.
     /// Returns the data portion (after the 2-byte length field).
     fn peek_marker_data(&self) -> Option<Vec<u8>> {
@@ -419,10 +439,13 @@ impl<'a> MarkerReader<'a> {
                     if self.should_save_marker(0xE1) {
                         if let Some(mut raw) = self.peek_marker_data() {
                             raw.truncate(self.marker_limit(0xE1));
-                            saved_markers.push(SavedMarker {
-                                code: 0xE1,
-                                data: raw,
-                            });
+                            Self::push_saved_marker(
+                                &mut saved_markers,
+                                SavedMarker {
+                                    code: 0xE1,
+                                    data: raw,
+                                },
+                            )?;
                         }
                     }
                     self.read_app1(&mut exif_data, &mut xmp_data, &mut xmp_ext_chunks)?;
@@ -432,10 +455,13 @@ impl<'a> MarkerReader<'a> {
                     if self.should_save_marker(0xE2) {
                         if let Some(mut raw) = self.peek_marker_data() {
                             raw.truncate(self.marker_limit(0xE2));
-                            saved_markers.push(SavedMarker {
-                                code: 0xE2,
-                                data: raw,
-                            });
+                            Self::push_saved_marker(
+                                &mut saved_markers,
+                                SavedMarker {
+                                    code: 0xE2,
+                                    data: raw,
+                                },
+                            )?;
                         }
                     }
                     self.read_app2(&mut icc_chunks)?;
@@ -445,10 +471,13 @@ impl<'a> MarkerReader<'a> {
                     if self.should_save_marker(0xED) {
                         if let Some(mut raw) = self.peek_marker_data() {
                             raw.truncate(self.marker_limit(0xED));
-                            saved_markers.push(SavedMarker {
-                                code: 0xED,
-                                data: raw,
-                            });
+                            Self::push_saved_marker(
+                                &mut saved_markers,
+                                SavedMarker {
+                                    code: 0xED,
+                                    data: raw,
+                                },
+                            )?;
                         }
                     }
                     self.read_app13(&mut iptc_data)?;
@@ -458,10 +487,13 @@ impl<'a> MarkerReader<'a> {
                     if self.should_save_marker(0xEE) {
                         if let Some(mut raw) = self.peek_marker_data() {
                             raw.truncate(self.marker_limit(0xEE));
-                            saved_markers.push(SavedMarker {
-                                code: 0xEE,
-                                data: raw,
-                            });
+                            Self::push_saved_marker(
+                                &mut saved_markers,
+                                SavedMarker {
+                                    code: 0xEE,
+                                    data: raw,
+                                },
+                            )?;
                         }
                     }
                     self.read_app14(&mut saw_adobe_marker, &mut adobe_transform)?;
@@ -471,10 +503,13 @@ impl<'a> MarkerReader<'a> {
                     if self.should_save_marker(0xE0) {
                         if let Some(mut raw) = self.peek_marker_data() {
                             raw.truncate(self.marker_limit(0xE0));
-                            saved_markers.push(SavedMarker {
-                                code: 0xE0,
-                                data: raw,
-                            });
+                            Self::push_saved_marker(
+                                &mut saved_markers,
+                                SavedMarker {
+                                    code: 0xE0,
+                                    data: raw,
+                                },
+                            )?;
                         }
                     }
                     self.read_app0(
@@ -489,10 +524,13 @@ impl<'a> MarkerReader<'a> {
                     if self.should_save_marker(COM) {
                         if let Some(mut raw) = self.peek_marker_data() {
                             raw.truncate(self.marker_limit(COM));
-                            saved_markers.push(SavedMarker {
-                                code: COM,
-                                data: raw,
-                            });
+                            Self::push_saved_marker(
+                                &mut saved_markers,
+                                SavedMarker {
+                                    code: COM,
+                                    data: raw,
+                                },
+                            )?;
                         }
                     }
                     self.read_com(&mut comment)?;
@@ -502,7 +540,10 @@ impl<'a> MarkerReader<'a> {
                     if self.should_save_marker(m) {
                         if let Some(mut raw) = self.peek_marker_data() {
                             raw.truncate(self.marker_limit(m));
-                            saved_markers.push(SavedMarker { code: m, data: raw });
+                            Self::push_saved_marker(
+                                &mut saved_markers,
+                                SavedMarker { code: m, data: raw },
+                            )?;
                         }
                     }
                     self.skip_marker_segment()?;
@@ -780,7 +821,19 @@ impl<'a> MarkerReader<'a> {
         // warning channel, and every other way this segment can be unusable
         // already errors.
         let text: Vec<u8> = crate::common::try_alloc::try_copy_of(data, "COM segment text")?;
-        *comment = Some(String::from_utf8_lossy(&text).into_owned());
+        // `from_utf8` *takes* the buffer when the bytes are already valid UTF-8,
+        // so the common case is one allocation rather than the two an
+        // `into_owned()` on a borrowed `Cow` would make — the fallible copy
+        // above must not double peak storage for every well-formed comment.
+        //
+        // The invalid-UTF-8 branch still allocates infallibly inside
+        // `from_utf8_lossy`, which has no fallible form. Bounded: a COM segment
+        // is at most 65 533 bytes and replacement characters expand it by at
+        // most 3x, so ~192 KiB on a path that only a malformed comment reaches.
+        *comment = Some(match String::from_utf8(text) {
+            Ok(valid) => valid,
+            Err(invalid) => String::from_utf8_lossy(invalid.as_bytes()).into_owned(),
+        });
         Ok(())
     }
 
@@ -996,7 +1049,7 @@ impl<'a> MarkerReader<'a> {
                 .try_reserve(1)
                 .map_err(|_| JpegError::AllocationFailed {
                     what: "ICC chunk list",
-                    bytes: ((icc_chunks.len() + 1) * std::mem::size_of::<IccChunk>()) as u64,
+                    bytes: ((icc_chunks.len() + 1) * core::mem::size_of::<IccChunk>()) as u64,
                 })?;
             icc_chunks.push(IccChunk {
                 seq_no,
@@ -1312,18 +1365,36 @@ mod tests {
             .find("\n#[cfg(test)]\nmod tests {")
             .unwrap_or(text.len());
 
+        // Statements, not lines. A copy split across lines — which rustfmt
+        // produces for any call with more than one argument — would slip past a
+        // per-line scan, and review found exactly that: the first version
+        // false-greened the COM path because `from_utf8_lossy` and its argument
+        // sat on different lines from the slice.
+        //
         // `to_vec()` on a *fixed-size* array (`guid`, table entries) is not an
         // input-sized copy; the metadata ones all slice `self.data`.
+        const COPY_FORMS: [&str; 4] = [
+            ".to_vec()",
+            ".to_owned()",
+            ".into_owned()",
+            "from_utf8_lossy",
+        ];
         let offenders: Vec<String> = text[..production_end]
-            .lines()
-            .enumerate()
-            .filter(|(_, line)| {
-                let code: &str = line.trim();
-                !code.starts_with("//")
-                    && (code.contains("self.data[") && code.contains(".to_vec()")
-                        || code.contains("from_utf8_lossy") && code.contains("self.data["))
+            .split(';')
+            .filter_map(|statement| {
+                let code: String = statement
+                    .lines()
+                    .map(str::trim)
+                    .filter(|l| !l.starts_with("//"))
+                    .collect::<Vec<&str>>()
+                    .join(" ");
+                let copies_input: bool =
+                    code.contains("self.data[") && COPY_FORMS.iter().any(|f| code.contains(f));
+                // A statement that already routes through the fallible helper is
+                // the fixed shape, not an offender.
+                let is_fallible: bool = code.contains("try_alloc") || code.contains("try_copy_of");
+                (copies_input && !is_fallible).then(|| format!("  {}", code.trim()))
             })
-            .map(|(i, line)| format!("  marker.rs:{}\t{}", i + 1, line.trim()))
             .collect();
 
         assert!(

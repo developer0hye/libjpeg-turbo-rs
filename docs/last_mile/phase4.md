@@ -3154,8 +3154,31 @@ and one error path, in the shape of P4-136's
 `allocator_refusal_is_an_error_not_an_abort`.
 
 **Status (2026-08-12): closed.** All seven input-sized copies in
-`decode/marker.rs` now allocate through `common::try_alloc`, and the two chunk
-*lists* grow through `try_reserve` before pushing.
+`decode/marker.rs` now allocate through `common::try_alloc`, and all three
+input-derived *lists* grow through `try_reserve` before pushing —
+`icc_chunks`, `xmp_ext_chunks`, and `saved_markers`.
+
+**`saved_markers` was the one that mattered, and review found it.** The first
+version guarded the two chunk lists and missed it, while the closure text
+claimed the lists were the unbounded exposure — so the item would have closed
+with its own stated risk still live. With marker saving on, and TJ3 defaults to
+`TJSM_ALL`, every APP/COM segment in a stream lands in that list through seven
+`push` sites. It now goes through `Self::push_saved_marker`, which reserves
+first and errors as `saved marker list`: `saved_markers` is read back through
+the C API, so a silently dropped entry is indistinguishable from a file that
+never carried the marker.
+
+**Two smaller defects from the same review.** The `IccChunk` size used
+`std::mem::size_of` in a crate that is `#![no_std]` without the `std` feature,
+breaking `cargo check --no-default-features` and its CI leg; it is
+`core::mem::size_of` now, verified by running that check. And the COM path
+made its fallible copy and then *another* infallible one, because
+`from_utf8_lossy(&text).into_owned()` copies again for valid UTF-8 — the fix
+doubled peak storage for every well-formed comment. `String::from_utf8` takes
+the buffer instead, so the common case is one allocation. The invalid-UTF-8
+branch still allocates infallibly inside `from_utf8_lossy`, which has no
+fallible form; bounded at ~192 KiB (a 64 KiB segment, 3x replacement-character
+expansion) and reachable only by a malformed comment.
 
 **The per-segment choice, and the rule behind it.** The decisive fact is that
 there is no warning channel at this layer: `exif_data`, `xmp_data`,
@@ -3193,16 +3216,31 @@ it is meant to catch. The first version of this test did exactly that and was
 discarded as vacuous.
 
 What can regress is the wiring, so that is what is gated:
-`no_metadata_copy_bypasses_the_fallible_allocator` fails if any line in the
-production half of `marker.rs` slices `self.data` into a `to_vec()` or a
-`from_utf8_lossy`. Proven by reverting the IPTC site — it reports
-`marker.rs:938` and fails. It scans only above the `#[cfg(test)]` module, since
-the predicate is itself source.
+`no_metadata_copy_bypasses_the_fallible_allocator` fails if any *statement* in
+the production half of `marker.rs` slices `self.data` into a `to_vec()`,
+`to_owned()`, `into_owned()` or `from_utf8_lossy` without routing through
+`try_alloc`.
 
-Note the copies were never the unbounded exposure at this layer: at 64 KiB a
-piece they are defensive uniformity. The unbounded growth is the chunk *lists*,
-which a stream can extend with arbitrarily many APP1/APP2 segments, and those
-are the `try_reserve` additions.
+Statements, not lines, and that distinction was earned: the first version
+scanned lines and false-greened the COM path, because rustfmt had put
+`from_utf8_lossy` and its argument on different lines. Review caught it. Three
+evasion forms are now Red-checked by planting each in the IPTC site — a
+single-line `.to_vec()`, a multi-line `.to_owned()`, and a multi-line
+`from_utf8_lossy` — and all three fail the gate. It scans only above the
+`#[cfg(test)]` module, since the predicate is itself source.
+
+**Residual limit, stated rather than implied.** A source scan cannot be
+exhaustive; an infallible helper called from here would still evade it. Fault
+injection would be the exhaustive answer and is not available: forcing a 64 KiB
+allocation to fail needs a failing global allocator, which would apply to the
+whole test binary. The gate covers the realistic regression, which is someone
+reverting one of these statements to the idiom that was there before.
+
+Note the copies were never the unbounded exposure at this layer: at 64 KiB
+apiece they are defensive uniformity. The unbounded growth is the *lists* — a
+stream can carry arbitrarily many APP/COM segments — which is why missing
+`saved_markers` in the first version was the real defect and the copies were
+the easy part.
 
 Verified by `cargo test --lib decode::marker` (7 passing) plus the metadata
 suites: `xmp_iptc_metadata` (9), `cross_check_metadata` (10),
