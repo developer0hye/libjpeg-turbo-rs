@@ -1727,19 +1727,20 @@ fn create_abi_guards_pass(
 /// So this zeroes *around* the two slots and never reads either. The observable
 /// result is upstream's: both survive, everything else is cleared.
 ///
-/// **Known strictness question (P4-149).** Preserving means that when the
-/// caller never set `client_data`, the slot stays uninitialized — which is
-/// exactly what upstream leaves too. Under a *deep* reading of reference
-/// validity, holding `&mut JpegDecompressPublic` over a struct with an
-/// uninitialized field would itself be invalid, and create does hold one to
-/// write the remaining defaults. Miri — the checker this crate gates on —
-/// accepts it: reference retagging does not descend into plain-data fields,
-/// and `create_never_loads_an_uninitialized_client_data` exercises exactly
-/// this shape. Whether deep validity applies on reference creation is unsettled
-/// in the UCG; if it is settled the strict way, create must become
-/// raw-pointer-only throughout. Nulling the slot instead is *not* the fix: it
-/// silently drops a pointer the application attached, which is the defect this
-/// preservation was added to correct.
+/// **Strictness posture (P4-149, resolved for create).** Preserving means that
+/// when the caller never set `client_data`, the slot stays uninitialized —
+/// which is exactly what upstream leaves too. Under a *deep* reading of
+/// reference validity, holding `&mut JpegDecompressPublic` over a struct with
+/// an uninitialized field would itself be invalid. Whether that reading
+/// applies on reference creation is unsettled in the UCG, so `jpeg_Create*`
+/// no longer poses the question: both write every default through raw field
+/// projections and never form a reference over the caller's struct.
+/// `create_never_loads_an_uninitialized_client_data` exercises exactly this
+/// shape under Miri. Nulling the slot instead is *not* a fix: it silently
+/// drops a pointer the application attached, which is the defect this
+/// preservation was added to correct. Entry points *after* create still form
+/// mirror references while `client_data` may remain uninitialized — that
+/// residue is P4-69's sweep, not this helper's concern.
 ///
 /// # Safety
 ///
@@ -1798,7 +1799,7 @@ fn common_mem_is_null(cinfo: *mut c_void, mem_offset: usize) -> bool {
 /// with `version = JPEG_LIB_VERSION` and `structsize = sizeof(*cinfo)`.
 ///
 /// Populates the caller-allocated `jpeg_decompress_struct` with libjpeg's
-/// standard defaults (as implemented by `jinit_decompress_master` in
+/// standard defaults (as implemented by `default_decompress_parms` in
 /// `references/libjpeg-turbo/src/jdapimin.c`) and registers private
 /// Rust-side state in the thread-local side table.
 ///
@@ -1835,158 +1836,159 @@ pub unsafe extern "C" fn jpeg_CreateDecompress(
             return;
         }
 
-        // Past the guards the declared size matches the mirror exactly, so a
-        // reference to the whole struct is now sound.
-        // SAFETY: `struct_size` equals `size_of::<JpegDecompressPublic>()`,
-        // checked immediately above, and the caller's pointer contract makes
-        // that many bytes valid and aligned.
-        let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
-            Some(c) => c,
-            None => return,
-        };
+        // Past the guards the declared size matches the mirror exactly — but
+        // no reference to the whole struct is formed even so. Upstream's
+        // contract preserves `client_data` exactly as the caller left it, and
+        // the standard idiom leaves it *uninitialized* (stock `djpeg` sets only
+        // `err`; upstream's own comment says the application "may have set
+        // client_data"). Under a deep reading of reference validity a
+        // `&mut JpegDecompressPublic` over such an object would itself be
+        // invalid — unsettled in the UCG, settled here by not forming one:
+        // every default below goes through a raw field projection (P4-149).
+        let p: *mut JpegDecompressPublic = cinfo.cast();
 
         // Upstream zeroes the entire struct and restores the two fields the
         // application owns (`jdapimin.c`: "the application has already set the
         // err pointer, and may have set client_data"). Zeroing matters on its
-        // own: the assignments below name most fields but not all, and a
-        // caller reusing a stack object would otherwise see stale values in
-        // whatever this function forgets.
-        // SAFETY: `c` is a valid, exclusively-borrowed mirror of exactly this
-        // size; every field it clears is plain data for which all-zero is a
-        // valid value, and it reads neither preserved slot.
+        // own: the writes below name most fields but not all, and a caller
+        // reusing a stack object would otherwise see stale values in whatever
+        // this function forgets.
+        // SAFETY: the guards established the caller's object covers exactly
+        // this many valid, aligned bytes; every byte cleared is plain data for
+        // which all-zero is a valid value, and neither preserved slot is read.
         unsafe {
             zero_public_struct_preserving_err_and_client_data(
-                c as *mut JpegDecompressPublic as *mut u8,
+                cinfo as *mut u8,
                 std::mem::size_of::<JpegDecompressPublic>(),
                 std::mem::offset_of!(JpegDecompressPublic, err),
                 std::mem::offset_of!(JpegDecompressPublic, client_data),
             );
         }
 
-        // Wire up the memory-manager vtable so libjpeg callers can invoke
-        // `(*cinfo->mem->alloc_small)(...)` from the very first line of
-        // their main loops (e.g. wrppm.c output init).
-        c.mem = memmgr::create_memory_mgr() as *mut c_void;
-        c.progress = std::ptr::null_mut();
-        c.is_decompressor = 1;
-        c.global_state = DSTATE_START;
+        // SAFETY: `p` covers the whole mirror per the create guards; each
+        // write targets a distinct plain-data field through a raw projection,
+        // so no reference over the struct (and its possibly-uninitialized
+        // `client_data`) ever exists. Field set and values are unchanged from
+        // the `&mut`-based version this replaced.
+        unsafe {
+            // Wire up the memory-manager vtable so libjpeg callers can invoke
+            // `(*cinfo->mem->alloc_small)(...)` from the very first line of
+            // their main loops (e.g. wrppm.c output init).
+            (&raw mut (*p).mem).write(memmgr::create_memory_mgr() as *mut c_void);
+            (&raw mut (*p).progress).write(std::ptr::null_mut());
+            (&raw mut (*p).is_decompressor).write(1);
+            (&raw mut (*p).global_state).write(DSTATE_START);
 
-        c.src = std::ptr::null_mut();
+            (&raw mut (*p).src).write(std::ptr::null_mut());
 
-        c.image_width = 0;
-        c.image_height = 0;
-        c.num_components = 0;
-        c.jpeg_color_space = JCS_UNKNOWN;
+            (&raw mut (*p).image_width).write(0);
+            (&raw mut (*p).image_height).write(0);
+            (&raw mut (*p).num_components).write(0);
+            (&raw mut (*p).jpeg_color_space).write(JCS_UNKNOWN);
 
-        // Output-side decompression defaults (match `jinit_decompress_master`).
-        c.out_color_space = JCS_UNKNOWN;
-        c.scale_num = 1;
-        c.scale_denom = 1;
-        c.output_gamma = 1.0;
-        c.buffered_image = 0;
-        c.raw_data_out = 0;
-        c.dct_method = 0; // JDCT_ISLOW
-        c.do_fancy_upsampling = 1;
-        c.do_block_smoothing = 1;
-        c.quantize_colors = 0;
-        c.dither_mode = 2; // JDITHER_FS
-        c.two_pass_quantize = 1;
-        c.desired_number_of_colors = 256;
-        c.enable_1pass_quant = 0;
-        c.enable_external_quant = 0;
-        c.enable_2pass_quant = 0;
+            // Output-side decompression defaults (match
+            // `default_decompress_parms`, `jdapimin.c:137`).
+            (&raw mut (*p).out_color_space).write(JCS_UNKNOWN);
+            (&raw mut (*p).scale_num).write(1);
+            (&raw mut (*p).scale_denom).write(1);
+            (&raw mut (*p).output_gamma).write(1.0);
+            (&raw mut (*p).buffered_image).write(0);
+            (&raw mut (*p).raw_data_out).write(0);
+            (&raw mut (*p).dct_method).write(0); // JDCT_ISLOW
+            (&raw mut (*p).do_fancy_upsampling).write(1);
+            (&raw mut (*p).do_block_smoothing).write(1);
+            (&raw mut (*p).quantize_colors).write(0);
+            (&raw mut (*p).dither_mode).write(2); // JDITHER_FS
+            (&raw mut (*p).two_pass_quantize).write(1);
+            (&raw mut (*p).desired_number_of_colors).write(256);
+            (&raw mut (*p).enable_1pass_quant).write(0);
+            (&raw mut (*p).enable_external_quant).write(0);
+            (&raw mut (*p).enable_2pass_quant).write(0);
 
-        c.output_width = 0;
-        c.output_height = 0;
-        c.out_color_components = 0;
-        c.output_components = 0;
-        c.rec_outbuf_height = 1;
+            (&raw mut (*p).output_width).write(0);
+            (&raw mut (*p).output_height).write(0);
+            (&raw mut (*p).out_color_components).write(0);
+            (&raw mut (*p).output_components).write(0);
+            (&raw mut (*p).rec_outbuf_height).write(1);
 
-        c.actual_number_of_colors = 0;
-        c.colormap = std::ptr::null_mut();
+            (&raw mut (*p).actual_number_of_colors).write(0);
+            (&raw mut (*p).colormap).write(std::ptr::null_mut());
 
-        c.output_scanline = 0;
-        c.input_scan_number = 0;
-        c.input_iMCU_row = 0;
-        c.output_scan_number = 0;
-        c.output_iMCU_row = 0;
+            (&raw mut (*p).output_scanline).write(0);
+            (&raw mut (*p).input_scan_number).write(0);
+            (&raw mut (*p).input_iMCU_row).write(0);
+            (&raw mut (*p).output_scan_number).write(0);
+            (&raw mut (*p).output_iMCU_row).write(0);
 
-        c.coef_bits = std::ptr::null_mut();
+            (&raw mut (*p).coef_bits).write(std::ptr::null_mut());
 
-        for slot in c.quant_tbl_ptrs.iter_mut() {
-            *slot = std::ptr::null_mut();
+            (&raw mut (*p).quant_tbl_ptrs).write([std::ptr::null_mut(); NUM_QUANT_TBLS]);
+            (&raw mut (*p).dc_huff_tbl_ptrs).write([std::ptr::null_mut(); NUM_HUFF_TBLS]);
+            (&raw mut (*p).ac_huff_tbl_ptrs).write([std::ptr::null_mut(); NUM_HUFF_TBLS]);
+
+            (&raw mut (*p).data_precision).write(8);
+            (&raw mut (*p).comp_info).write(std::ptr::null_mut());
+            (&raw mut (*p).is_baseline).write(0);
+            (&raw mut (*p).progressive_mode).write(0);
+            (&raw mut (*p).arith_code).write(0);
+
+            (&raw mut (*p).arith_dc_L).write([0u8; NUM_ARITH_TBLS]);
+            (&raw mut (*p).arith_dc_U).write([1u8; NUM_ARITH_TBLS]);
+            (&raw mut (*p).arith_ac_K).write([5u8; NUM_ARITH_TBLS]);
+
+            (&raw mut (*p).restart_interval).write(0);
+
+            (&raw mut (*p).saw_JFIF_marker).write(0);
+            (&raw mut (*p).JFIF_major_version).write(1);
+            (&raw mut (*p).JFIF_minor_version).write(1);
+            (&raw mut (*p).density_unit).write(0);
+            (&raw mut (*p).X_density).write(1);
+            (&raw mut (*p).Y_density).write(1);
+            (&raw mut (*p).saw_Adobe_marker).write(0);
+            (&raw mut (*p).Adobe_transform).write(0);
+
+            (&raw mut (*p).CCIR601_sampling).write(0);
+
+            (&raw mut (*p).marker_list).write(std::ptr::null_mut());
+
+            (&raw mut (*p).max_h_samp_factor).write(0);
+            (&raw mut (*p).max_v_samp_factor).write(0);
+            (&raw mut (*p).min_DCT_h_scaled_size).write(0);
+            (&raw mut (*p).min_DCT_v_scaled_size).write(0);
+            (&raw mut (*p).total_iMCU_rows).write(0);
+
+            (&raw mut (*p).sample_range_limit).write(std::ptr::null_mut());
+
+            (&raw mut (*p).comps_in_scan).write(0);
+            (&raw mut (*p).cur_comp_info).write([std::ptr::null_mut(); MAX_COMPS_IN_SCAN]);
+            (&raw mut (*p).MCUs_per_row).write(0);
+            (&raw mut (*p).MCU_rows_in_scan).write(0);
+            (&raw mut (*p).blocks_in_MCU).write(0);
+            (&raw mut (*p).MCU_membership).write([0; D_MAX_BLOCKS_IN_MCU]);
+
+            (&raw mut (*p).Ss).write(0);
+            (&raw mut (*p).Se).write(0);
+            (&raw mut (*p).Ah).write(0);
+            (&raw mut (*p).Al).write(0);
+
+            (&raw mut (*p).block_size).write(8); // DCTSIZE for lossy mode
+            (&raw mut (*p).natural_order).write(std::ptr::null());
+            (&raw mut (*p).lim_Se).write(63); // DCTSIZE2 - 1
+
+            (&raw mut (*p).unread_marker).write(0);
+
+            (&raw mut (*p).master).write(std::ptr::null_mut());
+            (&raw mut (*p).main_controller).write(std::ptr::null_mut());
+            (&raw mut (*p).coef).write(std::ptr::null_mut());
+            (&raw mut (*p).post).write(std::ptr::null_mut());
+            (&raw mut (*p).inputctl).write(std::ptr::null_mut());
+            (&raw mut (*p).marker).write(std::ptr::null_mut());
+            (&raw mut (*p).entropy).write(std::ptr::null_mut());
+            (&raw mut (*p).idct).write(std::ptr::null_mut());
+            (&raw mut (*p).upsample).write(std::ptr::null_mut());
+            (&raw mut (*p).cconvert).write(std::ptr::null_mut());
+            (&raw mut (*p).cquantize).write(std::ptr::null_mut());
         }
-        for slot in c.dc_huff_tbl_ptrs.iter_mut() {
-            *slot = std::ptr::null_mut();
-        }
-        for slot in c.ac_huff_tbl_ptrs.iter_mut() {
-            *slot = std::ptr::null_mut();
-        }
-
-        c.data_precision = 8;
-        c.comp_info = std::ptr::null_mut();
-        c.is_baseline = 0;
-        c.progressive_mode = 0;
-        c.arith_code = 0;
-
-        c.arith_dc_L = [0u8; NUM_ARITH_TBLS];
-        c.arith_dc_U = [1u8; NUM_ARITH_TBLS];
-        c.arith_ac_K = [5u8; NUM_ARITH_TBLS];
-
-        c.restart_interval = 0;
-
-        c.saw_JFIF_marker = 0;
-        c.JFIF_major_version = 1;
-        c.JFIF_minor_version = 1;
-        c.density_unit = 0;
-        c.X_density = 1;
-        c.Y_density = 1;
-        c.saw_Adobe_marker = 0;
-        c.Adobe_transform = 0;
-
-        c.CCIR601_sampling = 0;
-
-        c.marker_list = std::ptr::null_mut();
-
-        c.max_h_samp_factor = 0;
-        c.max_v_samp_factor = 0;
-        c.min_DCT_h_scaled_size = 0;
-        c.min_DCT_v_scaled_size = 0;
-        c.total_iMCU_rows = 0;
-
-        c.sample_range_limit = std::ptr::null_mut();
-
-        c.comps_in_scan = 0;
-        for slot in c.cur_comp_info.iter_mut() {
-            *slot = std::ptr::null_mut();
-        }
-        c.MCUs_per_row = 0;
-        c.MCU_rows_in_scan = 0;
-        c.blocks_in_MCU = 0;
-        c.MCU_membership = [0; D_MAX_BLOCKS_IN_MCU];
-
-        c.Ss = 0;
-        c.Se = 0;
-        c.Ah = 0;
-        c.Al = 0;
-
-        c.block_size = 8; // DCTSIZE for lossy mode
-        c.natural_order = std::ptr::null();
-        c.lim_Se = 63; // DCTSIZE2 - 1
-
-        c.unread_marker = 0;
-
-        c.master = std::ptr::null_mut();
-        c.main_controller = std::ptr::null_mut();
-        c.coef = std::ptr::null_mut();
-        c.post = std::ptr::null_mut();
-        c.inputctl = std::ptr::null_mut();
-        c.marker = std::ptr::null_mut();
-        c.entropy = std::ptr::null_mut();
-        c.idct = std::ptr::null_mut();
-        c.upsample = std::ptr::null_mut();
-        c.cconvert = std::ptr::null_mut();
-        c.cquantize = std::ptr::null_mut();
 
         // Register Rust-side private state in the thread-local side table.
         decompress_private_insert(cinfo, Box::default());
@@ -7091,107 +7093,118 @@ pub unsafe extern "C" fn jpeg_CreateCompress(
             return;
         }
 
-        // SAFETY: the guard above established that `struct_size` equals this
-        // mirror's size, so the caller's object covers the whole struct.
-        let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
-            Some(c) => c,
-            None => return,
-        };
+        // As in `jpeg_CreateDecompress`: the guard established the caller's
+        // object covers the whole mirror, but no `&mut` is formed over it —
+        // `client_data` may be legitimately uninitialized under upstream's
+        // preservation contract, so every default goes through a raw field
+        // projection (P4-149).
+        let p: *mut JpegCompressPublic = cinfo.cast();
+
         // `jcapimin.c` zeroes the struct and restores `err` and `client_data`.
         // This comment claimed that behaviour long before the code did it: the
-        // assignments below name most fields but not all, so a reused object
-        // kept stale values in the remainder.
-        // SAFETY: as in `jpeg_CreateDecompress` — exclusive borrow of exactly
-        // this many bytes, plain-data fields, and neither preserved slot read.
+        // writes below name most fields but not all, so a reused object kept
+        // stale values in the remainder.
+        // SAFETY: as in `jpeg_CreateDecompress` — exactly this many valid,
+        // aligned bytes per the guards, plain-data fields, and neither
+        // preserved slot read.
         unsafe {
             zero_public_struct_preserving_err_and_client_data(
-                c as *mut JpegCompressPublic as *mut u8,
+                cinfo as *mut u8,
                 std::mem::size_of::<JpegCompressPublic>(),
                 std::mem::offset_of!(JpegCompressPublic, err),
                 std::mem::offset_of!(JpegCompressPublic, client_data),
             );
         }
 
-        // Wire up the memory-manager vtable so stock cjpeg / jpegtran can
-        // invoke `cinfo->mem->alloc_*` from their init paths.
-        c.mem = memmgr::create_memory_mgr() as *mut c_void;
-        c.progress = std::ptr::null_mut();
-        c.is_decompressor = 0;
-        c.global_state = CSTATE_START;
-        c.dest = std::ptr::null_mut();
-        c.image_width = 0;
-        c.image_height = 0;
-        c.input_components = 0;
-        c.in_color_space = JCS_UNKNOWN;
-        c.input_gamma = 1.0;
-        c.scale_num = 1;
-        c.scale_denom = 1;
-        c.jpeg_width = 0;
-        c.jpeg_height = 0;
-        c.data_precision = 8; // BITS_IN_JSAMPLE
-        c.num_components = 0;
-        c.jpeg_color_space = JCS_UNKNOWN;
-        c.comp_info = std::ptr::null_mut();
-        c.quant_tbl_ptrs = [std::ptr::null_mut(); 4];
-        c.q_scale_factor = [100; 4];
-        c.dc_huff_tbl_ptrs = [std::ptr::null_mut(); 4];
-        c.ac_huff_tbl_ptrs = [std::ptr::null_mut(); 4];
-        c.arith_dc_L = [0; 16];
-        c.arith_dc_U = [0; 16];
-        c.arith_ac_K = [0; 16];
-        c.num_scans = 0;
-        c.scan_info = std::ptr::null();
-        c.raw_data_in = 0;
-        c.arith_code = 0;
-        c.optimize_coding = 0;
-        c.CCIR601_sampling = 0;
-        c.do_fancy_downsampling = 0;
-        c.smoothing_factor = 0;
-        c.dct_method = 0; // JDCT_ISLOW
-        c.restart_interval = 0;
-        c.restart_in_rows = 0;
-        c.write_JFIF_header = 1;
-        c.JFIF_major_version = 1;
-        c.JFIF_minor_version = 1;
-        c.density_unit = 0;
-        c.X_density = 1;
-        c.Y_density = 1;
-        c.write_Adobe_marker = 0;
-        c.next_scanline = 0;
-        c.progressive_mode = 0;
-        c.max_h_samp_factor = 0;
-        c.max_v_samp_factor = 0;
-        c.min_DCT_h_scaled_size = 8; // DCTSIZE
-        c.min_DCT_v_scaled_size = 8;
-        c.total_iMCU_rows = 0;
-        c.comps_in_scan = 0;
-        c.cur_comp_info = [std::ptr::null_mut(); 4];
-        c.MCUs_per_row = 0;
-        c.MCU_rows_in_scan = 0;
-        c.blocks_in_MCU = 0;
-        c.MCU_membership = [0; 10];
-        c.Ss = 0;
-        c.Se = 0;
-        c.Ah = 0;
-        c.Al = 0;
-        c.block_size = 8; // DCTSIZE (JPEG_LIB_VERSION >= 80)
-        c.natural_order = std::ptr::null();
-        c.lim_Se = 63; // DCTSIZE2 - 1
-                       // `master` doubles as our Rust-side private-state pointer; everything
-                       // else in the tail is opaque libjpeg internal state we never populate.
-        c.main_ctrl = std::ptr::null_mut();
-        c.prep = std::ptr::null_mut();
-        c.coef = std::ptr::null_mut();
-        c.marker = std::ptr::null_mut();
-        c.cconvert = std::ptr::null_mut();
-        c.downsample = std::ptr::null_mut();
-        c.fdct = std::ptr::null_mut();
-        c.entropy = std::ptr::null_mut();
-        c.script_space = std::ptr::null_mut();
-        c.script_space_size = 0;
+        // SAFETY: `p` covers the whole mirror per the create guards; each
+        // write targets a distinct plain-data field through a raw projection,
+        // so no reference over the struct (and its possibly-uninitialized
+        // `client_data`) ever exists. Field set and values are unchanged from
+        // the `&mut`-based version this replaced.
+        unsafe {
+            // Wire up the memory-manager vtable so stock cjpeg / jpegtran can
+            // invoke `cinfo->mem->alloc_*` from their init paths.
+            (&raw mut (*p).mem).write(memmgr::create_memory_mgr() as *mut c_void);
+            (&raw mut (*p).progress).write(std::ptr::null_mut());
+            (&raw mut (*p).is_decompressor).write(0);
+            (&raw mut (*p).global_state).write(CSTATE_START);
+            (&raw mut (*p).dest).write(std::ptr::null_mut());
+            (&raw mut (*p).image_width).write(0);
+            (&raw mut (*p).image_height).write(0);
+            (&raw mut (*p).input_components).write(0);
+            (&raw mut (*p).in_color_space).write(JCS_UNKNOWN);
+            (&raw mut (*p).input_gamma).write(1.0);
+            (&raw mut (*p).scale_num).write(1);
+            (&raw mut (*p).scale_denom).write(1);
+            (&raw mut (*p).jpeg_width).write(0);
+            (&raw mut (*p).jpeg_height).write(0);
+            (&raw mut (*p).data_precision).write(8); // BITS_IN_JSAMPLE
+            (&raw mut (*p).num_components).write(0);
+            (&raw mut (*p).jpeg_color_space).write(JCS_UNKNOWN);
+            (&raw mut (*p).comp_info).write(std::ptr::null_mut());
+            (&raw mut (*p).quant_tbl_ptrs).write([std::ptr::null_mut(); 4]);
+            (&raw mut (*p).q_scale_factor).write([100; 4]);
+            (&raw mut (*p).dc_huff_tbl_ptrs).write([std::ptr::null_mut(); 4]);
+            (&raw mut (*p).ac_huff_tbl_ptrs).write([std::ptr::null_mut(); 4]);
+            (&raw mut (*p).arith_dc_L).write([0; 16]);
+            (&raw mut (*p).arith_dc_U).write([0; 16]);
+            (&raw mut (*p).arith_ac_K).write([0; 16]);
+            (&raw mut (*p).num_scans).write(0);
+            (&raw mut (*p).scan_info).write(std::ptr::null());
+            (&raw mut (*p).raw_data_in).write(0);
+            (&raw mut (*p).arith_code).write(0);
+            (&raw mut (*p).optimize_coding).write(0);
+            (&raw mut (*p).CCIR601_sampling).write(0);
+            (&raw mut (*p).do_fancy_downsampling).write(0);
+            (&raw mut (*p).smoothing_factor).write(0);
+            (&raw mut (*p).dct_method).write(0); // JDCT_ISLOW
+            (&raw mut (*p).restart_interval).write(0);
+            (&raw mut (*p).restart_in_rows).write(0);
+            (&raw mut (*p).write_JFIF_header).write(1);
+            (&raw mut (*p).JFIF_major_version).write(1);
+            (&raw mut (*p).JFIF_minor_version).write(1);
+            (&raw mut (*p).density_unit).write(0);
+            (&raw mut (*p).X_density).write(1);
+            (&raw mut (*p).Y_density).write(1);
+            (&raw mut (*p).write_Adobe_marker).write(0);
+            (&raw mut (*p).next_scanline).write(0);
+            (&raw mut (*p).progressive_mode).write(0);
+            (&raw mut (*p).max_h_samp_factor).write(0);
+            (&raw mut (*p).max_v_samp_factor).write(0);
+            (&raw mut (*p).min_DCT_h_scaled_size).write(8); // DCTSIZE
+            (&raw mut (*p).min_DCT_v_scaled_size).write(8);
+            (&raw mut (*p).total_iMCU_rows).write(0);
+            (&raw mut (*p).comps_in_scan).write(0);
+            (&raw mut (*p).cur_comp_info).write([std::ptr::null_mut(); 4]);
+            (&raw mut (*p).MCUs_per_row).write(0);
+            (&raw mut (*p).MCU_rows_in_scan).write(0);
+            (&raw mut (*p).blocks_in_MCU).write(0);
+            (&raw mut (*p).MCU_membership).write([0; 10]);
+            (&raw mut (*p).Ss).write(0);
+            (&raw mut (*p).Se).write(0);
+            (&raw mut (*p).Ah).write(0);
+            (&raw mut (*p).Al).write(0);
+            (&raw mut (*p).block_size).write(8); // DCTSIZE (JPEG_LIB_VERSION >= 80)
+            (&raw mut (*p).natural_order).write(std::ptr::null());
+            (&raw mut (*p).lim_Se).write(63); // DCTSIZE2 - 1
 
-        let private: Box<CompressPrivate> = Box::default();
-        c.master = Box::into_raw(private) as *mut c_void;
+            // `master` doubles as our Rust-side private-state pointer;
+            // everything else in the tail is opaque libjpeg internal state we
+            // never populate.
+            (&raw mut (*p).main_ctrl).write(std::ptr::null_mut());
+            (&raw mut (*p).prep).write(std::ptr::null_mut());
+            (&raw mut (*p).coef).write(std::ptr::null_mut());
+            (&raw mut (*p).marker).write(std::ptr::null_mut());
+            (&raw mut (*p).cconvert).write(std::ptr::null_mut());
+            (&raw mut (*p).downsample).write(std::ptr::null_mut());
+            (&raw mut (*p).fdct).write(std::ptr::null_mut());
+            (&raw mut (*p).entropy).write(std::ptr::null_mut());
+            (&raw mut (*p).script_space).write(std::ptr::null_mut());
+            (&raw mut (*p).script_space_size).write(0);
+
+            let private: Box<CompressPrivate> = Box::default();
+            (&raw mut (*p).master).write(Box::into_raw(private) as *mut c_void);
+        }
     })
 }
 

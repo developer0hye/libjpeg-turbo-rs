@@ -2932,7 +2932,7 @@ indices carry that offset, which they did not before, so an unaligned
 allocation used to be checked against the wrong bytes. **42 error-manager blobs still have that alignment
 bug** and are filed separately as P4-148.
 
-## P4-149. Preserved `client_data` May Be Uninitialized While Create Holds `&mut` — **OPEN**
+## P4-149. Preserved `client_data` May Be Uninitialized While Create Holds `&mut` — **CLOSED 2026-08-13**
 
 **Motivation.** Raised in review while closing P4-110 (2026-08-11) and
 deliberately not resolved there; filed as issue #527. `jpeg_Create*` must preserve `client_data`
@@ -2953,16 +2953,39 @@ worse:
   memory-safety fix. Reviewing that as one commit is worse for safety, not
   better.
 
-**Current status.** Miri accepts the present code — retagging does not descend
-into plain-data fields — and `create_never_loads_an_uninitialized_client_data`
-runs exactly this shape under it in CI. Whether deep validity applies on
-reference creation is unsettled in the UCG.
+**Status at filing.** Miri accepted the code as it then stood — retagging does
+not descend into plain-data fields — and
+`create_never_loads_an_uninitialized_client_data` runs exactly this shape under
+it in CI. Whether deep validity applies on reference creation is unsettled in
+the UCG.
 
 **Acceptance criteria.** Either the UCG settles it permissively and this item
 closes with a citation, or `jpeg_CreateCompress` / `jpeg_CreateDecompress` stop
 forming `&mut` over the caller's struct entirely and write every field through
 raw pointers, with the existing Miri case still passing and no `client_data`
 behaviour change.
+
+**Status (2026-08-13): closed** via the second route (issue #527). Both create
+functions now write every default through `&raw mut (*p).field` projections;
+`cinfo_mut` / `cinfo_compress_mut` are no longer called before the struct is
+fully initialized, so no reference ever spans the possibly-uninitialized
+`client_data`. The zeroing already went through raw bytes
+(`zero_public_struct_preserving_err_and_client_data`), and the P4-110 guard
+path was already reference-free, so create is raw-pointer-only end to end.
+Field set and values are byte-identical to the `&mut` version — pinned by
+`capi_create_abi_guards` (7/7, and 4 passed / 2 process-spawning ignored under
+`cargo miri test -p libjpeg-turbo-rs-capi --test capi_create_abi_guards`,
+including `create_never_loads_an_uninitialized_client_data`),
+`capi_classic_lifecycle` 8/8, `capi_classic_lifecycle_pathological` 4/4, and
+`capi_decompress_struct_abi`. No *runtime* observable distinguishes the two
+implementations — Miri accepts both, which is how the defect survived — so the
+#527 regression is a source gate:
+`create_functions_form_no_reference_over_the_callers_struct` extracts both
+function bodies and fails on `cinfo_mut` / `cinfo_compress_mut` / `&mut `,
+verified to fail on the parent implementation. Entry points *after* create
+still form mirror references while `client_data` may remain uninitialized;
+that residue belongs to P4-69's module sweep, noted in the helper's doc
+comment.
 
 ## P4-150. `tj3Compress16` Accepts Lossy 16-bit Where Upstream Refuses — **CLOSED 2026-08-12**
 
