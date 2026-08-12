@@ -3299,7 +3299,7 @@ and moves to the serial CI step P4-147 added, (b) asserts a non-timing
 property that carries the same regression, or (c) is deleted with the reason
 recorded — a bound nothing can trip is not worth its flake risk.
 
-## P4-148. Test Error-Manager Blobs Are Under-Aligned `[u8; N]` Buffers — **OPEN**
+## P4-148. Test Error-Manager Blobs Are Under-Aligned `[u8; N]` Buffers — **CLOSED 2026-08-12**
 
 **Motivation.** Discovered while closing P4-110; filed as issue #526. Across the C-ABI test suite
 the error manager is allocated as `MaybeUninit<[u8; ERR_BYTES]>` and cast to
@@ -3318,6 +3318,56 @@ edits into a P0 fix would have made it harder to review, not safer.
 cast to a libjpeg struct pointer; each names the mirrored struct instead. A
 Miri run over the affected suites passes (Miri rejects misaligned references,
 so it is the mechanism rather than a convention).
+
+**Status (2026-08-12): closed.** All **43** sites now name the mirrored struct:
+`MaybeUninit<JpegErrorMgr>` in place of `MaybeUninit<[u8; ERR_BYTES]>` across
+ten suites, and the 33 now-dead `const ERR_BYTES` declarations are gone.
+
+**43, not the 42 the item counted.** `capi_classic_decode_ext.rs` held a
+`Box<[u8; 512]>` — the same defect in a different container, and it sat
+directly beneath a comment reading *"a `[u8; N]` is align-1, so casting it to a
+`j_decompress_ptr` was undefined however large it was … Boxing the mirrored
+struct fixes both."* The comment described the fix applied to the `cinfo` on the
+line above while the `err` on the line below still had the bug. Being on the
+heap made it *likely* to be suitably aligned, which is the kind of accident an
+allocator is free to stop providing. The item's stated shape was the search
+term, not the boundary.
+
+**Criterion 2 could not be met as written, and this is why.** Every one of the
+eleven affected suites locates and `dlopen`s the cdylib through `libloading`,
+so none of them runs under Miri at all:
+
+```
+$ cargo +nightly miri test -p libjpeg-turbo-rs-capi --test arith_code_flag
+panicked at tests/arith_code_flag.rs:55:5:
+could not locate cdylib near .../nightly-aarch64-apple-darwin/bin/miri
+```
+
+That is not a gap this fix can close — Miri has no FFI, and these tests exist
+precisely to exercise the shared object a C caller links against. Reporting a
+Miri pass here would have meant running something else and calling it this.
+
+What the criterion actually wanted was a *mechanism* rather than a convention.
+Naming the mirrored struct is a stronger one than Miri: alignment stops being a
+property anything checks at run time and becomes one the compiler guarantees,
+because the storage now **is** the struct. Miri could only ever have sampled the
+executions it ran. What no compiler prevents is someone reintroducing the
+byte-array idiom later, so that risk is carried by a source gate,
+`tests/err_mgr_alignment_gate.rs` (2 tests): it fails on `MaybeUninit<[u8;`,
+`Box<[u8;` or `as *mut [u8;` anywhere in this crate's tests, naming file and
+line. Verified by reintroducing the pattern in `arith_code_flag.rs` — the gate
+reports `arith_code_flag.rs:66` and fails.
+
+The gate carries a self-check, because a scanner with a broken path or an
+over-eager comment filter passes silently forever: it proves the banned shapes
+are still matched, that commented explanations are not, and that the walk still
+reaches two named suites P4-148 converted. It skips its own file, which
+necessarily contains the shapes as data.
+
+Verified by `cargo test -p libjpeg-turbo-rs-capi` over the eleven converted
+suites (54 passing) plus the gate. The full workspace release gate is 2599
+passing across 295 suites, 0 failures — 2597/294 plus this item's one new suite
+of 2.
 
 ## P4-111. Classic Progress-Manager Callbacks and Counters Are Not Wired — **OPEN**
 

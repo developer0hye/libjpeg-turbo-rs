@@ -23,8 +23,8 @@
 //! foreign-array materialisation path runs end-to-end. Round-trip
 //! pixel equality vs the reference decode locks in correctness.
 
-use libjpeg_turbo_rs_capi::jpeglib::JpegCompressPublic;
 use libjpeg_turbo_rs_capi::jpeglib::JpegDecompressPublic;
+use libjpeg_turbo_rs_capi::jpeglib::{JpegCompressPublic, JpegErrorMgr};
 use std::ffi::{c_int, c_long, c_uint, c_void};
 use std::mem::MaybeUninit;
 use std::os::raw::c_ulong;
@@ -262,8 +262,7 @@ fn foreign_coef_arrays_full_round_trip_pixel_exact() {
     let transcoded: Vec<u8> = unsafe {
         let mut dec_cinfo: MaybeUninit<JpegDecompressPublic> = MaybeUninit::zeroed();
         let dec_cinfo_ptr: *mut c_void = dec_cinfo.as_mut_ptr() as *mut c_void;
-        const ERR_BYTES: usize = 512;
-        let mut dec_err: MaybeUninit<[u8; ERR_BYTES]> = MaybeUninit::zeroed();
+        let mut dec_err: MaybeUninit<JpegErrorMgr> = MaybeUninit::zeroed();
         let dec_err_ptr: *mut c_void = dec_err.as_mut_ptr() as *mut c_void;
 
         let jpeg_std_error: libloading::Symbol<unsafe extern "C" fn(*mut c_void) -> *mut c_void> =
@@ -307,7 +306,7 @@ fn foreign_coef_arrays_full_round_trip_pixel_exact() {
         // Compress side
         let mut enc_cinfo: MaybeUninit<JpegCompressPublic> = MaybeUninit::zeroed();
         let enc_cinfo_ptr: *mut c_void = enc_cinfo.as_mut_ptr() as *mut c_void;
-        let mut enc_err: MaybeUninit<[u8; ERR_BYTES]> = MaybeUninit::zeroed();
+        let mut enc_err: MaybeUninit<JpegErrorMgr> = MaybeUninit::zeroed();
         let enc_err_ptr: *mut c_void = enc_err.as_mut_ptr() as *mut c_void;
         let _ = jpeg_std_error(enc_err_ptr);
         (enc_cinfo_ptr as *mut *mut c_void).write(enc_err_ptr);
@@ -529,10 +528,9 @@ fn finish_decompress_clears_coef_cache_for_reuse() {
     assert_ne!((w_a, h_a), (32usize, 48usize), "fixtures must differ");
 
     unsafe {
-        const ERR_BYTES: usize = 512;
         let mut cinfo_buf: MaybeUninit<JpegDecompressPublic> = MaybeUninit::zeroed();
         let cinfo_ptr: *mut c_void = cinfo_buf.as_mut_ptr() as *mut c_void;
-        let mut err_buf: MaybeUninit<[u8; ERR_BYTES]> = MaybeUninit::zeroed();
+        let mut err_buf: MaybeUninit<JpegErrorMgr> = MaybeUninit::zeroed();
         let err_ptr: *mut c_void = err_buf.as_mut_ptr() as *mut c_void;
 
         let jpeg_std_error: libloading::Symbol<unsafe extern "C" fn(*mut c_void) -> *mut c_void> =
@@ -640,10 +638,9 @@ fn jpeg_read_header_populates_jfif_density() {
     }
 
     unsafe {
-        const ERR_BYTES: usize = 512;
         let mut cinfo_buf: MaybeUninit<JpegDecompressPublic> = MaybeUninit::zeroed();
         let cinfo_ptr: *mut c_void = cinfo_buf.as_mut_ptr() as *mut c_void;
-        let mut err_buf: MaybeUninit<[u8; ERR_BYTES]> = MaybeUninit::zeroed();
+        let mut err_buf: MaybeUninit<JpegErrorMgr> = MaybeUninit::zeroed();
         let err_ptr: *mut c_void = err_buf.as_mut_ptr() as *mut c_void;
 
         let jpeg_std_error: libloading::Symbol<unsafe extern "C" fn(*mut c_void) -> *mut c_void> =

@@ -12,7 +12,7 @@
 //! assertion rule). Skip only when a fixture file is absent (submodule
 //! not initialised).
 
-use libjpeg_turbo_rs_capi::jpeglib::JpegDecompressPublic;
+use libjpeg_turbo_rs_capi::jpeglib::{JpegDecompressPublic, JpegErrorMgr};
 use std::ffi::{c_int, c_void};
 use std::mem::MaybeUninit;
 use std::os::raw::c_ulong;
@@ -160,8 +160,7 @@ unsafe fn collect_raw_planes_via_capi(
     let mut cinfo_buf: MaybeUninit<JpegDecompressPublic> = MaybeUninit::zeroed();
     let cinfo_ptr: *mut c_void = cinfo_buf.as_mut_ptr() as *mut c_void;
 
-    const ERR_BYTES: usize = 512;
-    let mut err_buf: MaybeUninit<[u8; ERR_BYTES]> = MaybeUninit::zeroed();
+    let mut err_buf: MaybeUninit<JpegErrorMgr> = MaybeUninit::zeroed();
     let err_ptr: *mut c_void = err_buf.as_mut_ptr() as *mut c_void;
 
     // Install error manager.
