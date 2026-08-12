@@ -28,17 +28,42 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include <turbojpeg.h>
 
 #define WIDTH 32
 #define HEIGHT 32
 
-/* Report one case. `rc` of 0 carries no message, so the field is empty then —
- * printing a stale `errStr` would compare state neither library promises. */
+/* Which rule refused the call, as opposed to how it phrased it.
+ *
+ * Two of the messages compared here are libjpeg's, reaching `errStr` through
+ * `CATCH_LIBJPEG` verbatim, so the port can and does match them byte for byte.
+ * The *precedence* between them is a separate contract — which check runs
+ * first — and pinning it by raw text would drag in messages the two libraries
+ * have never agreed on (TurboJPEG's own `function():` errors carry per-call
+ * detail this port words differently, deliberately: see the note in
+ * `norealloc_oracle.c` about not comparing byte counts). Classifying keeps the
+ * ordering assertion honest without pretending unrelated strings match. */
+static const char *error_kind(const char *message)
+{
+  if (strstr(message, "data precision")) return "precision";
+  if (strstr(message, "too small")) return "buffer";
+  return "other";
+}
+
+/* Report one case. `rc` of 0 carries no message, so both fields are empty then
+ * — printing a stale `errStr` would compare state neither library promises.
+ *
+ * `err` is printed only for the precision refusal, the one message the port
+ * owes byte for byte. For every other outcome the kind is the contract. */
 static void report(const char *label, tjhandle handle, int rc)
 {
-  printf("%s %d err=\"%s\"\n", label, rc, rc == 0 ? "" : tj3GetErrorStr(handle));
+  const char *message = rc == 0 ? "" : tj3GetErrorStr(handle);
+  const char *kind = rc == 0 ? "none" : error_kind(message);
+  int exact = strcmp(kind, "precision") == 0;
+
+  printf("%s %d kind=%s err=\"%s\"\n", label, rc, kind, exact ? message : "");
 }
 
 /* A compressor with the parameters every case shares. `precision` of 0 means
@@ -61,9 +86,18 @@ static tjhandle compressor(int lossless, int precision)
   return handle;
 }
 
-/* `tj3Compress16` under one configuration. The output buffer is allocated by
- * the library, so nothing here depends on the P4-145 ownership contract. */
-static void compress16_case(const char *label, int lossless, int precision)
+/* `tj3Compress16` under one configuration.
+ *
+ * `capacity` of 0 leaves the library to allocate, which is the plain case.
+ * A non-zero value pre-allocates and sets `TJPARAM_NOREALLOC`, which is what
+ * makes the *precedence* between the destination's error and the precision
+ * rule observable: upstream installs the destination before
+ * `jpeg_start_compress` (`turbojpeg-mp.c:118-120`). `capacity` of `NULL_SLOT`
+ * sets the flag but leaves the slot empty. */
+#define NULL_SLOT ((size_t)-1)
+
+static void compress16_case(const char *label, int lossless, int precision,
+                            size_t capacity)
 {
   tjhandle handle = compressor(lossless, precision);
   unsigned short *src =
@@ -75,6 +109,17 @@ static void compress16_case(const char *label, int lossless, int precision)
   if (!src) { fprintf(stderr, "oom\n"); exit(2); }
   for (i = 0; i < (size_t)WIDTH * HEIGHT * 3; i++)
     src[i] = (unsigned short)(i % 65535);
+
+  if (capacity != 0) {
+    if (tj3Set(handle, TJPARAM_NOREALLOC, 1) != 0) {
+      fprintf(stderr, "norealloc\n"); exit(2);
+    }
+    if (capacity != NULL_SLOT) {
+      buf = (unsigned char *)tj3Alloc(capacity);
+      if (!buf) { fprintf(stderr, "oom\n"); exit(2); }
+      size = capacity;
+    }
+  }
 
   rc = tj3Compress16(handle, src, WIDTH, 0, HEIGHT, TJPF_RGB, &buf, &size);
   report(label, handle, rc);
@@ -132,17 +177,32 @@ static void compress8_case(const char *label, int lossless)
 int main(void)
 {
   /* The divergence itself: refused upstream, accepted by the port. */
-  compress16_case("c16_lossy", 0, 0);
+  compress16_case("c16_lossy", 0, 0, 0);
   /* The configuration 16-bit exists for. */
-  compress16_case("c16_lossless", 1, 0);
+  compress16_case("c16_lossless", 1, 0, 0);
   /* Inside the window `turbojpeg-mp.c:111-115` honours (BITS_IN_JSAMPLE-3 .. 16). */
-  compress16_case("c16_lossless_prec13", 1, 13);
+  compress16_case("c16_lossless_prec13", 1, 13, 0);
   /* Outside it: silently ignored, so this stays a 16-bit lossless encode
    * rather than becoming an error. */
-  compress16_case("c16_lossless_prec12", 1, 12);
+  compress16_case("c16_lossless_prec12", 1, 12, 0);
   /* The trap: `TJPARAM_PRECISION` is read only when lossless is set, so
    * asking for 12 here does not turn a lossy 16-bit call into a legal one. */
-  compress16_case("c16_lossy_prec12", 0, 12);
+  compress16_case("c16_lossy_prec12", 0, 12, 0);
+
+  /* Precedence against the destination, which upstream installs first. A
+   * NOREALLOC slot that cannot be used *at all* — empty, or present with zero
+   * capacity — is refused by `jdatadst-tj.c:184-192` before the compress
+   * starts, so the buffer error wins over the precision rule. */
+  compress16_case("c16_lossy_norealloc_null", 0, 0, NULL_SLOT);
+  /* ...but a slot that is merely *too small* does not: its capacity is only
+   * tested when output overflows it, which never happens once the compress is
+   * refused. So the precision error wins here, and a fix that checked the
+   * destination unconditionally first would get this line wrong. */
+  compress16_case("c16_lossy_norealloc_cramped", 0, 0, 16);
+  /* The same two slots with a legal configuration, so the lines above are
+   * read as "which error", not "16-bit under NOREALLOC always fails". */
+  compress16_case("c16_lossless_norealloc_null", 1, 0, NULL_SLOT);
+  compress16_case("c16_lossless_norealloc_roomy", 1, 0, 64 * 1024);
 
   /* Does the rule generalise? These lines answer it. */
   compress12_case("c12_lossy", 0);

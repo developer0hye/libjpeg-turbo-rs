@@ -186,6 +186,13 @@ fn tj3_compress16_decompress16_is_lossless() {
         > = lib.get(b"tj3Decompress16").unwrap();
 
         let h_enc = tj3_init(TJINIT_COMPRESS);
+        // `TJPARAM_LOSSLESS` is required, not implied by the predictor and
+        // point-transform parameters. This test used to set only those two and
+        // pass, because the port treated 16-bit as unconditionally lossless.
+        // Upstream reads `TJPARAM_LOSSLESS` back as 0 after `PSV` alone and
+        // refuses the compress; P4-150 (#531) made this port agree, so the flag
+        // has to be set here the way a real caller sets it.
+        assert_eq!(tj3_set(h_enc, TJPARAM_LOSSLESS, 1), 0);
         assert_eq!(tj3_set(h_enc, TJPARAM_LOSSLESSPSV, 1), 0);
         assert_eq!(tj3_set(h_enc, TJPARAM_LOSSLESSPT, 0), 0);
 

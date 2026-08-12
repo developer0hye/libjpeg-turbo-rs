@@ -20,14 +20,23 @@
 //! function lives in: `turbojpeg-mp.c` contains no precision check at all.
 //! Reading only that file — which is what produced the bug — suggests 16-bit
 //! lossy is fine.
+//!
+//! The matrix also covers *where in the refusal chain* the check sits, which a
+//! gate placed naively last gets wrong. Upstream installs the destination
+//! before `jpeg_start_compress`, so a `TJPARAM_NOREALLOC` slot that cannot be
+//! used at all loses to the buffer error — but a slot that is merely too small
+//! does not, because its capacity is only tested when output overflows it, and
+//! nothing is written once the compress is refused. Those two cases disagree
+//! with each other, so neither "destination always first" nor "precision
+//! always first" passes.
 
 use std::ffi::{c_char, c_int, c_void, CStr};
 
 mod helpers;
 
 use libjpeg_turbo_rs_capi::{
-    tj3Compress12, tj3Compress16, tj3Compress8, tj3Destroy, tj3Free, tj3GetErrorStr, tj3Init,
-    tj3Set,
+    tj3Alloc, tj3Compress12, tj3Compress16, tj3Compress8, tj3Destroy, tj3Free, tj3GetErrorStr,
+    tj3Init, tj3Set,
 };
 
 /// `turbojpeg.h`: `TJINIT_COMPRESS` — a plain enum, so 0.
@@ -93,20 +102,63 @@ fn error_string(handle: *mut c_void) -> String {
         .to_string()
 }
 
-/// One case in the oracle's line format: `label rc err="<message>"`.
+/// Which rule refused the call, as opposed to how it phrased it.
 ///
-/// A successful call carries no message, so the field is empty then — reading
-/// a stale `errStr` would compare state neither library promises.
+/// The precision message is one this port owes byte for byte, and does. The
+/// *precedence* between it and the destination's refusal is a separate
+/// contract — which check runs first — and pinning that by raw text would drag
+/// in messages the two libraries have never agreed on: TurboJPEG's own
+/// `function():` errors carry per-call detail this port words differently, on
+/// purpose (the same reason `norealloc_oracle.c` does not compare byte counts).
+/// Classifying keeps the ordering assertion honest without pretending
+/// unrelated strings match.
+fn error_kind(message: &str) -> &'static str {
+    if message.contains("data precision") {
+        "precision"
+    } else if message.contains("too small") || message.contains("NOREALLOC") {
+        "buffer"
+    } else {
+        "other"
+    }
+}
+
+/// One case in the oracle's line format: `label rc kind=<k> err="<message>"`.
+///
+/// A successful call carries no message, so both fields are empty then —
+/// reading a stale `errStr` would compare state neither library promises.
+/// `err` is printed only for the precision refusal, the one message the port
+/// owes byte for byte; for every other outcome the kind is the contract.
 fn trace_line(label: &str, handle: *mut c_void, rc: c_int) -> String {
     let message: String = if rc == 0 {
         String::new()
     } else {
         error_string(handle)
     };
-    format!("{label} {rc} err=\"{message}\"\n")
+    let kind: &str = if rc == 0 {
+        "none"
+    } else {
+        error_kind(&message)
+    };
+    let exact: &str = if kind == "precision" { &message } else { "" };
+    format!("{label} {rc} kind={kind} err=\"{exact}\"\n")
 }
 
-fn compress16_case(label: &str, lossless: bool, precision: Option<c_int>) -> String {
+/// How the output slot is provided, which decides whether the destination's
+/// refusal or the precision rule is the one the caller sees.
+#[derive(Clone, Copy)]
+enum Slot {
+    /// The library allocates. The plain case.
+    LibraryAllocated,
+    /// `TJPARAM_NOREALLOC` set, slot left empty.
+    NoReallocEmpty,
+    /// `TJPARAM_NOREALLOC` set with a caller buffer of this many bytes.
+    NoReallocSized(usize),
+}
+
+fn compress16_case(label: &str, lossless: bool, precision: Option<c_int>, slot: Slot) -> String {
+    /// `turbojpeg.h`: `TJPARAM_NOREALLOC`.
+    const TJPARAM_NOREALLOC: c_int = 2;
+
     let handle: *mut c_void = compressor(lossless, precision);
     let src: Vec<u16> = (0..(WIDTH as usize * HEIGHT as usize * 3))
         .map(|i| (i % 65535) as u16)
@@ -114,8 +166,21 @@ fn compress16_case(label: &str, lossless: bool, precision: Option<c_int>) -> Str
     let mut buf: *mut u8 = std::ptr::null_mut();
     let mut size: usize = 0;
 
+    if let Slot::NoReallocEmpty | Slot::NoReallocSized(_) = slot {
+        // SAFETY: live handle.
+        unsafe {
+            assert_eq!(tj3Set(handle, TJPARAM_NOREALLOC, 1), 0, "set NOREALLOC");
+        }
+        if let Slot::NoReallocSized(capacity) = slot {
+            let allocated: *mut c_void = tj3Alloc(capacity);
+            assert!(!allocated.is_null(), "tj3Alloc({capacity})");
+            buf = allocated as *mut u8;
+            size = capacity;
+        }
+    }
+
     // SAFETY: `src` covers `WIDTH * HEIGHT * 3` samples at the default pitch and
-    // outlives the call; `buf`/`size` are a library-allocated output slot.
+    // outlives the call; `buf`/`size` are the output slot configured above.
     let rc: c_int = unsafe {
         tj3Compress16(
             handle,
@@ -203,11 +268,64 @@ fn compress8_case(label: &str, lossless: bool) -> String {
 /// Every case the oracle traces, in its order, as one string.
 fn our_trace() -> String {
     let mut trace: String = String::new();
-    trace.push_str(&compress16_case("c16_lossy", false, None));
-    trace.push_str(&compress16_case("c16_lossless", true, None));
-    trace.push_str(&compress16_case("c16_lossless_prec13", true, Some(13)));
-    trace.push_str(&compress16_case("c16_lossless_prec12", true, Some(12)));
-    trace.push_str(&compress16_case("c16_lossy_prec12", false, Some(12)));
+    trace.push_str(&compress16_case(
+        "c16_lossy",
+        false,
+        None,
+        Slot::LibraryAllocated,
+    ));
+    trace.push_str(&compress16_case(
+        "c16_lossless",
+        true,
+        None,
+        Slot::LibraryAllocated,
+    ));
+    trace.push_str(&compress16_case(
+        "c16_lossless_prec13",
+        true,
+        Some(13),
+        Slot::LibraryAllocated,
+    ));
+    trace.push_str(&compress16_case(
+        "c16_lossless_prec12",
+        true,
+        Some(12),
+        Slot::LibraryAllocated,
+    ));
+    trace.push_str(&compress16_case(
+        "c16_lossy_prec12",
+        false,
+        Some(12),
+        Slot::LibraryAllocated,
+    ));
+    // Precedence against the destination, which upstream installs before
+    // `jpeg_start_compress`. A slot that cannot be used at all loses to the
+    // buffer error; a slot that is merely too small does not, because its
+    // capacity is never tested once the compress is refused.
+    trace.push_str(&compress16_case(
+        "c16_lossy_norealloc_null",
+        false,
+        None,
+        Slot::NoReallocEmpty,
+    ));
+    trace.push_str(&compress16_case(
+        "c16_lossy_norealloc_cramped",
+        false,
+        None,
+        Slot::NoReallocSized(16),
+    ));
+    trace.push_str(&compress16_case(
+        "c16_lossless_norealloc_null",
+        true,
+        None,
+        Slot::NoReallocEmpty,
+    ));
+    trace.push_str(&compress16_case(
+        "c16_lossless_norealloc_roomy",
+        true,
+        None,
+        Slot::NoReallocSized(64 * 1024),
+    ));
     trace.push_str(&compress12_case("c12_lossy", false));
     trace.push_str(&compress12_case("c12_lossless", true));
     trace.push_str(&compress8_case("c8_lossy", false));
@@ -219,10 +337,10 @@ fn our_trace() -> String {
 /// still has teeth on a machine with no TurboJPEG development install.
 #[test]
 fn lossy_16bit_compress_is_refused() {
-    let line: String = compress16_case("c16_lossy", false, None);
+    let line: String = compress16_case("c16_lossy", false, None, Slot::LibraryAllocated);
     assert_eq!(
         line,
-        format!("c16_lossy -1 err=\"{BAD_PRECISION_16}\"\n"),
+        format!("c16_lossy -1 kind=precision err=\"{BAD_PRECISION_16}\"\n"),
         "a lossy 16-bit compress must fail with libjpeg's JERR_BAD_PRECISION \
          text; encoding a lossless stream instead gives the caller output where \
          upstream gives a documented error"
@@ -235,10 +353,10 @@ fn lossy_16bit_compress_is_refused() {
 /// precision rather than the lossless flag would get wrong.
 #[test]
 fn requesting_12bit_precision_does_not_rescue_a_lossy_16bit_compress() {
-    let line: String = compress16_case("c16_lossy_prec12", false, Some(12));
+    let line: String = compress16_case("c16_lossy_prec12", false, Some(12), Slot::LibraryAllocated);
     assert_eq!(
         line,
-        format!("c16_lossy_prec12 -1 err=\"{BAD_PRECISION_16}\"\n"),
+        format!("c16_lossy_prec12 -1 kind=precision err=\"{BAD_PRECISION_16}\"\n"),
         "TJPARAM_PRECISION is ignored unless TJPARAM_LOSSLESS is set, so the \
          effective precision here is still 16 and the call is still refused"
     );
@@ -252,12 +370,12 @@ fn requesting_12bit_precision_does_not_rescue_a_lossy_16bit_compress() {
 fn lossy_12bit_and_8bit_compress_still_succeed() {
     assert_eq!(
         compress12_case("c12_lossy", false),
-        "c12_lossy 0 err=\"\"\n",
+        "c12_lossy 0 kind=none err=\"\"\n",
         "12-bit lossy is legal upstream"
     );
     assert_eq!(
         compress8_case("c8_lossy", false),
-        "c8_lossy 0 err=\"\"\n",
+        "c8_lossy 0 kind=none err=\"\"\n",
         "8-bit lossy is the ordinary path"
     );
 }
@@ -275,8 +393,8 @@ fn lossless_16bit_compress_still_succeeds() {
         ("c16_lossless_prec12", Some(12)),
     ] {
         assert_eq!(
-            compress16_case(label, true, precision),
-            format!("{label} 0 err=\"\"\n"),
+            compress16_case(label, true, precision, Slot::LibraryAllocated),
+            format!("{label} 0 kind=none err=\"\"\n"),
             "lossless 16-bit must still encode"
         );
     }
