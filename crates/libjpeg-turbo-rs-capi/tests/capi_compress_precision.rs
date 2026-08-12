@@ -26,9 +26,10 @@
 //! before `jpeg_start_compress`, so a `TJPARAM_NOREALLOC` slot that cannot be
 //! used at all loses to the buffer error — but a slot that is merely too small
 //! does not, because its capacity is only tested when output overflows it, and
-//! nothing is written once the compress is refused. Those two cases disagree
-//! with each other, so neither "destination always first" nor "precision
-//! always first" passes.
+//! nothing is written once the compress is refused. And earlier still,
+//! `setCompDefaults` validates the lossless parameters before the destination
+//! exists, so an out-of-range point transform beats both. The three groups
+//! disagree with each other, so no single ordering satisfies them by accident.
 
 use std::ffi::{c_char, c_int, c_void, CStr};
 
@@ -63,8 +64,16 @@ const HEIGHT: c_int = 32;
 const BAD_PRECISION_16: &str = "Unsupported JPEG data precision 16";
 
 /// A compressor with the parameters every case shares. `precision` of `None`
-/// leaves `TJPARAM_PRECISION` alone, which is the common configuration.
-fn compressor(lossless: bool, precision: Option<c_int>) -> *mut c_void {
+/// leaves `TJPARAM_PRECISION` alone, and `point_transform` of `None` does the
+/// same for `TJPARAM_LOSSLESSPT`; both are the common configuration.
+fn compressor(
+    lossless: bool,
+    precision: Option<c_int>,
+    point_transform: Option<c_int>,
+) -> *mut c_void {
+    /// `turbojpeg.h`: `TJPARAM_LOSSLESSPT`.
+    const TJPARAM_LOSSLESSPT: c_int = 17;
+
     let handle: *mut c_void = tj3Init(TJINIT_COMPRESS);
     assert!(!handle.is_null(), "tj3Init(TJINIT_COMPRESS)");
     // SAFETY: `handle` is a live instance from `tj3Init`, used exclusively here.
@@ -83,6 +92,13 @@ fn compressor(lossless: bool, precision: Option<c_int>) -> *mut c_void {
                 tj3Set(handle, TJPARAM_PRECISION, bits),
                 0,
                 "set precision {bits}"
+            );
+        }
+        if let Some(pt) = point_transform {
+            assert_eq!(
+                tj3Set(handle, TJPARAM_LOSSLESSPT, pt),
+                0,
+                "set point transform {pt}"
             );
         }
     }
@@ -117,6 +133,12 @@ fn error_kind(message: &str) -> &'static str {
         "precision"
     } else if message.contains("too small") || message.contains("NOREALLOC") {
         "buffer"
+    } else if message.contains("lossless parameters") || message.contains("LOSSLESSPT") {
+        // Upstream words this "Invalid progressive/lossless parameters Ss=..
+        // Al=.."; this port names the two TJ parameters the caller actually
+        // set. Same rule, different phrasing, so it is classified rather than
+        // compared.
+        "lossless_params"
     } else {
         "other"
     }
@@ -155,11 +177,17 @@ enum Slot {
     NoReallocSized(usize),
 }
 
-fn compress16_case(label: &str, lossless: bool, precision: Option<c_int>, slot: Slot) -> String {
+fn compress16_case(
+    label: &str,
+    lossless: bool,
+    precision: Option<c_int>,
+    slot: Slot,
+    point_transform: Option<c_int>,
+) -> String {
     /// `turbojpeg.h`: `TJPARAM_NOREALLOC`.
     const TJPARAM_NOREALLOC: c_int = 2;
 
-    let handle: *mut c_void = compressor(lossless, precision);
+    let handle: *mut c_void = compressor(lossless, precision, point_transform);
     let src: Vec<u16> = (0..(WIDTH as usize * HEIGHT as usize * 3))
         .map(|i| (i % 65535) as u16)
         .collect();
@@ -204,7 +232,7 @@ fn compress16_case(label: &str, lossless: bool, precision: Option<c_int>, slot: 
 }
 
 fn compress12_case(label: &str, lossless: bool) -> String {
-    let handle: *mut c_void = compressor(lossless, None);
+    let handle: *mut c_void = compressor(lossless, None, None);
     let src: Vec<i16> = (0..(WIDTH as usize * HEIGHT as usize * 3))
         .map(|i| (i % 4096) as i16)
         .collect();
@@ -235,7 +263,7 @@ fn compress12_case(label: &str, lossless: bool) -> String {
 }
 
 fn compress8_case(label: &str, lossless: bool) -> String {
-    let handle: *mut c_void = compressor(lossless, None);
+    let handle: *mut c_void = compressor(lossless, None, None);
     let src: Vec<u8> = (0..(WIDTH as usize * HEIGHT as usize * 3))
         .map(|i| (i % 251) as u8)
         .collect();
@@ -273,30 +301,35 @@ fn our_trace() -> String {
         false,
         None,
         Slot::LibraryAllocated,
+        None,
     ));
     trace.push_str(&compress16_case(
         "c16_lossless",
         true,
         None,
         Slot::LibraryAllocated,
+        None,
     ));
     trace.push_str(&compress16_case(
         "c16_lossless_prec13",
         true,
         Some(13),
         Slot::LibraryAllocated,
+        None,
     ));
     trace.push_str(&compress16_case(
         "c16_lossless_prec12",
         true,
         Some(12),
         Slot::LibraryAllocated,
+        None,
     ));
     trace.push_str(&compress16_case(
         "c16_lossy_prec12",
         false,
         Some(12),
         Slot::LibraryAllocated,
+        None,
     ));
     // Precedence against the destination, which upstream installs before
     // `jpeg_start_compress`. A slot that cannot be used at all loses to the
@@ -307,24 +340,57 @@ fn our_trace() -> String {
         false,
         None,
         Slot::NoReallocEmpty,
+        None,
     ));
     trace.push_str(&compress16_case(
         "c16_lossy_norealloc_cramped",
         false,
         None,
         Slot::NoReallocSized(16),
+        None,
     ));
     trace.push_str(&compress16_case(
         "c16_lossless_norealloc_null",
         true,
         None,
         Slot::NoReallocEmpty,
+        None,
     ));
     trace.push_str(&compress16_case(
         "c16_lossless_norealloc_roomy",
         true,
         None,
         Slot::NoReallocSized(64 * 1024),
+        None,
+    ));
+    // Precedence against the *lossless parameters*, which upstream validates
+    // earlier still: `setCompDefaults` calls `jpeg_enable_lossless` before
+    // `jpeg_mem_dest_tj` (`turbojpeg-mp.c:117-120`). A point transform that is
+    // not less than the precision therefore wins over the buffer error even
+    // though the slot is unusable — so the destination preflight cannot simply
+    // be hoisted to the front of the function.
+    trace.push_str(&compress16_case(
+        "c16_pt_ge_prec_norealloc_null",
+        true,
+        Some(13),
+        Slot::NoReallocEmpty,
+        Some(13),
+    ));
+    trace.push_str(&compress16_case(
+        "c16_pt_ge_prec_roomy",
+        true,
+        Some(13),
+        Slot::LibraryAllocated,
+        Some(13),
+    ));
+    // A legal point transform, so the buffer error returns once the lossless
+    // parameters stop being the first thing wrong.
+    trace.push_str(&compress16_case(
+        "c16_pt_lt_prec_norealloc_null",
+        true,
+        Some(13),
+        Slot::NoReallocEmpty,
+        Some(12),
     ));
     trace.push_str(&compress12_case("c12_lossy", false));
     trace.push_str(&compress12_case("c12_lossless", true));
@@ -337,7 +403,7 @@ fn our_trace() -> String {
 /// still has teeth on a machine with no TurboJPEG development install.
 #[test]
 fn lossy_16bit_compress_is_refused() {
-    let line: String = compress16_case("c16_lossy", false, None, Slot::LibraryAllocated);
+    let line: String = compress16_case("c16_lossy", false, None, Slot::LibraryAllocated, None);
     assert_eq!(
         line,
         format!("c16_lossy -1 kind=precision err=\"{BAD_PRECISION_16}\"\n"),
@@ -353,7 +419,13 @@ fn lossy_16bit_compress_is_refused() {
 /// precision rather than the lossless flag would get wrong.
 #[test]
 fn requesting_12bit_precision_does_not_rescue_a_lossy_16bit_compress() {
-    let line: String = compress16_case("c16_lossy_prec12", false, Some(12), Slot::LibraryAllocated);
+    let line: String = compress16_case(
+        "c16_lossy_prec12",
+        false,
+        Some(12),
+        Slot::LibraryAllocated,
+        None,
+    );
     assert_eq!(
         line,
         format!("c16_lossy_prec12 -1 kind=precision err=\"{BAD_PRECISION_16}\"\n"),
@@ -393,7 +465,7 @@ fn lossless_16bit_compress_still_succeeds() {
         ("c16_lossless_prec12", Some(12)),
     ] {
         assert_eq!(
-            compress16_case(label, true, precision, Slot::LibraryAllocated),
+            compress16_case(label, true, precision, Slot::LibraryAllocated, None),
             format!("{label} 0 kind=none err=\"\"\n"),
             "lossless 16-bit must still encode"
         );

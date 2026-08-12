@@ -17,11 +17,21 @@
  * override is gated on the lossless flag; and the rule does not generalise to
  * `tj3Compress12`, whose lossy path is legal. Both are traced below.
  *
- * Output is `label rc err="<message>"`, one line per case. The message is
- * compared, not just the return code: on this path it is libjpeg's own
- * `JERR_BAD_PRECISION` text, which `CATCH_LIBJPEG` copies verbatim without
- * TurboJPEG's usual `function():` prefix. A caller that matches on it is
- * matching on something documented, so the port owes it exactly.
+ * The trace also covers *where in the refusal chain* the check sits, which a
+ * gate placed naively last gets wrong. Upstream validates the lossless
+ * parameters, then installs the destination, then starts the compress
+ * (`turbojpeg-mp.c:117-121`), and each stage can refuse — so the three
+ * `c16_pt_*`, `c16_*_norealloc_*` and `c16_lossy*` groups disagree with each
+ * other about which error a caller sees. No single ordering satisfies them all
+ * by accident.
+ *
+ * Output is `label rc kind=<k> err="<message>"`, one line per case. `kind`
+ * names the rule that refused; the message is compared only for the precision
+ * refusal, which is libjpeg's own `JERR_BAD_PRECISION` text copied verbatim by
+ * `CATCH_LIBJPEG` without TurboJPEG's usual `function():` prefix. A caller that
+ * matches on that string is matching on something documented, so the port owes
+ * it exactly. The other messages are classified instead: they are TurboJPEG's
+ * own, carrying per-call detail this port words differently on purpose.
  *
  * Usage: compress_precision_oracle
  */
@@ -49,6 +59,11 @@ static const char *error_kind(const char *message)
 {
   if (strstr(message, "data precision")) return "precision";
   if (strstr(message, "too small")) return "buffer";
+  /* Upstream words this "Invalid progressive/lossless parameters Ss=.. Al=..";
+   * the port names the two TJ parameters the caller actually set. Same rule,
+   * different phrasing, so it is classified rather than compared. */
+  if (strstr(message, "lossless parameters") || strstr(message, "LOSSLESSPT"))
+    return "lossless_params";
   return "other";
 }
 
@@ -67,8 +82,9 @@ static void report(const char *label, tjhandle handle, int rc)
 }
 
 /* A compressor with the parameters every case shares. `precision` of 0 means
- * "leave TJPARAM_PRECISION alone", which is the common case. */
-static tjhandle compressor(int lossless, int precision)
+ * "leave TJPARAM_PRECISION alone", and `point_transform` of -1 means the same
+ * for TJPARAM_LOSSLESSPT; both are the common case. */
+static tjhandle compressor(int lossless, int precision, int point_transform)
 {
   tjhandle handle = tj3Init(TJINIT_COMPRESS);
 
@@ -82,6 +98,9 @@ static tjhandle compressor(int lossless, int precision)
   }
   if (precision && tj3Set(handle, TJPARAM_PRECISION, precision) != 0) {
     fprintf(stderr, "precision\n"); exit(2);
+  }
+  if (point_transform >= 0 && tj3Set(handle, TJPARAM_LOSSLESSPT, point_transform) != 0) {
+    fprintf(stderr, "pt\n"); exit(2);
   }
   return handle;
 }
@@ -97,9 +116,9 @@ static tjhandle compressor(int lossless, int precision)
 #define NULL_SLOT ((size_t)-1)
 
 static void compress16_case(const char *label, int lossless, int precision,
-                            size_t capacity)
+                            size_t capacity, int point_transform)
 {
-  tjhandle handle = compressor(lossless, precision);
+  tjhandle handle = compressor(lossless, precision, point_transform);
   unsigned short *src =
     (unsigned short *)malloc((size_t)WIDTH * HEIGHT * 3 * sizeof(unsigned short));
   unsigned char *buf = NULL;
@@ -134,7 +153,7 @@ static void compress16_case(const char *label, int lossless, int precision,
  * so this is expected to succeed — but "expected" is what the oracle is for. */
 static void compress12_case(const char *label, int lossless)
 {
-  tjhandle handle = compressor(lossless, 0);
+  tjhandle handle = compressor(lossless, 0, -1);
   short *src = (short *)malloc((size_t)WIDTH * HEIGHT * 3 * sizeof(short));
   unsigned char *buf = NULL;
   size_t size = 0, i;
@@ -156,7 +175,7 @@ static void compress12_case(const char *label, int lossless)
  * presence keeps a bug that refused *everything* from looking like a pass. */
 static void compress8_case(const char *label, int lossless)
 {
-  tjhandle handle = compressor(lossless, 0);
+  tjhandle handle = compressor(lossless, 0, -1);
   unsigned char *src = (unsigned char *)malloc((size_t)WIDTH * HEIGHT * 3);
   unsigned char *buf = NULL;
   size_t size = 0, i;
@@ -177,32 +196,46 @@ static void compress8_case(const char *label, int lossless)
 int main(void)
 {
   /* The divergence itself: refused upstream, accepted by the port. */
-  compress16_case("c16_lossy", 0, 0, 0);
+  compress16_case("c16_lossy", 0, 0, 0, -1);
   /* The configuration 16-bit exists for. */
-  compress16_case("c16_lossless", 1, 0, 0);
+  compress16_case("c16_lossless", 1, 0, 0, -1);
   /* Inside the window `turbojpeg-mp.c:111-115` honours (BITS_IN_JSAMPLE-3 .. 16). */
-  compress16_case("c16_lossless_prec13", 1, 13, 0);
+  compress16_case("c16_lossless_prec13", 1, 13, 0, -1);
   /* Outside it: silently ignored, so this stays a 16-bit lossless encode
    * rather than becoming an error. */
-  compress16_case("c16_lossless_prec12", 1, 12, 0);
+  compress16_case("c16_lossless_prec12", 1, 12, 0, -1);
   /* The trap: `TJPARAM_PRECISION` is read only when lossless is set, so
    * asking for 12 here does not turn a lossy 16-bit call into a legal one. */
-  compress16_case("c16_lossy_prec12", 0, 12, 0);
+  compress16_case("c16_lossy_prec12", 0, 12, 0, -1);
 
   /* Precedence against the destination, which upstream installs first. A
    * NOREALLOC slot that cannot be used *at all* — empty, or present with zero
    * capacity — is refused by `jdatadst-tj.c:184-192` before the compress
    * starts, so the buffer error wins over the precision rule. */
-  compress16_case("c16_lossy_norealloc_null", 0, 0, NULL_SLOT);
+  compress16_case("c16_lossy_norealloc_null", 0, 0, NULL_SLOT, -1);
   /* ...but a slot that is merely *too small* does not: its capacity is only
    * tested when output overflows it, which never happens once the compress is
    * refused. So the precision error wins here, and a fix that checked the
    * destination unconditionally first would get this line wrong. */
-  compress16_case("c16_lossy_norealloc_cramped", 0, 0, 16);
+  compress16_case("c16_lossy_norealloc_cramped", 0, 0, 16, -1);
   /* The same two slots with a legal configuration, so the lines above are
    * read as "which error", not "16-bit under NOREALLOC always fails". */
-  compress16_case("c16_lossless_norealloc_null", 1, 0, NULL_SLOT);
-  compress16_case("c16_lossless_norealloc_roomy", 1, 0, 64 * 1024);
+  compress16_case("c16_lossless_norealloc_null", 1, 0, NULL_SLOT, -1);
+  compress16_case("c16_lossless_norealloc_roomy", 1, 0, 64 * 1024, -1);
+
+  /* Precedence against the *lossless parameters*, which upstream validates
+   * earlier still: `setCompDefaults` calls `jpeg_enable_lossless` before
+   * `jpeg_mem_dest_tj` (`turbojpeg-mp.c:117-120`). With a point transform that
+   * is not less than the precision, that error wins over the buffer error even
+   * though the slot is unusable — so the destination preflight cannot simply be
+   * hoisted to the front of the function. */
+  compress16_case("c16_pt_ge_prec_norealloc_null", 1, 13, NULL_SLOT, 13);
+  /* The same misconfiguration with a usable slot, so the line above reads as
+   * "which error" rather than "an empty slot fails". */
+  compress16_case("c16_pt_ge_prec_roomy", 1, 13, 0, 13);
+  /* A legal point transform, to show the buffer error returns once the
+   * lossless parameters stop being the first thing wrong. */
+  compress16_case("c16_pt_lt_prec_norealloc_null", 1, 13, NULL_SLOT, 12);
 
   /* Does the rule generalise? These lines answer it. */
   compress12_case("c12_lossy", 0);

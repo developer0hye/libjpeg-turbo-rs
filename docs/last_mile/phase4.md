@@ -3012,7 +3012,7 @@ not make a lossy 16-bit call legal — traced as `c16_lossy_prec12`.
 
 Verified by `crates/libjpeg-turbo-rs-capi/tests/capi_compress_precision.rs`
 (5 tests), whose `precision_rules_match_upstream_turbojpeg` compares a
-thirteen-case matrix line-for-line against
+sixteen-case matrix line-for-line against
 `examples/compress_precision_oracle.c` linked to real TurboJPEG 3. Before the
 fix exactly two lines diverged (`c16_lossy`, `c16_lossy_prec12`), both
 `0 kind=none` against C's `-1 kind=precision`.
@@ -3029,6 +3029,20 @@ compress is refused. Both orderings are traced
 (`c16_lossy_norealloc_null` vs `c16_lossy_norealloc_cramped`); with the
 ordering check removed exactly the first line flips, so a fix that checked the
 destination unconditionally would have been caught too.
+
+Review then found a *third* stage above both. `setCompDefaults` calls
+`jpeg_enable_lossless` before `jpeg_mem_dest_tj` (`turbojpeg-mp.c:117-120`), so
+an out-of-range point transform beats the buffer error too: with
+`PRECISION=13`, `LOSSLESSPT=13`, `NOREALLOC` and an empty slot, TurboJPEG 3
+reports the lossless-parameter error. The port's Pt check had to move above the
+destination preflight; `c16_pt_ge_prec_norealloc_null`,
+`c16_pt_ge_prec_roomy` and `c16_pt_lt_prec_norealloc_null` trace it, and with
+that check disabled the first two flip to `buffer`/`other`.
+
+Three groups that disagree with each other, so no single ordering satisfies
+them by accident — which is the point. Each was measured, not reasoned: two of
+the three orderings contradict the reading a careful person would take from
+`turbojpeg-mp.c`.
 
 The trace compares `rc` and an error *kind* for every line, plus the exact
 message for the precision refusal — the one string the port owes byte for byte.
