@@ -610,6 +610,82 @@ fn release(handle: *mut c_void, produced: *mut u8, original: *mut u8) {
     }
 }
 
+/// A grayscale ICC-carrying source, compared on the **no-overrun invariant**.
+///
+/// Upstream succeeds here and this port refuses, because the two disagree about
+/// whether a transform carries the source's ICC profile — P4-156 (#544), a
+/// separate defect. Tracing `rc` would fail for that reason rather than for
+/// anything P4-151 governs.
+///
+/// What both must satisfy, and what sizing grayscale as 4:4:4 violates, is
+/// narrower: never report success having written past the bound a compliant
+/// caller allocated. That is what this line compares, so the cross-validation
+/// is real without enshrining the divergence.
+fn legacy_gray_no_overrun_case(label: &str) -> String {
+    use libjpeg_turbo_rs_capi::inner::{Encoder, PixelFormat};
+    use libjpeg_turbo_rs_capi::{tjBufSize, tjTransform};
+
+    const TJFLAG_NOREALLOC: c_int = 1024;
+    /// `turbojpeg.h`: `TJSAMP_GRAY`.
+    const TJSAMP_GRAY: c_int = 3;
+
+    let gray_pixels: Vec<u8> = (0..(WIDTH as usize * HEIGHT as usize))
+        .map(|i| (i % 251) as u8)
+        .collect();
+    let icc: Vec<u8> = vec![0x5Au8; 5_000];
+    let jpeg: Vec<u8> = Encoder::new(
+        &gray_pixels,
+        WIDTH as usize,
+        HEIGHT as usize,
+        PixelFormat::Grayscale,
+    )
+    .quality(80)
+    .icc_profile(&icc)
+    .encode()
+    .expect("encode grayscale source");
+
+    let gray_bound: usize = tjBufSize(WIDTH, HEIGHT, TJSAMP_GRAY);
+    let handle: *mut c_void = tj3Init(TJINIT_TRANSFORM);
+    assert!(!handle.is_null(), "tj3Init(TJINIT_TRANSFORM)");
+    // Over-allocated for the same reason as the standalone test: a port with
+    // the bug must be caught reporting the overrun, not by performing it.
+    let slack: usize = tjBufSize(WIDTH, HEIGHT, TJSAMP_444) + 4096;
+    let original: *mut u8 = caller_buffer(gray_bound + slack);
+    let mut dst_bufs: [*mut u8; 1] = [original];
+    let mut dst_sizes: [usize; 1] = [0];
+    // SAFETY: `#[repr(C)]` plain data; all-zero is identity.
+    let transforms: [TjTransform; 1] = [unsafe { std::mem::zeroed() }];
+
+    // SAFETY: each array has the one slot `n = 1` declares.
+    let rc: c_int = unsafe {
+        tjTransform(
+            handle,
+            jpeg.as_ptr(),
+            jpeg.len(),
+            1,
+            dst_bufs.as_mut_ptr(),
+            dst_sizes.as_mut_ptr(),
+            transforms.as_ptr(),
+            TJFLAG_NOREALLOC,
+        )
+    };
+    let line: String = format!(
+        "{label} {} {}\n",
+        i32::from(dst_bufs[0] == original),
+        i32::from(rc == 0 && dst_sizes[0] > gray_bound)
+    );
+    if dst_bufs[0] != original && !dst_bufs[0].is_null() {
+        // SAFETY: library-allocated on a replacing path; freed once.
+        unsafe { tj3Free(dst_bufs[0] as *mut c_void) };
+    }
+    // SAFETY: ours, freed once; destroyed once.
+    unsafe {
+        tj3Free(original as *mut c_void);
+        tj3Destroy(handle);
+    }
+    line
+}
+
 /// A NULL source under the legacy wrapper, in the oracle's line format.
 ///
 /// P4-151 review: the bridge sliced `jpeg_buf` before `tj3Transform` could
@@ -767,6 +843,9 @@ fn norealloc_contract_matches_upstream_turbojpeg() {
     // P4-151: the legacy wrapper's output-vs-capacity bridge.
     ours.push_str(&legacy_transform_case("legacy_transform_zero_size"));
     ours.push_str(&legacy_null_source_case("legacy_transform_null_source"));
+    ours.push_str(&legacy_gray_no_overrun_case(
+        "legacy_transform_gray_no_overrun",
+    ));
 
     assert_eq!(
         ours, c_trace,

@@ -3199,13 +3199,15 @@ than papered over.** Upstream's grayscale case reports `0 1 1` — it succeeds
 within the 4096-byte grayscale bound — because it does not copy the source's ICC
 profile into the transformed image. This port does, producing 5619 bytes, so it
 refuses. The refusal is *correct for the size produced*; the defect is that the
-size is wrong. Filed as P4-156 (#544). `legacy_gray_transform_case` is written
-and passing on the C side but deliberately not emitted into the compared trace,
-since it would fail for a reason unrelated to this item; it is kept compiled so
-the fix has its oracle ready, and adding the call is P4-156's criterion 3.
+size is wrong. Filed as P4-156 (#544). `legacy_transform_gray_no_overrun` is compared, but
+narrowed to the invariant both libraries satisfy — never report success having
+written past the bound a compliant caller allocated — since tracing `rc` would
+fail for the divergence rather than for anything this item governs. That still
+catches sizing grayscale as 4:4:4, which is what the case exists for. Widening
+it to exact size and return code is P4-156's criterion 3.
 
 Verified by `norealloc_all_entry_points` (18 passing, up from 14) with four new
-tests and two new oracle cases, each Red-checked by reintroducing the defect it
+tests and three new oracle cases, each Red-checked by reintroducing the defect it
 targets. The full workspace release gate is 2604 passing across 295 suites, 0
 failures, 7 ignored:
 
@@ -6733,3 +6735,50 @@ the same question.
    duplicating it.
 4. Legacy `tjCompress2` and friends, which set quality on every call, keep
    working and must not become sensitive to the default.
+
+## P4-156. Lossless Transform Copies the Source ICC Profile Where Upstream Does Not — **OPEN**
+
+**Motivation.** Found 2026-08-12 (issue #544) while adding C-oracle coverage for
+P4-151. A lossless transform copies the source's ICC profile into the output
+here; upstream does not. Measured with a 32x32 grayscale source carrying a
+5000-byte profile, identity transform, `TJFLAG_NOREALLOC`:
+
+```
+                       rc   output bytes
+  C (TurboJPEG 3)       0   <= 4096   (tjBufSize(32,32,TJSAMP_GRAY))
+  ours                 -1   5619      (refused: exceeds the 4096 capacity)
+```
+
+Both size the destination the same way, so the difference is entirely in what
+the transform writes. Upstream's output fits the grayscale bound because it
+carries no profile; ours does not because it carries the source's.
+
+The refusal is **correct for the size produced** — P4-151's bridge computes
+capacity from geometry alone, as upstream does, and 5619 bytes genuinely do not
+fit 4096. The defect is upstream of that: we should not have produced 5619.
+
+**Why it matters.** A caller that allocates `tjTransformBufSize()`, as the API
+documents, is refused for any source carrying a profile larger than the slack in
+that bound. Worse, on the *reallocating* path there is no capacity to refuse
+against, so the transform silently returns a larger file than upstream would,
+carrying metadata a caller expecting `jpegtran`-equivalent behaviour may have
+assumed was dropped.
+
+**Where to look.** Upstream gates marker copying on `TJXOPT_COPYNONE` and on
+what `jpeg_save_markers` was asked to retain (`turbojpeg.c`, and `jpegtran`'s
+`jcopy_markers_setup`). This port appears to reattach the parsed profile
+unconditionally.
+
+**Acceptance criteria.**
+
+1. An identity transform of an ICC-carrying source produces the same marker set
+   as `jpegtran`, cross-validated against it rather than against a reading of
+   the source.
+2. `TJXOPT_COPYNONE` and the default path are both traced.
+3. `examples/norealloc_oracle.c`'s `legacy_transform_gray_no_overrun` line
+   compares exact size and return code, not just the no-overrun invariant it is
+   narrowed to today. The helper is already written and compiled; the narrowing
+   exists only because this divergence would have failed the line for a reason
+   unrelated to P4-151.
+4. Whether the grayscale case then succeeds or refuses must match C, not merely
+   be self-consistent.
