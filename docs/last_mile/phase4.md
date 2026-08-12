@@ -3156,9 +3156,39 @@ What a parse actually moves, measured on this fixture, is `TJPARAM_JPEGHEIGHT`
 one: nothing but a header parse sets it, so zero afterwards says the handle was
 never used to read the source.
 
-Verified by `norealloc_all_entry_points` (16 passing, up from 14) with two new
+**Two P1s the first version introduced, both found in review.**
+
+*Grayscale sized as 4:4:4.* `probe` reports `Subsampling::Unknown` for a
+single-component image — there are no chroma planes to describe — and the
+generic mapping turns `Unknown` into `TJSAMP_444`. A legacy caller allocates
+`tjBufSize(w, h, TJSAMP_GRAY)`: 4096 bytes at 32x32 against 8192 for 4:4:4.
+Handing `tj3Transform` the larger figure as a *capacity* means output between
+the two bounds is written past the end of the caller's allocation. Measured with
+the gate removed: **5619 bytes reported written into a 4096-byte buffer**. The
+direction is what makes it a defect rather than waste — over-stating a bound you
+allocate costs memory, over-stating a capacity you trust is an overrun, and this
+is the only place the value is used as the latter. `Subsampling::to_tjsamp`'s
+doc now says so.
+
+*Slice built from a NULL pointer.* The bridge sliced `jpeg_buf` before
+`tj3Transform` validated it, and `from_raw_parts` requires a non-null pointer
+even for a zero-length slice — a non-unwinding abort in debug, UB in release,
+where the API documents -1. Verified: with the guard removed the test panics on
+`unsafe precondition(s) violated: slice::from_raw_parts requires the pointer to
+be aligned and non-null`.
+
+**The grayscale test also nearly shipped vacuous**, for the third time in this
+item's history. Its first version encoded a plain grayscale source, whose output
+is far below both bounds, so it passed with the gate removed. It needed a 5 KiB
+ICC profile to push the transformed output into the window between the two
+bounds — and its assertion had to become the invariant rather than a success
+code, since refusing is a *correct* outcome when the caller's buffer genuinely
+cannot hold the result. What must never happen is `rc == 0` with a produced size
+past the bound.
+
+Verified by `norealloc_all_entry_points` (18 passing, up from 14) with four new
 tests and a new oracle case, each Red-checked by reintroducing the defect it
-targets. The full workspace release gate is 2602 passing across 295 suites, 0
+targets. The full workspace release gate is 2604 passing across 295 suites, 0
 failures, 7 ignored:
 
 - `legacy_tj_transform_fills_a_zero_dst_size_from_geometry` — fails with the

@@ -315,13 +315,16 @@ pub unsafe extern "C" fn tjDecompressHeader3(
 /// place or replaced and freed (P4-145). The rest are ignored; TJ3 drives
 /// options through `TJPARAM_*` on the handle.
 ///
-/// **One upstream behaviour is not reproduced (P4-151).** Upstream treats the
-/// legacy `dstSizes` as *outputs* and substitutes each transformed image's
-/// worst case as the capacity, so a caller may leave them at zero. This
-/// wrapper forwards them unchanged, so under `TJFLAG_NOREALLOC` a zero entry
-/// is read as a zero capacity and the call fails with "buffer too small". Set
-/// each `dst_sizes[i]` to the buffer's real size, or leave the flag unset.
-/// Otherwise identical to `tj3Transform`.
+/// `dst_sizes` are **outputs**, as in upstream. A caller that sized its
+/// destinations with `tjTransformBufSize()` may leave them at zero: under
+/// `TJFLAG_NOREALLOC` each slot is filled from the transformed image's
+/// geometry before the call and overwritten with the produced size afterwards
+/// (P4-151), matching `turbojpeg.c:3118-3132`. Without the flag they are
+/// forwarded unchanged, since the reallocating path derives its own capacity.
+///
+/// The substituted capacity comes from geometry alone — never from metadata —
+/// so it cannot exceed the buffer a `tjTransformBufSize()`-sized allocation
+/// describes. Otherwise identical to `tj3Transform`.
 ///
 /// # Safety
 ///
@@ -388,8 +391,21 @@ pub unsafe extern "C" fn tjTransform(
         //    and silently compress differently afterwards. `probe` parses the
         //    source header into its own decoder and leaves the instance alone.
         let sizes: Option<Vec<usize>> = if norealloc {
-            // SAFETY: `jpeg_buf`/`jpeg_size` describe the source image; the
-            // caller's contract covers their validity for the whole call.
+            // `tj3Transform` validates the source itself, but not before this
+            // runs — and `from_raw_parts` requires a non-null pointer even for
+            // a zero-length slice, so reaching it first turns a documented -1
+            // into a non-unwinding abort in debug and UB in release.
+            if jpeg_buf.is_null() || jpeg_size == 0 {
+                // SAFETY: `with_handle` NULL-checks the handle itself.
+                let _ = unsafe {
+                    crate::tj3::with_handle(handle, |inst: &mut crate::tj3::TjInstance| {
+                        inst.set_error("tjTransform: Invalid argument", crate::tj3::TJERR_FATAL);
+                    })
+                };
+                return -1;
+            }
+            // SAFETY: non-null and non-empty per the check above; the caller's
+            // contract covers validity for `jpeg_size` bytes.
             let jpeg: &[u8] = unsafe { std::slice::from_raw_parts(jpeg_buf, jpeg_size) };
             let info: libjpeg_turbo_rs::JpegInfo = match libjpeg_turbo_rs::probe(jpeg) {
                 Ok(info) => info,
@@ -403,7 +419,23 @@ pub unsafe extern "C" fn tjTransform(
                     return -1;
                 }
             };
-            let src_subsamp: c_int = info.subsampling.to_tjsamp();
+            // A grayscale source must size as `TJSAMP_GRAY`, not as whatever
+            // `to_tjsamp` makes of `Subsampling::Unknown`. `probe` reports
+            // `Unknown` for single-component images — there are no chroma
+            // planes to describe — and mapping that to 4:4:4 would hand
+            // `tj3Transform` a capacity *larger* than the caller's buffer,
+            // which is sized `tjBufSize(w, h, TJSAMP_GRAY)`. Output landing
+            // between the two bounds would then be written past the end of it.
+            //
+            // The direction matters: over-stating a bound you *allocate* is
+            // merely wasteful, while over-stating a capacity you *trust* is an
+            // overrun. This is the only place the value is used as the latter.
+            const TJSAMP_GRAY: c_int = 3;
+            let src_subsamp: c_int = if info.components == 1 {
+                TJSAMP_GRAY
+            } else {
+                info.subsampling.to_tjsamp()
+            };
             let mut sizes: Vec<usize> = Vec::with_capacity(n as usize);
             for index in 0..n as usize {
                 // SAFETY: `transforms` points to `n` entries per the caller's
