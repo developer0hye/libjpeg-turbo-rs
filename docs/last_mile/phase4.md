@@ -3034,6 +3034,37 @@ from the source, e.g. S420 handle over an S444 source); and the P4-145 oracle
 gains a legacy-wrapper case so the comparison is against C rather than against
 this description.
 
+## P4-153. Marker-Parse Metadata Copies Are Still Infallible — **OPEN**
+
+**Motivation.** Found 2026-08-12 (issue #536) in review while closing P4-144,
+and deliberately not folded into it. P4-144 made the metadata *copies* fallible —
+the reassembly buffers and every clone into an `Image`. The **originals** are
+still built infallibly one layer earlier, in the marker parser:
+`read_app1`, `read_app2`, `read_app13`, `read_com` and `peek_marker_data` use
+`.to_vec()`, `into_owned()` and infallible vector growth
+(`src/decode/marker.rs`).
+
+So a JPEG carrying EXIF, XMP, IPTC, ICC or COM data can still abort the process
+during `read_markers`, before any of P4-144's work is reached.
+
+**Why it was not folded into P4-144.** That item names its instances — the
+reassembly buffers and the `Image` clones — and the parse stage is a different
+layer with a different contract. The copies had a clear answer to "what happens
+on refusal?" because they run inside functions already returning `Result`. The
+parser needs that question answered per segment, and its existing contract is
+that malformed metadata *degrades* rather than failing an otherwise-valid
+decode — the same tension P4-144 resolved for Extended XMP by degrading, and
+the opposite of what it did for ICC. Deciding that segment by segment is the
+work, not the mechanical `try_reserve_exact` conversion.
+
+**Acceptance criteria.** Every metadata copy in `decode/marker.rs` allocates
+fallibly. For each segment kind, the refusal behaviour is *chosen and recorded*:
+either `JpegError::AllocationFailed`, or degrade-and-continue with the reason
+stated — matching P4-144's precedent, where the choice followed the local
+contract rather than a blanket rule. A test proves at least one degrade path
+and one error path, in the shape of P4-136's
+`allocator_refusal_is_an_error_not_an_abort`.
+
 ## P4-147. `worker_b8_restart_bomb` Asserts a Wall-Clock Bound and Flakes Under Parallel Load — **CLOSED 2026-08-12**
 
 **Motivation.** Filed 2026-08-11 (issue #523) during the P4-104 work.
@@ -5715,7 +5746,7 @@ into a hard error. Review caught it; no automated gate did.
 the tests are green on a build nobody ships. Any future change to a wasm `cfg`
 is equally invisible until a user reports it.
 
-## P4-144. Metadata Copies Are Input-Sized But Still Allocate Infallibly — **OPEN**
+## P4-144. Metadata Copies Are Input-Sized But Still Allocate Infallibly — **CLOSED 2026-08-12**
 
 **GitHub:** [#512](https://github.com/developer0hye/libjpeg-turbo-rs/issues/512) — filed 2026-08-10 while closing
 [P4-136](#p4-136-progressive-output-calls-set_len-on-uninitialized-vec-after-an-unchecked-size-multiplication--closed-2026-08-10);
@@ -5745,6 +5776,24 @@ one buffer) and is the instance to measure first.
 1. `icc::reassemble_icc_profile` and the Extended XMP reassembly path return
    `Result`, allocating with `try_reserve_exact` and reporting
    `JpegError::AllocationFailed`.
+
+   **Revised twice during implementation.** The ICC half landed as a *new*
+   `try_reassemble_icc_profile`; the existing `reassemble_icc_profile` is
+   public API and keeps its `Option` return, folding refusal into `None`
+   rather than breaking every downstream caller. See the Status note.
+
+   **Revised 2026-08-12 during implementation, for Extended XMP only.** That
+   path allocates with `try_reserve_exact` as required, but *degrades* on
+   refusal — skipping the extension and keeping the standard packet — instead
+   of reporting the error. The criterion was written before its local contract
+   was noticed: `decode/marker.rs` states three lines above that a broken
+   extension must not fail an otherwise-valid decode. "The allocator said no"
+   is a worse reason to break that than "the chunks were malformed", and an
+   error return there would also abandon the rest of the metadata the function
+   has already parsed. ICC is unchanged and still reports, because it is
+   reassembled at `Image` construction where refusal means the decode genuinely
+   cannot complete. Recorded here rather than left as an unmet criterion under a
+   CLOSED heading.
 2. `Image` construction in both the progressive and baseline decoders propagates
    that error rather than cloning infallibly.
 3. A test proving refusal is recoverable, in the shape of P4-136's
@@ -5755,6 +5804,88 @@ one buffer) and is the instance to measure first.
 4. Record whether the `Result` threading is worth it for the non-amplifying
    clones, or whether criterion 2 should stop at the reassembly buffers. Decide
    it here; do not leave it implicit.
+
+**Status (2026-08-12): closed.** `cargo test --workspace --release` passes 2592
+tests. The three helpers P4-136 left in `api::progressive_output` moved to
+`common::try_alloc` — copying them into `common::icc` and `decode::marker`
+would have been the `compress_*` family P4-40 was filed for, one file later.
+
+**Every metadata copy on the decode path, not just the first.** Review found
+the first version protected only the four copies at the top of
+`decode_image_inner`, while downstream constructors and the progressive, 12-bit
+and lossless paths still cloned straight from `self.metadata`. **85 sites**
+across six files now go through the helpers — and every one compiled on the
+first attempt, because each was already inside a function returning `Result`.
+That is the same evidence criterion 4 turns on.
+
+`comment: Option<String>` and `saved_markers: Vec<SavedMarker>` are included:
+smaller than an ICC profile, but "small" is not "zero", and a deep clone of the
+marker list allocates once per marker. A second review pass found the *owned
+locals* were still cloned infallibly into each `Image` — 34 more sites in
+`output.rs` alone, plus `probe()` and `tj3.rs`. Grepping the five field names
+across the decode path now returns **zero** infallible clones, which is the
+check the closure rests on rather than a count of what was edited.
+
+**The public signature is unchanged.** `common::icc::reassemble_icc_profile` is
+exported from the crate root, so turning it into a `Result` would break every
+downstream caller for a change they did not ask for. It keeps returning
+`Option<Vec<u8>>` and folds refusal into `None` — still an improvement, since it
+used to abort — while a new `try_reassemble_icc_profile` carries the error for
+the internal decode path. Review caught that; the first version was a silent
+SemVer break.
+
+**Criterion 4, decided rather than left implicit: the clones are threaded too.**
+The item anticipated that making `Image` construction fallible would cost API
+churn and asked whether it was worth it for allocations that do not amplify. It
+does not cost churn: `decode_image_inner`, `output()` and `finish()` already
+return `Result<Image>`, so `try_clone_opt` is a helper call at four sites, not a
+signature change. The reasoning for *not* doing it — the caller already holds
+the bytes — is still true, and still does not make an abort acceptable: the
+clone doubles the peak for that blob, and a refusal there was previously
+unrecoverable.
+
+**Sorts allocate too.** `sort_by_key` is stable, so it reserves scratch — which
+would abort after both explicit buffers had been reserved fallibly. Keys are
+unique in both reassembly paths (duplicate sequence numbers and non-contiguous
+offsets are rejected before the sort), so `sort_unstable_by_key` is equivalent
+and allocates nothing. The ICC chunk list was likewise still an infallible
+`collect`.
+
+**One deliberate asymmetry.** Extended XMP reassembly (`decode/marker.rs`)
+*degrades* on refusal rather than erroring: it skips the extension and keeps the
+standard packet. All **three** of its allocations are covered — review caught
+that the first version guarded only the largest: the `ext` buffer, the chunk
+reference list, and growing `std_packet` by up to the 64 MiB ceiling. The contract three lines above it is that a broken extension
+must not fail an otherwise-valid decode, and "the allocator said no" is a worse
+reason to break that than "the chunks were malformed". ICC does the opposite and
+propagates, because it is reassembled at `Image` construction, where a refusal
+means the decode genuinely cannot complete. The guard order there was also
+preserved deliberately: the 64 MiB ceiling and the bytes-actually-present test
+run *before* the allocation, so a tiny file declaring a huge `full_len` is
+rejected without allocating — an intermediate version of this fix had inverted
+that.
+
+`try_reassemble_icc_profile` returns `Result<Option<Vec<u8>>>` — the *public*
+`reassemble_icc_profile` keeps its `Option` signature, see above — keeping the
+two outcomes distinct: `Ok(None)` is a malformed or absent profile, which must stay
+soft, and `Err` is the allocator refusing. Collapsing them would turn "this
+file's ICC is broken" into "this decode failed".
+
+**Where this stops, explicitly.** P4-144 covers the metadata *copies*. The
+**originals** are built one layer earlier by the marker parser, which still uses
+`.to_vec()` and infallible growth in `read_app1`/`read_app2`/`read_app13`/
+`read_com`/`peek_marker_data` — so a file carrying EXIF, XMP, IPTC, ICC or COM
+can still abort during `read_markers`, before any of this is reached. Filed as
+**P4-153** rather than folded in: the parser needs the degrade-versus-error
+question answered per segment kind, which is the work, and this item's instance
+list does not name it.
+
+**Not an amplifier, and the measurement is why.** The item asked for Extended
+XMP to be measured first as the closest candidate. It is already bounded by
+both a 64 MiB ceiling and `available >= full_len` from an earlier review, so a
+declared length cannot conjure an allocation. Every allocation this item touches
+is bounded by input the caller already holds — which is exactly why it was P2
+and why P4-136's geometry-derived buffers came first.
 
 ## P4-145. `TJPARAM_NOREALLOC` Is Honoured by `tj3Compress8` Only — **CLOSED 2026-08-12**
 

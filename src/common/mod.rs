@@ -9,6 +9,7 @@ pub mod quant_table;
 pub mod sample;
 pub mod tables;
 pub mod traits;
+pub(crate) mod try_alloc;
 pub mod types;
 
 /// Runtime CPU-feature detection that degrades to compile-time gating
