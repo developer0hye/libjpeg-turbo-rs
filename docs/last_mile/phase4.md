@@ -3122,7 +3122,7 @@ from the source, e.g. S420 handle over an S444 source); and the P4-145 oracle
 gains a legacy-wrapper case so the comparison is against C rather than against
 this description.
 
-## P4-153. Marker-Parse Metadata Copies Are Still Infallible — **OPEN**
+## P4-153. Marker-Parse Metadata Copies Are Still Infallible — **CLOSED 2026-08-12**
 
 **Motivation.** Found 2026-08-12 (issue #536) in review while closing P4-144,
 and deliberately not folded into it. P4-144 made the metadata *copies* fallible —
@@ -3152,6 +3152,64 @@ stated — matching P4-144's precedent, where the choice followed the local
 contract rather than a blanket rule. A test proves at least one degrade path
 and one error path, in the shape of P4-136's
 `allocator_refusal_is_an_error_not_an_abort`.
+
+**Status (2026-08-12): closed.** All seven input-sized copies in
+`decode/marker.rs` now allocate through `common::try_alloc`, and the two chunk
+*lists* grow through `try_reserve` before pushing.
+
+**The per-segment choice, and the rule behind it.** The decisive fact is that
+there is no warning channel at this layer: `exif_data`, `xmp_data`,
+`iptc_data`, `icc_chunks` and `comment` are fields the caller reads, so a
+silently dropped one is indistinguishable from a file that never carried the
+data — the failure mode with nothing to notice, the same class as P4-39 and
+P4-150. Degrading is therefore reserved for the case where the caller still
+holds the data:
+
+| Segment | On refusal | Why |
+| --- | --- | --- |
+| EXIF (APP1) | error | caller-visible field; a silent drop is undetectable |
+| Standard XMP (APP1) | error | same |
+| IPTC (APP13) | error | same |
+| COM | error | same; `from_utf8_lossy` copies either way |
+| ICC chunk (APP2) | error | worse than the others — reassembly requires sequence numbers 1..=N, so one dropped chunk turns a valid profile into a missing one |
+| **Extended XMP chunk (APP1)** | **degrade** | an optional *enlargement* of a packet the caller already holds; dropping it leaves the standard packet, which erroring would discard too. P4-144 made this same call for the reassembly buffers |
+| `peek_marker_data` | degrade | returns `Option`, and `None` already means "not readable" — every caller handles it |
+
+**How each is verified, including what is not verifiable.** The degrade path is
+covered end to end by
+`tests/xmp_iptc_metadata.rs::incomplete_extended_xmp_falls_back_to_the_standard_packet`:
+a chunk dropped at parse time leaves exactly the state that test pins — an
+extension that cannot be assembled, with the standard packet surviving.
+
+The error path is **not** deterministically reachable, and the criterion's
+suggested shape does not fit. Every parse copy is bounded by its segment's
+`u16` length — at most 65 533 bytes — so no host refuses one and no JPEG can be
+built that makes it; the refusal exists for a memory-constrained allocator,
+which is the caller this item is for. A test calling `try_copy_of` with an
+unservable length would prove the *helper* works, which
+`api::progressive_output::allocator_refusal_is_an_error_not_an_abort` already
+does, and would pass unchanged if this file reverted to `.to_vec()` — the drift
+it is meant to catch. The first version of this test did exactly that and was
+discarded as vacuous.
+
+What can regress is the wiring, so that is what is gated:
+`no_metadata_copy_bypasses_the_fallible_allocator` fails if any line in the
+production half of `marker.rs` slices `self.data` into a `to_vec()` or a
+`from_utf8_lossy`. Proven by reverting the IPTC site — it reports
+`marker.rs:938` and fails. It scans only above the `#[cfg(test)]` module, since
+the predicate is itself source.
+
+Note the copies were never the unbounded exposure at this layer: at 64 KiB a
+piece they are defensive uniformity. The unbounded growth is the chunk *lists*,
+which a stream can extend with arbitrarily many APP1/APP2 segments, and those
+are the `try_reserve` additions.
+
+Verified by `cargo test --lib decode::marker` (7 passing) plus the metadata
+suites: `xmp_iptc_metadata` (9), `cross_check_metadata` (10),
+`cross_check_metadata_edge` (11), `icc_exif_edge_cases` (21), `metadata_write`
+(5). The full workspace release gate is 2600 passing across 295 suites, 0
+failures — 2599 plus this item's single test, which joined an existing lib
+module rather than adding a suite.
 
 ## P4-147. `worker_b8_restart_bomb` Asserts a Wall-Clock Bound and Flakes Under Parallel Load — **CLOSED 2026-08-12**
 

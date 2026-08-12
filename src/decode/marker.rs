@@ -205,7 +205,14 @@ impl<'a> MarkerReader<'a> {
         if length < 2 || self.pos + length > self.data.len() {
             return None;
         }
-        Some(self.data[self.pos + 2..self.pos + length].to_vec())
+        // P4-153: `None` already means "this segment is not readable", so an
+        // allocation refusal joins an outcome every caller handles. Nothing is
+        // lost by degrading here that erroring would recover.
+        crate::common::try_alloc::try_copy_of(
+            &self.data[self.pos + 2..self.pos + length],
+            "peeked marker segment",
+        )
+        .ok()
     }
 
     /// Parse all markers. For baseline, stops after first SOS.
@@ -767,7 +774,13 @@ impl<'a> MarkerReader<'a> {
         }
         let data = &self.data[self.pos..self.pos + text_len];
         self.pos += text_len;
-        *comment = Some(String::from_utf8_lossy(data).into_owned());
+        // P4-153: error. `from_utf8_lossy` borrows when the bytes are already
+        // valid UTF-8 and allocates when they are not, so the copy is
+        // input-sized either way. `comment` is a caller-visible field with no
+        // warning channel, and every other way this segment can be unusable
+        // already errors.
+        let text: Vec<u8> = crate::common::try_alloc::try_copy_of(data, "COM segment text")?;
+        *comment = Some(String::from_utf8_lossy(&text).into_owned());
         Ok(())
     }
 
@@ -821,7 +834,15 @@ impl<'a> MarkerReader<'a> {
         {
             let data_start = self.pos + 6;
             let data_len = data_end.saturating_sub(data_start);
-            *exif_data = Some(self.data[data_start..data_start + data_len].to_vec());
+            // P4-153: error rather than degrade. `exif_data` is a field the
+            // caller reads, and there is no warning channel at this layer, so a
+            // silent drop is undetectable — the failure mode with nothing to
+            // notice. Every other way this segment can be unusable already
+            // errors.
+            *exif_data = Some(crate::common::try_alloc::try_copy_of(
+                &self.data[data_start..data_start + data_len],
+                "EXIF payload",
+            )?);
         }
 
         // Standard XMP packet (issue #358); only the first is stored,
@@ -831,7 +852,11 @@ impl<'a> MarkerReader<'a> {
             && &self.data[self.pos..self.pos + XMP_HEADER.len()] == XMP_HEADER
         {
             let data_start = self.pos + XMP_HEADER.len();
-            *xmp_data = Some(self.data[data_start..data_end].to_vec());
+            // P4-153: error, for the same reason as EXIF above.
+            *xmp_data = Some(crate::common::try_alloc::try_copy_of(
+                &self.data[data_start..data_end],
+                "XMP packet",
+            )?);
         }
 
         // Extended XMP chunk: GUID (32 ASCII bytes) + full length (u32
@@ -844,12 +869,29 @@ impl<'a> MarkerReader<'a> {
             let guid: [u8; 32] = self.data[p..p + 32].try_into().expect("32-byte slice");
             let full_len = u32::from_be_bytes(self.data[p + 32..p + 36].try_into().unwrap());
             let offset = u32::from_be_bytes(self.data[p + 36..p + 40].try_into().unwrap());
-            xmp_ext_chunks.push(XmpExtChunk {
-                guid,
-                full_len,
-                offset,
-                data: self.data[p + 40..data_end].to_vec(),
-            });
+            // P4-153: degrade, and this is the one segment here that does.
+            // P4-144 set the precedent when it made the *reassembly* fallible:
+            // an Extended XMP chunk that cannot be held is dropped and the
+            // standard packet is kept, because the extension is an optional
+            // enlargement of data the caller already has. Erroring would throw
+            // away the packet too. The reassembler already treats a missing
+            // chunk as "extension unavailable" and returns the standard packet,
+            // so this joins a path that is exercised.
+            let chunk_data: Option<Vec<u8>> = crate::common::try_alloc::try_copy_of(
+                &self.data[p + 40..data_end],
+                "Extended XMP chunk",
+            )
+            .ok();
+            if let Some(data) = chunk_data {
+                if xmp_ext_chunks.try_reserve(1).is_ok() {
+                    xmp_ext_chunks.push(XmpExtChunk {
+                        guid,
+                        full_len,
+                        offset,
+                        data,
+                    });
+                }
+            }
         }
 
         self.pos = end;
@@ -892,7 +934,13 @@ impl<'a> MarkerReader<'a> {
                     break;
                 }
                 if id == 0x0404 && iptc_data.is_none() {
-                    *iptc_data = Some(self.data[payload..payload + size].to_vec());
+                    // P4-153: error. `iptc_data` is a caller-visible field
+                    // with no warning channel, so a silent drop is
+                    // undetectable — same reasoning as EXIF.
+                    *iptc_data = Some(crate::common::try_alloc::try_copy_of(
+                        &self.data[payload..payload + size],
+                        "IPTC payload",
+                    )?);
                 }
                 // Advance past this resource. Checked, and forward
                 // progress is required so a malformed IRB cannot spin.
@@ -934,7 +982,22 @@ impl<'a> MarkerReader<'a> {
             // place `end` past the buffer; clamp before the slice copy.
             let data_end = end.min(self.data.len());
             let data_len = data_end.saturating_sub(data_start);
-            let data = self.data[data_start..data_start + data_len].to_vec();
+            // P4-153: error. A dropped ICC *chunk* is worse than a dropped
+            // whole profile — reassembly checks that sequence numbers 1..=N are
+            // all present, so losing one silently turns a valid profile into a
+            // missing one, and the caller cannot tell that from a file that
+            // never carried a profile. This is also where P4-144 landed for the
+            // reassembly buffers, which every other ICC allocation now matches.
+            let data: Vec<u8> = crate::common::try_alloc::try_copy_of(
+                &self.data[data_start..data_start + data_len],
+                "ICC profile chunk",
+            )?;
+            icc_chunks
+                .try_reserve(1)
+                .map_err(|_| JpegError::AllocationFailed {
+                    what: "ICC chunk list",
+                    bytes: ((icc_chunks.len() + 1) * std::mem::size_of::<IccChunk>()) as u64,
+                })?;
             icc_chunks.push(IccChunk {
                 seq_no,
                 num_markers,
@@ -1208,6 +1271,92 @@ impl<'a> MarkerReader<'a> {
 mod tests {
     use super::*;
     use crate::decode::arithmetic::NUM_ARITH_TBLS;
+
+    /// P4-153: every metadata copy in this file goes through the fallible
+    /// allocator, and this is checked against the source rather than asserted
+    /// in prose.
+    ///
+    /// **Why the source and not the behaviour.** Each parse copy is bounded by
+    /// its segment's `u16` length — at most 65 533 bytes — so no real host
+    /// refuses one and no JPEG can be built that makes it. The refusal is
+    /// reachable only under a memory-constrained allocator, which is the caller
+    /// P4-153 exists for. A test that called `try_copy_of` with an unservable
+    /// length would prove the helper works, which `api::progressive_output`
+    /// already does, and would pass unchanged if this file went back to
+    /// `.to_vec()` — the drift it is supposed to catch.
+    ///
+    /// So the property checked here is the one that can actually regress: that
+    /// no bare `to_vec()` / `into_owned()` reappears on a metadata path. Proven
+    /// by reverting one site, which fails this test naming it.
+    ///
+    /// Skipped where the source tree is not readable (`wasm32-wasip1` under
+    /// wasmtime, a packaged crate); it runs on every native leg.
+    #[test]
+    fn no_metadata_copy_bypasses_the_fallible_allocator() {
+        let path: std::path::PathBuf =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/decode/marker.rs");
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            eprintln!(
+                "SKIP: {} is not readable; this gate inspects repository sources, \
+                 which a packaged crate and a sandboxed target do not provide.",
+                path.display()
+            );
+            return;
+        };
+
+        // Only the production code: this module necessarily contains the
+        // predicate below as *source*, and a gate that trips on its own
+        // definition gets deleted rather than obeyed. Everything the gate is
+        // about lives above the test module.
+        let production_end: usize = text
+            .find("\n#[cfg(test)]\nmod tests {")
+            .unwrap_or(text.len());
+
+        // `to_vec()` on a *fixed-size* array (`guid`, table entries) is not an
+        // input-sized copy; the metadata ones all slice `self.data`.
+        let offenders: Vec<String> = text[..production_end]
+            .lines()
+            .enumerate()
+            .filter(|(_, line)| {
+                let code: &str = line.trim();
+                !code.starts_with("//")
+                    && (code.contains("self.data[") && code.contains(".to_vec()")
+                        || code.contains("from_utf8_lossy") && code.contains("self.data["))
+            })
+            .map(|(i, line)| format!("  marker.rs:{}\t{}", i + 1, line.trim()))
+            .collect();
+
+        assert!(
+            offenders.is_empty(),
+            "a metadata copy slices the input and allocates infallibly:\n\n{}\n\n\
+             An input-sized copy must go through `common::try_alloc`, so an \
+             allocator refusal becomes `JpegError::AllocationFailed` rather than \
+             aborting the process mid-decode (P4-153). Use `try_copy_of(.., \
+             \"<segment name>\")` and either propagate with `?` or, for the \
+             Extended XMP chunk alone, degrade — see the note below on why that \
+             one is different.",
+            offenders.join("\n")
+        );
+    }
+
+    // P4-153: the one segment that degrades rather than erroring is the
+    // Extended XMP chunk, and its degrade is proven by
+    // `tests/xmp_iptc_metadata.rs::incomplete_extended_xmp_falls_back_to_the_standard_packet`
+    // rather than duplicated here. A chunk dropped at parse time leaves exactly
+    // the state that test already pins: an extension that cannot be assembled,
+    // with the standard packet surviving. The merge is inline in `read_markers`
+    // rather than a callable unit, so a unit test would have to rebuild the
+    // whole marker stream to reach it and would assert the same thing less
+    // directly — and a test that merely set a field and read it back would
+    // assert nothing at all.
+    //
+    // Why that segment and no other: an Extended XMP chunk is an optional
+    // *enlargement* of a packet the caller already holds, so dropping one
+    // leaves the standard packet intact, and P4-144 made the same call for the
+    // reassembly buffers. Every other segment errors, because there is no
+    // warning channel at this layer: `exif_data`, `xmp_data`, `iptc_data`,
+    // `icc_chunks` and `comment` are fields the caller reads, and a silent drop
+    // is indistinguishable from a file that never carried the data.
 
     /// Build a minimal JPEG byte stream containing only the given SOF marker
     /// followed by the simplest possible 1-component SOF segment and a
