@@ -8,6 +8,16 @@ and `git log` between tags.
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking (Rust API):** `TjHandle::new()` now initialises `TJPARAM_QUALITY`
+  to `-1` and `TJPARAM_SUBSAMP` to `TJSAMP_UNKNOWN` (unset), exactly as
+  upstream TurboJPEG does, and every lossy compress path — native and C ABI —
+  refuses with upstream's "must be specified" error until the caller supplies
+  them (P4-155, #539). Code that relied on the old silent 75 / 4:2:0 defaults
+  must set both explicitly; a lossless compress consults neither. `tj3Get` on
+  a fresh handle reports the unset values.
+
 ### Added
 - A pinned Ubuntu 24.04/OpenCV 4.6 replacement harness that proves OpenCV's
   JPEG compression/decompression symbols bind to the Rust `libjpeg.so.8` and

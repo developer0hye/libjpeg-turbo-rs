@@ -68,6 +68,9 @@ fn a5_2_norealloc_buffer_too_small_returns_error() {
 
     let mut handle = TjHandle::new();
     handle.set(TjParam::Quality, 90).unwrap();
+    // A fresh handle's parameters are *unset* since P4-155 (#539), as
+    // upstream's are; this test is about NOREALLOC, so both are explicit.
+    handle.set(TjParam::Subsampling, 2).unwrap();
     handle.set(TjParam::NoRealloc, 1).unwrap();
 
     let mut buf = vec![0u8; 64];
@@ -94,6 +97,8 @@ fn a5_2_norealloc_adequate_buffer_writes_without_realloc() {
 
     let mut handle = TjHandle::new();
     handle.set(TjParam::Quality, 75).unwrap();
+    // Explicit for the same P4-155 (#539) reason as the case above.
+    handle.set(TjParam::Subsampling, 2).unwrap();
     handle.set(TjParam::NoRealloc, 1).unwrap();
 
     let capacity: usize = 16 * 1024;
@@ -134,7 +139,15 @@ fn a5_2_norealloc_zero_still_errors_on_undersized_slice() {
     let height: usize = 32;
     let pixels: Vec<u8> = (0..width * height * 3).map(|i| (i % 200) as u8).collect();
 
-    let handle = TjHandle::new();
+    let mut handle = TjHandle::new();
+    // Explicit for the same P4-155 (#539) reason as the cases above — the
+    // assertion below is about the undersized slice, not the unset gates.
+    handle
+        .set(libjpeg_turbo_rs::tj3::TjParam::Quality, 75)
+        .unwrap();
+    handle
+        .set(libjpeg_turbo_rs::tj3::TjParam::Subsampling, 2)
+        .unwrap();
     let mut buf = vec![0u8; 32];
     let err = handle
         .compress_into(&pixels, width, height, PixelFormat::Rgb, &mut buf)

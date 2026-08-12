@@ -206,10 +206,12 @@ fn assert_pixels_identical(
 }
 
 // ===========================================================================
-// Test 1: TjHandle compress with default quality (75)
+// Test 1: TjHandle compress at quality 75 / 4:2:0
 // ===========================================================================
 
-/// TjHandle::new() with default quality 75, compress 48x48 gradient, C djpeg decode -> diff=0.
+/// TjHandle with quality 75 / 4:2:0 set explicitly (the former silent
+/// defaults — unset since P4-155, #539), compress 48x48 gradient, C djpeg
+/// decode -> diff=0.
 #[test]
 fn c_xval_tj3_compress_default() {
     let djpeg: PathBuf = require_c_tool!("djpeg");
@@ -218,10 +220,12 @@ fn c_xval_tj3_compress_default() {
     let height: usize = 48;
     let pixels: Vec<u8> = generate_gradient(width, height);
 
-    let handle: TjHandle = TjHandle::new();
+    let mut handle: TjHandle = TjHandle::new();
+    handle.set(TjParam::Quality, 75).unwrap();
+    handle.set(TjParam::Subsampling, 2).unwrap();
     let jpeg: Vec<u8> = handle
         .compress(&pixels, width, height, PixelFormat::Rgb)
-        .expect("TjHandle compress with default quality failed");
+        .expect("TjHandle compress at quality 75 / 4:2:0 failed");
 
     let (c_width, c_height, c_pixels) = decode_with_c_djpeg(&djpeg, &jpeg, "tj3_default");
 
@@ -253,6 +257,8 @@ fn c_xval_tj3_compress_quality_range() {
 
     for &quality in &quality_values {
         let mut handle: TjHandle = TjHandle::new();
+        // Explicit since P4-155 (#539): unset by default, as upstream.
+        handle.set(TjParam::Subsampling, 2).unwrap();
         handle
             .set(TjParam::Quality, quality)
             .unwrap_or_else(|e| panic!("Failed to set quality={}: {:?}", quality, e));
@@ -302,6 +308,8 @@ fn c_xval_tj3_compress_subsampling() {
 
     for &(subsamp_val, subsamp_label) in &subsampling_configs {
         let mut handle: TjHandle = TjHandle::new();
+        // Explicit since P4-155 (#539): unset by default, as upstream.
+        handle.set(TjParam::Quality, 75).unwrap();
         handle
             .set(TjParam::Subsampling, subsamp_val)
             .unwrap_or_else(|e| panic!("Failed to set subsampling={}: {:?}", subsamp_val, e));
@@ -347,6 +355,9 @@ fn c_xval_tj3_compress_progressive() {
     let pixels: Vec<u8> = generate_gradient(width, height);
 
     let mut handle: TjHandle = TjHandle::new();
+    // Explicit since P4-155 (#539): unset by default, as upstream.
+    handle.set(TjParam::Quality, 75).unwrap();
+    handle.set(TjParam::Subsampling, 2).unwrap();
     handle
         .set(TjParam::Progressive, 1)
         .expect("Failed to set progressive=1");
@@ -388,6 +399,9 @@ fn c_xval_tj3_compress_optimize() {
     let pixels: Vec<u8> = generate_gradient(width, height);
 
     let mut handle: TjHandle = TjHandle::new();
+    // Explicit since P4-155 (#539): unset by default, as upstream.
+    handle.set(TjParam::Quality, 75).unwrap();
+    handle.set(TjParam::Subsampling, 2).unwrap();
     handle
         .set(TjParam::Optimize, 1)
         .expect("Failed to set optimize=1");
@@ -422,6 +436,9 @@ fn c_xval_tj3_compress_restart() {
     let pixels: Vec<u8> = generate_gradient(width, height);
 
     let mut handle: TjHandle = TjHandle::new();
+    // Explicit since P4-155 (#539): unset by default, as upstream.
+    handle.set(TjParam::Quality, 75).unwrap();
+    handle.set(TjParam::Subsampling, 2).unwrap();
     handle
         .set(TjParam::RestartBlocks, 4)
         .expect("Failed to set restart_blocks=4");
@@ -514,6 +531,9 @@ fn c_xval_tj3_compress_arithmetic() {
     let pixels: Vec<u8> = generate_gradient(width, height);
 
     let mut handle: TjHandle = TjHandle::new();
+    // Explicit since P4-155 (#539): unset by default, as upstream.
+    handle.set(TjParam::Quality, 75).unwrap();
+    handle.set(TjParam::Subsampling, 2).unwrap();
     handle
         .set(TjParam::Arithmetic, 1)
         .expect("Failed to set arithmetic=1");

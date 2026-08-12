@@ -55,6 +55,9 @@ use crate::alloc::{deliver_compressed_output, OutputDelivery};
 /// short read. The `isize::MAX` bound is `from_raw_parts`'s own documented
 /// precondition.
 fn packed_yuv_len(width: usize, height: usize, align: i32, ss: Subsampling) -> Option<usize> {
+    // Defensive only: both callers validate `align >= 1` and power-of-two in
+    // argument validation before reaching this (P4-155 #539 re-review) — this
+    // clamp cannot mask a refusal the way the legacy wrappers' `.max(1)` did.
     let align: usize = (align.max(1)) as usize;
     let mut total: usize = 0;
     for c in 0..3 {
@@ -250,21 +253,36 @@ pub unsafe extern "C" fn tj3EncodeYUV8(
         // Defined outside the `unsafe` block below so the body's own `unsafe`
         // blocks stay meaningful rather than nesting inside a blanket one.
         let body = |inst: &mut TjInstance| -> c_int {
-            if src_buf.is_null() || dst_buf.is_null() || width <= 0 || height <= 0 {
-                inst.set_error("tj3EncodeYUV8: invalid pointer/dim", TJERR_FATAL);
+            // Upstream's packed wrapper validates dims, `align` (a power of
+            // two) and the buffers before anything else
+            // (`turbojpeg.c:1745-1750`); the pixel-format range check lives in
+            // the `…Planes8` delegate, *downstream* of the subsampling gate.
+            if src_buf.is_null()
+                || dst_buf.is_null()
+                || width <= 0
+                || height <= 0
+                || align < 1
+                || (align & (align - 1)) != 0
+            {
+                inst.set_error("tj3EncodeYUV8: invalid pointer/dim/align", TJERR_FATAL);
                 return -1;
             }
+            let ss: Subsampling = match current_subsampling(inst) {
+                Some(s) => s,
+                None => {
+                    // P4-155 (#539): *unset* is upstream's "must be specified",
+                    // not "bad" — the mapping cannot tell -1 from garbage.
+                    if !crate::tj3::require_specified(inst, "tj3EncodeYUV8", false, true) {
+                        return -1;
+                    }
+                    inst.set_error("tj3EncodeYUV8: bad TJPARAM_SUBSAMP", TJERR_FATAL);
+                    return -1;
+                }
+            };
             let pf: PixelFormat = match pixel_format_from_tj(pixel_format) {
                 Some(p) => p,
                 None => {
                     inst.set_error("tj3EncodeYUV8: unsupported TJPF", TJERR_FATAL);
-                    return -1;
-                }
-            };
-            let ss: Subsampling = match current_subsampling(inst) {
-                Some(s) => s,
-                None => {
-                    inst.set_error("tj3EncodeYUV8: bad TJPARAM_SUBSAMP", TJERR_FATAL);
                     return -1;
                 }
             };
@@ -357,6 +375,11 @@ pub unsafe extern "C" fn tj3EncodeYUVPlanes8(
             let ss: Subsampling = match current_subsampling(inst) {
                 Some(s) => s,
                 None => {
+                    // P4-155 (#539): *unset* is upstream's "must be specified",
+                    // not "bad" — the mapping cannot tell -1 from garbage.
+                    if !crate::tj3::require_specified(inst, "tj3EncodeYUVPlanes8", false, true) {
+                        return -1;
+                    }
                     inst.set_error("tj3EncodeYUVPlanes8: bad TJPARAM_SUBSAMP", TJERR_FATAL);
                     return -1;
                 }
@@ -458,22 +481,41 @@ pub unsafe extern "C" fn tj3CompressFromYUV8(
         // Defined outside the `unsafe` block below so the body's own `unsafe`
         // blocks stay meaningful rather than nesting inside a blanket one.
         let body = |inst: &mut TjInstance| -> c_int {
+            // Upstream validates dims and `align` first (`turbojpeg.c:1493-1496`).
             if src_buf.is_null()
                 || jpeg_buf.is_null()
                 || jpeg_size.is_null()
                 || width <= 0
                 || height <= 0
+                || align < 1
+                || (align & (align - 1)) != 0
             {
-                inst.set_error("tj3CompressFromYUV8: NULL / bad dim", TJERR_FATAL);
+                inst.set_error("tj3CompressFromYUV8: NULL / bad dim/align", TJERR_FATAL);
                 return -1;
             }
+            // P4-155 (#539): this entry gates the *subsampling* itself — it
+            // needs it to size the packed planes (`turbojpeg.c:1497-1498`) —
+            // and the quality gate is reached only through the `…Planes8`
+            // delegate (`:1347-1350`), so with both unset upstream reports
+            // TJPARAM_SUBSAMP first. Order pinned by the oracle's
+            // `p4155_fromyuv8_unset` line (#548-review round).
             let ss: Subsampling = match current_subsampling(inst) {
                 Some(s) => s,
                 None => {
+                    // *Unset* is upstream's "must be specified", not "bad" —
+                    // the mapping cannot tell -1 from garbage.
+                    if !crate::tj3::require_specified(inst, "tj3CompressFromYUV8", false, true) {
+                        return -1;
+                    }
                     inst.set_error("tj3CompressFromYUV8: bad TJPARAM_SUBSAMP", TJERR_FATAL);
                     return -1;
                 }
             };
+            // The delegate's unconditional quality gate — YUV compression is
+            // inherently lossy (`turbojpeg.c:1347-1350`).
+            if !crate::tj3::require_specified(inst, "tj3CompressFromYUV8", true, false) {
+                return -1;
+            }
             let quality: i32 = inst.inner.get(libjpeg_turbo_rs::tj3::TjParam::Quality);
 
             // Compute the raw packed YUV length from align+dims.
@@ -597,9 +639,25 @@ pub unsafe extern "C" fn tj3CompressFromYUVPlanes8(
                 inst.set_error("tj3CompressFromYUVPlanes8: NULL / bad dim", TJERR_FATAL);
                 return -1;
             }
+            // P4-155 (#539): YUV compression is inherently lossy, so upstream
+            // gates TJPARAM_QUALITY unconditionally, before the subsampling
+            // (`turbojpeg.c:1347-1350`).
+            if !crate::tj3::require_specified(inst, "tj3CompressFromYUVPlanes8", true, false) {
+                return -1;
+            }
             let ss: Subsampling = match current_subsampling(inst) {
                 Some(s) => s,
                 None => {
+                    // P4-155 (#539): *unset* is upstream's "must be specified",
+                    // not "bad" — the mapping cannot tell -1 from garbage.
+                    if !crate::tj3::require_specified(
+                        inst,
+                        "tj3CompressFromYUVPlanes8",
+                        false,
+                        true,
+                    ) {
+                        return -1;
+                    }
                     inst.set_error(
                         "tj3CompressFromYUVPlanes8: bad TJPARAM_SUBSAMP",
                         TJERR_FATAL,
@@ -916,21 +974,36 @@ pub unsafe extern "C" fn tj3DecodeYUV8(
         // Defined outside the `unsafe` block below so the body's own `unsafe`
         // blocks stay meaningful rather than nesting inside a blanket one.
         let body = |inst: &mut TjInstance| -> c_int {
-            if src_buf.is_null() || dst_buf.is_null() || width <= 0 || height <= 0 {
-                inst.set_error("tj3DecodeYUV8: NULL / bad dim", TJERR_FATAL);
+            // Upstream's packed wrapper validates dims, `align` and the
+            // buffers first (`turbojpeg.c:2721-2726`); the pixel-format range
+            // check lives in the `…Planes8` delegate, *downstream* of the
+            // subsampling gate.
+            if src_buf.is_null()
+                || dst_buf.is_null()
+                || width <= 0
+                || height <= 0
+                || align < 1
+                || (align & (align - 1)) != 0
+            {
+                inst.set_error("tj3DecodeYUV8: NULL / bad dim/align", TJERR_FATAL);
                 return -1;
             }
+            let ss: Subsampling = match current_subsampling(inst) {
+                Some(s) => s,
+                None => {
+                    // P4-155 (#539): *unset* is upstream's "must be specified",
+                    // not "bad" — the mapping cannot tell -1 from garbage.
+                    if !crate::tj3::require_specified(inst, "tj3DecodeYUV8", false, true) {
+                        return -1;
+                    }
+                    inst.set_error("tj3DecodeYUV8: bad TJPARAM_SUBSAMP", TJERR_FATAL);
+                    return -1;
+                }
+            };
             let pf: PixelFormat = match pixel_format_from_tj(pixel_format) {
                 Some(p) => p,
                 None => {
                     inst.set_error("tj3DecodeYUV8: unsupported TJPF", TJERR_FATAL);
-                    return -1;
-                }
-            };
-            let ss: Subsampling = match current_subsampling(inst) {
-                Some(s) => s,
-                None => {
-                    inst.set_error("tj3DecodeYUV8: bad TJPARAM_SUBSAMP", TJERR_FATAL);
                     return -1;
                 }
             };
@@ -1045,6 +1118,11 @@ pub unsafe extern "C" fn tj3DecodeYUVPlanes8(
             let ss: Subsampling = match current_subsampling(inst) {
                 Some(s) => s,
                 None => {
+                    // P4-155 (#539): *unset* is upstream's "must be specified",
+                    // not "bad" — the mapping cannot tell -1 from garbage.
+                    if !crate::tj3::require_specified(inst, "tj3DecodeYUVPlanes8", false, true) {
+                        return -1;
+                    }
                     inst.set_error("tj3DecodeYUVPlanes8: bad TJPARAM_SUBSAMP", TJERR_FATAL);
                     return -1;
                 }

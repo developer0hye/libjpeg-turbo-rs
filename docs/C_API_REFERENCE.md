@@ -349,7 +349,7 @@
 
 | C Function | TJ3 Equivalent | Description |
 |---|---|---|
-| `tjTransform(handle, jpeg, size, n, &dstBufs, &dstSizes, transforms, flags)` | `tj3Transform` | TJ 1.2 lossless transform. `dstSizes` are *outputs*: under `TJFLAG_NOREALLOC` every slot's capacity comes from the transformed geometry — the value passed in is never read, as upstream — and is overwritten with the produced size (P4-151). That same flag also drops **every** marker, ICC included: upstream's capacity pre-read parses the header before `jcopy_markers_setup` can register anything, and this port reproduces the quirk by forcing `TJXOPT_COPYNONE` there (P4-156). `flags=0` and `tj3Transform` copy markers |
+| `tjTransform(handle, jpeg, size, n, &dstBufs, &dstSizes, transforms, flags)` | `tj3Transform` | TJ 1.2 lossless transform. `dstSizes` are *outputs*: under `TJFLAG_NOREALLOC` every slot's capacity comes from the transformed geometry — the value passed in is never read, as upstream — and is overwritten with the produced size (P4-151). On a handle that has not yet registered marker processors, that same flag also drops **every** marker, ICC included: upstream's capacity pre-read parses the header before `jcopy_markers_setup` can register anything, and this port reproduces the quirk by forcing `TJXOPT_COPYNONE` there (P4-156). A warm handle, `flags=0` and `tj3Transform` copy markers |
 
 ### Legacy Buffer Size
 

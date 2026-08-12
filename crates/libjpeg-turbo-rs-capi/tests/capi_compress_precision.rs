@@ -139,6 +139,12 @@ fn error_kind(message: &str) -> &'static str {
         // set. Same rule, different phrasing, so it is classified rather than
         // compared.
         "lossless_params"
+    } else if message.contains("TJPARAM_QUALITY must be specified") {
+        // P4-155 (#539): the substring is the documented part of upstream's
+        // message; the `function():` prefix is not.
+        "quality_unset"
+    } else if message.contains("TJPARAM_SUBSAMP must be specified") {
+        "subsamp_unset"
     } else {
         "other"
     }
@@ -396,6 +402,35 @@ fn our_trace() -> String {
     trace.push_str(&compress12_case("c12_lossless", true));
     trace.push_str(&compress8_case("c8_lossy", false));
     trace.push_str(&compress8_case("c8_lossless", true));
+
+    // P4-155 (#539): the unset-parameter matrix.
+    trace.push_str(&fresh_get_case("p4155_fresh_get"));
+    trace.push_str(&unset8_case("p4155_c8_unset_both", false, false, false));
+    trace.push_str(&unset8_case("p4155_c8_unset_quality", false, true, false));
+    trace.push_str(&unset8_case("p4155_c8_unset_subsamp", true, false, false));
+    // Argument validation still wins over the musts (step 1 vs step 2).
+    trace.push_str(&unset8_case("p4155_c8_arg_precedence", false, false, true));
+    trace.push_str(&unset12_case("p4155_c12_unset_both"));
+    trace.push_str(&unset16_lossless_case("p4155_c16_lossless_unset"));
+    trace.push_str(&unset_encodeyuv8_case("p4155_encodeyuv8_unset"));
+    trace.push_str(&unset_fromyuvplanes8_case("p4155_fromyuvplanes8_unset"));
+    trace.push_str(&unset_decodeyuvplanes8_case("p4155_decodeyuvplanes8_unset"));
+    // #548-review round: the packed wrappers, discriminating lines — an
+    // out-of-range pixelFormat proves the subsampling gate precedes the
+    // format check (the check lives in the ...Planes8 delegates upstream),
+    // and a non-power-of-two align proves argument validation beats the
+    // gates.
+    trace.push_str(&unset_fromyuv8_case("p4155_fromyuv8_unset", 1));
+    trace.push_str(&unset_fromyuv8_case("p4155_fromyuv8_badalign", 3));
+    trace.push_str(&unset_encodeyuv8_badpf_case("p4155_encodeyuv8_badpf_unset"));
+    trace.push_str(&unset_decodeyuv8_badpf_case("p4155_decodeyuv8_badpf_unset"));
+    trace.push_str(&unset_encodeyuvplanes8_case("p4155_encodeyuvplanes8_unset"));
+    trace.push_str(&legacy_encodeyuv3_align0_case(
+        "p4155_legacy_encodeyuv3_align0",
+    ));
+    trace.push_str(&legacy_decodeyuv_align0_case(
+        "p4155_legacy_decodeyuv_align0",
+    ));
     trace
 }
 
@@ -496,4 +531,444 @@ fn precision_rules_match_upstream_turbojpeg() {
         c_trace,
         "compress precision acceptance diverges from upstream TurboJPEG"
     );
+}
+
+// --- P4-155 (#539): the "must be specified" gates over unset parameters. ---
+//
+// A fresh handle carries `TJPARAM_QUALITY = -1` and `TJPARAM_SUBSAMP =
+// TJSAMP_UNKNOWN`, and every *lossy* compress path refuses until the caller
+// supplies them (`turbojpeg-mp.c:95-98`); the YUV encode/decode paths gate on
+// SUBSAMP alone. This port defaulted to 75 / 4:2:0, so the branch was
+// unreachable and a caller who forgot a parameter silently got substitutes.
+
+/// A handle with only the named parameters set.
+fn partial_compressor(set_quality: bool, set_subsamp: bool, lossless: bool) -> *mut c_void {
+    let handle: *mut c_void = tj3Init(TJINIT_COMPRESS);
+    assert!(!handle.is_null(), "tj3Init(TJINIT_COMPRESS)");
+    // SAFETY: `handle` is a live instance from `tj3Init`, used exclusively here.
+    unsafe {
+        if set_quality {
+            assert_eq!(tj3Set(handle, TJPARAM_QUALITY, 80), 0, "set quality");
+        }
+        if set_subsamp {
+            assert_eq!(
+                tj3Set(handle, TJPARAM_SUBSAMP, TJSAMP_444),
+                0,
+                "set subsamp"
+            );
+        }
+        if lossless {
+            assert_eq!(tj3Set(handle, TJPARAM_LOSSLESS, 1), 0, "set lossless");
+        }
+    }
+    handle
+}
+
+/// Criterion 1: the fresh handle's own report of both parameters.
+fn fresh_get_case(label: &str) -> String {
+    use libjpeg_turbo_rs_capi::tj3Get;
+    let handle: *mut c_void = tj3Init(TJINIT_COMPRESS);
+    assert!(!handle.is_null(), "tj3Init(TJINIT_COMPRESS)");
+    // SAFETY: live handle.
+    let line: String = unsafe {
+        format!(
+            "{label} 0 kind=get err=\"quality={} subsamp={}\"\n",
+            tj3Get(handle, TJPARAM_QUALITY),
+            tj3Get(handle, TJPARAM_SUBSAMP)
+        )
+    };
+    // SAFETY: destroyed once.
+    unsafe { tj3Destroy(handle) };
+    line
+}
+
+fn unset8_case(label: &str, set_quality: bool, set_subsamp: bool, null_src: bool) -> String {
+    let handle: *mut c_void = partial_compressor(set_quality, set_subsamp, false);
+    let src: Vec<u8> = (0..(WIDTH as usize * HEIGHT as usize * 3))
+        .map(|i| (i % 251) as u8)
+        .collect();
+    let mut buf: *mut u8 = std::ptr::null_mut();
+    let mut size: usize = 0;
+    // SAFETY: `src` outlives the call; out-params are locals.
+    let rc: c_int = unsafe {
+        tj3Compress8(
+            handle,
+            if null_src {
+                std::ptr::null()
+            } else {
+                src.as_ptr()
+            },
+            WIDTH,
+            0,
+            HEIGHT,
+            TJPF_RGB,
+            &mut buf,
+            &mut size,
+        )
+    };
+    let line: String = trace_line(label, handle, rc);
+    // SAFETY: library-allocated or null.
+    unsafe {
+        tj3Free(buf as *mut c_void);
+        tj3Destroy(handle);
+    }
+    line
+}
+
+fn unset12_case(label: &str) -> String {
+    let handle: *mut c_void = partial_compressor(false, false, false);
+    let src: Vec<i16> = (0..(WIDTH as usize * HEIGHT as usize * 3))
+        .map(|i| (i % 4096) as i16)
+        .collect();
+    let mut buf: *mut u8 = std::ptr::null_mut();
+    let mut size: usize = 0;
+    // SAFETY: as `unset8_case`.
+    let rc: c_int = unsafe {
+        tj3Compress12(
+            handle,
+            src.as_ptr(),
+            WIDTH,
+            0,
+            HEIGHT,
+            TJPF_RGB,
+            &mut buf,
+            &mut size,
+        )
+    };
+    let line: String = trace_line(label, handle, rc);
+    // SAFETY: as `unset8_case`.
+    unsafe {
+        tj3Free(buf as *mut c_void);
+        tj3Destroy(handle);
+    }
+    line
+}
+
+/// A lossless compress consults neither parameter (`turbojpeg-mp.c:95-98`
+/// gates on `!this->lossless`), so both may stay unset.
+fn unset16_lossless_case(label: &str) -> String {
+    let handle: *mut c_void = partial_compressor(false, false, true);
+    let src: Vec<u16> = (0..(WIDTH as usize * HEIGHT as usize * 3))
+        .map(|i| (i % 65535) as u16)
+        .collect();
+    let mut buf: *mut u8 = std::ptr::null_mut();
+    let mut size: usize = 0;
+    // SAFETY: as `unset8_case`.
+    let rc: c_int = unsafe {
+        tj3Compress16(
+            handle,
+            src.as_ptr(),
+            WIDTH,
+            0,
+            HEIGHT,
+            TJPF_RGB,
+            &mut buf,
+            &mut size,
+        )
+    };
+    let line: String = trace_line(label, handle, rc);
+    // SAFETY: as `unset8_case`.
+    unsafe {
+        tj3Free(buf as *mut c_void);
+        tj3Destroy(handle);
+    }
+    line
+}
+
+fn unset_encodeyuv8_case(label: &str) -> String {
+    use libjpeg_turbo_rs_capi::tj3EncodeYUV8;
+    let handle: *mut c_void = tj3Init(TJINIT_COMPRESS);
+    assert!(!handle.is_null(), "tj3Init(TJINIT_COMPRESS)");
+    let src: Vec<u8> = (0..(WIDTH as usize * HEIGHT as usize * 3))
+        .map(|i| (i % 251) as u8)
+        .collect();
+    // Generous: large enough for any subsampling had the call proceeded.
+    let mut dst: Vec<u8> = vec![0; WIDTH as usize * HEIGHT as usize * 4];
+    // SAFETY: buffers outlive the call.
+    let rc: c_int = unsafe {
+        tj3EncodeYUV8(
+            handle,
+            src.as_ptr(),
+            WIDTH,
+            0,
+            HEIGHT,
+            TJPF_RGB,
+            dst.as_mut_ptr(),
+            1,
+        )
+    };
+    let line: String = trace_line(label, handle, rc);
+    // SAFETY: destroyed once.
+    unsafe { tj3Destroy(handle) };
+    line
+}
+
+fn unset_fromyuvplanes8_case(label: &str) -> String {
+    use libjpeg_turbo_rs_capi::tj3CompressFromYUVPlanes8;
+    let handle: *mut c_void = tj3Init(TJINIT_COMPRESS);
+    assert!(!handle.is_null(), "tj3Init(TJINIT_COMPRESS)");
+    let plane: usize = WIDTH as usize * HEIGHT as usize;
+    let y: Vec<u8> = (0..plane).map(|i| (i % 251) as u8).collect();
+    let cb: Vec<u8> = vec![128; plane];
+    let cr: Vec<u8> = vec![128; plane];
+    let planes: [*const u8; 3] = [y.as_ptr(), cb.as_ptr(), cr.as_ptr()];
+    let strides: [c_int; 3] = [WIDTH, WIDTH, WIDTH];
+    let mut buf: *mut u8 = std::ptr::null_mut();
+    let mut size: usize = 0;
+    // SAFETY: three live planes with matching strides.
+    let rc: c_int = unsafe {
+        tj3CompressFromYUVPlanes8(
+            handle,
+            planes.as_ptr(),
+            WIDTH,
+            strides.as_ptr(),
+            HEIGHT,
+            &mut buf,
+            &mut size,
+        )
+    };
+    let line: String = trace_line(label, handle, rc);
+    // SAFETY: as `unset8_case`.
+    unsafe {
+        tj3Free(buf as *mut c_void);
+        tj3Destroy(handle);
+    }
+    line
+}
+
+fn unset_decodeyuvplanes8_case(label: &str) -> String {
+    use libjpeg_turbo_rs_capi::tj3DecodeYUVPlanes8;
+    /// `turbojpeg.h`: `TJINIT_DECOMPRESS`.
+    const TJINIT_DECOMPRESS: c_int = 1;
+    let handle: *mut c_void = tj3Init(TJINIT_DECOMPRESS);
+    assert!(!handle.is_null(), "tj3Init(TJINIT_DECOMPRESS)");
+    let plane: usize = WIDTH as usize * HEIGHT as usize;
+    let y: Vec<u8> = (0..plane).map(|i| (i % 251) as u8).collect();
+    let cb: Vec<u8> = vec![128; plane];
+    let cr: Vec<u8> = vec![128; plane];
+    let planes: [*const u8; 3] = [y.as_ptr(), cb.as_ptr(), cr.as_ptr()];
+    let strides: [c_int; 3] = [WIDTH, WIDTH, WIDTH];
+    let mut dst: Vec<u8> = vec![0; plane * 4];
+    // SAFETY: three live planes; `dst` sized for RGBX at full resolution.
+    let rc: c_int = unsafe {
+        tj3DecodeYUVPlanes8(
+            handle,
+            planes.as_ptr(),
+            strides.as_ptr(),
+            dst.as_mut_ptr(),
+            WIDTH,
+            0,
+            HEIGHT,
+            TJPF_RGB,
+        )
+    };
+    let line: String = trace_line(label, handle, rc);
+    // SAFETY: destroyed once.
+    unsafe { tj3Destroy(handle) };
+    line
+}
+
+fn unset_fromyuv8_case(label: &str, align: c_int) -> String {
+    use libjpeg_turbo_rs_capi::tj3CompressFromYUV8;
+    let handle: *mut c_void = tj3Init(TJINIT_COMPRESS);
+    assert!(!handle.is_null(), "tj3Init(TJINIT_COMPRESS)");
+    let src: Vec<u8> = vec![128; WIDTH as usize * HEIGHT as usize * 4];
+    let mut buf: *mut u8 = std::ptr::null_mut();
+    let mut size: usize = 0;
+    // SAFETY: `src` outlives the call; out-params are locals.
+    let rc: c_int = unsafe {
+        tj3CompressFromYUV8(
+            handle,
+            src.as_ptr(),
+            WIDTH,
+            align,
+            HEIGHT,
+            &mut buf,
+            &mut size,
+        )
+    };
+    let line: String = trace_line(label, handle, rc);
+    // SAFETY: library-allocated or null; destroyed once.
+    unsafe {
+        tj3Free(buf as *mut c_void);
+        tj3Destroy(handle);
+    }
+    line
+}
+
+fn unset_encodeyuv8_badpf_case(label: &str) -> String {
+    use libjpeg_turbo_rs_capi::tj3EncodeYUV8;
+    let handle: *mut c_void = tj3Init(TJINIT_COMPRESS);
+    assert!(!handle.is_null(), "tj3Init(TJINIT_COMPRESS)");
+    let src: Vec<u8> = (0..(WIDTH as usize * HEIGHT as usize * 3))
+        .map(|i| (i % 251) as u8)
+        .collect();
+    let mut dst: Vec<u8> = vec![0; WIDTH as usize * HEIGHT as usize * 4];
+    // SAFETY: buffers outlive the call; 99 is deliberately out of TJPF range.
+    let rc: c_int = unsafe {
+        tj3EncodeYUV8(
+            handle,
+            src.as_ptr(),
+            WIDTH,
+            0,
+            HEIGHT,
+            99,
+            dst.as_mut_ptr(),
+            1,
+        )
+    };
+    let line: String = trace_line(label, handle, rc);
+    // SAFETY: destroyed once.
+    unsafe { tj3Destroy(handle) };
+    line
+}
+
+fn unset_decodeyuv8_badpf_case(label: &str) -> String {
+    use libjpeg_turbo_rs_capi::tj3DecodeYUV8;
+    /// `turbojpeg.h`: `TJINIT_DECOMPRESS`.
+    const TJINIT_DECOMPRESS: c_int = 1;
+    let handle: *mut c_void = tj3Init(TJINIT_DECOMPRESS);
+    assert!(!handle.is_null(), "tj3Init(TJINIT_DECOMPRESS)");
+    let src: Vec<u8> = vec![128; WIDTH as usize * HEIGHT as usize * 4];
+    let mut dst: Vec<u8> = vec![0; WIDTH as usize * HEIGHT as usize * 4];
+    // SAFETY: buffers outlive the call; 99 is deliberately out of TJPF range.
+    let rc: c_int = unsafe {
+        tj3DecodeYUV8(
+            handle,
+            src.as_ptr(),
+            1,
+            dst.as_mut_ptr(),
+            WIDTH,
+            0,
+            HEIGHT,
+            99,
+        )
+    };
+    let line: String = trace_line(label, handle, rc);
+    // SAFETY: destroyed once.
+    unsafe { tj3Destroy(handle) };
+    line
+}
+
+fn unset_encodeyuvplanes8_case(label: &str) -> String {
+    use libjpeg_turbo_rs_capi::tj3EncodeYUVPlanes8;
+    let handle: *mut c_void = tj3Init(TJINIT_COMPRESS);
+    assert!(!handle.is_null(), "tj3Init(TJINIT_COMPRESS)");
+    let src: Vec<u8> = (0..(WIDTH as usize * HEIGHT as usize * 3))
+        .map(|i| (i % 251) as u8)
+        .collect();
+    let plane: usize = WIDTH as usize * HEIGHT as usize;
+    let mut y: Vec<u8> = vec![0; plane];
+    let mut cb: Vec<u8> = vec![0; plane];
+    let mut cr: Vec<u8> = vec![0; plane];
+    let mut planes: [*mut u8; 3] = [y.as_mut_ptr(), cb.as_mut_ptr(), cr.as_mut_ptr()];
+    let strides: [c_int; 3] = [WIDTH, WIDTH, WIDTH];
+    // SAFETY: three live planes with matching strides; `src` outlives.
+    let rc: c_int = unsafe {
+        tj3EncodeYUVPlanes8(
+            handle,
+            src.as_ptr(),
+            WIDTH,
+            0,
+            HEIGHT,
+            TJPF_RGB,
+            planes.as_mut_ptr(),
+            strides.as_ptr(),
+        )
+    };
+    let line: String = trace_line(label, handle, rc);
+    // SAFETY: destroyed once.
+    unsafe { tj3Destroy(handle) };
+    line
+}
+
+/// P4-155 (#539): the C-ABI gates fire without a TurboJPEG install.
+///
+/// The oracle trace above cross-validates against real TurboJPEG where one
+/// exists; this standalone test keeps the gates covered on hosts (and CI
+/// legs) without it — the first version of this block had every new case
+/// reachable only through the skippable trace.
+#[test]
+fn unset_params_refuse_standalone() {
+    let both = unset8_case("standalone_unset_both", false, false, false);
+    assert!(
+        both.contains("kind=quality_unset"),
+        "quality gate first: {both}"
+    );
+    let no_subsamp = unset8_case("standalone_unset_subsamp", true, false, false);
+    assert!(
+        no_subsamp.contains("kind=subsamp_unset"),
+        "subsamp gate second: {no_subsamp}"
+    );
+    let lossless = unset16_lossless_case("standalone_lossless_bypass");
+    assert!(
+        lossless.contains(" 0 kind=none"),
+        "lossless consults neither: {lossless}"
+    );
+    let packed = unset_fromyuv8_case("standalone_fromyuv8", 1);
+    assert!(
+        packed.contains("kind=subsamp_unset"),
+        "packed FromYUV8 gates subsampling in the entry itself: {packed}"
+    );
+}
+
+/// The legacy wrappers forward `align`/`pad` raw; a zero value must reach the
+/// TJ3 entry's validation rather than being clamped to 1 — upstream refuses
+/// (#539 re-review). Both parameters are set, isolating the align path.
+fn legacy_encodeyuv3_align0_case(label: &str) -> String {
+    use libjpeg_turbo_rs_capi::{tjEncodeYUV3, tjInitCompress};
+    const TJSAMP_420: c_int = 2;
+    let handle: *mut c_void = tjInitCompress();
+    assert!(!handle.is_null(), "tjInitCompress");
+    let src: Vec<u8> = (0..(WIDTH as usize * HEIGHT as usize * 3))
+        .map(|i| (i % 251) as u8)
+        .collect();
+    let mut dst: Vec<u8> = vec![0; WIDTH as usize * HEIGHT as usize * 4];
+    // SAFETY: buffers outlive the call; align 0 is the case under test.
+    let rc: c_int = unsafe {
+        tjEncodeYUV3(
+            handle,
+            src.as_ptr(),
+            WIDTH,
+            0,
+            HEIGHT,
+            TJPF_RGB,
+            dst.as_mut_ptr(),
+            0,
+            TJSAMP_420,
+            0,
+        )
+    };
+    let line: String = trace_line(label, handle, rc);
+    // SAFETY: destroyed once.
+    unsafe { tj3Destroy(handle) };
+    line
+}
+
+fn legacy_decodeyuv_align0_case(label: &str) -> String {
+    use libjpeg_turbo_rs_capi::{tjDecodeYUV, tjInitDecompress};
+    const TJSAMP_420: c_int = 2;
+    let handle: *mut c_void = tjInitDecompress();
+    assert!(!handle.is_null(), "tjInitDecompress");
+    let src: Vec<u8> = vec![128; WIDTH as usize * HEIGHT as usize * 4];
+    let mut dst: Vec<u8> = vec![0; WIDTH as usize * HEIGHT as usize * 4];
+    // SAFETY: buffers outlive the call; align 0 is the case under test.
+    let rc: c_int = unsafe {
+        tjDecodeYUV(
+            handle,
+            src.as_ptr(),
+            0,
+            TJSAMP_420,
+            dst.as_mut_ptr(),
+            WIDTH,
+            0,
+            HEIGHT,
+            TJPF_RGB,
+            0,
+        )
+    };
+    let line: String = trace_line(label, handle, rc);
+    // SAFETY: destroyed once.
+    unsafe { tj3Destroy(handle) };
+    line
 }

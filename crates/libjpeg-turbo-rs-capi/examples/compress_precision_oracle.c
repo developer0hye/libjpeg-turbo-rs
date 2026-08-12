@@ -64,6 +64,10 @@ static const char *error_kind(const char *message)
    * different phrasing, so it is classified rather than compared. */
   if (strstr(message, "lossless parameters") || strstr(message, "LOSSLESSPT"))
     return "lossless_params";
+  /* P4-155 (#539): upstream's "must be specified" gates. Classified — the
+   * substring is the documented part; the function-name prefix is not. */
+  if (strstr(message, "TJPARAM_QUALITY must be specified")) return "quality_unset";
+  if (strstr(message, "TJPARAM_SUBSAMP must be specified")) return "subsamp_unset";
   return "other";
 }
 
@@ -193,6 +197,289 @@ static void compress8_case(const char *label, int lossless)
   tj3Destroy(handle);
 }
 
+/* --- P4-155 (#539): the "must be specified" gates over unset parameters. ---
+ *
+ * A fresh handle carries TJPARAM_QUALITY = -1 and TJPARAM_SUBSAMP =
+ * TJSAMP_UNKNOWN, and every *lossy* compress path refuses until the caller
+ * supplies them (`turbojpeg-mp.c:95-98`); the YUV encode/decode paths gate on
+ * SUBSAMP alone. The port defaulted to 75 / 4:2:0, so the branch was
+ * unreachable and a caller who forgot a parameter silently got substitutes. */
+
+static void fresh_get_case(const char *label)
+{
+  tjhandle handle = tj3Init(TJINIT_COMPRESS);
+  if (!handle) { fprintf(stderr, "tj3Init\n"); exit(2); }
+  printf("%s 0 kind=get err=\"quality=%d subsamp=%d\"\n", label,
+         tj3Get(handle, TJPARAM_QUALITY), tj3Get(handle, TJPARAM_SUBSAMP));
+  tj3Destroy(handle);
+}
+
+/* A handle with only the named parameters set. */
+static tjhandle partial_compressor(int set_quality, int set_subsamp, int lossless)
+{
+  tjhandle handle = tj3Init(TJINIT_COMPRESS);
+  if (!handle) { fprintf(stderr, "tj3Init\n"); exit(2); }
+  if (set_quality && tj3Set(handle, TJPARAM_QUALITY, 80) != 0) {
+    fprintf(stderr, "quality\n"); exit(2);
+  }
+  if (set_subsamp && tj3Set(handle, TJPARAM_SUBSAMP, TJSAMP_444) != 0) {
+    fprintf(stderr, "subsamp\n"); exit(2);
+  }
+  if (lossless && tj3Set(handle, TJPARAM_LOSSLESS, 1) != 0) {
+    fprintf(stderr, "lossless\n"); exit(2);
+  }
+  return handle;
+}
+
+static void unset8_case(const char *label, int set_quality, int set_subsamp,
+                        int null_src)
+{
+  tjhandle handle = partial_compressor(set_quality, set_subsamp, 0);
+  unsigned char *src = (unsigned char *)malloc((size_t)WIDTH * HEIGHT * 3);
+  unsigned char *buf = NULL;
+  size_t size = 0, i;
+  int rc;
+
+  if (!src) { fprintf(stderr, "oom\n"); exit(2); }
+  for (i = 0; i < (size_t)WIDTH * HEIGHT * 3; i++)
+    src[i] = (unsigned char)(i % 251);
+
+  rc = tj3Compress8(handle, null_src ? NULL : src, WIDTH, 0, HEIGHT, TJPF_RGB,
+                    &buf, &size);
+  report(label, handle, rc);
+
+  if (buf) tj3Free(buf);
+  free(src);
+  tj3Destroy(handle);
+}
+
+static void unset12_case(const char *label)
+{
+  tjhandle handle = partial_compressor(0, 0, 0);
+  short *src = (short *)malloc((size_t)WIDTH * HEIGHT * 3 * sizeof(short));
+  unsigned char *buf = NULL;
+  size_t size = 0, i;
+  int rc;
+
+  if (!src) { fprintf(stderr, "oom\n"); exit(2); }
+  for (i = 0; i < (size_t)WIDTH * HEIGHT * 3; i++)
+    src[i] = (short)(i % 4096);
+  rc = tj3Compress12(handle, src, WIDTH, 0, HEIGHT, TJPF_RGB, &buf, &size);
+  report(label, handle, rc);
+  if (buf) tj3Free(buf);
+  free(src);
+  tj3Destroy(handle);
+}
+
+/* A lossless compress consults neither parameter (`turbojpeg-mp.c:95-98`
+ * gates on `!this->lossless`), so both may stay unset. */
+static void unset16_lossless_case(const char *label)
+{
+  tjhandle handle = partial_compressor(0, 0, 1);
+  unsigned short *src =
+    (unsigned short *)malloc((size_t)WIDTH * HEIGHT * 3 * sizeof(unsigned short));
+  unsigned char *buf = NULL;
+  size_t size = 0, i;
+  int rc;
+
+  if (!src) { fprintf(stderr, "oom\n"); exit(2); }
+  for (i = 0; i < (size_t)WIDTH * HEIGHT * 3; i++)
+    src[i] = (unsigned short)(i % 65535);
+  rc = tj3Compress16(handle, src, WIDTH, 0, HEIGHT, TJPF_RGB, &buf, &size);
+  report(label, handle, rc);
+  if (buf) tj3Free(buf);
+  free(src);
+  tj3Destroy(handle);
+}
+
+static void unset_encodeyuv8_case(const char *label)
+{
+  tjhandle handle = tj3Init(TJINIT_COMPRESS);
+  unsigned char *src = (unsigned char *)malloc((size_t)WIDTH * HEIGHT * 3);
+  /* Generous: large enough for any subsampling had the call proceeded. */
+  unsigned char *dst = (unsigned char *)malloc((size_t)WIDTH * HEIGHT * 4);
+  size_t i;
+  int rc;
+
+  if (!handle || !src || !dst) { fprintf(stderr, "oom\n"); exit(2); }
+  for (i = 0; i < (size_t)WIDTH * HEIGHT * 3; i++)
+    src[i] = (unsigned char)(i % 251);
+  rc = tj3EncodeYUV8(handle, src, WIDTH, 0, HEIGHT, TJPF_RGB, dst, 1);
+  report(label, handle, rc);
+  free(src);
+  free(dst);
+  tj3Destroy(handle);
+}
+
+static void unset_fromyuvplanes8_case(const char *label)
+{
+  tjhandle handle = tj3Init(TJINIT_COMPRESS);
+  unsigned char *y = (unsigned char *)malloc((size_t)WIDTH * HEIGHT);
+  unsigned char *cb = (unsigned char *)malloc((size_t)WIDTH * HEIGHT);
+  unsigned char *cr = (unsigned char *)malloc((size_t)WIDTH * HEIGHT);
+  const unsigned char *planes[3];
+  int strides[3] = { WIDTH, WIDTH, WIDTH };
+  unsigned char *buf = NULL;
+  size_t size = 0, i;
+  int rc;
+
+  if (!handle || !y || !cb || !cr) { fprintf(stderr, "oom\n"); exit(2); }
+  for (i = 0; i < (size_t)WIDTH * HEIGHT; i++) y[i] = (unsigned char)(i % 251);
+  memset(cb, 128, (size_t)WIDTH * HEIGHT);
+  memset(cr, 128, (size_t)WIDTH * HEIGHT);
+  planes[0] = y; planes[1] = cb; planes[2] = cr;
+  rc = tj3CompressFromYUVPlanes8(handle, planes, WIDTH, strides, HEIGHT,
+                                 &buf, &size);
+  report(label, handle, rc);
+  if (buf) tj3Free(buf);
+  free(y); free(cb); free(cr);
+  tj3Destroy(handle);
+}
+
+static void unset_decodeyuvplanes8_case(const char *label)
+{
+  tjhandle handle = tj3Init(TJINIT_DECOMPRESS);
+  unsigned char *y = (unsigned char *)malloc((size_t)WIDTH * HEIGHT);
+  unsigned char *cb = (unsigned char *)malloc((size_t)WIDTH * HEIGHT);
+  unsigned char *cr = (unsigned char *)malloc((size_t)WIDTH * HEIGHT);
+  const unsigned char *planes[3];
+  int strides[3] = { WIDTH, WIDTH, WIDTH };
+  unsigned char *dst = (unsigned char *)malloc((size_t)WIDTH * HEIGHT * 4);
+  size_t i;
+  int rc;
+
+  if (!handle || !y || !cb || !cr || !dst) { fprintf(stderr, "oom\n"); exit(2); }
+  for (i = 0; i < (size_t)WIDTH * HEIGHT; i++) y[i] = (unsigned char)(i % 251);
+  memset(cb, 128, (size_t)WIDTH * HEIGHT);
+  memset(cr, 128, (size_t)WIDTH * HEIGHT);
+  planes[0] = y; planes[1] = cb; planes[2] = cr;
+  rc = tj3DecodeYUVPlanes8(handle, planes, strides, dst, WIDTH, 0, HEIGHT,
+                           TJPF_RGB);
+  report(label, handle, rc);
+  free(y); free(cb); free(cr); free(dst);
+  tj3Destroy(handle);
+}
+
+/* Packed-YUV shapes for the #548-review round. The packed wrappers gate the
+ * subsampling *before* the pixel-format range check (which lives in the
+ * ...Planes8 delegates), so these lines deliberately pass an out-of-range
+ * pixelFormat: a port that validates the format first reports the wrong
+ * error and a valid-format line cannot tell. `tj3CompressFromYUV8` gates the
+ * subsampling in the entry itself (turbojpeg.c:1497-1498), before the
+ * delegate's quality gate; and a non-power-of-two align is an argument error
+ * that beats every gate (turbojpeg.c:1493-1496). */
+static void unset_fromyuv8_case(const char *label, int align)
+{
+  tjhandle handle = tj3Init(TJINIT_COMPRESS);
+  unsigned char *src = (unsigned char *)malloc((size_t)WIDTH * HEIGHT * 4);
+  unsigned char *buf = NULL;
+  size_t size = 0;
+  int rc;
+
+  if (!handle || !src) { fprintf(stderr, "oom\n"); exit(2); }
+  memset(src, 128, (size_t)WIDTH * HEIGHT * 4);
+  rc = tj3CompressFromYUV8(handle, src, WIDTH, align, HEIGHT, &buf, &size);
+  report(label, handle, rc);
+  if (buf) tj3Free(buf);
+  free(src);
+  tj3Destroy(handle);
+}
+
+static void unset_encodeyuv8_badpf_case(const char *label)
+{
+  tjhandle handle = tj3Init(TJINIT_COMPRESS);
+  unsigned char *src = (unsigned char *)malloc((size_t)WIDTH * HEIGHT * 3);
+  unsigned char *dst = (unsigned char *)malloc((size_t)WIDTH * HEIGHT * 4);
+  size_t i;
+  int rc;
+
+  if (!handle || !src || !dst) { fprintf(stderr, "oom\n"); exit(2); }
+  for (i = 0; i < (size_t)WIDTH * HEIGHT * 3; i++)
+    src[i] = (unsigned char)(i % 251);
+  rc = tj3EncodeYUV8(handle, src, WIDTH, 0, HEIGHT, 99 /* bad TJPF */, dst, 1);
+  report(label, handle, rc);
+  free(src);
+  free(dst);
+  tj3Destroy(handle);
+}
+
+static void unset_decodeyuv8_badpf_case(const char *label)
+{
+  tjhandle handle = tj3Init(TJINIT_DECOMPRESS);
+  unsigned char *src = (unsigned char *)malloc((size_t)WIDTH * HEIGHT * 4);
+  unsigned char *dst = (unsigned char *)malloc((size_t)WIDTH * HEIGHT * 4);
+  int rc;
+
+  if (!handle || !src || !dst) { fprintf(stderr, "oom\n"); exit(2); }
+  memset(src, 128, (size_t)WIDTH * HEIGHT * 4);
+  rc = tj3DecodeYUV8(handle, src, 1, dst, WIDTH, 0, HEIGHT, 99 /* bad TJPF */);
+  report(label, handle, rc);
+  free(src);
+  free(dst);
+  tj3Destroy(handle);
+}
+
+static void unset_encodeyuvplanes8_case(const char *label)
+{
+  tjhandle handle = tj3Init(TJINIT_COMPRESS);
+  unsigned char *src = (unsigned char *)malloc((size_t)WIDTH * HEIGHT * 3);
+  unsigned char *y = (unsigned char *)malloc((size_t)WIDTH * HEIGHT);
+  unsigned char *cb = (unsigned char *)malloc((size_t)WIDTH * HEIGHT);
+  unsigned char *cr = (unsigned char *)malloc((size_t)WIDTH * HEIGHT);
+  unsigned char *planes[3];
+  int strides[3] = { WIDTH, WIDTH, WIDTH };
+  size_t i;
+  int rc;
+
+  if (!handle || !src || !y || !cb || !cr) { fprintf(stderr, "oom\n"); exit(2); }
+  for (i = 0; i < (size_t)WIDTH * HEIGHT * 3; i++)
+    src[i] = (unsigned char)(i % 251);
+  planes[0] = y; planes[1] = cb; planes[2] = cr;
+  rc = tj3EncodeYUVPlanes8(handle, src, WIDTH, 0, HEIGHT, TJPF_RGB,
+                           planes, strides);
+  report(label, handle, rc);
+  free(src); free(y); free(cb); free(cr);
+  tj3Destroy(handle);
+}
+
+/* The legacy wrappers forward `align`/`pad` raw; a zero (or negative) value
+ * must reach the TJ3 entry's validation rather than being clamped to 1 —
+ * upstream refuses (#539 re-review). Both parameters here are set, so the
+ * only thing under test is the align path. */
+static void legacy_encodeyuv3_align0_case(const char *label)
+{
+  tjhandle handle = tjInitCompress();
+  unsigned char *src = (unsigned char *)malloc((size_t)WIDTH * HEIGHT * 3);
+  unsigned char *dst = (unsigned char *)malloc((size_t)WIDTH * HEIGHT * 4);
+  size_t i;
+  int rc;
+
+  if (!handle || !src || !dst) { fprintf(stderr, "oom\n"); exit(2); }
+  for (i = 0; i < (size_t)WIDTH * HEIGHT * 3; i++)
+    src[i] = (unsigned char)(i % 251);
+  rc = tjEncodeYUV3(handle, src, WIDTH, 0, HEIGHT, TJPF_RGB, dst,
+                    0 /* align */, TJSAMP_420, 0);
+  report(label, handle, rc);
+  free(src); free(dst);
+  tj3Destroy(handle);
+}
+
+static void legacy_decodeyuv_align0_case(const char *label)
+{
+  tjhandle handle = tjInitDecompress();
+  unsigned char *src = (unsigned char *)malloc((size_t)WIDTH * HEIGHT * 4);
+  unsigned char *dst = (unsigned char *)malloc((size_t)WIDTH * HEIGHT * 4);
+  int rc;
+
+  if (!handle || !src || !dst) { fprintf(stderr, "oom\n"); exit(2); }
+  memset(src, 128, (size_t)WIDTH * HEIGHT * 4);
+  rc = tjDecodeYUV(handle, src, 0 /* align */, TJSAMP_420, dst, WIDTH, 0,
+                   HEIGHT, TJPF_RGB, 0);
+  report(label, handle, rc);
+  free(src); free(dst);
+  tj3Destroy(handle);
+}
+
 int main(void)
 {
   /* The divergence itself: refused upstream, accepted by the port. */
@@ -242,6 +529,27 @@ int main(void)
   compress12_case("c12_lossless", 1);
   compress8_case("c8_lossy", 0);
   compress8_case("c8_lossless", 1);
+
+  /* P4-155 (#539): the unset-parameter matrix. */
+  fresh_get_case("p4155_fresh_get");
+  unset8_case("p4155_c8_unset_both", 0, 0, 0);
+  unset8_case("p4155_c8_unset_quality", 0, 1, 0);
+  unset8_case("p4155_c8_unset_subsamp", 1, 0, 0);
+  /* Argument validation still wins over the musts (step 1 vs step 2). */
+  unset8_case("p4155_c8_arg_precedence", 0, 0, 1);
+  unset12_case("p4155_c12_unset_both");
+  unset16_lossless_case("p4155_c16_lossless_unset");
+  unset_encodeyuv8_case("p4155_encodeyuv8_unset");
+  unset_fromyuvplanes8_case("p4155_fromyuvplanes8_unset");
+  unset_decodeyuvplanes8_case("p4155_decodeyuvplanes8_unset");
+  /* #548-review round: the packed wrappers, discriminating lines. */
+  unset_fromyuv8_case("p4155_fromyuv8_unset", 1);
+  unset_fromyuv8_case("p4155_fromyuv8_badalign", 3);
+  unset_encodeyuv8_badpf_case("p4155_encodeyuv8_badpf_unset");
+  unset_decodeyuv8_badpf_case("p4155_decodeyuv8_badpf_unset");
+  unset_encodeyuvplanes8_case("p4155_encodeyuvplanes8_unset");
+  legacy_encodeyuv3_align0_case("p4155_legacy_encodeyuv3_align0");
+  legacy_decodeyuv_align0_case("p4155_legacy_decodeyuv_align0");
 
   return 0;
 }

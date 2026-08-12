@@ -326,10 +326,11 @@ pub unsafe extern "C" fn tjDecompressHeader3(
 /// so it cannot exceed the buffer a `tjTransformBufSize()`-sized allocation
 /// describes.
 ///
+/// On a handle whose earlier batches never registered marker processors,
 /// `TJFLAG_NOREALLOC` also drops **every** marker, ICC included, reproducing
-/// the ordering quirk that pre-read causes upstream (P4-156). Without the flag,
-/// and through `tj3Transform`, markers are copied. Otherwise identical to
-/// `tj3Transform`.
+/// the ordering quirk that pre-read causes upstream (P4-156). A warm handle,
+/// the flag-free path and `tj3Transform` all copy markers. Otherwise identical
+/// to `tj3Transform`.
 ///
 /// # Safety
 ///
@@ -646,7 +647,12 @@ pub unsafe extern "C" fn tjEncodeYUV3(
                 height,
                 pixel_format,
                 dst_buf,
-                align.max(1),
+                // Forwarded raw, as upstream does (`turbojpeg.c:1798-1799`,
+                // `:2775-2776`): the TJ3 entry validates `align` (>= 1, power
+                // of two), and clamping here masked the `align < 1` half of
+                // that check — a silent accept where upstream refuses
+                // (#539 re-review).
+                align,
             )
         }
     })
@@ -691,7 +697,12 @@ pub unsafe extern "C" fn tjDecodeYUV(
             crate::yuv::tj3DecodeYUV8(
                 handle,
                 src_buf,
-                align.max(1),
+                // Forwarded raw, as upstream does (`turbojpeg.c:1798-1799`,
+                // `:2775-2776`): the TJ3 entry validates `align` (>= 1, power
+                // of two), and clamping here masked the `align < 1` half of
+                // that check — a silent accept where upstream refuses
+                // (#539 re-review).
+                align,
                 dst_buf,
                 width,
                 pitch,
@@ -724,10 +735,11 @@ const TJPARAM_FASTDCT: c_int = 10;
 /// directly on COMPRESS. It computes
 /// `fastDCT = (quality < 96) && !(flags & TJFLAG_ACCURATEDCT)`.
 /// We read the current quality back via
-/// `tj3Get(handle, TJPARAM_QUALITY)` and apply the same rule, so
-/// `tjEncodeYUV3(..., flags=0)` at quality 75 ends up with
-/// `TJPARAM_FASTDCT=1` (matching libjpeg-turbo's default), while
-/// quality ≥ 96 or `TJFLAG_ACCURATEDCT` clears it.
+/// `tj3Get(handle, TJPARAM_QUALITY)` and apply the same rule. Since P4-155
+/// a fresh handle reads back -1 (unset) here, and `-1 < 96` selects
+/// `TJPARAM_FASTDCT=1` exactly as upstream's `processFlags` does on its own
+/// unset default (`turbojpeg.c:554-558`); quality ≥ 96 or
+/// `TJFLAG_ACCURATEDCT` clears it.
 fn process_legacy_compress_flags(handle: *mut c_void, flags: c_int) {
     let _ = unsafe {
         tj3Set(
