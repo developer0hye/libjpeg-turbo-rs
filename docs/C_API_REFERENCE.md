@@ -213,7 +213,7 @@
 | `jpeg_write_scanlines(cinfo, scanlines, num_lines)` | Write scanline rows | `ScanlineEncoder::write_scanlines()`; residual option gaps are P4-84..P4-93 | 🔶 |
 | `jpeg12_write_scanlines(...)` | Write 12-bit scanlines | Native 12-bit encode exists; classic finish dispatch remains P4-94 | 🔶 |
 | `jpeg16_write_scanlines(...)` | Write 16-bit scanlines | Native 16-bit lossless encode exists; classic finish dispatch remains P4-94 | 🔶 |
-| `jpeg_finish_compress(cinfo)` | Finalize compression | Native finish exists; classic incomplete-input/state/error semantics remain P4-100/P4-106 | 🔶 |
+| `jpeg_finish_compress(cinfo)` | Finalize compression | Incomplete-input/state contract matches stock (P4-106 closed 2026-08-14, oracle-compared); classic error-reporting semantics remain P4-100 | 🔶 |
 | `jpeg_calc_jpeg_dimensions(cinfo)` | Compute compression-side JPEG dimensions; no compression scaling | `calc_jpeg_dimensions()` | ✅ |
 | `jpeg_write_raw_data(cinfo, data, num_lines)` | Write raw downsampled data | Default `compress_raw()` path works; full classic options remain P4-95 | 🔶 |
 | `jpeg12_write_raw_data(...)` | Write 12-bit raw data | Default `compress_raw_12()` path works; full classic options remain P4-95 | 🔶 |
@@ -232,7 +232,7 @@
 
 | C Function | Description | Rust | Status |
 |---|---|---|---|
-| `jpeg_read_header(cinfo, require_image)` | Parse headers | Native parser works; classic metadata/state/tables remain P4-99/P4-101/P4-104 | 🔶 |
+| `jpeg_read_header(cinfo, require_image)` | Parse headers | Native parser works; entry guard and post-parse state match stock (P4-104 closed 2026-08-14); classic metadata/tables remain P4-99/P4-101 | 🔶 |
 | `jpeg_start_decompress(cinfo)` | Begin decompression | Basic `ScanlineDecoder` path works; classic option dispatch remains P4-96/P4-99 | 🔶 |
 | `jpeg_read_scanlines(cinfo, scanlines, max_lines)` | Read scanline rows | Basic rows work; classic quantization/options remain P4-96/P4-99 | 🔶 |
 | `jpeg12_read_scanlines(...)` | Read 12-bit scanlines | Native precision decode exists; classic lifecycle/options remain P4-98 | 🔶 |
@@ -241,7 +241,7 @@
 | `jpeg12_skip_scanlines(...)` | Skip 12-bit scanlines | Private offset support exists; immediate-after-start behavior remains P4-98 | 🔶 |
 | `jpeg_crop_scanline(cinfo, &xoffset, &width)` | Scanline-level crop | Native exact crop exists; classic iMCU alignment/state semantics remain P4-103 | 🔶 |
 | `jpeg12_crop_scanline(...)` | 12-bit crop | Private crop support exists; immediate-after-start/output proof remains P4-98 | 🔶 |
-| `jpeg_finish_decompress(cinfo)` | Finalize decompression | Native finish exists; classic lifecycle/suspension/error semantics remain P4-100/P4-104 | 🔶 |
+| `jpeg_finish_decompress(cinfo)` | Finalize decompression | Lifecycle (state guard, EOI drain/suspend, exactly-once `term_source`, abort-reset) matches stock (P4-104 closed 2026-08-14, oracle-compared); classic error-reporting semantics remain P4-100 | 🔶 |
 | `jpeg_read_raw_data(cinfo, data, max_lines)` | Read raw downsampled data | Native raw decode exists; classic options/state/error semantics remain P4-102 | 🔶 |
 | `jpeg12_read_raw_data(...)` | Read 12-bit raw data | Native raw decode exists; classic options/state/error semantics remain P4-102 | 🔶 |
 
@@ -250,10 +250,10 @@
 | C Function | Description | Rust | Status |
 |---|---|---|---|
 | `jpeg_has_multiple_scans(cinfo)` | Check if progressive/multi-scan | Reports upstream's bit (progressive ∨ non-interleaved sequential, 2026-08-13); P4-114 state semantics remain | 🔶 |
-| `jpeg_start_output(cinfo, scan_number)` | Begin output for specific scan | Native output exists; classic input-pull/state behavior remains P4-26/P4-104 | 🔶 |
-| `jpeg_finish_output(cinfo)` | Finish scan output | Native finish exists; classic input-pull/state behavior remains P4-26/P4-104 | 🔶 |
-| `jpeg_input_complete(cinfo)` | Check if all input consumed | Native query exists; deeper streaming/state fidelity remains P4-26/P4-104 | 🔶 |
-| `jpeg_consume_input(cinfo)` | Process more input data | Suspension core works; deeper streaming/state fidelity remains P4-13/P4-26/P4-104 | 🔶 |
+| `jpeg_start_output(cinfo, scan_number)` | Begin output for specific scan | State guard matches stock (P4-104 closed 2026-08-14); classic input-pull and `DSTATE_BUFIMAGE` pass-walking remain P4-26/P4-13 | 🔶 |
+| `jpeg_finish_output(cinfo)` | Finish scan output | State guard matches stock (P4-104 closed 2026-08-14); classic input-pull and multi-scan pass-walking remain P4-26/P4-13 | 🔶 |
+| `jpeg_input_complete(cinfo)` | Check if all input consumed | Answers `eoi_seen` with upstream's `eoi_reached` semantics (P4-104 closed 2026-08-14); deeper streaming fidelity remains P4-26 | 🔶 |
+| `jpeg_consume_input(cinfo)` | Process more input data | Suspension core works and the state dispatch matches stock (P4-104 closed 2026-08-14); deeper streaming fidelity remains P4-13/P4-26 | 🔶 |
 | `jpeg_new_colormap(cinfo)` | Update colormap after quant change | Native `requantize()` exists; classic color quantization remains P4-96 | 🔶 |
 
 ### Output Dimensions
@@ -492,7 +492,7 @@
 | `jpeg_component_info` | Per-component metadata | `ComponentInfo` | ✅ |
 | `jpeg_scan_info` | Scan script entry (components, Ss/Se/Ah/Al) | `ScanScript` / `ScanInfo`; classic scanline wiring remains P4-91 | 🔶 |
 | `jpeg_marker_struct` | Saved marker (code, length, data, next) | Native markers exist; classic incremental pointer stability remains P4-26 | 🔶 |
-| `jpeg_common_struct` | Common fields (err, mem, progress) | Native equivalents exist; classic error/state/progress contracts remain P4-100/P4-104/P4-111 | 🔶 |
+| `jpeg_common_struct` | Common fields (err, mem, progress) | Native equivalents exist; decompressor `global_state` matches stock (P4-104 closed 2026-08-14) except `DSTATE_BUFIMAGE`/`BUFPOST` (P4-13); classic error/progress contracts remain P4-100/P4-111 | 🔶 |
 | `jpeg_compress_struct` | Full compression state (~50 fields) | `Encoder` / `ScanlineEncoder`; residual classic option/state gaps are P4-84..P4-111 | 🔶 |
 | `jpeg_decompress_struct` | Full decompression state (~60 fields) | `Decoder` / `ScanlineDecoder`; residual classic state/options gaps are P4-96..P4-114 | 🔶 |
 | `jpeg_error_mgr` | Error handler (5 callbacks + state) | `ErrorHandler` trait (3 callbacks) | 🔶 |

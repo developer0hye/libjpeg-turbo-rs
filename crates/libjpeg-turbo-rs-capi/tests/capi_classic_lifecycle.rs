@@ -1573,11 +1573,12 @@ static unsigned char *decode_via_buffered_image(const unsigned char *jpeg, size_
      * return JPEG_REACHED_EOI from the first jpeg_consume_input call;
      * in that case the loop runs exactly once and the consumer sees
      * only the final-quality output. That is the libjpeg-turbo-rs
-     * shim's current posture (`jpeg_consume_input` at jpeglib.rs:3730
-     * documents this — "for our fully-buffered shim, EOI is the
-     * truthful answer the moment a header is in hand"). Either
-     * implementation must produce identical final pixels — that's
-     * what this test asserts. */
+     * shim's posture from the post-start states this loop polls from —
+     * its eager decode has already absorbed the datastream, so the
+     * `jpeg_consume_input` arm for those states reports EOI (P4-104,
+     * #468; before start_decompress it reports SOS, as stock does).
+     * Either implementation must produce identical final pixels —
+     * that's what this test asserts. */
     int passes = 0;
     int max_passes = 32;  /* safety cap — a 64x64 progressive should not exceed 10 scans */
     for (passes = 0; passes < max_passes; ++passes) {

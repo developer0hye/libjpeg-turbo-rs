@@ -294,11 +294,13 @@ fn jpeg_lib_decode_roundtrip_matches_rust_native() {
 
 /// Regression: the buffered/progressive idiom
 ///   `while (!jpeg_input_complete(cinfo)) jpeg_consume_input(cinfo);`
-/// must terminate. Earlier we returned `JPEG_REACHED_EOI` from
-/// `jpeg_consume_input` once the header was parsed but left
-/// `global_state` at `DSTATE_INHEADER`, so `jpeg_input_complete`
-/// (which keys off `global_state >= DSTATE_SCANNING`) reported FALSE
-/// forever.
+/// must terminate *after decompression has started* — upstream's shape.
+/// A pre-start loop stays at `JPEG_REACHED_SOS` forever on stock ("can't
+/// advance past first SOS until start_decompress"), and since the P4-104
+/// (#468) restructure this shim matches that (see
+/// `capi_input_complete_contract::pre_start_polls_stay_incomplete_reporting_sos`).
+/// This test therefore starts decompression first, which is what real
+/// buffered consumers do, and then requires the poll loop to terminate.
 #[test]
 fn jpeg_consume_input_loop_terminates_after_header_parsed() {
     let path: PathBuf = cdylib_path();
@@ -340,6 +342,14 @@ fn jpeg_consume_input_loop_terminates_after_header_parsed() {
                 .expect("jpeg_input_complete");
         let jpeg_consume_input: libloading::Symbol<unsafe extern "C" fn(*mut c_void) -> c_int> =
             lib.get(b"jpeg_consume_input").expect("jpeg_consume_input");
+
+        // Upstream's terminating idiom begins after startup; a bare
+        // post-header loop never completes on stock and now never
+        // completes here either.
+        let jpeg_start_decompress: libloading::Symbol<unsafe extern "C" fn(*mut c_void) -> c_int> =
+            lib.get(b"jpeg_start_decompress")
+                .expect("jpeg_start_decompress");
+        assert_eq!(jpeg_start_decompress(cinfo_ptr), 1, "start_decompress");
 
         // Drive the buffered/progressive polling loop. Cap iterations
         // so a regression manifests as a deterministic test failure
