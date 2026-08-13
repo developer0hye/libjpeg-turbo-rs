@@ -299,7 +299,7 @@ impl<'a> Decoder<'a> {
             }
         }
 
-        #[cfg(all(target_arch = "wasm32", feature = "simd"))]
+        #[cfg(all(target_arch = "wasm32", feature = "simd", target_feature = "simd128"))]
         {
             return crate::simd::wasm32::color::wasm_ycbcr_to_rgba_row(y, cb, cr, out, width);
         }
@@ -331,7 +331,7 @@ impl<'a> Decoder<'a> {
             }
         }
 
-        #[cfg(all(target_arch = "wasm32", feature = "simd"))]
+        #[cfg(all(target_arch = "wasm32", feature = "simd", target_feature = "simd128"))]
         {
             return crate::simd::wasm32::color::wasm_ycbcr_to_bgr_row(y, cb, cr, out, width);
         }
@@ -363,7 +363,7 @@ impl<'a> Decoder<'a> {
             }
         }
 
-        #[cfg(all(target_arch = "wasm32", feature = "simd"))]
+        #[cfg(all(target_arch = "wasm32", feature = "simd", target_feature = "simd128"))]
         {
             return crate::simd::wasm32::color::wasm_ycbcr_to_bgra_row(y, cb, cr, out, width);
         }
@@ -547,7 +547,7 @@ impl<'a> Decoder<'a> {
             return;
         }
 
-        #[cfg(all(target_arch = "wasm32", feature = "simd"))]
+        #[cfg(all(target_arch = "wasm32", feature = "simd", target_feature = "simd128"))]
         {
             return crate::simd::wasm32::merged::wasm_merged_h2v1_ycbcr_to_rgb(
                 y_row, cb_row, cr_row, rgb_out, width,
@@ -589,7 +589,7 @@ impl<'a> Decoder<'a> {
             return;
         }
 
-        #[cfg(all(target_arch = "wasm32", feature = "simd"))]
+        #[cfg(all(target_arch = "wasm32", feature = "simd", target_feature = "simd128"))]
         {
             return crate::simd::wasm32::merged::wasm_merged_h2v2_ycbcr_to_rgb(
                 y_row0, y_row1, cb_row, cr_row, rgb_out0, rgb_out1, width,
@@ -639,7 +639,7 @@ impl<'a> Decoder<'a> {
             )
         }
 
-        #[cfg(all(target_arch = "wasm32", feature = "simd"))]
+        #[cfg(all(target_arch = "wasm32", feature = "simd", target_feature = "simd128"))]
         {
             return crate::simd::wasm32::upsample::wasm_fancy_upsample_h2v2(
                 input, in_width, in_height, output, out_width,

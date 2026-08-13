@@ -182,7 +182,7 @@ pub(super) fn convert_to_ycbcr(
                     );
                     continue;
                 }
-                #[cfg(all(target_arch = "wasm32", feature = "simd"))]
+                #[cfg(all(target_arch = "wasm32", feature = "simd", target_feature = "simd128"))]
                 {
                     crate::simd::wasm32::color_encode::wasm_rgba_to_ycbcr_row(
                         &pixels[src_offset..src_offset + width * bpp],
@@ -231,7 +231,7 @@ pub(super) fn convert_to_ycbcr(
                     );
                     continue;
                 }
-                #[cfg(all(target_arch = "wasm32", feature = "simd"))]
+                #[cfg(all(target_arch = "wasm32", feature = "simd", target_feature = "simd128"))]
                 {
                     crate::simd::wasm32::color_encode::wasm_bgr_to_ycbcr_row(
                         &pixels[src_offset..src_offset + width * bpp],
@@ -280,7 +280,7 @@ pub(super) fn convert_to_ycbcr(
                     );
                     continue;
                 }
-                #[cfg(all(target_arch = "wasm32", feature = "simd"))]
+                #[cfg(all(target_arch = "wasm32", feature = "simd", target_feature = "simd128"))]
                 {
                     crate::simd::wasm32::color_encode::wasm_bgra_to_ycbcr_row(
                         &pixels[src_offset..src_offset + width * bpp],
@@ -383,7 +383,7 @@ pub(super) fn extract_block(
                 return;
             }
         }
-        #[cfg(all(target_arch = "wasm32", target_feature = "simd128", feature = "simd"))]
+        #[cfg(all(target_arch = "wasm32", feature = "simd", target_feature = "simd128"))]
         {
             unsafe {
                 extract_block_wasm(plane, plane_width, block_x, block_y, block);
@@ -469,7 +469,7 @@ pub(super) unsafe fn extract_block_sse2(
 /// # Safety
 /// Requires simd128. Caller must ensure `block_x + 8 <= plane_width` and
 /// `block_y + 8 <= plane_height` (interior block bounds).
-#[cfg(all(target_arch = "wasm32", target_feature = "simd128", feature = "simd"))]
+#[cfg(all(target_arch = "wasm32", feature = "simd", target_feature = "simd128"))]
 #[target_feature(enable = "simd128")]
 pub(super) unsafe fn extract_block_wasm(
     plane: &[u8],

@@ -10,7 +10,7 @@
 //! Verifies that AVX2-accelerated RGB->YCbCr color conversion produces
 //! identical results to the scalar equivalent.
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", feature = "simd"))]
 mod tests {
     use crate::encode::color::rgb_to_ycbcr_row;
     use crate::simd::x86_64::avx2_color_encode::avx2_rgb_to_ycbcr_row;

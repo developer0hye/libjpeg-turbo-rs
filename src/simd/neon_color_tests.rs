@@ -6,7 +6,7 @@
 //! can be private. Moved verbatim apart from the path rewrite.
 
 //! NEON YCbCr→pixel color conversion tests.
-#![cfg(target_arch = "aarch64")]
+#![cfg(all(target_arch = "aarch64", feature = "simd"))]
 
 use crate::decode::color;
 use crate::simd;

@@ -560,7 +560,7 @@ pub(super) fn progressive_fdct_chroma_block(
         }
     }
 
-    #[cfg(all(target_arch = "wasm32", target_feature = "simd128", feature = "simd"))]
+    #[cfg(all(target_arch = "wasm32", feature = "simd", target_feature = "simd128"))]
     {
         let src_w: usize = hf * 8;
         let src_h: usize = vf * 8;

@@ -885,7 +885,7 @@ The subtlety worth recording: **enabling smoothing changes the padding of compon
 
 **Root cause.** C pads twice, in different places and by different rules: the **input** side completes the final row group by repeating the last real row (`jcprepct.c:171-178`), and the **output** side fills the rest of the iMCU by repeating the last *downsampled* row (`jcprepct.c:197-205`). Carried back to full resolution, that second rule means different things per component. A component sampled at the maximum downsamples 1:1, so repeating its last output row is just repeating its last input row. A component subsampled `v` ways has one output row per `v` input rows, so repeating its last output row means repeating the last complete **group** of `v` input rows.
 
-CMYK has both kinds in one image — components 0 and 3 carry the sampling factors, 1 and 2 sit at 1x1 — so no single rule is right for the whole image, and letting the per-block edge path clamp is right for neither when `v > 1`. This is the same distinction as [P4-47](#p4-47-progressive-420--440-diverges-from-cjpeg-at-every-even-height-not-a-multiple-of-16--closed-2026-07-26) (#324), arrived at from the other direction.
+CMYK has both kinds in one image — components 0 and 3 carry the sampling factors, 1 and 2 sit at 1x1 — so no single rule is right for the whole image, and letting the per-block edge path clamp is right for neither when `v > 1`. This is the same distinction as [P4-47](#p4-47-progressive-encoding-diverges-from-cjpeg-at-every-even-height-not-a-multiple-of-16--closed-2026-07-26) (#324), arrived at from the other direction.
 
 **Status (2026-07-26): closed.** `pad_plane_to_mcu_grid` takes the row-group height as a parameter and each component passes its own. Byte-exact against the C oracle for every legal CMYK subsampling; before the fix, 1x2 and 2x2 were 15/21 and the six failures per subsampling were exactly the geometries whose height is a multiple of `v_samp` but not of the MCU height.
 
@@ -1211,7 +1211,7 @@ Review of the fix found two more, both in configurations the sweep could not rea
 - **Row-based restarts used the wrong effective MCU width.** `jpeg_set_colorspace(JCS_RGB)` defaults R, G, and B to 1x1 sampling (`jcparam.c:367-373`), but that is not an RGB restriction in JPEG: T.81 B.2.2 defines sampling factors per component, and `cjpeg` applies an explicit `-sample` after the colorspace defaults (`cjpeg.c:544-552,609-611`; `rdswitch.c:397-425`). Thus implicit RGB-direct has an 8-pixel MCU width, while explicit `2x2,1x1,1x1` sampling has `Hmax=2` and a 16-pixel width. This is RGB component sampling, not JFIF/YCbCr chroma subsampling. `compute_restart_interval` instead counted rows from the requested subsampling without distinguishing the default from an explicit request; the divergence is visible where `ceil(width/8) != ceil(width/16)`.
 - **16-bit quantization tables were declared SOF0.** Below quality ~20 with `force_baseline` off, or with a coarse custom table, the DQT entries exceed 255 — which baseline forbids. C switches to SOF1 and emits `JTRC_16BIT_TABLES` (`jcmarker.c:517-535`); we wrote SOF0 and a non-conforming stream. The fix lands in the shared core, so it closes the same latent hole on the CMYK side: 180 `customquant|cmyk` fixture rows moved, and nothing else.
 
-**The matrix gained a colorspace axis**, which is the part that generalizes: the next entry point to early-return past the option set gets caught by the suite rather than by someone thinking to look. It immediately earned its keep by surfacing [P4-54](#p4-54-colorspacergb-silently-ignores-progressive--arithmetic--lossless--open).
+**The matrix gained a colorspace axis**, which is the part that generalizes: the next entry point to early-return past the option set gets caught by the suite rather than by someone thinking to look. It immediately earned its keep by surfacing [P4-54](#p4-54-colorspacergb-silently-ignores-progressive--arithmetic--lossless--closed-2026-07-26).
 
 ## P4-54. `colorspace(Rgb)` Silently Ignores `progressive` / `arithmetic` / `lossless` — **CLOSED 2026-07-26**
 
@@ -1400,6 +1400,16 @@ C expands instead of ignoring: `djpeg -rgb` on a `cjpeg -precision 12` grayscale
 4. **Goal state (#389's last criterion)**: `#![cfg_attr(not(feature = "simd"), forbid(unsafe_code))]` compiles, README-advertised and CI-checked — requires (3) to reach zero.
 
 **Acceptance criteria.** Each numbered item lands with tests/benches per the project rules; #389 closes only when all four do. The phase-1 Miri job (non-SIMD `--lib` subset, 191 tests) must stay green throughout.
+
+**Scope note (2026-08-13, from the P4-143 review):** the `src/simd/*_tests.rs`
+in-module suites pass vacuously when the `simd` feature is off — with `simd`
+disabled on aarch64 all 11 `simd_parity_tests` still run and report `ok`
+while every assertion sits inside a now-excluded `cfg` block (lib test count
+drops 313 → 232). No CI job runs tests with `--no-default-features`, so
+nothing is fooled today, but it is the "don't assert around an unrunnable
+path" shape: when this item restructures the SIMD tests, gate the *test
+functions* on the same predicate as the kernels they assert against, so a
+config with no kernels has no green tests claiming parity.
 
 ## P4-70. Clippy Structural-Lint Allow-List in Test Code — **OPEN**
 
@@ -5326,7 +5336,7 @@ unchecked lengths any more. Two separate routes had to be shut:
   failed with `error[E0599]: no method named 'ycbcr_to_rgb_row' … field, not a
   method`, i.e. rustc resolving the `pub` field from an external test crate.
 
-Criteria 1–4 are met; 5 is deliberately deferred:
+Criteria 1–5 are met (5 as of 2026-08-13, with P4-143):
 
 | # | Criterion | Disposition |
 | --- | --- | --- |
@@ -5334,24 +5344,24 @@ Criteria 1–4 are met; 5 is deliberately deferred:
 | 2 | `simd::*` no longer resolves externally | Met earlier; `tests/simd_module_privacy.rs` |
 | 3 | Entry points validate lengths + `checked` byte counts before dispatch | Met — `require_samples` / `require_bytes` in `src/simd/mod.rs` |
 | 4 | Length preconditions removed from `SimdRoutines` fn-pointer types | Met, recorded per field below |
-| 5 | Arch backends compile only under `feature = "simd"` | **Not done, deliberately** — see below |
+| 5 | Arch backends compile only under `feature = "simd"` | Met 2026-08-13 with P4-143 — see below |
 
-**Why criterion 5 was backed out.** Adding `feature = "simd"` to the three
-module `cfg`s compiles clean locally and in CI — but only because
-`.cargo/config.toml` forces `-C target-feature=+simd128` on both wasm targets.
-A downstream crate inherits no such thing. Roughly 30 call sites disagree about
-which condition guards them: `encode/pipeline_impl/{dispatch,sampling}.rs` gate
-on the Cargo `simd` feature, `mcu.rs` on the Cargo feature *and* `simd128`, and
-six `neon_*`/`simd_*_tests.rs` files on `target_arch` alone. Narrowing the
-module gate without aligning every one of them turns the documented scalar
-fallback (`crates/libjpeg-turbo-rs-wasm/README.md`) into `E0433` for anyone
-building baseline `wasm32` without `+simd128`.
+**Criterion 5's history.** The first attempt was backed out: adding
+`feature = "simd"` to the module `cfg`s compiled clean everywhere — but only
+because `.cargo/config.toml` forces `+simd128` on both wasm targets, and
+narrowing the gates without aligning the disagreeing call sites was a hidden
+`E0433` for anyone building baseline `wasm32`. That regression was caught by
+review, not by any build or CI job, and the masking was filed as P4-143.
 
-That regression was caught by review, not by any local build or CI job, which is
-the point worth recording: **the repo-local `.cargo/config.toml` masks wasm
-target-feature regressions from the entire test matrix.** Criterion 5 needs its
-own change — align the call sites first, then narrow the module gates — and
-wants a CI leg that builds `wasm32-unknown-unknown` *without* `+simd128`.
+The second attempt (2026-08-13) landed it in the order the back-out
+prescribed: every call site aligned to its arch's canonical predicate first
+(13 pipeline sites and 9 `src/simd/*_tests.rs` files were missing a
+condition; `detect`/`detect_encoder`'s wasm arms too), then the module gates
+narrowed — wasm32's requiring `simd128` as well, since its kernels cannot
+exist in a baseline module — with P4-143's `Check baseline wasm32` CI leg
+proving the scalar fallback compiles warning-free without `+simd128`
+(verified red against the pre-alignment tree: 67 dead-code errors). See the
+P4-143 closure for the full delivery.
 
 Per-field disposition for criterion 4:
 
@@ -5369,18 +5379,19 @@ bounds, short-input/short-output cases for all three entry points, and
 `width * 3` overflow rejected by `checked_mul` rather than wrapping into a
 bound a short buffer satisfies.
 
-**What remains (criteria 6 and 7).** Both are in-crate hygiene, not
-reachability:
+**What remains.** In-crate hygiene, not reachability:
 
 * The kernel wrappers inside the arch modules are still safe `pub(crate) fn`
   fronting `target_feature` bodies. A *crate-local* caller can therefore still
   misuse one without writing `unsafe`. No such call site exists today, and none
   is reachable from outside the crate, so this is defence-in-depth rather than
   a live defect — but criterion 1's "kernels become `pub(crate) unsafe fn`"
-  sub-clause is genuinely not done.
-* Criterion 5, backed out for the reason above, plus a CI leg that builds
-  baseline `wasm32` without `+simd128` so the next attempt cannot pass on a
-  masked matrix.
+  sub-clause is genuinely not done. The direct-call surface that sweep must
+  annotate was measured 2026-08-13 (review recount): 129 pipeline call sites
+  — `decode/pipeline_impl/color.rs` 39, `encode/pipeline_impl/mcu.rs` 40,
+  `optimized.rs` 12, `sampling.rs` 9, `dispatch.rs` 9, `baseline.rs` 8,
+  `progressive_entropy.rs` 5, `api/progressive_output.rs` 7 — plus the
+  `src/simd/*_tests.rs` callers.
 * Criterion 6 (`#[allow(unsafe_op_in_unsafe_fn)]` on `pub mod simd`) and
   criterion 7 (SAFETY-comment content) are the ~630–679-site sweep measured in
   `src/lib.rs`. The issue itself calls criterion 6 "a consequence of the work,
@@ -5475,7 +5486,7 @@ This item is no longer a soundness blocker for the [#481](https://github.com/dev
 **Status (2026-08-10): CLOSED — criteria 3–6 delivered.** The three `set_len`
 sites in `src/encode/pipeline_impl/progressive_entropy.rs` (`:65`, `:96`,
 `:145`) stay out of scope and move to
-[P4-139](#p4-139-memory-layout-arithmetic-is-decentralised-and-uses-saturatingunchecked-multiplication--open)
+[P4-139](#p4-139-memory-layout-arithmetic-is-decentralised-and-uses-saturatingunchecked-multiplication--partial-every-span-is-checked-and-the-rule-is-enforced-centralisation-and-scalingfactor-outstanding)
 as recorded below.
 
 * **Criterion 3 — met.** `experiments/progressive.tsv` records the zero-init
@@ -5486,7 +5497,7 @@ as recorded below.
   row's own *uninit* figure. Treat the +4.7% as unconfirmed — on this host
   zero-init is free, exactly as the criterion's `calloc` hint predicted.
 * **Criterion 4 — met for the geometry-sized allocations; metadata copies split
-  out to [P4-144](#p4-144-metadata-copies-are-input-sized-but-still-allocate-infallibly--open).**
+  out to [P4-144](#p4-144-metadata-copies-are-input-sized-but-still-allocate-infallibly--closed-2026-08-12).**
   Every allocation in `src/api/progressive_output.rs` whose size comes from
   *header geometry* goes through `try_filled_vec`, `try_reserved_vec` or
   `try_copy_of`, which use `try_reserve_exact` and report refusal as
@@ -5728,7 +5739,7 @@ full capi suite at 54 blocks / 0 failures and both CI clippy legs clean.
   memory-sizing `saturating_mul` at `:6697`, `:7382-7383`, `:7444`,
   `:9429/:9432` and `:10467`. Those size `Vec` allocations rather than raw
   slices, so they are outside criterion 5's wording but squarely inside
-  [P4-139](#p4-139-memory-layout-arithmetic-is-decentralised-and-uses-saturatingunchecked-multiplication--open)
+  [P4-139](#p4-139-memory-layout-arithmetic-is-decentralised-and-uses-saturatingunchecked-multiplication--partial-every-span-is-checked-and-the-rule-is-enforced-centralisation-and-scalingfactor-outstanding)
   criterion 3, which is where they are recorded.
 
 * **Criterion 7 — done.** The crate root states the boundary plainly: invalid
@@ -6274,7 +6285,7 @@ C comparison: it flips a currently-failing call into a succeeding one, which is
 exactly the kind of change that should not ride along in a patch about YUV
 validation order.
 
-## P4-143. `.cargo/config.toml` Forces `+simd128`, Hiding wasm Target-Feature Regressions From the Whole Matrix — **OPEN**
+## P4-143. `.cargo/config.toml` Forces `+simd128`, Hiding wasm Target-Feature Regressions From the Whole Matrix — **CLOSED 2026-08-13**
 
 **GitHub:** filed from the [#474](https://github.com/developer0hye/libjpeg-turbo-rs/issues/474) (P4-135) review.
 
@@ -6327,6 +6338,37 @@ into a hard error. Review caught it; no automated gate did.
 **Why it matters beyond P4-135.** It is a *coverage* defect, not a code defect:
 the tests are green on a build nobody ships. Any future change to a wasm `cfg`
 is equally invisible until a user reports it.
+
+**Status (2026-08-13): closed.** All four criteria delivered alongside P4-135
+criterion 5:
+
+1. The `Check baseline wasm32` leg in `wasm.yml` compiles
+   `wasm32-unknown-unknown` and `wasm32-wasip1` with `RUSTFLAGS: -D warnings` —
+   the env var overrides the config's target rustflags, removing `+simd128`,
+   and denying warnings makes compiled-but-gated-out SIMD code fail the leg.
+   Verified discriminating: against the pre-alignment tree the leg fails with
+   67 dead-code errors; against the aligned tree it passes.
+2. Every SIMD call site now states the canonical predicate for its arch —
+   `all(target_arch, feature = "simd")` for aarch64/x86_64,
+   `all(target_arch = "wasm32", feature = "simd", target_feature = "simd128")`
+   for wasm — and the module gates in `src/simd/mod.rs` match. 13 pipeline
+   sites gained the missing `simd128` condition (including one in
+   `src/api/progressive_output.rs` outside the ~30 the filing counted), 9
+   `src/simd/*_tests.rs` files gained the missing Cargo-feature condition,
+   and `detect`/`detect_encoder`'s wasm arms gained it too. Wasm SIMD test
+   coverage is unchanged: 17 `simd::` tests run under wasip1+simd128 before
+   and after the alignment.
+3. `.cargo/config.toml` opens with a note recording that its rustflags change
+   what the matrix covers and naming the CI leg that compensates.
+4. Audit of the same masking elsewhere: aarch64 NEON is mandatory (no
+   equivalent gap); the x86_64 `target-cpu=native` case is the same
+   "CI tests a configuration consumers do not get" class and is already
+   tracked as its own item —
+   [P4-133](#p4-133-bmi2fma-paths-are-reachable-only-via-target-cpunative-so-portable-builds-leave-them-off--open)
+   — so it stays there rather than being duplicated. `.cargo/config.toml`
+   sets no rustflags beyond the two wasm targets, so nothing else is masked
+   repo-wide; the per-job `RUSTFLAGS` in `cross-arch.yml`/`armv7.yml`/
+   `sanitizers.yml` add configurations rather than hiding one.
 
 ## P4-144. Metadata Copies Are Input-Sized But Still Allocate Infallibly — **CLOSED 2026-08-12**
 

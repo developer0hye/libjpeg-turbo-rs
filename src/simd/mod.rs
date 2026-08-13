@@ -43,29 +43,30 @@ mod simd_parity_tests;
 #[cfg(test)]
 mod simd_x86_tests;
 
-// P4-135 criterion 5 (#474) — "arch backends compile only under
-// `feature = "simd"`" — is deliberately NOT done here. Adding the feature to
-// these three `cfg`s compiles, but only because this repo's
-// `.cargo/config.toml` forces `-C target-feature=+simd128` on both wasm
-// targets. A downstream crate does not inherit that, and ~30 call sites
-// disagree about which condition guards them: `encode/pipeline_impl/{dispatch,
-// sampling}.rs` gate on the Cargo `simd` feature, `mcu.rs` on both, and six
-// `neon_*`/`simd_*_tests.rs` files on `target_arch` alone. Narrowing the module
-// gate without aligning all of them turns a documented scalar fallback into
-// E0433 for anyone building baseline `wasm32` — caught by review, not by CI.
+// P4-135 criterion 5 (#474): arch backends compile only under the Cargo
+// `simd` feature. The wasm32 backend additionally requires the `simd128`
+// *target* feature at compile time — its kernels are `core::arch::wasm32`
+// intrinsics, wasm has no runtime feature detection, and an engine without
+// SIMD support rejects a module containing SIMD instructions at validation,
+// so baseline `wasm32` builds must not contain them at all. Every call site
+// uses the same predicate as its module gate (P4-143 aligned them); the
+// `not(...)` complements select the scalar fallback documented in
+// `crates/libjpeg-turbo-rs-wasm/README.md`.
 //
-// Criterion 5 is therefore its own change: align every call site first, then
-// narrow these. It is build hygiene, not the soundness hole this item was P0
-// for, so it does not block the rest. The masking itself is tracked as P4-143,
-// which wants a CI leg that builds baseline `wasm32` without `+simd128` — until
-// that exists, a green matrix is not evidence that narrowing these is safe.
-#[cfg(target_arch = "aarch64")]
+// The first attempt at this narrowing introduced a compile break for baseline
+// `wasm32` that the whole matrix missed, because `.cargo/config.toml` forces
+// `+simd128` on every in-tree build (P4-143); review caught it before it
+// shipped. The wasm workflow now carries a baseline leg that builds both wasm
+// targets with the config's rustflags overridden and warnings denied, so a
+// call site that drifts from these predicates fails CI instead of a
+// downstream consumer's build.
+#[cfg(all(target_arch = "aarch64", feature = "simd"))]
 pub(crate) mod aarch64;
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", feature = "simd"))]
 pub(crate) mod x86_64;
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", feature = "simd", target_feature = "simd128"))]
 pub(crate) mod wasm32;
 
 /// Bytes per pixel written by every kernel behind `ycbcr_to_rgb_row` and read
@@ -310,7 +311,7 @@ pub fn detect() -> SimdRoutines {
         return x86_64::routines();
     }
 
-    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    #[cfg(all(target_arch = "wasm32", feature = "simd", target_feature = "simd128"))]
     {
         return wasm32::routines();
     }
@@ -336,7 +337,7 @@ pub fn detect_encoder() -> EncoderSimdRoutines {
         return x86_64::encoder_routines();
     }
 
-    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    #[cfg(all(target_arch = "wasm32", feature = "simd", target_feature = "simd128"))]
     {
         return wasm32::encoder_routines();
     }

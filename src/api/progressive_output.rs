@@ -969,7 +969,7 @@ impl ProgressiveDecoder {
             )
         }
 
-        #[cfg(all(target_arch = "wasm32", feature = "simd"))]
+        #[cfg(all(target_arch = "wasm32", feature = "simd", target_feature = "simd128"))]
         {
             return crate::simd::wasm32::upsample::wasm_fancy_upsample_h2v2(
                 input, in_width, in_height, output, out_width,

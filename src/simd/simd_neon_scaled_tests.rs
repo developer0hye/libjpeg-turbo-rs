@@ -10,7 +10,7 @@
 //! Verifies that NEON-accelerated scaled IDCT (4x4, 2x2, 1x1) and quantization
 //! produce identical results to their scalar equivalents.
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "simd"))]
 mod tests {
     use crate::decode::idct_scaled::{idct_1x1, idct_2x2, idct_4x4};
     use crate::simd::aarch64::idct_scaled::{neon_idct_1x1, neon_idct_2x2, neon_idct_4x4};
