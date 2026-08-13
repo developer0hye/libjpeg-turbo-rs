@@ -32,6 +32,27 @@ and `git log` between tags.
   runs system/Rust bidirectional cross-decodes.
 
 ### Fixed
+- The classic decompressor's state machine and finish lifecycle now match
+  stock libjpeg (P4-104/P4-106, #468), trace-compared verbatim: a direct
+  `jpeg_read_header` lands on `DSTATE_READY`; `jpeg_finish_decompress`
+  raises `JERR_TOO_LITTLE_DATA` on unread rows and `JERR_BAD_STATE` from a
+  non-started state or on a second finish, calls the source manager's
+  `term_source` exactly once, and resets to `DSTATE_START`; and
+  `jpeg_input_complete` answers from an EOI flag with upstream's
+  `eoi_reached` semantics — FALSE after a bare header parse or single-scan
+  startup, TRUE after a multi-scan startup, a tables-only parse, a
+  full-height `jpeg_skip_scanlines`, `jpeg_read_coefficients`,
+  `jpeg_finish_output`, or a successful finish, surviving finish/abort and
+  cleared at the next datastream's parse. `jpeg_read_header` now refuses
+  out-of-order calls (`JERR_BAD_STATE`, upstream's entry guard), and
+  `jpeg_start_output`/`jpeg_finish_output` refuse non-buffered states.
+  Pre-start `jpeg_consume_input` polls report `JPEG_REACHED_SOS`
+  indefinitely as upstream does; a bare pre-start drain loop no longer
+  terminates (the documented buffered idiom — start decompression first —
+  does). One recorded divergence: on multi-scan buffered-image streams the
+  eager decode reports input-complete after the first output pass where
+  stock walks the passes. `jpeg_finish_compress`'s missing-rows/bad-state
+  contract is differentially proven against stock in the same trace.
 - Nine SIMD wrapper functions whose safety contracts were comment-only now
   enforce them in code (P4-135, #474): `avx2_idct_islow`, `sse2_idct_islow`
   and the AVX2 FDCT+quantize composite check the CPU feature themselves and

@@ -506,8 +506,13 @@ jobs:
           cargo test -p libjpeg-turbo-rs-capi
           --test capi_input_complete_contract
           --test capi_consume_input_states
-          --test capi_preload_resume -- --nocapture
+          --test capi_preload_resume
+          --test capi_classic_lifecycle_state -- --nocapture
         env:
+          # capi_classic_lifecycle_state is the P4-104/P4-106 (#468)
+          # differential trace — 17 lines compared verbatim against a stock
+          # libjpeg oracle. Without the prefix it soft-skips, which is
+          # exactly the vacuous green this step exists to prevent.
           LIBJPEG_TURBO_PREFIX: /tmp/ljt8/prefix
 
       - name: Classic destination ownership + stdio I/O parity (P4-108)

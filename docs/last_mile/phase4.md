@@ -298,8 +298,10 @@ Verified with `cargo test --release --test hard_case_x_byte_and_restart` → 6 p
 - **`jpeg_consume_input`**: while `body_incomplete`, pull from the live source manager one chunk at a time (`pull_more_from_source_mgr`) and report the next boundary — `JPEG_REACHED_SOS` at each scan, `JPEG_REACHED_EOI` at EOI (clearing `body_incomplete`), or `JPEG_SUSPENDED` when the source is dry. **Since 2026-08-11 this drain runs only from a state upstream also drains from**: P4-104's `DSTATE_READY` guard returns `REACHED_SOS` ahead of it, because upstream consumes nothing until `jpeg_start_decompress` is called. P4-13's own harness enters from `INHEADER` and is unaffected; a caller that reaches SOS and then wants the body drained calls `jpeg_start_decompress`, which publishes `DSTATE_PRELOAD` and drains from there.
 - **`jpeg_start_decompress`**: in buffered-image mode, publish output dimensions from the header and defer the pixel decode; in non-buffered mode, finish draining the body to EOI now (suspending if dry).
 - **`jpeg_read_scanlines`**: materialise the deferred decode (`ensure_decoded_deferred`) once the body is complete.
-- **`jpeg_input_complete`**: returns `FALSE` while `body_incomplete`, so the `while (!jpeg_input_complete()) jpeg_consume_input()` idiom drives the body to EOI.
+- **`jpeg_input_complete`**: returns `FALSE` while `body_incomplete`, so the `while (!jpeg_input_complete()) jpeg_consume_input()` idiom drives the body to EOI. **Since 2026-08-14 (P4-104's closure) the answer is `eoi_seen`, upstream's `inputctl->eoi_reached`, and `body_incomplete` only suppresses it.**
 - `jpeg_finish_decompress` / `jpeg_abort_decompress` reset the new state for handle reuse.
+
+**Handed over 2026-08-14 by the [P4-104](#p4-104-classic-decompressor-state-constants-transitions-and-finish-lifecycle-diverge--closed-2026-08-14) closure — still open here.** Buffered-image startup publishes `DSTATE_SCANNING` where upstream publishes `DSTATE_BUFIMAGE` (`jdapistd.c:60-63`), and this shim never reaches `PRESCAN` or `BUFPOST` either. The buffered arms of `jpeg_finish_decompress` / `jpeg_start_output` / `jpeg_finish_output` therefore key on `SCANNING`/`RAW_OK` **plus** `buffered_image` rather than on the state alone, and a consumer that switches on `global_state` during a buffered-image decode reads a state upstream never publishes there. It lands here rather than in P4-104 because the branch that publishes it is this item's deferred-decode path. Acceptance: buffered-image startup publishes `DSTATE_BUFIMAGE`, the output-pass entry points walk `BUFIMAGE`/`BUFPOST` as upstream does, and the `buffered_image`-keyed arms above become plain state checks — oracle-compared like the P4-104 trace.
 
 **Status (2026-06-02): PARTIAL — suspension is byte-exact-proven; deeper contracts are P4-26 and finish lifecycle is P4-104.** `cargo test -p libjpeg-turbo-rs-capi --test capi_classic_lifecycle_pathological consume_input_suspends_through_progressive_body` passes: a real suspending source manager drip-feeds a multi-scan progressive JPEG; the harness asserts mid-body suspension, SOS/EOI progression, resume, and pixels byte-identical to both full-buffer shim decode and stock `djpeg`. It no longer treats the shim's post-finish `DSTATE_STOPPING` as an oracle because upstream resets the cinfo. Boundary scanning, the 256 MiB drain cap, marker rebuild, scan tracking, and raw/coefficient body drain remain covered.
 
@@ -2394,7 +2396,7 @@ subsampling/scaling/grayscale, invalid null/zero/out-of-bounds/after-read calls,
 returned x/width/output_width, component geometry, and subsequent row bytes.
 The 12-bit initialization/order portion remains in P4-98.
 
-## P4-104. Classic Decompressor State Constants, Transitions, and Finish Lifecycle Diverge — **OPEN**
+## P4-104. Classic Decompressor State Constants, Transitions, and Finish Lifecycle Diverge — **CLOSED 2026-08-14**
 
 **Motivation.** Filed 2026-08-02 after P4-13's harness was found to assert the
 shim's `DSTATE_STOPPING`, the opposite of upstream's abort-reset completion.
@@ -2665,7 +2667,8 @@ entry point that had no transition, and then mis-reported readiness on a third
 path once the new state existed. All three are pinned in
 `capi_preload_resume.rs` and each was verified red without its fix.
 
-**What is still partial:** a *direct* `jpeg_read_header` call still leaves
+**What was still partial (superseded 2026-08-14 by the closing status
+below):** a *direct* `jpeg_read_header` call still leaves
 `DSTATE_INHEADER`. READY is reached only through `consume_input`, so the two
 entry points disagree about the post-header state where upstream has one
 answer. Making `read_header` land on READY is the remaining half of step 1 —
@@ -2720,13 +2723,82 @@ against the original bug: restoring `DSTATE_STOPPING = 206` fails with
 comparing against the constants themselves removes the transcription step that
 produced the 206.
 
-Still open: the transition work — `DSTATE_BUFIMAGE` in buffered-image mode,
-`DSTATE_READY` after a *direct* `jpeg_read_header` (the shim stays at
+Still open as of that date (all but `DSTATE_BUFIMAGE` closed 2026-08-14; see
+the status below): the transition work — `DSTATE_BUFIMAGE` in buffered-image
+mode, `DSTATE_READY` after a *direct* `jpeg_read_header` (the shim stays at
 `INHEADER`; the consume-driven path and the repeated-call guard landed
 2026-08-11), and finish's
 unread-row rejection, EOI draining with suspension, exactly-once `term_source`
 and abort-reset for reuse, together with the stock-C setjmp harness the criteria
 above require.
+
+
+**Status (2026-08-14): closed.** The remaining root-cause pieces are
+delivered, all measured against stock 3.1.4.1 by
+`examples/classic_lifecycle_state_oracle.c` /
+`tests/capi_classic_lifecycle_state.rs` (13 cases, 17-line trace, verbatim;
+red-check: disabling the finish guard flips four rows (d2/d4/d5/d6, measured)):
+
+* A *direct* `jpeg_read_header` lands on `DSTATE_READY` (202), matching the
+  consume-driven path (oracle d1). **Delivered as an entry guard plus
+  explicit state/flag sites, not as the filing's structural inversion**
+  (read_header as a thin wrapper over `consume_input`): the review re-traced
+  every divergence originally attributed to the inversion's absence
+  (probes u1/u2/p1/s5) and all match stock verbatim, so the inversion is
+  now a maintainability argument rather than a correctness one. The
+  residual risk that argument rests on, recorded for the session that
+  takes it up: upstream maintains `eoi_reached` at 5 sites inside one
+  input controller, while this shim mirrors it at 16 write sites across 9
+  entry points — every future set-site, upstream's or ours, must be
+  mirrored by hand, and only the oracle trace catches a miss.
+* `jpeg_finish_decompress` implements upstream's contract
+  (`jdapimin.c:404-426`): `JERR_TOO_LITTLE_DATA` on unread rows (d2),
+  `JERR_BAD_STATE` with the state as parameter from READY or after a
+  completed finish (d3/d5), `term_source` called exactly once — observable
+  via a counting source manager (d4) — and the abort-reset to
+  `DSTATE_START` (d4/d6). Buffered-image mode takes the BUFIMAGE-equivalent
+  arm keyed on `buffered_image` (this shim publishes SCANNING for that
+  mode — the P4-13 note; full `DSTATE_BUFIMAGE` publication remains that
+  item's residue, not this one's).
+* The `jpeg_consume_input` / `jpeg_input_complete` restructure the item's
+  filing demanded: `eoi_seen` now means what upstream's
+  `inputctl->eoi_reached` means — FALSE after a bare header parse or a
+  single-scan startup, TRUE after a multi-scan startup (upstream's PRELOAD
+  loop absorbs the whole datastream), post-start consume, a tables-only
+  parse (direct and consume-driven), a full-height `jpeg_skip_scanlines`
+  (upstream's clamp branch), `jpeg_finish_output`, `jpeg_read_coefficients`,
+  or a successful finish; surviving finish and abort; cleared when the next
+  datastream's parse begins. The three `#[ignore]`d
+  executable-specification tests in `capi_input_complete_contract.rs` are
+  enabled and pass, and the two tests that pinned the old shim-only
+  promotion (a bare pre-start drain loop terminating) are rewritten to
+  upstream's shape — pre-start polls report `JPEG_REACHED_SOS` forever,
+  and the terminating idiom starts decompression first.
+* The state guards the review round added, each measured against stock
+  (probes s3/r4/u2/p3 → oracle rows d7a/d7b/d8/d9): `jpeg_read_header`
+  itself is legal only from START/INHEADER (`jdapimin.c:278-281`) — a
+  re-read from READY or STOPPING raises `JERR_BAD_STATE(state)`, which is
+  also what makes the START-gated `eoi_seen` clear sound; mid-header
+  suspension leaves `DSTATE_INHEADER`; `jpeg_finish_output` and
+  `jpeg_start_output` refuse non-buffered/non-pass states
+  (`jdapistd.c:747-749`, `:771-780`); `jpeg_finish_decompress` suspends
+  (returns FALSE, no `term_source`, no cleanup) while a P4-13 body is
+  still draining; and `term_source` runs after STOPPING is published,
+  with the callback pointer derived from the live borrow (the bridge sites' child-tag pattern), with the d5 oracle row pinning that a
+  refused second finish does not call it again.
+* **Recorded divergence, not parity:** on a *multi-scan* stream in
+  buffered-image mode, stock's `jpeg_finish_output` absorbs to the next
+  scan boundary and `eoi_reached` stays FALSE until the last pass (the
+  canonical libjpeg.txt loop runs one pass per scan — measured, 10 passes
+  on a 10-scan progressive); the eager model reports EOI after the first
+  pass, so that loop runs once. Pixels are identical (the decode is
+  complete); the pass-walking observability belongs to the buffered-image
+  machinery tracked in P4-13/P4-26.
+
+Proof: `capi_classic_lifecycle_state` (trace verbatim vs stock),
+`capi_input_complete_contract` 8/8 with zero ignores,
+`capi_preload_resume` including the differential `complete` token, and the
+full C-ABI suite at 73 suites / 304 / 0.
 
 ## P4-105. Classic Marker Writers Ignore State and Declared Lengths — **OPEN**
 
@@ -2742,7 +2814,7 @@ as capacity, so under/over-write changes the emitted length.
 valid pre-row, after-row, wrong byte counts, invalid sizes, ordering, and exact
 marker bytes for complete, piecemeal, and ICC writers.
 
-## P4-106. `jpeg_finish_compress` Accepts Incomplete Input and Bad States — **OPEN**
+## P4-106. `jpeg_finish_compress` Accepts Incomplete Input and Bad States — **CLOSED 2026-08-14**
 
 **Motivation.** Filed 2026-08-02 alongside P4-100. Finishing partial scanlines
 currently encodes zero-filled unwritten rows and returns a valid-looking JPEG.
@@ -2754,6 +2826,21 @@ scanline/raw row counts or legal state, then resets regardless of helper result.
 bad/double finish, progress passes, helper failure/no usable partial output,
 destination termination, final reset, and reuse. `JERR_TOO_LITTLE_DATA` and
 other errors flow through P4-100's shared translator.
+
+
+**Status (2026-08-14): closed by measurement.** The filing's claim — partial
+scanlines encode zero-filled rows and return a valid-looking JPEG — no
+longer reproduces: `examples/classic_lifecycle_state_oracle.c` c1/c2/c3/c5
+show `jpeg_finish_compress` raising `JERR_TOO_LITTLE_DATA` (69) on missing
+rows, `JERR_BAD_STATE(100)` without a start and after a completed finish,
+and an error-trapped object reusing cleanly after `jpeg_abort` +
+destination reinstall — line-for-line identical to stock 3.1.4.1 in
+`tests/capi_classic_lifecycle_state.rs`. The row check and state guard were
+delivered by the P4-100/P4-154 batches; this closure contributes the
+differential proof the acceptance criteria asked for. Not separately
+tested: the progress-monitor pass counters during finish's remaining
+passes — that observability belongs with the option batch (P4-84..P4-115)
+where progress reporting is treated as a whole.
 
 ## P4-107. `jpeg_enable_lossless` Clamps Invalid Input and Omits Public State — **OPEN**
 
@@ -6462,6 +6549,31 @@ criterion 5:
    repo-wide; the per-job `RUSTFLAGS` in `cross-arch.yml`/`armv7.yml`/
    `sanitizers.yml` add configurations rather than hiding one.
 
+## P4-163. `jpeg_read_coefficients` Does Not Port Upstream's Improper-Usage Refusal — **OPEN**
+
+**Motivation.** Surfaced by the P4-104 closure's drift audit (2026-08-14):
+the state-machine item that tracked classic decompressor guards closed, and
+this one guard has no other home. Upstream's `jpeg_read_coefficients`
+refuses improper usage after its absorb loop: unless it lands in
+`DSTATE_STOPPING`, or is invoked mid-buffered-image (`DSTATE_BUFIMAGE` with
+`buffered_image` set) to expose the coefficient arrays, it raises
+`ERREXIT1(JERR_BAD_STATE, global_state)` and returns NULL
+(`jdtrans.c:84-94`). This shim's `jpeg_read_coefficients` walks
+READY→RDCOEFS→STOPPING for the standalone flow but has no equivalent
+refusal for out-of-order entry (e.g. from SCANNING mid-scanline-decode),
+where upstream errors and we return arrays or NULL without `error_exit`.
+Related: the P4-104-family guards for `read_header`/`start_output`/
+`finish_output`/`finish_decompress` all landed with #468; this is the one
+classic decompress entry point still without its upstream state guard.
+
+**Acceptance criteria.** A differential oracle row (the
+`classic_lifecycle_state_oracle.c` family) calling
+`jpeg_read_coefficients` from a mid-decode state shows the same
+`JERR_BAD_STATE(state)` on stock and shim; the standalone and
+buffered-image-access flows keep working (existing `capi_preload_resume`
+coefficient trace stays green).
+
+
 ## P4-144. Metadata Copies Are Input-Sized But Still Allocate Infallibly — **CLOSED 2026-08-12**
 
 **GitHub:** [#512](https://github.com/developer0hye/libjpeg-turbo-rs/issues/512) — filed 2026-08-10 while closing
@@ -7291,13 +7403,33 @@ populates the public aggregates during header parse (`jdinput.c`
 `v_samp_factor` correctly but leave `cinfo->max_h_samp_factor` /
 `max_v_samp_factor` at 0 after `jpeg_read_header` on every stream probed
 (stock: 2/2 for 4:2:0, 1/1 for grayscale). They are set on the later
-`jpeg_calc_output_dimensions` path (`jpeglib.rs:3964-3975`) but not at
+`jpeg_calc_output_dimensions` path (`jpeglib.rs:4030-4043`) but not at
 header time. These are public ABI fields consumers read for MCU geometry
 between header and start — and they are why `coef_array_geometries`
 recomputes the maxima from `comp_info` instead of reading them.
 
+**Scope extension (2026-08-14, from the #468 review):** the same family
+one call later — the 8-bit `jpeg_start_decompress` never calls
+`jpeg_calc_output_dimensions` (only the 12/16-bit path does), so
+`max_v_samp_factor` / `min_DCT_v_scaled_size` / `min_DCT_h_scaled_size`
+are 0 after startup where stock reports 2/8/8. A stock-shaped raw-data
+consumer (libtiff, ImageMagick, ffmpeg all compute `lines_per_iMCU =
+max_v_samp_factor * min_DCT_v_scaled_size`) reads zero rows per
+iteration and stalls; with the P4-104 finish guard the stall now
+surfaces loudly as `JERR_TOO_LITTLE_DATA` instead of silently returning
+TRUE (measured: #468 review probes s1/s2 — stock `max_v 2 min_DCT_v 8`,
+`scanline 64`, `finish ret 1`; shim `max_v 0`, `stalled`, `err 69`).
+`capi_jpeg_read_raw_data.rs:192` masks it by calling
+`jpeg_calc_output_dimensions` explicitly before asserting.
+
 **Acceptance criteria.** After `jpeg_read_header`, both aggregates equal
 stock's for a probe matrix covering 4:2:0, 4:2:2, 4:4:0, 4:4:4,
 grayscale, and 4-component CMYK (oracle-compared), and
-`coef_array_geometries` can assert its recomputation against them.
+`coef_array_geometries` can assert its recomputation against them. After
+the 8-bit `jpeg_start_decompress`, `max_v_samp_factor` and the
+`min_DCT_*_scaled_size` pair equal stock's without the caller invoking
+`jpeg_calc_output_dimensions`, and the stock-shaped raw loop (probe s2)
+reads all rows and finishes TRUE; the explicit `calc` call is removed
+from `capi_jpeg_read_raw_data.rs` so the test exercises the consumer's
+real sequence.
 

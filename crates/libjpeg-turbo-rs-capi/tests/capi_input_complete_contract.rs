@@ -13,24 +13,17 @@
 //! shim used to return `state >= DSTATE_SCANNING && !body_incomplete`, which
 //! worked only because `jpeg_consume_input` jumped the state to `SCANNING` on
 //! header completion. That hack is what blocked modelling `DSTATE_READY`, so
-//! untangling it is a prerequisite for the rest of P4-104's transition work —
+//! untangling it was a prerequisite for the rest of P4-104's transition work —
 //! not a cosmetic change.
 
-//! **Three tests here are `#[ignore]`d, deliberately.** They encode upstream's
-//! contract for cases this shim does not match yet: completion surviving
-//! `jpeg_finish_decompress`, a reused handle clearing it, and a baseline
-//! startup not implying it. Each needs `jpeg_input_complete` to answer from
-//! `eoi_seen` rather than `global_state` — and that needs `jpeg_consume_input`
-//! restructured, because for a fully-buffered stream ours returns
-//! `JPEG_REACHED_EOI` at header parse where upstream returns
-//! `JPEG_REACHED_SOS`. Four attempts to maintain the flag around that
-//! divergence each got a different shape wrong (baseline vs progressive,
-//! buffered vs not, across abort, across reuse), so the flag stays out of the
-//! answer until the restructure.
-//!
-//! They are written as executable specification rather than prose, per
-//! `CLAUDE.md`: an implementation that is not ready gets `#[ignore]` with a
-//! reason, not a loosened assertion.
+//! The P4-104 (#468) restructure landed: `jpeg_input_complete` answers from
+//! `eoi_seen` — which now means exactly what upstream's
+//! `inputctl->eoi_reached` means — and `jpeg_consume_input` follows
+//! upstream's state dispatch (pre-start polls report `JPEG_REACHED_SOS`
+//! without consuming). The three tests that spent their `#[ignore]`d lives
+//! as executable specification for that contract are enabled below:
+//! completion survives `jpeg_finish_decompress`, a reused handle clears it
+//! at the next parse, and a baseline startup does not imply it.
 
 use std::ffi::{c_int, c_void};
 
@@ -133,11 +126,16 @@ fn fresh_decompressor_reports_incomplete_without_erroring() {
     );
 }
 
-/// Draining a complete datastream reports complete — the documented
-/// buffered-image idiom `while (!jpeg_input_complete()) jpeg_consume_input();`
-/// must terminate.
+/// A pre-start poll loop does NOT complete — upstream's contract, verbatim:
+/// `jpeg_consume_input` "can't advance past first SOS until start_decompress
+/// is called" (`jdapimin.c`), so from `DSTATE_READY` every poll reports
+/// `JPEG_REACHED_SOS` without consuming and `jpeg_input_complete` stays
+/// FALSE. This test used to assert the opposite — a shim-only promotion
+/// that made the bare drain loop terminate — which was retired with the
+/// P4-104 (#468) restructure; the working buffered idiom starts
+/// decompression first (see the tests above and below).
 #[test]
-fn draining_to_eoi_reports_complete() {
+fn pre_start_polls_stay_incomplete_reporting_sos() {
     let jpeg: Vec<u8> = tiny_jpeg();
     let mut h: Harness = Harness::new();
     let p: *mut c_void = h.ptr();
@@ -146,17 +144,22 @@ fn draining_to_eoi_reports_complete() {
     // `jpeg_mem_src`'s retained-pointer contract requires.
     unsafe {
         jpeg_mem_src(p, jpeg.as_ptr(), jpeg.len() as std::os::raw::c_ulong);
-        jpeg_read_header(p, 1);
+        assert_eq!(jpeg_read_header(p, 1), 1, "JPEG_HEADER_OK");
 
-        // Bounded, so a regression that never completes fails instead of
-        // hanging CI.
-        let mut polls: u32 = 0;
-        while jpeg_input_complete(p) == 0 {
-            jpeg_consume_input(p);
-            polls += 1;
-            assert!(polls < 1000, "input never completed after {polls} polls");
+        const JPEG_REACHED_SOS: c_int = 1;
+        for poll in 0..8 {
+            assert_eq!(
+                jpeg_input_complete(p),
+                0,
+                "poll {poll}: a parsed header is not a consumed datastream"
+            );
+            assert_eq!(
+                jpeg_consume_input(p),
+                JPEG_REACHED_SOS,
+                "poll {poll}: pre-start consume reports SOS without advancing"
+            );
         }
-        assert_eq!(h.raised(), NO_ERROR, "a clean drain must not raise");
+        assert_eq!(h.raised(), NO_ERROR, "idempotent polls must not raise");
     }
 }
 
@@ -234,13 +237,13 @@ fn progressive_start_decompress_leaves_input_complete() {
 /// `DSTATE_START` is inside the accepted range, so the query stays valid and
 /// still answers TRUE.
 ///
-/// This shim clears its `eoi_seen` flag in finish and abort, and has no
-/// clear-on-fresh-parse. That is invisible today because the answer comes from
-/// `global_state`, but it is a second thing the restructure must fix: the flag
-/// has to be cleared where upstream clears it — when the next datastream read
-/// begins (`reset_input_controller`) — and left alone by finish and abort.
+/// This shim used to clear its `eoi_seen` flag in finish and abort, with no
+/// clear-on-fresh-parse. The P4-104 (#468) restructure moved the clear to
+/// where upstream clears it — when the next datastream read begins
+/// (`reset_input_controller`) — and left finish and abort alone, which is what
+/// this test and `reusing_the_handle_clears_completion_for_the_new_image`
+/// between them pin.
 #[test]
-#[ignore = "P4-104 (#468): jpeg_input_complete still answers from global_state, which finish resets. Unignores when consume_input is restructured and the answer moves to eoi_seen."]
 fn input_stays_complete_after_finish_decompress() {
     use libjpeg_turbo_rs_capi::jpeglib::{jpeg_finish_decompress, jpeg_start_decompress};
 
@@ -255,9 +258,9 @@ fn input_stays_complete_after_finish_decompress() {
         assert_eq!(jpeg_start_decompress(p), 1);
         // Read every row before finishing. Upstream raises
         // `JERR_TOO_LITTLE_DATA` when `output_scanline < output_height`
-        // (`jdapimin.c:404-408`); calling finish straight after startup would
-        // pass here only because that guard is still missing (P4-106), so the
-        // test would be asserting a successful finish it never performed.
+        // (`jdapimin.c:404-408`), and since P4-104 (#468) so does this shim,
+        // so calling finish straight after startup would fail the assertion
+        // below rather than assert a successful finish it never performed.
         drain_all_scanlines(p, &mut h);
         assert_eq!(jpeg_finish_decompress(p), 1, "finish");
         assert_eq!(
@@ -274,7 +277,6 @@ fn input_stays_complete_after_finish_decompress() {
 /// completion. Without this, a reused handle would report "complete" before
 /// reading anything.
 #[test]
-#[ignore = "P4-104 (#468): depends on the eoi_seen answer, deferred with it."]
 fn reusing_the_handle_clears_completion_for_the_new_image() {
     use libjpeg_turbo_rs_capi::jpeglib::{jpeg_finish_decompress, jpeg_start_decompress};
 
@@ -331,7 +333,6 @@ fn reusing_the_handle_clears_completion_for_the_new_image() {
 /// reports incomplete. Internal eagerness is not a licence to answer a public
 /// query differently.
 #[test]
-#[ignore = "P4-104 (#468): our consume_input reports EOI at header parse for a fully-buffered stream where upstream reports SOS, so the state-based answer says complete here. Unignores with the consume_input rework."]
 fn baseline_startup_alone_is_not_completion() {
     use libjpeg_turbo_rs_capi::jpeglib::jpeg_start_decompress;
 
@@ -365,10 +366,11 @@ fn baseline_startup_alone_is_not_completion() {
 /// `global_state` is a public field consumers switch on, so this is an
 /// observable contract, not an internal detail.
 ///
-/// Enabled deliberately: the two other tests that touch finish are
-/// `#[ignore]`d pending the `consume_input` rework, which would have left the
-/// `DSTATE_START` change with no gate at all — reverting it would have kept
-/// every enabled test green.
+/// Enabled deliberately when it landed: the two other tests that touch finish
+/// were `#[ignore]`d pending the `consume_input` rework, which would have left
+/// the `DSTATE_START` change with no gate at all — reverting it would have
+/// kept every enabled test green. Those two run alongside this one since the
+/// P4-104 (#468) closure.
 #[test]
 fn finish_decompress_resets_state_to_start() {
     use libjpeg_turbo_rs_capi::jpeglib::{jpeg_finish_decompress, jpeg_start_decompress};

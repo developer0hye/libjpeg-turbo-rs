@@ -174,7 +174,7 @@
 ### Scanline-Level Encode API
 - [ ] Full classic `jpeg_start_compress()` contract — basic start works; `write_all_tables` remains P4-87
 - [ ] Full classic `jpeg_write_scanlines()` option contract — basic rows work; residual gaps are P4-84..P4-93
-- [ ] Full classic `jpeg_finish_compress()` lifecycle/error contract — native finish works; P4-100/P4-106
+- [ ] Full classic `jpeg_finish_compress()` lifecycle/error contract — missing-rows/bad-state lifecycle matches stock (P4-106 closed 2026-08-14); error reporting is P4-100
 - [ ] Full classic `jpeg_write_raw_data()` / `jpeg12_write_raw_data()` option contract — default raw encode works; P4-95
 - [ ] Classic `jpeg12_write_scanlines()` / `jpeg16_write_scanlines()` encode completion — P4-94
 - [x] `jpeg_calc_jpeg_dimensions()` — Compute compression-side JPEG dimensions; no compression scaling (`calc_jpeg_dimensions()`, P4-1 2026-05-10)
@@ -236,17 +236,17 @@
 ### Multi-Scan / Progressive Output
 - [ ] Classic `jpeg_has_multiple_scans()` state semantics — the reported bit matches upstream since 2026-08-13 (progressive ∨ non-interleaved sequential first scan, `jdinput.c:153-156`, pinned by the P4-14 `hms_*` oracle rows); the P4-114 state handling remains
 - [x] `buffered_image` mode — Enable scan-by-scan output (`ProgressiveDecoder`)
-- [ ] Full classic `jpeg_start_output()` / `jpeg_finish_output()` input-pull/state contract — native output works; P4-26/P4-104
-- [ ] Full classic `jpeg_consume_input()` contract — suspension core works; P4-13/P4-26/P4-104
-- [ ] Full classic `jpeg_input_complete()` state/streaming contract — native query works; P4-26/P4-104
+- [ ] Full classic `jpeg_start_output()` / `jpeg_finish_output()` input-pull/state contract — state guards match stock (P4-104 closed 2026-08-14); input-pull is P4-26, `DSTATE_BUFIMAGE` pass-walking is P4-13
+- [ ] Full classic `jpeg_consume_input()` contract — suspension core and state dispatch match stock (P4-104 closed 2026-08-14); deeper streaming fidelity is P4-13/P4-26
+- [ ] Full classic `jpeg_input_complete()` state/streaming contract — answers upstream's `eoi_reached` (P4-104 closed 2026-08-14); deeper streaming fidelity is P4-26
 
 ### Scanline-Level Decode API
-- [ ] Full classic `jpeg_read_header()` public state/tables contract — native parser works; P4-99/P4-101/P4-104
-- [ ] Full classic `jpeg_start_decompress()` option/state contract — native decoder works; P4-96/P4-99/P4-104
+- [ ] Full classic `jpeg_read_header()` public state/tables contract — entry guard and post-parse state match stock (P4-104 closed 2026-08-14); metadata/tables are P4-99/P4-101
+- [ ] Full classic `jpeg_start_decompress()` option/state contract — native decoder works; P4-96/P4-99 (published state closed with P4-104 2026-08-14, except `DSTATE_BUFIMAGE` → P4-13)
 - [ ] Full classic `jpeg_read_scanlines()` option/error contract — basic rows work; P4-96/P4-99/P4-100
 - [x] `jpeg_skip_scanlines()` — Skip rows during decode (`ScanlineDecoder::skip_scanlines()`)
 - [ ] Full classic `jpeg_crop_scanline()` iMCU-aligned/state semantics — native exact crop exists; P4-103
-- [ ] Full classic `jpeg_finish_decompress()` lifecycle/suspension contract — native finish works; P4-100/P4-104
+- [ ] Full classic `jpeg_finish_decompress()` lifecycle/suspension contract — lifecycle and suspension match stock (P4-104 closed 2026-08-14, oracle-compared); error reporting is P4-100
 - [ ] Full classic `jpeg_read_raw_data()` option/state/error contract — native raw decode works; P4-102
 - [ ] Full classic `jpeg12_read/skip/crop_scanline` lifecycle/options — native precision decode exists; P4-98
 - [ ] Full classic `jpeg16_read_scanlines` lifecycle/options — native precision decode exists; P4-98
