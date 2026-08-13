@@ -305,7 +305,7 @@ Verified with `cargo test --release --test hard_case_x_byte_and_restart` → 6 p
 
 **Why PARTIAL, not CLOSED.** Codex round 8 (on commit `4645b52`) raised three upstream-contract-fidelity gaps that lie *beyond* the stated acceptance criteria but mean the broad title — "honor per-byte source suspension" — is not yet fully met across every entry point: (1) `jpeg_read_header` only stops at the first SOS on the *suspending* path (gated on `body_incomplete`); a fully-buffered consumer still has the whole body swallowed in `read_header`, so a later `jpeg_consume_input` reports `REACHED_EOI` immediately without per-scan `REACHED_SOS` callbacks. (2) Buffered-image *output* calls (`jpeg_start_output` / `jpeg_read_scanlines` / `jpeg_finish_output`) do not themselves pull from the source manager — a consumer driving decode purely through the output side on a still-`body_incomplete` handle makes no forward progress. (3) The `marker_list` is *rebuilt* from the completed stream rather than *appended* in place, so a `jpeg_saved_marker_ptr` a consumer retained mid-stream is invalidated by the rebuild. All three need a deeper, consumer-risky refactor (gap (1) changes every fully-buffered consumer's `read_header` behavior), none block T3, and no known consumer exercises them — so they are filed as [P4-26](#p4-26-deeper-streaming-contract-fidelity-beyond-the-p4-13-core--open) rather than expanding this PR's scope. The verified streaming-suspension core lands here.
 
-## P4-14. `max_memory_to_use` Is ABI-Mirrored But Not Enforced in the C-Side Allocation Path — **PARTIAL: the memory-manager vtable enforces it; the native decode path does not route through it**
+## P4-14. `max_memory_to_use` Is ABI-Mirrored But Not Enforced in the C-Side Allocation Path — **PARTIAL: vtable + classic decode sequence enforce it; strip-wise realization and full upstream accounting remain**
 
 **Correction (2026-08-11): the error contract this item and [#467](https://github.com/developer0hye/libjpeg-turbo-rs/issues/467)
 specify is wrong, and the "no spill path" constraint dissolves.** Recorded
@@ -438,6 +438,25 @@ still has no injection point, and the `msg_parm` payload of
 - Either: wire budget enforcement through `alloc_large_impl` / `realize_virt_arrays_impl` and the virtual-array spill path; OR document the divergence in `ABI_COMPATIBILITY.md` with a `cargo:warning=` when the field is set to a non-default value via `tj3Set(TJPARAM_MAXMEMORY)` or the C-ABI direct path.
 
 **Why deferred.** Upstream uses backing-store spill to disk when virtual arrays exceed the in-memory budget. We have no backing-store implementation (`memmgr.rs:20-28`: *"This module keeps all of the data in RAM and never spills to disk"*). Wiring true budget enforcement either reimplements the spill path or changes the failure semantics from "OOM kill or swap" to "explicit `JERR_OUT_OF_MEMORY` exit". Documenting first; implementing only on a named consumer requirement.
+
+**Status (2026-08-13): the decode-sequence half is delivered.** The
+`jpeg_read_header → jpeg_start_decompress → jpeg_read_scanlines` sequence is
+now bounded: `run_decoder_for_start` reads `cinfo->mem->max_memory_to_use`
+(`classic_decode_budget`) and applies it via `Decoder::set_max_memory` — on
+**progressive streams only**, because that is what upstream bounds: the field
+is consulted by `realize_virt_arrays`, which exists only where whole-image
+coefficient arrays do. Measured (`examples/classic_budget_oracle.c` vs stock
+3.1.4.1): a 1000-byte budget passes a baseline 64x64 decode and fails a
+progressive one at `jpeg_start_decompress` with `JERR_NO_BACKING_STORE`;
+`capi_classic_decode_budget.rs` compares the six-case trace verbatim and
+carries a standalone refusal test, Red-verified by disabling the plumbing.
+The budget refusal propagates past the format-fallback (which would
+otherwise re-decode without limits), and `classic_error_for` maps the
+memory-limit error to 51 rather than `JERR_IMAGE_TOO_BIG`. Still open here:
+strip-wise realization semantics and the manager/virtual-control allocations
+upstream counts (`total_space_allocated`); exact byte-threshold parity
+remains out of scope by the coarser-model note above. P4-120's injection
+half is separate and untouched by this delivery.
 
 ## P4-15. `jpeg16_read_raw_data` / `jpeg16_write_raw_data` Mirror Upstream's 8/12-Only Raw-Data API — **CLOSED 2026-05-18**
 

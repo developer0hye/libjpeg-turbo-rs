@@ -658,7 +658,7 @@ unsafe extern "C" fn request_virt_barray_impl(
 /// `jpeg_mem_available` (`jmemnobs.c:66-78`), `realize_virt_arrays` parcels the
 /// shortfall into strips (`jmemmgr.c:745-760`), and the spill that follows hits
 /// `jmemnobs.c:87-92`. See the P4-14 correction in `phase4.md`.
-const JERR_NO_BACKING_STORE: c_int = 51;
+pub(crate) const JERR_NO_BACKING_STORE: c_int = 51;
 
 /// `jerror.h` — "Insufficient memory (case %d)". Used here only for geometry
 /// that cannot be expressed in bytes, which is an allocation failure rather

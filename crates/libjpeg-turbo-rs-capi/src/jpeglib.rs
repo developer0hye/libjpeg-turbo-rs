@@ -1183,6 +1183,15 @@ fn classic_error_for(err: &libjpeg_turbo_rs::JpegError) -> (c_int, Option<c_int>
         E::Unsupported(_) => (JERR_NOTIMPL, None),
         // Exact: caller-sized buffer proved too small.
         E::BufferTooSmall { .. } => (JERR_BUFFER_SIZE, None),
+        // The memory budget is `JERR_NO_BACKING_STORE`, matching what the
+        // vtable's `realize_virt_arrays` enforcement raises for the same
+        // field (#517's corrected contract, P4-14) — upstream has no backing
+        // store, so an unsatisfiable `max_memory_to_use` surfaces as 51,
+        // not as an image-dimension error.
+        E::LimitExceeded {
+            what: "estimated decode memory",
+            ..
+        } => (crate::memmgr::JERR_NO_BACKING_STORE, None),
         // Exact: upstream substitutes the limit it enforces.
         E::LimitExceeded { limit, .. } => (
             JERR_IMAGE_TOO_BIG,
@@ -3489,25 +3498,29 @@ pub unsafe extern "C" fn jpeg_start_decompress(cinfo: *mut c_void) -> CBoolean {
         // per-code length limits.
         let save_config: libjpeg_turbo_rs::MarkerSaveConfig =
             marker_save_to_config(&priv_state.marker_save);
-        let image: libjpeg_turbo_rs::Image =
-            match run_decoder_for_start(&bytes, format, save_config, &priv_state.marker_processors)
-            {
-                Ok(i) => i,
-                Err(e) => {
-                    // P4-100: a malformed stream is not source suspension.
-                    // Returning FALSE with only a private string told a
-                    // conforming caller "refill and retry" about a stream that
-                    // can never decode; route it through the shared translator
-                    // so `msg_code` matches what stock libjpeg reports.
-                    raise_native_error(
-                        cinfo,
-                        &mut priv_state.last_error,
-                        "jpeg_start_decompress",
-                        &e,
-                    );
-                    return 0;
-                }
-            };
+        let image: libjpeg_turbo_rs::Image = match run_decoder_for_start(
+            &bytes,
+            format,
+            save_config,
+            &priv_state.marker_processors,
+            classic_decode_budget(c),
+        ) {
+            Ok(i) => i,
+            Err(e) => {
+                // P4-100: a malformed stream is not source suspension.
+                // Returning FALSE with only a private string told a
+                // conforming caller "refill and retry" about a stream that
+                // can never decode; route it through the shared translator
+                // so `msg_code` matches what stock libjpeg reports.
+                raise_native_error(
+                    cinfo,
+                    &mut priv_state.last_error,
+                    "jpeg_start_decompress",
+                    &e,
+                );
+                return 0;
+            }
+        };
 
         let out_cs_effective: c_int = colorspace_to_jcs(match image.pixel_format {
             PixelFormat::Grayscale => libjpeg_turbo_rs::ColorSpace::Grayscale,
@@ -3577,14 +3590,53 @@ fn marker_save_to_config(settings: &MarkerSaveSettings) -> libjpeg_turbo_rs::Mar
 /// `decompress` path if the explicit `decompress_to` shape is
 /// unsupported for the input colorspace (e.g. grayscale JPEG with
 /// `JCS_GRAYSCALE`).
+/// The caller-set `cinfo->mem->max_memory_to_use`, or `None` when 0 or
+/// negative (unlimited, upstream's `jpeg_mem_init` default) or when `mem` is
+/// absent. Raw read — the memory-manager struct is caller-visible ABI.
+fn classic_decode_budget(c: &JpegDecompressPublic) -> Option<usize> {
+    if c.mem.is_null() {
+        return None;
+    }
+    // SAFETY: `mem` was installed by create as a `JpegMemoryMgr`, and
+    // `max_memory_to_use` sits at the ABI-pinned offset the layout assertion
+    // in `memmgr.rs` enforces.
+    let v: c_long = unsafe {
+        std::ptr::addr_of!((*(c.mem as *const crate::memmgr::JpegMemoryMgr)).max_memory_to_use)
+            .read()
+    };
+    if v > 0 {
+        Some(v as usize)
+    } else {
+        None
+    }
+}
+
 fn run_decoder_for_start(
     bytes: &[u8],
     format: PixelFormat,
     save_config: libjpeg_turbo_rs::MarkerSaveConfig,
     processors: &std::collections::HashMap<u8, MarkerParserFn>,
+    budget: Option<usize>,
 ) -> libjpeg_turbo_rs::Result<libjpeg_turbo_rs::Image> {
     let mut decoder: libjpeg_turbo_rs::Decoder<'_> = libjpeg_turbo_rs::Decoder::new(bytes)?;
     decoder.set_output_format(format);
+    // P4-14 (#467): the classic decode sequence is bounded by the same field
+    // the memory-manager vtable enforces. Until this, `jpeg_read_header` →
+    // `jpeg_start_decompress` → `jpeg_read_scanlines` was unbounded — the
+    // criterion the issue names.
+    //
+    // Applied only to progressive streams, because that is what upstream
+    // bounds: `jpeg_mem_available` is consulted by `realize_virt_arrays`,
+    // which exists only where whole-image coefficient arrays do. Measured
+    // (classic_budget_oracle vs stock 3.1.4.1): a 1000-byte budget passes a
+    // baseline 64x64 decode — no virtual arrays — and fails a progressive
+    // one at `jpeg_start_decompress` with `JERR_NO_BACKING_STORE`. Bounding
+    // baseline here would refuse what stock accepts.
+    if let Some(bytes_cap) = budget {
+        if decoder.header().is_progressive {
+            decoder.set_max_memory(bytes_cap);
+        }
+    }
     // Always enable marker capture when processors are registered — the
     // Rust `set_marker_processor` API is called after-the-fact via a
     // closure that inspects `Image.saved_markers`.
@@ -3605,9 +3657,19 @@ fn run_decoder_for_start(
     }
     match decoder.decode_image() {
         Ok(img) => Ok(img),
+        // The budget refusal must propagate: the fallback below re-decodes
+        // and would silently bypass the limit it just enforced.
+        Err(e @ libjpeg_turbo_rs::JpegError::LimitExceeded { .. }) => Err(e),
         Err(_e) => {
-            // Fall back: format-agnostic decompress.
-            decompress(bytes)
+            // Fall back: format-agnostic decompress, same budget policy.
+            let mut fallback: libjpeg_turbo_rs::Decoder<'_> =
+                libjpeg_turbo_rs::Decoder::new(bytes)?;
+            if let Some(bytes_cap) = budget {
+                if fallback.header().is_progressive {
+                    fallback.set_max_memory(bytes_cap);
+                }
+            }
+            fallback.decode_image()
         }
     }
 }
@@ -3638,7 +3700,13 @@ fn ensure_decoded_deferred(
     let format: PixelFormat = jcs_to_pixel_format(c.out_color_space).unwrap_or(PixelFormat::Rgb);
     let save_config: libjpeg_turbo_rs::MarkerSaveConfig =
         marker_save_to_config(&priv_state.marker_save);
-    match run_decoder_for_start(&bytes, format, save_config, &priv_state.marker_processors) {
+    match run_decoder_for_start(
+        &bytes,
+        format,
+        save_config,
+        &priv_state.marker_processors,
+        classic_decode_budget(c),
+    ) {
         Ok(image) => {
             let out_cs_effective: c_int = colorspace_to_jcs(match image.pixel_format {
                 PixelFormat::Grayscale => libjpeg_turbo_rs::ColorSpace::Grayscale,
