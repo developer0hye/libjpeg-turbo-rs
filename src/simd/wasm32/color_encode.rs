@@ -24,11 +24,29 @@ pub fn wasm_rgb_to_ycbcr_row(rgb: &[u8], y: &mut [u8], cb: &mut [u8], cr: &mut [
     if width == 0 {
         return;
     }
-    // SAFETY: Caller guarantees y.len() >= width, cb.len() >= width, cr.len() >= width,
-    // out.len() >= width * BPP. The loop processes 8 pixels per iteration with a scalar
-    // tail for width % 8 != 0, preventing out-of-bounds access.
-    unsafe {
-        wasm_rgb_to_ycbcr_row_inner(rgb, y, cb, cr, width);
+    // P4-135 (#474): `width` is independent of the slice lengths, and the
+    // SIMD loop loads/stores by raw pointer without consulting them — so a
+    // safe function must check, not assume. The input holds
+    // `width * 3` bytes (checked_mul: a wrapping product would let a
+    // short buffer pass); each output plane holds `width`. A request the
+    // arguments cannot satisfy falls back to the scalar path, which
+    // slices and therefore bounds-checks. simd128 needs no runtime check
+    // on wasm32: this module only compiles when the target feature is
+    // statically enabled.
+    let src_needed: Option<usize> = width.checked_mul(3);
+    let fits: bool = src_needed.is_some_and(|n| rgb.len() >= n)
+        && y.len() >= width
+        && cb.len() >= width
+        && cr.len() >= width;
+    if fits {
+        // SAFETY: every slice holds the samples this kernel reads and
+        // writes, checked immediately above; simd128 is statically
+        // enabled for this module.
+        unsafe {
+            wasm_rgb_to_ycbcr_row_inner(rgb, y, cb, cr, width);
+        }
+    } else {
+        crate::encode::color::rgb_to_ycbcr_row(rgb, y, cb, cr, width);
     }
 }
 
@@ -268,10 +286,29 @@ pub fn wasm_rgba_to_ycbcr_row(
     if width == 0 {
         return;
     }
-    // SAFETY: Caller guarantees rgba.len() >= width * 4, y/cb/cr.len() >= width.
-    // The loop processes 8 pixels per iteration with a scalar tail.
-    unsafe {
-        wasm_rgba_to_ycbcr_row_inner(rgba, y, cb, cr, width);
+    // P4-135 (#474): `width` is independent of the slice lengths, and the
+    // SIMD loop loads/stores by raw pointer without consulting them — so a
+    // safe function must check, not assume. The input holds
+    // `width * 4` bytes (checked_mul: a wrapping product would let a
+    // short buffer pass); each output plane holds `width`. A request the
+    // arguments cannot satisfy falls back to the scalar path, which
+    // slices and therefore bounds-checks. simd128 needs no runtime check
+    // on wasm32: this module only compiles when the target feature is
+    // statically enabled.
+    let src_needed: Option<usize> = width.checked_mul(4);
+    let fits: bool = src_needed.is_some_and(|n| rgba.len() >= n)
+        && y.len() >= width
+        && cb.len() >= width
+        && cr.len() >= width;
+    if fits {
+        // SAFETY: every slice holds the samples this kernel reads and
+        // writes, checked immediately above; simd128 is statically
+        // enabled for this module.
+        unsafe {
+            wasm_rgba_to_ycbcr_row_inner(rgba, y, cb, cr, width);
+        }
+    } else {
+        crate::encode::color::rgba_to_ycbcr_row(rgba, y, cb, cr, width);
     }
 }
 
@@ -352,10 +389,29 @@ pub fn wasm_bgr_to_ycbcr_row(bgr: &[u8], y: &mut [u8], cb: &mut [u8], cr: &mut [
     if width == 0 {
         return;
     }
-    // SAFETY: Caller guarantees bgr.len() >= width * 3, y/cb/cr.len() >= width.
-    // The loop processes 8 pixels per iteration with a scalar tail.
-    unsafe {
-        wasm_bgr_to_ycbcr_row_inner(bgr, y, cb, cr, width);
+    // P4-135 (#474): `width` is independent of the slice lengths, and the
+    // SIMD loop loads/stores by raw pointer without consulting them — so a
+    // safe function must check, not assume. The input holds
+    // `width * 3` bytes (checked_mul: a wrapping product would let a
+    // short buffer pass); each output plane holds `width`. A request the
+    // arguments cannot satisfy falls back to the scalar path, which
+    // slices and therefore bounds-checks. simd128 needs no runtime check
+    // on wasm32: this module only compiles when the target feature is
+    // statically enabled.
+    let src_needed: Option<usize> = width.checked_mul(3);
+    let fits: bool = src_needed.is_some_and(|n| bgr.len() >= n)
+        && y.len() >= width
+        && cb.len() >= width
+        && cr.len() >= width;
+    if fits {
+        // SAFETY: every slice holds the samples this kernel reads and
+        // writes, checked immediately above; simd128 is statically
+        // enabled for this module.
+        unsafe {
+            wasm_bgr_to_ycbcr_row_inner(bgr, y, cb, cr, width);
+        }
+    } else {
+        crate::encode::color::bgr_to_ycbcr_row_scalar(bgr, y, cb, cr, width);
     }
 }
 
@@ -441,10 +497,29 @@ pub fn wasm_bgra_to_ycbcr_row(
     if width == 0 {
         return;
     }
-    // SAFETY: Caller guarantees bgra.len() >= width * 4, y/cb/cr.len() >= width.
-    // The loop processes 8 pixels per iteration with a scalar tail.
-    unsafe {
-        wasm_bgra_to_ycbcr_row_inner(bgra, y, cb, cr, width);
+    // P4-135 (#474): `width` is independent of the slice lengths, and the
+    // SIMD loop loads/stores by raw pointer without consulting them — so a
+    // safe function must check, not assume. The input holds
+    // `width * 4` bytes (checked_mul: a wrapping product would let a
+    // short buffer pass); each output plane holds `width`. A request the
+    // arguments cannot satisfy falls back to the scalar path, which
+    // slices and therefore bounds-checks. simd128 needs no runtime check
+    // on wasm32: this module only compiles when the target feature is
+    // statically enabled.
+    let src_needed: Option<usize> = width.checked_mul(4);
+    let fits: bool = src_needed.is_some_and(|n| bgra.len() >= n)
+        && y.len() >= width
+        && cb.len() >= width
+        && cr.len() >= width;
+    if fits {
+        // SAFETY: every slice holds the samples this kernel reads and
+        // writes, checked immediately above; simd128 is statically
+        // enabled for this module.
+        unsafe {
+            wasm_bgra_to_ycbcr_row_inner(bgra, y, cb, cr, width);
+        }
+    } else {
+        crate::encode::color::bgra_to_ycbcr_row_scalar(bgra, y, cb, cr, width);
     }
 }
 

@@ -459,13 +459,17 @@ pub fn idct_float_8x8(coeffs: &[i16; 64], quant: &[u16; 64]) -> [i16; 64] {
 pub fn idct_8x8(coeffs: &[i16; 64]) -> [i16; 64] {
     // libjpeg-turbo's SIMD islow (the codec djpeg actually runs on every
     // platform — verified bit-identical between x86 SSE2/AVX2 and AArch64
-    // NEON) keeps the pass-1 column workspace in 16-bit lanes: the DC shift
-    // is `psllw`/`vshl_n_s16` and the general descale is `packssdw`/`vrshrn`,
-    // both of which narrow to i16 *before* pass 2 reads them. For valid
-    // inputs every pass-1 result fits in i16, so this is a no-op; only
+    // NEON on valid input, per P4-19) keeps the pass-1 column workspace in
+    // 16-bit lanes: the DC shift is `psllw`/`vshl_n_s16` and
+    // the general descale is `packssdw` (x86, which *saturates*) /
+    // `vrshrn` (NEON, which *truncates*) — both narrow to i16 before pass
+    // 2 reads them, but not the same way on overflow. This scalar path
+    // mirrors the NEON/truncating behavior (`as i16`). For valid inputs
+    // every pass-1 result fits in i16, so the distinction is a no-op; only
     // corrupt/out-of-range coefficients (e.g. a DC predictor that ran away
-    // on a fuzzed bitstream) overflow, and there the i16 wrap is exactly the
-    // reference behavior. Our NEON port already mirrors this — storing the
+    // on a fuzzed bitstream) overflow, and there the i16 wrap matches NEON
+    // while x86's saturating pack differs — the per-backend divergence
+    // P4-19/P4-20 record. Our NEON port already mirrors this — storing the
     // workspace as i32 here is what made the scalar/x86 paths diverge from C
     // (and from our own NEON path) on such inputs.
     let mut workspace = [0i16; 64];
