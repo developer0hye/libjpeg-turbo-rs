@@ -21,7 +21,7 @@
 | P4-11 | CLOSED 2026-05-17 |
 | P4-12 | CLOSED 2026-05-17 |
 | P4-13 | PARTIAL (incremental consume_input suspension landed + byte-exact-proven; deeper streaming-contract fidelity → P4-26) |
-| P4-14 | OPEN (filed 2026-05-18) |
+| P4-14 | PARTIAL (vtable enforces 2026-08-11, classic decode sequence 2026-08-13; strip-wise realization, allocated-overhead accounting and the suspending buffered path remain) |
 | P4-15 | CLOSED 2026-05-18 |
 | P4-16 | CLOSED 2026-05-19 (Option B: documented in ABI_COMPATIBILITY.md) |
 | P4-17 | CLOSED 2026-06-02 (real-suspension test delivered with P4-13) |
@@ -72,11 +72,11 @@
 | P4-111 | OPEN (classic progress-manager callbacks/counters are not wired) |
 | P4-112 | OPEN (`jpeg_set_marker_processor` callbacks are stored but never invoked) |
 | P4-113 | OPEN (`jpeg_read_icc_profile` bypasses classic saved-marker semantics) |
-| P4-114 | OPEN (`jpeg_has_multiple_scans` equates multi-scan with progressive) |
+| P4-114 | OPEN (the reported bit matches upstream since 2026-08-13; `jpeg_has_multiple_scans` state validation remains) |
 | P4-115 | OPEN (native 12-bit coverage claims include modes and sampling layouts that are not tested) |
 | P4-116 | CLOSED 2026-08-08 (C-parity tests can convert Rust/oracle failures or missing comparisons into a pass) |
 | P4-117 | CLOSED 2026-08-08 (4:4:1 trim rejected images shorter than one iMCU row) |
-| P4-120 | OPEN (classic-shim allocation-failure paths are unreachable from tests) |
+| P4-120 | CLOSED 2026-08-13 (`fail_nth_allocation_for_tests` makes both `jpeg_mem_dest` OOM paths reachable, code 56 + `msg_parm.i[0] == 10` asserted) |
 | P4-121 | OPEN (lossless encode accepts a restart interval C refuses to decode) |
 | P4-122 | OPEN (the Pillow smoke harness substitutes for a v6b library, which its own policy forbids) |
 | P4-125 | CLOSED 2026-08-08 (TurboJPEG YUV decompress entry points emitted one plane per SOF component) |
@@ -305,7 +305,7 @@ Verified with `cargo test --release --test hard_case_x_byte_and_restart` → 6 p
 
 **Why PARTIAL, not CLOSED.** Codex round 8 (on commit `4645b52`) raised three upstream-contract-fidelity gaps that lie *beyond* the stated acceptance criteria but mean the broad title — "honor per-byte source suspension" — is not yet fully met across every entry point: (1) `jpeg_read_header` only stops at the first SOS on the *suspending* path (gated on `body_incomplete`); a fully-buffered consumer still has the whole body swallowed in `read_header`, so a later `jpeg_consume_input` reports `REACHED_EOI` immediately without per-scan `REACHED_SOS` callbacks. (2) Buffered-image *output* calls (`jpeg_start_output` / `jpeg_read_scanlines` / `jpeg_finish_output`) do not themselves pull from the source manager — a consumer driving decode purely through the output side on a still-`body_incomplete` handle makes no forward progress. (3) The `marker_list` is *rebuilt* from the completed stream rather than *appended* in place, so a `jpeg_saved_marker_ptr` a consumer retained mid-stream is invalidated by the rebuild. All three need a deeper, consumer-risky refactor (gap (1) changes every fully-buffered consumer's `read_header` behavior), none block T3, and no known consumer exercises them — so they are filed as [P4-26](#p4-26-deeper-streaming-contract-fidelity-beyond-the-p4-13-core--open) rather than expanding this PR's scope. The verified streaming-suspension core lands here.
 
-## P4-14. `max_memory_to_use` Is ABI-Mirrored But Not Enforced in the C-Side Allocation Path — **PARTIAL: the memory-manager vtable enforces it; the native decode path does not route through it**
+## P4-14. `max_memory_to_use` Is ABI-Mirrored But Not Enforced in the C-Side Allocation Path — **PARTIAL: vtable + classic decode sequence enforce it with upstream's coefficient-only accounting; strip-wise realization, allocated-overhead accounting, and the suspending buffered path remain**
 
 **Correction (2026-08-11): the error contract this item and [#467](https://github.com/developer0hye/libjpeg-turbo-rs/issues/467)
 specify is wrong, and the "no spill path" constraint dissolves.** Recorded
@@ -366,20 +366,70 @@ which also made that test render each code through our own formatter. The
 message check is still how the first draft was caught guessing "Backing store
 not supported" from the macro name; the real text is "Memory limit exceeded".
 
-**What is NOT done, and why this is partial rather than closed.** The budget is
-enforced in the memory-manager vtable, but **the classic decode path does not
-route through that vtable**: `run_decoder_for_start()` builds a `Decoder::new()`
-with default limits, and `jpeg_read_coefficients()` materializes
-`JpegCoefficients` before calling it. So a C caller following the sequence this
-item's own criterion names — `jpeg_read_header → jpeg_start_decompress →
-jpeg_read_scanlines` — is still unbounded, and a 1-byte cap decodes a
-progressive fixture that upstream refuses.
+**Status (2026-08-13): the classic decode sequence is now bounded, shim-side
+at `jpeg_start_decompress`.** `classic_budget_refuses_start`
+(`jpeglib.rs`) mirrors upstream's single enforcement point: the budget
+applies exactly when whole-image coefficient arrays would exist —
+`has_multiple_scans` (progressive *or* non-interleaved sequential,
+`jdinput.c:153-156`) or buffered-image mode (`jdmaster.c:709`) — and the
+quantity weighed is **only** the coefficient-array bytes (summed from
+`coef_array_geometries`, upstream's `realize_virt_arrays` accounting),
+raising `JERR_NO_BACKING_STORE` (51) at start. The check sits before the
+precision dispatch, so 12/16-bit streams are bounded the same way.
 
-That gap was invisible to the first version of this work because its test drove
-`realize_virt_arrays` through the vtable directly. The test proves the callback
-enforces; it does not prove the *documented C sequence* is bounded. Closing this
-item requires plumbing the field into the native decode path's `DecodeLimits`
-and a test that drives the public C API.
+Two wrong shapes of the first draft (e492da9), both caught by adversarial
+review against stock 3.1.4.1 and now pinned by the oracle matrix:
+
+* *Gate was `is_progressive`.* Stock refuses multi-scan **sequential**
+  streams (what `cjpeg -scans` emits) and **any** stream in buffered-image
+  mode under a tiny budget; the draft accepted all of them. The
+  `mss_tiny` / `buffered_baseline_tiny` oracle rows and the committed
+  `tests/fixtures/mss_64x64.jpg` fixture pin this, and
+  `jpeg_has_multiple_scans` now reports upstream's bit (it returned bare
+  `progressive_mode` before, wrong for non-interleaved sequential — the
+  `hms_*` oracle rows pin that too).
+* *Quantity was the native whole-pipeline estimate* (output buffer +
+  planes + coefficients, ~4.7× upstream's number on 4:2:0). Measured
+  fallout: `djpeg -maxmemory 8192` on a 1024×1024 progressive image
+  aborted against our dylib while stock accepts — working→broken for a
+  shipped upstream flag. The `big_progressive_midband` oracle row (2 MiB
+  of coefficients, 4 MiB budget, must accept) is the regression guard.
+
+Proof: `capi_classic_decode_budget.rs` — a 13-case + 3-`hms`-row trace
+compared verbatim against `examples/classic_budget_oracle.c` on stock,
+plus oracle-independent standalone assertions; verified red with the
+start-time check disabled.
+
+**Second verification round (2026-08-13), all by measurement against
+stock:** the coefficient footprint equals upstream's `maximum_space` to
+the byte on 13 probed geometries (odd dimensions, 4:2:2 / 4:4:0 /
+4:4:4, 4-component CMYK both samplings, 1×1 px, 2048×8); 12-bit is
+bounded identically (probed through `jpeg12_read_scanlines` against
+stock's 12-bit entry points — `prog12_tiny start 51`, `base12_tiny ok
+0`); and upstream's `max_minheights >= 1` clamp (`jmemmgr.c:753-762`)
+is ported: a stream whose every array fits one `maxaccess` window
+(`v_samp`, ×5 progressive — `jdcoefct.c:897-901`) is accepted at ANY
+positive budget, as stock is (7 of the 13 geometries; the
+`short_progressive_tiny` oracle row pins the class — the pure
+footprint-vs-budget first draft refused those below footprint).
+
+**Still open within this item:** (1) strip-wise realization: on the
+vtable path, full-height allocation refuses budgets upstream would
+squeeze into strips; on the shim path the accept-any-budget window class
+now matches stock, but for multi-window streams stock's refusal
+threshold sits *above* `maximum_space` (strip mechanics plus the
+`already_allocated` deduction of `jpeg_mem_available`,
+`jmemnobs.c:66-78`) — measured at 1.5×–4.1× the coefficient bytes on
+small images, 1.7% above at 1024×1024 — so between our threshold and
+stock's we accept where stock refuses, the safe direction for a coarser
+model but not parity. (2) A *suspending* source in buffered-image mode
+defers the pixel decode past `jpeg_start_decompress` (P4-13/P4-26 path),
+and the deferred materialization does not re-run the start-time check —
+that corner is unbounded. (3) `jpeg_read_coefficients` needs no shim
+check — it registers arrays through the vtable and refuses tiny budgets
+exactly where stock does — but its bisected thresholds are looser in the
+same direction (ours 8224 vs stock 26454 on a 64×64; 3145760 vs 3164182
+at 1024×1024), the vtable half of residue (1).
 
 Also outstanding: **the enforcement is stricter than upstream in one direction
 and laxer in the other**, and both need recording rather than a single "matches
@@ -411,9 +461,10 @@ what upstream rejects.
    charged realized bytes twice, so a second no-op `realize_virt_arrays` failed
    where the first succeeded.
 
-**P4-120 is unaffected and remains open**: forcing a shim *allocation* to fail
-still has no injection point, and the `msg_parm` payload of
-`JERR_OUT_OF_MEMORY` is still unproven.
+**P4-120** (forcing a shim *allocation* to fail had no injection point, and
+the `msg_parm` payload of `JERR_OUT_OF_MEMORY` was unproven) was closed
+2026-08-13 by the thread-local `fail_nth_allocation_for_tests` countdown in
+`alloc.rs` — see its own section.
 
 **Motivation.** Cold inspection of `crates/libjpeg-turbo-rs-capi/src/memmgr.rs` shows:
 
@@ -430,14 +481,15 @@ still has no injection point, and the `msg_parm` payload of
 > `jpeg_mem_available` and a shortfall raises **`JERR_NO_BACKING_STORE` (51)**;
 > upstream's shipped build has no backing store either
 > (`CMakeLists.txt:678` compiles `src/jmemnobs.c`). The live contract is the
-> Status section further down. Do not implement to the text below.
+> Status sections above (2026-08-11 vtable, 2026-08-13 decode sequence). Do
+> not implement to the text below.
 
 - A C harness that:
   1. Allocates `jpeg_decompress_struct`, sets `cinfo.mem->max_memory_to_use = N` where `N` is below the working-set size of a fixture (e.g. 64 MB cap on a progressive 4096² fixture with restart-every-MCU).
   2. Drives `jpeg_read_header → jpeg_start_decompress → jpeg_read_scanlines` and asserts the same exit path that upstream takes — `error_exit(JERR_OUT_OF_MEMORY)` (msg_code 16) on a budget-exceed virtual-array allocation, OR a documented divergence with deterministic alternative behaviour.
 - Either: wire budget enforcement through `alloc_large_impl` / `realize_virt_arrays_impl` and the virtual-array spill path; OR document the divergence in `ABI_COMPATIBILITY.md` with a `cargo:warning=` when the field is set to a non-default value via `tj3Set(TJPARAM_MAXMEMORY)` or the C-ABI direct path.
 
-**Why deferred.** Upstream uses backing-store spill to disk when virtual arrays exceed the in-memory budget. We have no backing-store implementation (`memmgr.rs:20-28`: *"This module keeps all of the data in RAM and never spills to disk"*). Wiring true budget enforcement either reimplements the spill path or changes the failure semantics from "OOM kill or swap" to "explicit `JERR_OUT_OF_MEMORY` exit". Documenting first; implementing only on a named consumer requirement.
+**Why deferred.** Upstream uses backing-store spill to disk when virtual arrays exceed the in-memory budget. We have no backing-store implementation (`memmgr.rs:20-28`: *"This module keeps all virtual arrays in memory"*). Wiring true budget enforcement either reimplements the spill path or changes the failure semantics from "OOM kill or swap" to "explicit `JERR_OUT_OF_MEMORY` exit". Documenting first; implementing only on a named consumer requirement.
 
 ## P4-15. `jpeg16_read_raw_data` / `jpeg16_write_raw_data` Mirror Upstream's 8/12-Only Raw-Data API — **CLOSED 2026-05-18**
 
@@ -3790,6 +3842,16 @@ sequential multi-scan, progressive, abbreviated, and invalid-state cases. The
 answer must come from parsed scan structure and remain correct across
 consume-input/buffered-image progression.
 
+**Progress (2026-08-13, P4-14 delivery).** The reported *bit* is no longer
+`progressive_mode`: `jpeg_read_header` records upstream's
+`(comps_in_scan < num_components) || progressive_mode`
+(`jdinput.c:153-156`) and `jpeg_has_multiple_scans` returns it, so the
+sequential-multi-scan answer is now correct and oracle-pinned by the
+`hms_baseline` / `hms_progressive` / `hms_mss` rows of
+`capi_classic_decode_budget.rs`. Still open: the abbreviated and
+invalid-state cases, and correctness across consume-input/buffered-image
+progression — this item stays OPEN on the state semantics alone.
+
 ## P4-115. Native 12-Bit Coverage Claims Include Untested Modes and Sampling Layouts — **OPEN**
 
 **Motivation.** Filed 2026-08-02 after the C-parity audit found that B6-1 and
@@ -4138,7 +4200,7 @@ completed all 32 checks on the implementation commit, including ARMv7 scalar,
 aarch64 NEON, x86_64 AVX2 and no-AVX2, WASM SIMD128, Linux/macOS/Windows,
 sanitizers, Miri, mutation testing, C interop, and the C-parity corpus gate.
 
-## P4-120. Classic-Shim Allocation-Failure Paths Are Unreachable From Tests — **OPEN**
+## P4-120. Classic-Shim Allocation-Failure Paths Are Unreachable From Tests — **CLOSED 2026-08-13**
 
 **Motivation.** Filed 2026-08-08 during the P4-108 review. The classic shim now
 raises `JERR_OUT_OF_MEMORY` (upstream code 56, message `"Insufficient memory
@@ -4180,6 +4242,21 @@ allocation.
 **Why deferred.** P4-108 delivers the behaviour; this is test reachability for
 one error path. It belongs with the wider test-integrity work in **P4-116**
 rather than blocking the destination-ownership fix.
+
+**Status (2026-08-13): closed** (issue #467). `libc_malloc` — the funnel every
+classic dest-manager allocation passes through — carries a thread-local
+failure countdown armed only by `fail_nth_allocation_for_tests` (not
+`extern "C"`, not exported from the cdylib; one thread-local read on the
+production path). `capi_alloc_failure_injection.rs` forces both
+previously-unreachable `jpeg_mem_dest` OOM paths — the empty-slot initial
+allocation (`jdatadst.c:271`) and the doubling growth (`:132`) — and asserts
+code 56 **with** `msg_parm.i[0] == 10`, the `ERREXIT1` payload this item
+called unproven; the growth path's `pending_error` was widened to carry the
+parm through the deferred flush. A disarmed-hook control test pins that the
+injection, not the sequence, causes the failures. No C oracle exists for
+these lines (stock's `malloc` cannot be portably failed on demand); the
+contract constants are read from `jdatadst.c` and the rendering is covered
+by the P4-146 whole-table gate.
 
 ## P4-117. 4:4:1 Trim Rejected Images Shorter Than One iMCU Row — **CLOSED 2026-08-08**
 
@@ -7002,4 +7079,91 @@ claiming the property.
    (the `configure_encoder` shape, where `.lossless(...)` is passed through,
    is the model).
 3. The capi `tj3Compress12` route is traced for the same configuration.
+
+## P4-159. `jpeg_read_coefficients` Returns NULL on Multi-Scan Sequential Streams — **OPEN**
+
+**Motivation.** Found by the P4-14 adversarial review (2026-08-13), measured
+against stock 3.1.4.1: on a non-interleaved *sequential* JPEG (SOF0, one
+full-spectral scan per component — what `cjpeg -scans` produces, committed
+as `tests/fixtures/mss_64x64.jpg`), stock `jpeg_read_coefficients` returns
+the virtual-array set while ours returns NULL (`coef_mss_generous`: stock
+`ok`, ours `coefnull`). The classic *pixel* decode of the same stream works
+(the P4-14 oracle's `mss_generous` row passes), so this is a parity gap
+confined to coefficient reading — likely the native `read_coefficients`
+path rejecting or mishandling first-scan `comps_in_scan < num_components`.
+Unrelated to the memory budget; `jpegtran`-class consumers transcoding such
+streams hit it.
+
+**Acceptance criteria.** `jpeg_read_coefficients` on a multi-scan sequential
+stream returns coefficient arrays whose dump matches stock's byte-for-byte
+(the P4-34 dump-comparison harness shape), pinned by a test using the
+committed fixture; a red-check shows the test fails on today's NULL.
+
+## P4-160. Default `error_exit` Presents as `abort()` + Raw `msg_code`, Not Stock's Rendered Message + `exit` — **OPEN**
+
+**Motivation.** Found by the P4-14 adversarial review (2026-08-13), running
+real stock `djpeg` against our dylib via `DYLD_LIBRARY_PATH`. On any fatal
+error, our default `error_exit` prints
+`libjpeg-turbo-rs: fatal JPEG error (msg_code=NN, parm0=..., parm1=...)`
+and `abort()`s (SIGABRT, exit 134). Stock's default `error_exit`
+(`jerror.c:79-92`) calls `output_message` — rendering the human text, e.g.
+"Premature end of JPEG file" — then `jpeg_destroy` + `exit(EXIT_FAILURE)`.
+Measured: a truncated file gives ours `msg_code=44` exit 134 vs stock
+"Premature end of JPEG file" exit 2 (djpeg's own wrapper). P4-146 closed
+message-*table* rendering (`format_message` works); this is the default
+*handler* not using it and killing the process with the wrong mechanism —
+a CLI consumer that never installs its own `error_exit` sees a crash where
+stock sees a clean error line.
+
+**Acceptance criteria.** The default `error_exit` renders through
+`format_message`/`output_message` and terminates via `exit(EXIT_FAILURE)`
+after `jpeg_destroy`, matching `jerror.c`; verified end-to-end with stock
+`djpeg` on a truncated file (message text and exit status compared against
+stock's dylib), with the abort-on-unwind safety rationale for the current
+behaviour either preserved behind it or explicitly retired.
+
+## P4-161. CMYK Progressive With 2×2 Luma Panics in Color Conversion, Then Surfaces as Silent Zero-Size Success — **OPEN**
+
+**Motivation.** Found by the P4-14 verification round (2026-08-13),
+reproduced with `max_memory_to_use` never set, on `src/decode/color.rs`
+byte-identical across `0a4c052`/`e492da9`/the P4-14 working tree — a
+pre-existing native bug, not budget work. A 97×53 4-component progressive
+JPEG (CMYK, 2×2 luma sampling, built with stock cjpeg) panics at
+`src/decode/color.rs:327` — `index out of bounds: the len is 56 but the
+index is 56`. Stock decodes all 53 rows.
+
+Two defects stack: the out-of-bounds itself, and how it presents through
+the classic shim — the panic is caught at the FFI boundary
+(`unwind_guard`), `jpeg_start_decompress` returns FALSE, and
+`output_width`/`output_height`/`output_components` stay 0 **without
+`error_exit` ever firing**. A C caller that ignores the boolean sees a
+silent zero-size decode; upstream contract says a fatal error must reach
+`error_exit` exactly once (the P4-100/P4-106 rule).
+
+**Acceptance criteria.** (1) The 97×53 CMYK 2×2-luma progressive repro
+(`cmyk_repro.c` shape, rebuilt as a fixture or generated in-test) decodes
+with rows matching stock `djpeg` byte-for-byte. (2) Any panic that does
+cross `unwind_guard` on the decompress path raises `error_exit` with a
+real `msg_code` rather than returning FALSE with zeroed outputs —
+verified by a test. Repro source:
+`bisect.c`/`cmyk_repro.c` in the P4-14 review scratchpad (regenerate with
+stock cjpeg: 97×53, `-sample 2x2`, 4-component, `-progressive`).
+
+## P4-162. `max_h_samp_factor` / `max_v_samp_factor` Stay 0 After `jpeg_read_header` — **OPEN**
+
+**Motivation.** Found by the P4-14 verification round (2026-08-13). Stock
+populates the public aggregates during header parse (`jdinput.c`
+`initial_setup`); we populate `comp_info[].h_samp_factor` /
+`v_samp_factor` correctly but leave `cinfo->max_h_samp_factor` /
+`max_v_samp_factor` at 0 after `jpeg_read_header` on every stream probed
+(stock: 2/2 for 4:2:0, 1/1 for grayscale). They are set on the later
+`jpeg_calc_output_dimensions` path (`jpeglib.rs:3964-3975`) but not at
+header time. These are public ABI fields consumers read for MCU geometry
+between header and start — and they are why `coef_array_geometries`
+recomputes the maxima from `comp_info` instead of reading them.
+
+**Acceptance criteria.** After `jpeg_read_header`, both aggregates equal
+stock's for a probe matrix covering 4:2:0, 4:2:2, 4:4:0, 4:4:4,
+grayscale, and 4-component CMYK (oracle-compared), and
+`coef_array_geometries` can assert its recomputation against them.
 

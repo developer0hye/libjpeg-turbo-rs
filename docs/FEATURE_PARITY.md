@@ -234,7 +234,7 @@
 - [x] JFIF version / density read (`Image.density`)
 
 ### Multi-Scan / Progressive Output
-- [ ] Classic `jpeg_has_multiple_scans()` sequential multi-scan/state semantics — native progressive query exists; P4-114
+- [ ] Classic `jpeg_has_multiple_scans()` state semantics — the reported bit matches upstream since 2026-08-13 (progressive ∨ non-interleaved sequential first scan, `jdinput.c:153-156`, pinned by the P4-14 `hms_*` oracle rows); the P4-114 state handling remains
 - [x] `buffered_image` mode — Enable scan-by-scan output (`ProgressiveDecoder`)
 - [ ] Full classic `jpeg_start_output()` / `jpeg_finish_output()` input-pull/state contract — native output works; P4-26/P4-104
 - [ ] Full classic `jpeg_consume_input()` contract — suspension core works; P4-13/P4-26/P4-104
@@ -410,7 +410,7 @@
 - [x] `alloc_small` / `alloc_large` / `alloc_sarray` / `alloc_barray` — N/A (Rust `Vec`/`Box` replaces C pool allocator)
 - [x] `request_virt_sarray` / `request_virt_barray` / virtual array API — N/A (Rust uses direct `Vec<Vec<>>` coefficient storage)
 - [x] `free_pool` / `self_destruct` — N/A (Rust Drop trait handles cleanup)
-- [x] `max_memory_to_use` / `max_alloc_chunk` — `Decoder::set_max_memory()` / `TjHandle` `TJPARAM_MAXMEMORY`, **plus partial classic enforcement since 2026-08-11 (P4-14).** `cinfo->mem->max_memory_to_use` is now compared against in `realize_virt_arrays`, the only place upstream consults it, raising `JERR_NO_BACKING_STORE` ("Memory limit exceeded", 51) exactly as upstream's no-backing-store build does. Its default is upstream's `0` (unlimited), not the `1000000000L` this line used to claim. **Still partial:** the classic decode path does not route through that vtable, so a C consumer lowering the field does not yet bound `jpeg_read_header` → `jpeg_start_decompress`. See the P4-14 section of `docs/ABI_COMPATIBILITY.md`.
+- [x] `max_memory_to_use` / `max_alloc_chunk` — `Decoder::set_max_memory()` / `TjHandle` `TJPARAM_MAXMEMORY`, **plus classic enforcement (P4-14: vtable since 2026-08-11, decode sequence since 2026-08-13).** `cinfo->mem->max_memory_to_use` is compared against in `realize_virt_arrays` and, for the classic `jpeg_read_header` → `jpeg_start_decompress` sequence, shim-side at start with upstream's scope (multi-scan or buffered-image streams) and accounting (whole-image coefficient bytes only), raising `JERR_NO_BACKING_STORE` ("Memory limit exceeded", 51) exactly as upstream's no-backing-store build does. Its default is upstream's `0` (unlimited), not the `1000000000L` this line used to claim. **Residues** (strip-wise realization, already-allocated overhead, suspending buffered corner) are recorded in P4-14; see the P4-14 section of `docs/ABI_COMPATIBILITY.md`.
 - [x] `tj3Alloc()` / `tj3Free()` — N/A (Rust ownership; `Vec<u8>` return replaces C caller-managed buffers)
 
 ---

@@ -10,8 +10,8 @@
 //!
 //! - `JpegMemoryMgr`: the publicly visible struct pointed to by
 //!   `cinfo.mem`. Byte-for-byte mirror of libjpeg-turbo's
-//!   `struct jpeg_memory_mgr` (12 fn ptrs + `max_memory_to_use: long` +
-//!   `max_alloc_chunk: long`).
+//!   `struct jpeg_memory_mgr` (11 fn ptrs + `max_memory_to_use: long` +
+//!   `max_alloc_chunk: long` — the layout assertion below pins the count).
 //! - `MemPool`: the Rust-owned backing state living immediately after the
 //!   public vtable in a single heap allocation. Stores per-pool lists of
 //!   heap blocks, per-pool row-pointer arrays, and the virtual-array
@@ -175,11 +175,13 @@ pub struct JpegMemoryMgr {
     /// unlimited, matching upstream's `if (cinfo->mem->max_memory_to_use)`
     /// test and its default of 0 (`jmemnobs.c:101-104`).
     ///
-    /// **Enforced since P4-14** by `realize_virt_arrays_impl`, which is the
-    /// only place upstream consults it either. Note the scope: the classic
-    /// decode path does not route through this vtable, so setting this field
-    /// does not yet bound `jpeg_read_header` → `jpeg_start_decompress`. That
-    /// remainder is tracked in P4-14.
+    /// **Enforced** in two places that mirror upstream's one: by
+    /// `realize_virt_arrays_impl` for callers driving this vtable directly
+    /// (e.g. `jpeg_read_coefficients`), and shim-side at
+    /// `jpeg_start_decompress` for the classic decode sequence, which this
+    /// port runs on the native decoder rather than through the vtable
+    /// (`jpeglib.rs::classic_budget_refuses_start`, P4-14). Both weigh the
+    /// whole-image coefficient arrays only, as `realize_virt_arrays` does.
     pub max_memory_to_use: c_long,
     /// Maximum single `alloc_large` request. Pinned at
     /// `MAX_ALLOC_CHUNK` so libjpeg-turbo modules that read this field
@@ -658,7 +660,15 @@ unsafe extern "C" fn request_virt_barray_impl(
 /// `jpeg_mem_available` (`jmemnobs.c:66-78`), `realize_virt_arrays` parcels the
 /// shortfall into strips (`jmemmgr.c:745-760`), and the spill that follows hits
 /// `jmemnobs.c:87-92`. See the P4-14 correction in `phase4.md`.
-const JERR_NO_BACKING_STORE: c_int = 51;
+///
+/// 51 holds for `JPEG_LIB_VERSION >= 70` — the v8 ABI this crate ships. The
+/// pre-v7 table has it at 49: four `#if JPEG_LIB_VERSION` guards ahead of it
+/// in `jerror.h` net two extra entries at v7+ (`JERR_ARITH_NOTIMPL` drops
+/// out at `:48-50`; `JERR_BAD_CROP_SPEC` `:55-57`, `JERR_BAD_DROP_SAMPLING`
+/// `:61-64` and `JERR_NO_ARITH_TABLE` `:111-113` come in), and every code
+/// after a guard shifts — a table-wide property any constant from that enum
+/// inherits.
+pub(crate) const JERR_NO_BACKING_STORE: c_int = 51;
 
 /// `jerror.h` — "Insufficient memory (case %d)". Used here only for geometry
 /// that cannot be expressed in bytes, which is an allocation failure rather

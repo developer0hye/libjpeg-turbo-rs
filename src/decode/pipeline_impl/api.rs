@@ -458,6 +458,19 @@ impl<'a> Decoder<'a> {
         self.metadata.is_arithmetic
     }
 
+    /// Whether decoding this stream requires a whole-image coefficient
+    /// buffer: it is progressive, or its first scan does not interleave
+    /// every frame component (a multi-scan *sequential* file, the shape
+    /// `cjpeg -scans` produces). Mirrors stock libjpeg's
+    /// `jpeg_has_multiple_scans()`, which reports
+    /// `(comps_in_scan < num_components) || progressive_mode` as recorded
+    /// by `initial_setup`
+    /// (`references/libjpeg-turbo/src/jdinput.c:153-156`).
+    pub fn has_multiple_scans(&self) -> bool {
+        self.metadata.frame.is_progressive
+            || self.metadata.scan.components.len() < self.metadata.frame.components.len()
+    }
+
     /// Set the desired output pixel format.
     pub fn set_output_format(&mut self, format: PixelFormat) {
         self.output_format = Some(format);

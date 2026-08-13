@@ -24,6 +24,24 @@ and `git log` between tags.
   runs system/Rust bidirectional cross-decodes.
 
 ### Fixed
+- The classic decode sequence (`jpeg_read_header` → `jpeg_start_decompress` →
+  `jpeg_read_scanlines`) now honors `cinfo->mem->max_memory_to_use` exactly as
+  upstream does (P4-14, #467): the budget applies to multi-scan streams
+  (progressive or non-interleaved sequential) and buffered-image mode, weighs
+  only the whole-image coefficient-array bytes, and refuses at
+  `jpeg_start_decompress` with `JERR_NO_BACKING_STORE` (51). Baseline
+  single-scan decodes outside buffered-image mode remain unbounded, matching
+  stock, and budgets above the coefficient bytes accept even where a
+  whole-pipeline estimate would not (`djpeg -maxmemory` parity,
+  cross-validated against stock libjpeg-turbo).
+- `jpeg_has_multiple_scans()` now reports upstream's definition —
+  `(comps_in_scan < num_components) || progressive_mode` — so non-interleaved
+  *sequential* streams (the `cjpeg -scans` shape) return TRUE; it previously
+  mirrored `progressive_mode` alone.
+- `jpeg_mem_dest`'s allocation-failure paths (initial buffer and mid-encode
+  growth) are now provably reachable and raise upstream's
+  `JERR_OUT_OF_MEMORY` case 10 (P4-120, #467), exercised by a test-only
+  fault-injection hook in the shim's allocation funnel.
 - The P4-13 progressive-suspension C oracle now discovers `cjpeg`/`djpeg` on
   `PATH`, fails closed on tool/compile errors in CI, and runs as an explicit
   provisioned Linux CI gate instead of reporting a soft-skipped pass.

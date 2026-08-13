@@ -617,6 +617,11 @@ struct DecompressPrivate {
     crop_width: u32,
     /// TRUE if a crop was requested via `jpeg_crop_scanline`.
     crop_active: bool,
+    /// Upstream's `has_multiple_scans` bit, recorded at `jpeg_read_header`:
+    /// `(comps_in_scan < num_components) || progressive_mode`
+    /// (`jdinput.c:153-156`). TRUE for non-interleaved *sequential* streams
+    /// too, which `progressive_mode` alone misses.
+    has_multiple_scans: bool,
     /// Owned backing for `JpegDecompressPublic::comp_info`. Populated in
     /// `jpeg_read_header`; the public struct exposes a raw pointer into
     /// this vector so real libjpeg callers can iterate components.
@@ -719,6 +724,7 @@ impl Default for DecompressPrivate {
             crop_xoffset: 0,
             crop_width: 0,
             crop_active: false,
+            has_multiple_scans: false,
             comp_info_storage: Vec::new(),
             marker_list_storage: Vec::new(),
             bridge_partial: Vec::new(),
@@ -1183,7 +1189,11 @@ fn classic_error_for(err: &libjpeg_turbo_rs::JpegError) -> (c_int, Option<c_int>
         E::Unsupported(_) => (JERR_NOTIMPL, None),
         // Exact: caller-sized buffer proved too small.
         E::BufferTooSmall { .. } => (JERR_BUFFER_SIZE, None),
-        // Exact: upstream substitutes the limit it enforces.
+        // Exact: upstream substitutes the limit it enforces. The
+        // `max_memory_to_use` refusal never reaches this translator — the
+        // classic decode budget is enforced shim-side at
+        // `jpeg_start_decompress` (P4-14), which raises
+        // `JERR_NO_BACKING_STORE` directly.
         E::LimitExceeded { limit, .. } => (
             JERR_IMAGE_TOO_BIG,
             Some((*limit).min(c_int::MAX as u64) as c_int),
@@ -3066,6 +3076,9 @@ pub unsafe extern "C" fn jpeg_read_header(cinfo: *mut c_void, require_image: CBo
         c.num_components = frame.components.len() as c_int;
         c.data_precision = frame.precision as c_int;
         c.progressive_mode = if frame.is_progressive { 1 } else { 0 };
+        // Recorded for `jpeg_has_multiple_scans`: upstream's bit also covers
+        // non-interleaved sequential streams, not just progressive ones.
+        priv_state.has_multiple_scans = decoder.has_multiple_scans();
 
         // Populate JFIF presence + density from the parsed APP0 marker.
         // Stock libjpeg-turbo sets `cinfo.saw_JFIF_marker`,
@@ -3446,6 +3459,23 @@ pub unsafe extern "C" fn jpeg_start_decompress(cinfo: *mut c_void) -> CBoolean {
             }
         };
 
+        // P4-14 (#467): stock refuses over-budget decodes at
+        // `jpeg_start_decompress` with `JERR_NO_BACKING_STORE` — checked
+        // before the precision dispatch below so 12/16-bit streams are
+        // bounded the same way (upstream's 12-bit build shares
+        // `realize_virt_arrays`, `jdmaster.c:709-714`).
+        if classic_budget_refuses_start(&bytes, classic_decode_budget(c), c.buffered_image != 0) {
+            raise_classic_error(
+                cinfo,
+                &mut priv_state.last_error,
+                "jpeg_start_decompress: max_memory_to_use cannot hold the \
+                 whole-image coefficient arrays",
+                crate::memmgr::JERR_NO_BACKING_STORE,
+                None,
+            );
+            return 0;
+        }
+
         // Fast path for high-precision streams (12/16 bit). The 8-bit
         // `Decoder` would silently succeed and then overwrite
         // `data_precision`, `output_components`, etc. with 8-bit values,
@@ -3570,6 +3600,144 @@ fn marker_save_to_config(settings: &MarkerSaveSettings) -> libjpeg_turbo_rs::Mar
     } else {
         libjpeg_turbo_rs::MarkerSaveConfig::Specific(codes)
     }
+}
+
+/// The caller-set `cinfo->mem->max_memory_to_use`, or `None` when 0 or
+/// negative (unlimited, upstream's `jpeg_mem_init` default) or when `mem` is
+/// absent. Raw read — the memory-manager struct is caller-visible ABI.
+fn classic_decode_budget(c: &JpegDecompressPublic) -> Option<usize> {
+    if c.mem.is_null() {
+        return None;
+    }
+    // SAFETY: `max_memory_to_use` sits at a fixed offset in the *public*
+    // `struct jpeg_memory_mgr` (`jpeglib.h`: 11 method pointers, then the
+    // two `long`s), so the read is valid for any conforming manager —
+    // foreign or ours. The layout assertion in `memmgr.rs` pins the offset.
+    let v: c_long = unsafe {
+        std::ptr::addr_of!((*(c.mem as *const crate::memmgr::JpegMemoryMgr)).max_memory_to_use)
+            .read()
+    };
+    if v > 0 {
+        Some(v as usize)
+    } else {
+        None
+    }
+}
+
+/// `sizeof(JBLOCK)`: 64 `JCOEF`s of 2 bytes at every precision
+/// (`jmorecfg.h` — upstream's per-precision `sample_size` applies to
+/// sample arrays, not coefficient arrays).
+const JBLOCK_BYTES: u64 = 128;
+
+/// One whole-image coefficient array's geometry, exactly as upstream
+/// builds it: block counts per `initial_setup` (`jdinput.c:118-124`),
+/// padded to the sampling factors and windowed by `access_rows` per the
+/// coefficient controller's `request_virt_barray` call
+/// (`jdcoefct.c:889-908` — `access_rows = v_samp_factor`, ×5 for
+/// progressive streams because block smoothing may need the bigger
+/// window, `:897-901`).
+struct CoefArrayGeometry {
+    /// `jround_up(width_in_blocks, h_samp_factor)` — `blocksperrow`.
+    padded_width_in_blocks: u64,
+    /// `jround_up(height_in_blocks, v_samp_factor)` — `rows_in_array`.
+    padded_height_in_blocks: u64,
+    /// The `maxaccess` row window.
+    access_rows: u64,
+}
+
+/// The per-component whole-image coefficient arrays the decode would
+/// realize, from header fields alone.
+fn coef_array_geometries(frame: &libjpeg_turbo_rs::FrameHeader) -> Vec<CoefArrayGeometry> {
+    const DCTSIZE: u64 = 8;
+    let round_up = |a: u64, b: u64| -> u64 { a.div_ceil(b) * b };
+    let max_h: u64 = frame
+        .components
+        .iter()
+        .map(|comp| u64::from(comp.horizontal_sampling))
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    let max_v: u64 = frame
+        .components
+        .iter()
+        .map(|comp| u64::from(comp.vertical_sampling))
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    frame
+        .components
+        .iter()
+        .map(|comp| {
+            let h: u64 = u64::from(comp.horizontal_sampling).max(1);
+            let v: u64 = u64::from(comp.vertical_sampling).max(1);
+            let width_in_blocks: u64 = (frame.width() as u64 * h).div_ceil(max_h * DCTSIZE);
+            let height_in_blocks: u64 = (frame.height() as u64 * v).div_ceil(max_v * DCTSIZE);
+            CoefArrayGeometry {
+                padded_width_in_blocks: round_up(width_in_blocks, h),
+                padded_height_in_blocks: round_up(height_in_blocks, v),
+                access_rows: v * if frame.is_progressive { 5 } else { 1 },
+            }
+        })
+        .collect()
+}
+
+/// P4-14 (#467): whether `jpeg_start_decompress` must refuse this decode
+/// with `JERR_NO_BACKING_STORE`, exactly where and how upstream does.
+///
+/// Upstream consults `max_memory_to_use` in one place only:
+/// `realize_virt_arrays` during `jpeg_start_decompress` master selection.
+/// Whole-image coefficient arrays exist only for multi-scan streams —
+/// progressive *or* non-interleaved sequential (`has_multiple_scans`,
+/// `jdinput.c:153-156`) — and for any stream in buffered-image mode
+/// (`jdmaster.c:709-714`, both precisions). Everything else is unbounded;
+/// bounding baseline would refuse what stock accepts (measured:
+/// classic_budget_oracle vs stock 3.1.4.1).
+///
+/// Two upstream properties shape the comparison (`jmemmgr.c:696-763`):
+///
+/// * `max_minheights` is clamped to at least 1 (`:753-762`), so a stream
+///   whose **every** array fits one `maxaccess` window is realized in
+///   full at ANY positive budget — even one below the arrays' footprint
+///   (measured: stock accepts a 1-byte budget on 7 of 13 probed
+///   geometries; the `short_progressive_tiny` oracle row pins it).
+/// * Otherwise the quantity weighed is upstream's `maximum_space` — the
+///   coefficient-array bytes only, **not** the native decoder's
+///   whole-pipeline estimate, which counts output buffers and planes
+///   upstream never charges to the budget and refused ordinary
+///   progressive images stock accepts (~4.7× on 4:2:0 — review of
+///   e492da9). Bisected against stock: our footprint equals upstream's
+///   `maximum_space` to the byte on all 13 probed geometries.
+///
+/// Remaining looseness, recorded in P4-14's PARTIAL note: upstream's
+/// *refusal* threshold sits above `maximum_space` for multi-window
+/// streams (strip mechanics plus the `already_allocated` deduction of
+/// `jpeg_mem_available`, `jmemnobs.c:66-78`), so between our threshold
+/// and stock's we accept where stock refuses — the safe direction for a
+/// coarser model.
+fn classic_budget_refuses_start(bytes: &[u8], budget: Option<usize>, buffered_image: bool) -> bool {
+    let Some(cap) = budget else {
+        return false;
+    };
+    // A stream the header parse rejects takes the decode path's own error
+    // reporting; the budget has nothing to say about it.
+    let Ok(decoder) = libjpeg_turbo_rs::Decoder::new(bytes) else {
+        return false;
+    };
+    if !(buffered_image || decoder.has_multiple_scans()) {
+        return false;
+    }
+    let arrays: Vec<CoefArrayGeometry> = coef_array_geometries(decoder.header());
+    if arrays
+        .iter()
+        .all(|a| a.padded_height_in_blocks.div_ceil(a.access_rows) <= 1)
+    {
+        return false;
+    }
+    let footprint: u64 = arrays
+        .iter()
+        .map(|a| a.padded_width_in_blocks * a.padded_height_in_blocks * JBLOCK_BYTES)
+        .sum();
+    footprint > cap as u64
 }
 
 /// Run `Decoder::decode_image()` with the desired output format and
@@ -5841,8 +6009,9 @@ const P4_13_MAX_BODY_BYTES: usize = 256 * 1024 * 1024;
 //   * `jpeg_consume_input` returns `JPEG_REACHED_EOI` once the upfront
 //     decoder has populated the source buffer (we always read end-to-end).
 //   * `jpeg_input_complete` returns TRUE for the same reason.
-//   * `jpeg_has_multiple_scans` reflects `c.progressive_mode` from the
-//     header, matching upstream `jpeg_has_multiple_scans`.
+//   * `jpeg_has_multiple_scans` reflects the bit recorded at
+//     `jpeg_read_header` — `(comps_in_scan < num_components) ||
+//     progressive_mode`, upstream's definition (`jdinput.c:153-156`).
 //   * `jpeg_start_output` / `jpeg_finish_output` succeed for any scan
 //     since we always have the full image decoded.
 //   * `jpeg_new_colormap` is a no-op (we don't ship the 1-pass
@@ -6220,9 +6389,13 @@ pub unsafe extern "C" fn jpeg_input_complete(cinfo: *mut c_void) -> CBoolean {
 
 /// `jpeg_has_multiple_scans(cinfo) -> boolean`.
 ///
-/// Returns the `progressive_mode` flag populated by `jpeg_read_header`.
-/// This is what upstream `jpeg_has_multiple_scans` does — see
-/// `references/libjpeg-turbo/src/jdmaster.c::jpeg_has_multiple_scans`.
+/// Returns upstream's `has_multiple_scans` bit as recorded at
+/// `jpeg_read_header`: `(comps_in_scan < num_components) ||
+/// progressive_mode` (`jdinput.c:153-156`, reported by
+/// `jdapimin.c::jpeg_has_multiple_scans`). TRUE for non-interleaved
+/// *sequential* streams too — `progressive_mode` alone misses those.
+/// Falls back to `progressive_mode` when no private state exists (a
+/// cinfo this shim did not create).
 ///
 /// # Safety
 ///
@@ -6235,6 +6408,12 @@ pub unsafe extern "C" fn jpeg_input_complete(cinfo: *mut c_void) -> CBoolean {
 #[no_mangle]
 pub unsafe extern "C" fn jpeg_has_multiple_scans(cinfo: *mut c_void) -> CBoolean {
     crate::unwind_guard!(0, {
+        let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
+        if let Some(p) = unsafe { priv_from_ptr(priv_ptr) } {
+            if p.has_multiple_scans {
+                return 1;
+            }
+        }
         match unsafe { cinfo_mut(cinfo) } {
             Some(c) => c.progressive_mode,
             None => 0,
@@ -7439,7 +7618,9 @@ struct OwnedDestMgr {
     /// raises it through `error_exit` once its own allocations are dropped.
     /// The C-visible behaviour is identical — `jpeg_finish_compress` still
     /// leaves through `error_exit` with the same `msg_code`.
-    pending_error: Option<c_int>,
+    /// `(code, msg_parm.i[0])` — the parm carries upstream's `ERREXIT1`
+    /// payload where one exists (`jdatadst.c`'s OOM twins are case 10).
+    pending_error: Option<(c_int, Option<c_int>)>,
 }
 
 impl OwnedDestMgr {
@@ -7502,12 +7683,12 @@ unsafe extern "C" fn mem_empty_output_buffer(cinfo: *mut c_void) -> CBoolean {
         // installed by `jpeg_mem_dest`, which always sets a `Mem` kind. Report
         // it as a buffer problem rather than letting it read as suspension.
         JpegDest::File(_) => {
-            owned.pending_error = Some(JERR_BUFFER_SIZE);
+            owned.pending_error = Some((JERR_BUFFER_SIZE, None));
             return 0;
         }
     };
     if state.buffer.is_null() {
-        owned.pending_error = Some(JERR_BUFFER_SIZE);
+        owned.pending_error = Some((JERR_BUFFER_SIZE, None));
         return 0;
     }
 
@@ -7523,14 +7704,14 @@ unsafe extern "C" fn mem_empty_output_buffer(cinfo: *mut c_void) -> CBoolean {
     let nextsize: usize = match old_bufsize.checked_mul(2) {
         Some(n) => n,
         None => {
-            owned.pending_error = Some(JERR_OUT_OF_MEMORY);
+            owned.pending_error = Some((JERR_OUT_OF_MEMORY, Some(10)));
             return 0;
         }
     };
     let nextbuffer: *mut u8 = crate::alloc::libc_malloc(nextsize);
     if nextbuffer.is_null() {
         // Upstream: ERREXIT1(cinfo, JERR_OUT_OF_MEMORY, 10).
-        owned.pending_error = Some(JERR_OUT_OF_MEMORY);
+        owned.pending_error = Some((JERR_OUT_OF_MEMORY, Some(10)));
         return 0;
     }
     // SAFETY: `state.buffer` is a live `old_bufsize`-byte block (either the
@@ -7600,12 +7781,12 @@ unsafe extern "C" fn stdio_empty_output_buffer(cinfo: *mut c_void) -> CBoolean {
         JpegDest::File(ref s) => s.outfile,
         // See `mem_empty_output_buffer`: not reachable through libjpeg's flow.
         JpegDest::Mem(_) => {
-            owned.pending_error = Some(JERR_BUFFER_SIZE);
+            owned.pending_error = Some((JERR_BUFFER_SIZE, None));
             return 0;
         }
     };
     if file.is_null() {
-        owned.pending_error = Some(JERR_FILE_WRITE);
+        owned.pending_error = Some((JERR_FILE_WRITE, None));
         return 0;
     }
     // Upstream writes a hard-coded OUTPUT_BUF_SIZE because it only ever calls
@@ -7617,7 +7798,7 @@ unsafe extern "C" fn stdio_empty_output_buffer(cinfo: *mut c_void) -> CBoolean {
         .len()
         .saturating_sub(owned.pub_mgr.free_in_buffer);
     if datacount > 0 && write_c_file(file, &owned.staging[..datacount]) != datacount {
-        owned.pending_error = Some(JERR_FILE_WRITE);
+        owned.pending_error = Some((JERR_FILE_WRITE, None));
         return 0;
     }
     owned.pub_mgr.next_output_byte = owned.staging.as_mut_ptr();
@@ -7635,12 +7816,12 @@ unsafe extern "C" fn stdio_term_destination(cinfo: *mut c_void) {
     let file: *mut c_void = match owned.kind {
         JpegDest::File(ref s) => s.outfile,
         JpegDest::Mem(_) => {
-            owned.pending_error = Some(JERR_BUFFER_SIZE);
+            owned.pending_error = Some((JERR_BUFFER_SIZE, None));
             return;
         }
     };
     if file.is_null() {
-        owned.pending_error = Some(JERR_FILE_WRITE);
+        owned.pending_error = Some((JERR_FILE_WRITE, None));
         return;
     }
     let datacount: usize = owned
@@ -7648,7 +7829,7 @@ unsafe extern "C" fn stdio_term_destination(cinfo: *mut c_void) {
         .len()
         .saturating_sub(owned.pub_mgr.free_in_buffer);
     if datacount > 0 && write_c_file(file, &owned.staging[..datacount]) != datacount {
-        owned.pending_error = Some(JERR_FILE_WRITE);
+        owned.pending_error = Some((JERR_FILE_WRITE, None));
         return;
     }
     // SAFETY: `file` is the caller-supplied `FILE *`, still open per the
@@ -7656,7 +7837,7 @@ unsafe extern "C" fn stdio_term_destination(cinfo: *mut c_void) {
     unsafe {
         c_fflush(file);
         if c_ferror(file) != 0 {
-            owned.pending_error = Some(JERR_FILE_WRITE);
+            owned.pending_error = Some((JERR_FILE_WRITE, None));
         }
     }
 }
@@ -8702,7 +8883,7 @@ fn dest_flush_failed(priv_state: &CompressPrivate) -> bool {
 /// Safe to reach through `&mut CompressPrivate` because no destination
 /// callback is running at this point — see the `OwnedDestMgr` note on why the
 /// callbacks themselves must not take this route.
-fn take_pending_dest_error(priv_state: &mut CompressPrivate) -> Option<c_int> {
+fn take_pending_dest_error(priv_state: &mut CompressPrivate) -> Option<(c_int, Option<c_int>)> {
     priv_state
         .dest_mgr
         .as_mut()
@@ -8727,7 +8908,7 @@ fn finish_dest_flush(
     priv_state: &mut CompressPrivate,
     completed: bool,
 ) {
-    if let Some(code) = take_pending_dest_error(priv_state) {
+    if let Some((code, parm)) = take_pending_dest_error(priv_state) {
         priv_state.last_error = CString::new(match code {
             JERR_FILE_WRITE => {
                 "destination stream rejected the encoded bytes (short write or \
@@ -8740,7 +8921,12 @@ fn finish_dest_flush(
         })
         .unwrap_or_default();
         priv_state.error_reported = true;
-        invoke_error_exit(c as *mut JpegCompressPublic as *mut c_void, code);
+        // The OOM twins carry upstream's `ERREXIT1` payload (`jdatadst.c`
+        // case 10) — reachable since P4-120's allocation-failure injection.
+        match parm {
+            Some(p) => invoke_error_exit_parm(c as *mut JpegCompressPublic as *mut c_void, code, p),
+            None => invoke_error_exit(c as *mut JpegCompressPublic as *mut c_void, code),
+        }
         return;
     }
     if !completed {
