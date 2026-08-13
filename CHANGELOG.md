@@ -32,6 +32,17 @@ and `git log` between tags.
   runs system/Rust bidirectional cross-decodes.
 
 ### Fixed
+- Nine SIMD wrapper functions whose safety contracts were comment-only now
+  enforce them in code (P4-135, #474): `avx2_idct_islow`, `sse2_idct_islow`
+  and the AVX2 FDCT+quantize composite check the CPU feature themselves and
+  fall back to the scalar reference instead of assuming "verified at
+  dispatch time"; the four `wasm_*_to_ycbcr_row` encode wrappers and
+  `neon_fancy_h2v2_row` validate slice lengths (`checked_mul`) instead of
+  documenting "Caller guarantees…"; and `wasm_fancy_upsample_h2v1` asserts
+  its bounds explicitly. A new unguarded parity test asserts that whichever
+  arm the executing host takes equals scalar, and the CPUID-masked no-AVX2
+  CI leg now runs the lib suite (`--lib`) so the fallback arms execute on a
+  CPU that genuinely lacks AVX2, not only the SIMD arms on one that has it.
 - Baseline `wasm32` builds (no `+simd128`) no longer emit SIMD128
   instructions (P4-135 criterion 5 / P4-143, #474). Previously the wasm
   backend compiled unconditionally and 13 pipeline call sites dispatched

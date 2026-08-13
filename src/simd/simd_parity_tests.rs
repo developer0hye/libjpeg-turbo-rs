@@ -60,12 +60,12 @@ const N: usize = 1000;
 // ---------------------------------------------------------------------
 
 #[derive(Clone, Copy)]
-struct Mulberry32 {
+pub(super) struct Mulberry32 {
     state: u32,
 }
 
 impl Mulberry32 {
-    const fn new(seed: u32) -> Self {
+    pub(super) const fn new(seed: u32) -> Self {
         Self { state: seed }
     }
 
@@ -105,7 +105,7 @@ impl Mulberry32 {
 /// that overflows with extreme inputs. We therefore clamp both coeff
 /// and quant to a range where every kernel, scalar and SIMD, produces
 /// identical output and no debug-build overflow checks trip.
-fn random_coeffs(rng: &mut Mulberry32) -> [i16; 64] {
+pub(super) fn random_coeffs(rng: &mut Mulberry32) -> [i16; 64] {
     let mut coeffs: [i16; 64] = [0i16; 64];
     for slot in coeffs.iter_mut() {
         // Random in [-128, 127] — conservative enough that every IDCT
@@ -121,7 +121,7 @@ fn random_coeffs(rng: &mut Mulberry32) -> [i16; 64] {
 
 /// Quant table values matching real JPEG encoders, but narrowed so the
 /// scaled-IDCT scalar reference cannot overflow its i32 intermediate.
-fn random_quant(rng: &mut Mulberry32) -> [u16; 64] {
+pub(super) fn random_quant(rng: &mut Mulberry32) -> [u16; 64] {
     let mut quant: [u16; 64] = [0u16; 64];
     for slot in quant.iter_mut() {
         // Quantization values in [1, 8] cover typical high-quality
@@ -138,7 +138,7 @@ fn random_quant(rng: &mut Mulberry32) -> [u16; 64] {
 /// Build `QuantDivisors` from a natural-order quant table using the same
 /// `compute_reciprocal` path the encoder uses. Divisors are multiplied
 /// by 8 to match FDCT output scaling.
-fn build_quant_divisors(natural_quant: [u16; 64]) -> QuantDivisors {
+pub(super) fn build_quant_divisors(natural_quant: [u16; 64]) -> QuantDivisors {
     let mut divisors: [u16; 64] = [0u16; 64];
     let mut reciprocals: [u16; 64] = [0u16; 64];
     let mut corrections: [u16; 64] = [0u16; 64];

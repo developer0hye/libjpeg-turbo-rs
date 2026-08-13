@@ -38,11 +38,21 @@ const F_3_072: i32 = 25172;
 
 /// SSE2-accelerated combined dequant + IDCT + level-shift + clamp.
 ///
-/// Safe wrapper matching the `SimdRoutines::idct_islow` signature.
+/// Safe wrapper matching the `SimdRoutines::idct_islow` signature. The
+/// lengths are in the types; the CPU feature is the one precondition, and
+/// it is checked *here* rather than assumed of the caller (P4-135, #474 —
+/// "verified at dispatch time" was a statement about our call sites, not
+/// this function's contract). Without SSE2 the scalar reference path runs.
 pub fn sse2_idct_islow(coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 64]) {
-    // SAFETY: SSE2 is verified at dispatch time via `is_x86_feature_detected!`.
-    unsafe {
-        sse2_idct_islow_core(coeffs, quant, output.as_mut_ptr(), 8);
+    if crate::cpu_has!("sse2") {
+        // SAFETY: SSE2 confirmed immediately above; every buffer is a
+        // fixed-size array covering the 64 elements the kernel touches
+        // (`[u8; 64]` with stride 8 covers the 64-byte write).
+        unsafe {
+            sse2_idct_islow_core(coeffs, quant, output.as_mut_ptr(), 8);
+        }
+    } else {
+        crate::simd::scalar::scalar_idct_islow(coeffs, quant, output);
     }
 }
 

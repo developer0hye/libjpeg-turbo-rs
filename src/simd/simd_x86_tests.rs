@@ -181,3 +181,52 @@ fn sse2_dispatch_integration() {
     (routines.fancy_upsample_h2v1)(&input, 32, &mut au);
     assert_eq!(au, eu);
 }
+
+/// P4-135 (#474): the safe fixed-array wrappers check their own CPU
+/// feature and fall back to scalar — "verified at dispatch time" is not a
+/// contract a safe function may impose on its caller. Deliberately
+/// UNGUARDED by any feature probe: whichever arm the executing host takes
+/// must equal the scalar reference, so an AVX2 host exercises the SIMD
+/// arms and a host without AVX2 the new fallback arms. Both arms execute
+/// in CI: the AVX2 leg's `cargo test --tests` includes this lib binary,
+/// and the CPUID-masked no-AVX2 leg (#320,
+/// `.github/workflows/cross-arch.yml`) carries `--lib` so the fallback
+/// arms run under an emulated Nehalem where
+/// `is_x86_feature_detected!("avx2")` is genuinely false — the x86 half
+/// of P4-141 criterion 2 for the lib suite.
+///
+/// Inputs come from the parity suite's generators: coefficients in
+/// [-128, 127] and quant in [1, 8], the documented envelope where every
+/// IDCT variant is bit-exact against scalar. Outside it they legitimately
+/// diverge — scalar truncates its pass-1 workspace to i16, SSE2 keeps
+/// i32, AVX2 saturates (the P4-19/P4-20 family) — so a wider generator
+/// here would assert a property the kernels never promised.
+#[test]
+fn feature_checked_wrappers_match_scalar_on_any_cpu() {
+    let mut rng = super::simd_parity_tests::Mulberry32::new(0x8676_2d5e);
+    let coeffs: [i16; 64] = super::simd_parity_tests::random_coeffs(&mut rng);
+    let quant: [u16; 64] = super::simd_parity_tests::random_quant(&mut rng);
+
+    let (mut expected, mut got) = ([0u8; 64], [0u8; 64]);
+    crate::simd::scalar::scalar_idct_islow(&coeffs, &quant, &mut expected);
+    crate::simd::x86_64::avx2_idct::avx2_idct_islow(&coeffs, &quant, &mut got);
+    assert_eq!(got, expected, "avx2_idct_islow diverges from scalar");
+    let mut got_sse = [0u8; 64];
+    crate::simd::x86_64::idct::sse2_idct_islow(&coeffs, &quant, &mut got_sse);
+    assert_eq!(got_sse, expected, "sse2_idct_islow diverges from scalar");
+
+    let divisors = super::simd_parity_tests::build_quant_divisors(quant);
+    let mut block = [0i16; 64];
+    for (i, slot) in block.iter_mut().enumerate() {
+        *slot = coeffs[i] / 2;
+    }
+    let (mut fdct_expected, mut fdct_got) = ([0i16; 64], [0i16; 64]);
+    let mut scalar_in = block;
+    crate::simd::scalar::scalar_fdct_quantize(&mut scalar_in, &divisors, &mut fdct_expected);
+    let mut simd_in = block;
+    crate::simd::x86_64::avx2_fdct_quantize(&mut simd_in, &divisors, &mut fdct_got);
+    assert_eq!(
+        fdct_got, fdct_expected,
+        "avx2_fdct_quantize diverges from scalar"
+    );
+}

@@ -12,6 +12,14 @@ pub fn wasm_fancy_upsample_h2v1(input: &[u8], in_width: usize, output: &mut [u8]
     if in_width == 0 {
         return;
     }
+    // P4-135 (#474): `in_width` is independent of the slice lengths and the
+    // SIMD loop indexes by raw pointer. The edge-pixel writes below happen
+    // to index up to `input[in_width - 1]` / `output[2 * in_width - 1]` and
+    // would panic first, but the bound must not depend on that accident.
+    // (`in_width * 2` cannot overflow: `input.len() >= in_width` caps it at
+    // `isize::MAX`.)
+    assert!(input.len() >= in_width);
+    assert!(output.len() >= in_width * 2);
     if in_width == 1 {
         output[0] = input[0];
         output[1] = input[0];
@@ -34,9 +42,10 @@ pub fn wasm_fancy_upsample_h2v1(input: &[u8], in_width: usize, output: &mut [u8]
     output[last * 2] = ((3 * input[last] as u16 + input[last - 1] as u16 + 1) >> 2) as u8;
     output[last * 2 + 1] = input[last];
 
-    // SAFETY: Caller guarantees y.len() >= width, cb.len() >= width, cr.len() >= width,
-    // out.len() >= width * BPP. The loop processes 8 pixels per iteration with a scalar
-    // tail for width % 8 != 0, preventing out-of-bounds access.
+    // SAFETY: `input` holds `in_width` samples and `output` the
+    // `in_width * 2` the kernel writes, asserted at entry; simd128 is
+    // statically enabled for this module, so the `target_feature` call
+    // needs no runtime check.
     unsafe {
         wasm_fancy_h2v1_inner(input, in_width, output);
     }
@@ -155,7 +164,6 @@ pub fn wasm_fancy_h2v2_row(cur: &[u8], neighbor: &[u8], output: &mut [u8], in_wi
         output[1] = ((cs0 * 3 + cs1 + 7) >> 4) as u8;
     }
 
-    // SAFETY: wasm simd128 is enabled by target_feature. We verified in_width >= 3.
     // P4-135: 2:1 horizontal upsample against a neighbouring row -- `cur` and
     // `neighbor` each hold `in_width`, `output` holds `in_width * 2`. The row
     // arguments are not interchangeable (near vs far weighting), so this checks

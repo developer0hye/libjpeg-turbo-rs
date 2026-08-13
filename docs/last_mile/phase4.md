@@ -1504,7 +1504,7 @@ So **(D) enable the target feature and let the compiler vectorise** joins the li
 
 **What would make (D) safe to recommend:** a hardware A/B on the actual target core, with `-C target-cpu=` set to that core rather than generic; per-kernel A/B rather than whole-decode timings, so a kernel that regresses is not hidden inside an average; and it stays opt-in either way, documented beside the existing x86_64 build-flag guidance rather than as a default.
 
-**Correctness is not in question.** The scalar path is the reference every SIMD kernel is validated against, and `tests/no_std_dispatch.rs::scalar_dispatch_matches_the_default_dispatch` pins scalar output == host-dispatch output. What ARMv7 adds beyond that is a **32-bit hardware ISA** — native ARM codegen, the armhf ABI, real unaligned-access semantics. (32-bit *pointer width* alone was already executed: `wasm.yml` runs `cargo test --target wasm32-wasip1` under wasmtime, scalar-dispatched because `simd128` is off by default there.) That is now gated by the `Test (linux-armv7 scalar, emulated)` leg (`.github/workflows/armv7.yml`), which cross-builds for `armv7-unknown-linux-gnueabihf` and runs the suites under `qemu-arm` — **204 tests executed** (196 lib + 6 `simd_dispatch` + 2 `no_std_dispatch`), 0 failed, on qemu-arm 8.2.2 ([first green run](https://github.com/developer0hye/libjpeg-turbo-rs/actions/runs/30519595108/job/90796847495)). Verified by mechanism rather than by the job passing: the log's per-binary `running N tests` / `test result: ok` lines were read to confirm the counts, since a filter or target mistake here would otherwise produce the vacuous green that P4-61 documents. That leg is a correctness gate only: unlike the RISC-V harness, the two sides would *not* pay a symmetric emulation tax here, since C's NEON kernels would be emulated while our scalar ones are not.
+**Correctness is not in question.** The scalar path is the reference every SIMD kernel is validated against, and `tests/no_std_dispatch.rs::scalar_dispatch_matches_the_default_dispatch` pins scalar output == host-dispatch output. What ARMv7 adds beyond that is a **32-bit hardware ISA** — native ARM codegen, the armhf ABI, real unaligned-access semantics. (32-bit *pointer width* alone was already executed: `wasm.yml` runs `cargo test --target wasm32-wasip1` under wasmtime — SIMD128-dispatched, since `.cargo/config.toml` forces `+simd128` for in-tree wasm builds.) That is now gated by the `Test (linux-armv7 scalar, emulated)` leg (`.github/workflows/armv7.yml`), which cross-builds for `armv7-unknown-linux-gnueabihf` and runs the suites under `qemu-arm` — **204 tests executed** (196 lib + 6 `simd_dispatch` + 2 `no_std_dispatch`), 0 failed, on qemu-arm 8.2.2 ([first green run](https://github.com/developer0hye/libjpeg-turbo-rs/actions/runs/30519595108/job/90796847495)). Verified by mechanism rather than by the job passing: the log's per-binary `running N tests` / `test result: ok` lines were read to confirm the counts, since a filter or target mistake here would otherwise produce the vacuous green that P4-61 documents. That leg is a correctness gate only: unlike the RISC-V harness, the two sides would *not* pay a symmetric emulation tax here, since C's NEON kernels would be emulated while our scalar ones are not.
 
 **Measurement recipe (for a real ARMv7-A device, no emulation).** Build ours with `cargo build --release --target armv7-unknown-linux-gnueabihf --example bench_scalar_p460` and C with `-mfpu=neon` (or use the distro's `libjpeg-turbo-progs`, which enables NEON at runtime); run `examples/bench_scalar_p460.rs` for our in-process decode medians and `djpeg -outfile /dev/null` best-of-N minus process startup for C, exactly as `experiments/riscv64_scalar_2026-07-27.md` does; cross-check `JSIMD_FORCENONE=1 djpeg` to separate "C's NEON win" from "our scalar deficit". Record as `experiments/armv7_<date>.md`.
 
@@ -5210,7 +5210,7 @@ installed base of the architectures we target, and unlike P4-78 (where ARMv7
 hardware is everywhere and the gap is inferred from a real user question) there
 is no downstream request. It is filed so the P4-60 premise change is on record.
 
-## P4-135. Public Safe SIMD Wrappers Let Safe Rust Reach `target_feature` Kernels With Unvalidated Slices — **PARTIAL: external safe-to-UB path closed; in-crate `unsafe fn` sweep pending**
+## P4-135. Public Safe SIMD Wrappers Let Safe Rust Reach `target_feature` Kernels With Unvalidated Slices — **CLOSED 2026-08-13**
 
 **GitHub:** [#474](https://github.com/developer0hye/libjpeg-turbo-rs/issues/474) — under the [#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481) umbrella.
 
@@ -5403,6 +5403,88 @@ which already tracks the sweep and the `forbid(unsafe_code)` goal. P4-135 keeps
 the row until the kernel signatures change; it is no longer P0, because the
 property it was P0 for — "our safe API is sound" against this defect — now
 holds.
+
+**Status (2026-08-13): closed.** The "kernel signatures" residue above was
+re-audited by classifier (every safe wrapper in the three arch modules,
+checked for *executable* validation rather than comment claims) and turned
+out to describe an architecture that had already moved on: the inner
+`target_feature` kernels are `unsafe fn`, and nearly every safe wrapper
+already validates lengths and CPU feature itself with a scalar fallback —
+which is precisely criterion 1's "the safe entry points validate first".
+The "~129 direct call sites need `unsafe` annotation" framing was wrong:
+those sites call the validating wrappers, and annotating them would have
+re-implemented the wrappers' job at every caller.
+
+What the audit *did* find — nine wrappers whose stated contracts were
+comment-only (eight by the classifier, the ninth — `neon_fancy_h2v2_row`
+— by the review's independent sweep), all fixed here. A tenth,
+`avx2_fdct_islow`, carried the same "Caller must ensure AVX2" contract on
+a safe `pub fn` and is fixed as a knock-on of hardening its only caller
+(the composite below) rather than counted with the nine:
+
+* **x86_64, feature precondition unchecked (UB hazard):**
+  `avx2_idct_islow`, `sse2_idct_islow`, and the `avx2_fdct_quantize`
+  composite carried "verified at dispatch time" SAFETY comments — the
+  filing's own root-cause premise ("a safe `pub fn` may not assume
+  anything about its caller") one module deeper. Each now checks
+  `cpu_has!` itself and falls back to the scalar reference.
+  `avx2_fdct_islow` has no same-shape scalar (the scalar FDCT emits
+  `i32`), so it became `pub(crate) unsafe fn` with the precondition in
+  its signature; its one caller sits inside the composite's checked arm.
+* **wasm32, length preconditions unchecked (OOB hazard):** the four
+  `wasm_*_to_ycbcr_row` encode wrappers said "Caller guarantees …" and
+  checked nothing; they now validate with `checked_mul` and fall back to
+  scalar, mirroring their AVX2 twins. `wasm_fancy_upsample_h2v1` was
+  sound only because its edge-pixel indexing happened to probe both
+  bounds; it now asserts them explicitly. (simd128 needs no runtime
+  check — the module only compiles where the target feature is
+  statically enabled, per the P4-143 gating.)
+* **aarch64, one length-unvalidated row kernel (OOB hazard):**
+  `neon_fancy_h2v2_row` probed only `output[0]`/`output[1]` before its
+  inner wrote `output[..in_width * 2]` by raw pointer, and its caller
+  never checks `out_width >= in_width * 2` — found by the review, since
+  the classifier's incidental-indexing heuristic scored it validated. It
+  now runs the same `fits`-then-fallback shape as its SSE2/AVX2/wasm
+  twins.
+* **The rest need no change:** NEON is mandatory and simd128 is
+  compile-time, so the fixed-array wrappers (lengths in the types) have
+  no unchecked precondition, and the slice-taking aarch64
+  downsample/upsample-h2v1 wrappers already carry explicit `assert!`s —
+  sound by executable check, not by type.
+
+Proof: `simd_x86_tests::feature_checked_wrappers_match_scalar_on_any_cpu`
+— deliberately unguarded by any feature probe, so whichever arm the
+executing host takes must equal scalar. Both arms execute in CI, and the
+`--lib` that makes that true was added here: the AVX2 leg's
+`cargo test --tests` runs the SIMD arms, and the CPUID-masked no-AVX2 leg
+(#320) — which built four *integration* binaries and not `--lib` — now
+carries the lib binary too, so the AVX2 wrappers take their new fallback
+arms on a CPU that genuinely lacks the feature. Read that arm for what it
+proves: the fallback calls the same `scalar_idct_islow` /
+`scalar_fdct_quantize` the expectation uses, so its equality holds by
+construction, and what the leg pins is that the wrapper *takes* the
+fallback instead of entering an AVX2 kernel without AVX2.
+`sse2_idct_islow` still runs its SIMD arm there, SSE2 being x86_64
+baseline. That is the x86 half of P4-141 criterion 2 for the lib suite.
+Inputs stay inside the parity
+suite's documented bit-exactness envelope (coeffs [-128, 127] × quant
+[1, 8]) — the first draft generated ±256 × [1, 31], where scalar
+truncates its pass-1 workspace to i16, SSE2 keeps i32 and AVX2
+saturates, and the review *ran* it under Rosetta and watched the SSE2
+assertion fail 32/64 bytes; parity outside the envelope is a property
+the kernels never promised (the P4-19/P4-20 family). The wasip1 suite
+runs the hardened wasm wrappers through the existing parity tests
+(226/0) — exact-fit slices only, so the new `fits == false` fallback
+arm has no executing coverage there, and the short-slice panic arm is
+not assertable under wasip1 (that target is `panic = "abort"`, which is
+why `avx2_color.rs`'s `p4135_soundness_tests` is gated on
+`panic = "unwind"`); for those, the checks' code is the pin.
+
+Criteria 6–7 (the `unsafe_op_in_unsafe_fn` lift and the SAFETY-prose
+sweep) remain with
+[P4-69](#p4-69-simd-feature-contract-and-the-remaining-389-safety-posture-work--open),
+exactly as the paragraph above records — the issue's own text calls
+criterion 6 a consequence of that sweep, not of this item.
 
 ## P4-136. Progressive Output Calls `set_len()` on Uninitialized `Vec` After an Unchecked Size Multiplication — **CLOSED 2026-08-10**
 
@@ -6206,7 +6288,17 @@ misuse of a public SIMD entry point; none injects allocation failure; none runs
 2. **Sanitizers** run with SIMD on *and* off; on an AVX2 machine and a
    non-AVX2 one; on 32-bit `i686`; and on AArch64 NEON. Add guard pages either
    side of C destination buffers, short-stride and canary buffers, and repeated
-   init/destroy sequences.
+   init/destroy sequences. **Partially delivered 2026-08-13 by the P4-135
+   closure:** `cross-arch.yml`'s `test-linux-x86_64-no-avx2-emulated` built
+   four *integration* binaries and no `--lib`, so nothing ran the lib suite
+   under a masked CPUID; it now carries `--lib`, and the scalar-fallback arms
+   P4-135 added to `avx2_idct_islow` / `avx2_fdct_quantize` execute there.
+   That is the x86 non-AVX2 half for *tests*; the sanitizer legs, `i686` and
+   AArch64 NEON remain. Also outstanding from the same closure: the wasm
+   wrappers' `fits == false` fallback arms have no executing coverage
+   anywhere (wasip1 parity uses exact-fit slices, and the panic arm cannot
+   be asserted under `panic = "abort"`) — the "pinned by the checks' code,
+   not by a gate" shape this item exists to retire.
 3. **An API-sequence fuzzer** exists alongside the byte fuzzers — driving
    `new → configure → probe → decode → reset → decode → transform → destroy`
    orderings — plus a process-isolated C-ABI harness covering

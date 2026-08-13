@@ -126,12 +126,18 @@ macro_rules! dofdct {
 
 /// AVX2 forward DCT on 64 i16 coefficients (in-place, natural order).
 ///
-/// # Safety contract
-/// Caller must ensure AVX2 is available.
-pub fn avx2_fdct_islow(data: &mut [i16; 64]) {
-    // SAFETY: AVX2 availability is verified at dispatch time via is_x86_feature_detected!().
-    // Input/output is a fixed-size [i16; 64], guaranteeing sufficient length for all loads
-    // and stores performed by the inner function.
+/// `unsafe fn` because a "Caller must ensure AVX2" contract on a *safe*
+/// function was exactly the P4-135 (#474) defect shape — a safe `pub fn`
+/// may not assume anything about its caller. There is no same-signature
+/// scalar fallback to validate into (the scalar FDCT emits `i32`), so the
+/// signature carries the precondition honestly instead. The lengths are in
+/// the type.
+///
+/// # Safety
+/// AVX2 must be available on the executing CPU.
+pub(crate) unsafe fn avx2_fdct_islow(data: &mut [i16; 64]) {
+    // SAFETY: the caller upholds AVX2 availability per this function's own
+    // contract; `[i16; 64]` covers every load and store the kernel makes.
     unsafe { avx2_fdct_islow_inner(data) }
 }
 

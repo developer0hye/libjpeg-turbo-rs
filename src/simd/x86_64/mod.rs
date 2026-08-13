@@ -54,15 +54,28 @@ pub fn encoder_routines() -> EncoderSimdRoutines {
 }
 
 /// AVX2 fused FDCT + quantize + zigzag.
-fn avx2_fdct_quantize(input: &mut [i16; 64], quant: &QuantDivisors, output: &mut [i16; 64]) {
-    // Step 1: AVX2 FDCT (in-place, destroys input)
-    avx2_fdct::avx2_fdct_islow(input);
-
-    // Step 2: AVX2 quantize using reciprocal multiply + zigzag reorder
-    // SAFETY: AVX2 availability is verified at dispatch time via is_x86_feature_detected!().
-    // Input arrays are fixed-size [i16; 64], guaranteeing sufficient length.
-    // Output buffer is [i16; 64], satisfying the 64-element write requirement.
-    unsafe { avx2_quantize_zigzag(input, quant, output) }
+///
+/// The CPU feature is checked *here*, not assumed of the caller (P4-135,
+/// #474): `encoder_routines()` installs this only after its own check, but
+/// a safe function must hold for every caller. Without AVX2 the scalar
+/// reference path runs.
+pub(crate) fn avx2_fdct_quantize(
+    input: &mut [i16; 64],
+    quant: &QuantDivisors,
+    output: &mut [i16; 64],
+) {
+    if crate::cpu_has!("avx2") {
+        // SAFETY: AVX2 confirmed immediately above; every buffer is a
+        // fixed-size array covering the 64 elements both kernels touch.
+        unsafe {
+            // Step 1: AVX2 FDCT (in-place, destroys input)
+            avx2_fdct::avx2_fdct_islow(input);
+            // Step 2: AVX2 quantize using reciprocal multiply + zigzag
+            avx2_quantize_zigzag(input, quant, output);
+        }
+    } else {
+        crate::simd::scalar::scalar_fdct_quantize(input, quant, output);
+    }
 }
 
 /// Fused extract (u8→i16 + level-shift) + FDCT + quantize + zigzag.

@@ -183,6 +183,24 @@ fn neon_fancy_h2v2_row(cur: &[u8], neighbor: &[u8], output: &mut [u8], in_width:
         return;
     }
 
+    // P4-135 (#474): `in_width` is independent of the slice lengths and the
+    // inner writes `output[..in_width * 2]` by raw pointer — the edge-pixel
+    // indexing below probes too little of `output` to rely on. Both rows
+    // hold `in_width` samples; `output` holds `in_width * 2` (checked_mul:
+    // a wrapping product would let a short buffer pass). A request the
+    // arguments cannot satisfy falls back to the scalar path, which slices
+    // and therefore bounds-checks. The row arguments are not
+    // interchangeable (near vs far weighting), so this only checks
+    // lengths; ordering stays the caller's contract.
+    let out_needed: Option<usize> = in_width.checked_mul(2);
+    let fits: bool = cur.len() >= in_width
+        && neighbor.len() >= in_width
+        && out_needed.is_some_and(|n| output.len() >= n);
+    if !fits {
+        crate::decode::upsample::fancy_h2v2_row(cur, neighbor, output, in_width);
+        return;
+    }
+
     // First column (scalar edge): even pixel + odd pixel
     let cs0: i32 = cur[0] as i32 * 3 + neighbor[0] as i32;
     output[0] = ((cs0 * 4 + 8) >> 4) as u8;
@@ -191,7 +209,9 @@ fn neon_fancy_h2v2_row(cur: &[u8], neighbor: &[u8], output: &mut [u8], in_width:
         output[1] = ((cs0 * 3 + cs1 + 7) >> 4) as u8;
     }
 
-    // SAFETY: NEON is mandatory on aarch64, and we verified in_width >= 3.
+    // SAFETY: NEON is mandatory on aarch64; `in_width >= 3` was checked at
+    // entry, both input rows hold `in_width` samples and `output` the
+    // `in_width * 2` the kernel writes, checked immediately above.
     unsafe {
         neon_fancy_h2v2_row_inner(cur, neighbor, output, in_width);
     }
