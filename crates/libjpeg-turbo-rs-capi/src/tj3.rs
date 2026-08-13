@@ -77,6 +77,50 @@ impl TjInstance {
     }
 }
 
+/// Upstream's "must be specified" gates, entry-point side (P4-155, #539).
+///
+/// A fresh handle carries `TJPARAM_QUALITY = -1` and `TJPARAM_SUBSAMP =
+/// TJSAMP_UNKNOWN`; the lossy compress entries refuse until the caller
+/// supplies both (`turbojpeg-mp.c:95-98` — skipped entirely when
+/// `TJPARAM_LOSSLESS` is set), the YUV compress entries refuse
+/// unconditionally (`turbojpeg.c:1347-1350` — YUV compress is inherently
+/// lossy), and the YUV encode/decode entries need only the subsampling
+/// (`turbojpeg.c:1592-1593`, `:2578-2579`). Runs after argument validation,
+/// which is upstream's order. Returns `false` with the error stashed.
+pub(crate) fn require_specified(
+    inst: &mut TjInstance,
+    function: &str,
+    need_quality: bool,
+    need_subsamp: bool,
+) -> bool {
+    use libjpeg_turbo_rs::tj3::TjParam;
+    if need_quality && inst.inner.get(TjParam::Quality) == -1 {
+        inst.set_error(
+            format!("{function}: TJPARAM_QUALITY must be specified"),
+            TJERR_FATAL,
+        );
+        return false;
+    }
+    if need_subsamp && inst.inner.get(TjParam::Subsampling) == -1 {
+        inst.set_error(
+            format!("{function}: TJPARAM_SUBSAMP must be specified"),
+            TJERR_FATAL,
+        );
+        return false;
+    }
+    true
+}
+
+/// The lossy-compress shape of [`require_specified`]: a lossless compress
+/// consults neither parameter.
+pub(crate) fn require_lossy_compress_params(inst: &mut TjInstance, function: &str) -> bool {
+    use libjpeg_turbo_rs::tj3::TjParam;
+    if inst.inner.get(TjParam::Lossless) != 0 {
+        return true;
+    }
+    require_specified(inst, function, true, true)
+}
+
 // TJ_NUMERR matches libjpeg-turbo: 0 = warning (non-fatal), 1 = fatal.
 // `TJERR_WARNING = 0` is reserved for future non-fatal paths; kept here to
 // document the contract even though no caller currently selects it.

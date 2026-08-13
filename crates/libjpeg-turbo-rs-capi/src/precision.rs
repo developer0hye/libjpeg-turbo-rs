@@ -94,6 +94,12 @@ pub unsafe extern "C" fn tj3Compress12(
                 }
             };
 
+            // P4-155 (#539): after argument validation, before any encoding
+            // state — upstream's order (`turbojpeg-mp.c:95-98`).
+            if !crate::tj3::require_lossy_compress_params(inst, "tj3Compress12") {
+                return -1;
+            }
+
             let w: usize = width as usize;
             let h: usize = height as usize;
             let line_samples: usize = if pitch == 0 {
@@ -436,6 +442,13 @@ pub unsafe extern "C" fn tj3Compress16(
             };
 
             let is_lossless: bool = inst.inner.get(TjParam::Lossless) != 0;
+
+            // P4-155 (#539): the "must be specified" gates precede the whole
+            // precision/lossless-parameter chain (`turbojpeg-mp.c:95-98` runs
+            // before `:107-121`), and a lossless compress consults neither.
+            if !crate::tj3::require_lossy_compress_params(inst, "tj3Compress16") {
+                return -1;
+            }
 
             // Which precision the encode will actually use. Upstream honours
             // `TJPARAM_PRECISION` only when lossless is set and only inside

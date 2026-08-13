@@ -2,7 +2,8 @@
 //! `tj3Decompress16`.
 //!
 //! 12-bit is lossy (SOF1) so we assert against a measured per-sample
-//! tolerance (worst-case ~64/4095 at the handle's default Q=75).
+//! tolerance (worst-case ~64/4095 at the Q=95 the test sets; since P4-155
+//! (#539) a fresh handle has no quality to fall back on).
 //! 16-bit is lossless, so diff must be exactly zero.
 
 use std::ffi::{c_int, c_short, c_void};
@@ -103,6 +104,9 @@ fn tj3_compress12_decompress12_round_trips_gray_ramp() {
         let h_enc = tj3_init(TJINIT_COMPRESS);
         assert!(!h_enc.is_null());
         assert_eq!(tj3_set(h_enc, TJPARAM_QUALITY, 95), 0);
+        // Explicit since P4-155 (#539): a fresh handle's subsampling is
+        // *unset*, and a lossy compress refuses it. 3 = TJSAMP_GRAY.
+        assert_eq!(tj3_set(h_enc, 4 /* TJPARAM_SUBSAMP */, 3), 0);
 
         // 64x64 12-bit gray ramp: values 0..4095 wrapping.
         let w: c_int = 64;
@@ -779,6 +783,9 @@ fn tj3_transform_buf_size_includes_icc_size() {
 
         let h_enc: TjHandle = tj3_init(1 /* TJINIT_COMPRESS */);
         assert!(!h_enc.is_null());
+        // Explicit since P4-155 (#539): a fresh handle's quality is *unset*,
+        // and a lossy compress refuses it.
+        assert_eq!(tj3_set(h_enc, 3 /* TJPARAM_QUALITY */, 80), 0);
         assert_eq!(tj3_set(h_enc, TJPARAM_SUBSAMPLING, TJSAMP_420), 0);
         let mut jpeg_buf: *mut u8 = std::ptr::null_mut();
         let mut jpeg_size: usize = 0;

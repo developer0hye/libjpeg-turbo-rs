@@ -6764,7 +6764,7 @@ inside `jpeg_start_compress` is pinned by `mixed_width_overflow_precision_9`
 sits after the row check. And the suite is named in `ci.yml` (P4-154 step) —
 a suite nothing names never runs.
 
-## P4-155. `TJPARAM_QUALITY` / `TJPARAM_SUBSAMP` Default to Set Values, So Upstream's "must be specified" Errors Can Never Fire — **OPEN**
+## P4-155. `TJPARAM_QUALITY` / `TJPARAM_SUBSAMP` Default to Set Values, So Upstream's "must be specified" Errors Can Never Fire — **CLOSED 2026-08-13**
 
 **Motivation.** Found 2026-08-12 (issue #539) while closing P4-150. Upstream
 initialises a TurboJPEG instance with `TJPARAM_QUALITY = -1` and
@@ -6816,6 +6816,49 @@ the same question.
    duplicating it.
 4. Legacy `tjCompress2` and friends, which set quality on every call, keep
    working and must not become sensitive to the default.
+
+**Status (2026-08-13): closed** (issue #539). A fresh handle now carries
+`quality = -1` and `subsampling = -1` (TJSAMP_UNKNOWN), reported verbatim by
+`tj3Get` and cross-validated by the oracle's `p4155_fresh_get` line. The
+gates are ported at both layers: the TJ3 entry points refuse with upstream's
+message shape after argument validation — the lossy compress entries skip
+them under `TJPARAM_LOSSLESS` (`turbojpeg-mp.c:95-98`), the YUV compress
+entries gate quality unconditionally — `tj3CompressFromYUVPlanes8`
+quality-then-subsampling (`turbojpeg.c:1347-1350`), while the packed
+`tj3CompressFromYUV8` gates the subsampling itself first, because it needs it
+to size the planes (`:1497-1498`), and reaches the quality gate only through
+the delegate — and the YUV encode/decode entries need only the
+subsampling, with *unset* distinguished from *out-of-range* — and the native
+`TjHandle` compress methods carry the same refusal as a backstop for Rust
+callers. Pinned by the `p4155_*` block in `compress_precision_oracle.c` /
+`capi_compress_precision.rs` (17 lines: the fresh-handle readback, the c8
+unset matrix, argument-error precedence, c12, the lossless bypass, and eight
+YUV lines — the six entry-point shapes plus the packed wrappers' `align` and
+pixel-format precedence, and the legacy `tjEncodeYUV3`/`tjDecodeYUV`
+`align=0` rows — the re-review caught those wrappers clamping `align.max(1)`
+and thereby masking the new `align < 1` validation, a silent accept where
+upstream refuses; the clamp is gone and the raw value reaches the TJ3
+entry), classified
+on upstream's documented "must be specified" substrings and Red-verified:
+before the change every unset case encoded with silent 75 / 4:2:0
+substitutes and the fresh handle reported `quality=75 subsamp=2`.
+
+The #539 review round (adversarial, standing in for the quota-blocked codex
+pass) reordered three gates the first version got wrong, each measured
+against stock TurboJPEG 3.1.4.1 before and after: packed `tj3CompressFromYUV8`
+gates the subsampling in the entry itself — it needs it to size the planes
+(`turbojpeg.c:1497-1498`) — and reaches the quality gate only through the
+`…Planes8` delegate; and the packed `tj3EncodeYUV8` / `tj3DecodeYUV8`
+wrappers gate the subsampling *before* the pixel-format range check, which
+upstream performs in the delegates (`:1745-1750`, `:2721-2726`). The packed
+entries also now validate `align` (power of two) in argument validation,
+where it beats every gate. The discriminating oracle lines use an
+out-of-range pixel format on purpose — a valid-format line passes with the
+checks in either order. The round also added standalone `#[test]`s at both
+layers so the gates stay covered without a TurboJPEG install, a CHANGELOG
+entry for the breaking Rust-API default change, and filed **P4-158** for the
+pre-existing `compress_12bit` lossless-flag gap the sentinel comment had
+papered over.
 
 ## P4-156. Legacy NOREALLOC Transform Copies the Source ICC Profile Where Upstream Drops Every Marker — **CLOSED 2026-08-13**
 
@@ -6933,3 +6976,30 @@ payload crossing a bound; the standalone
 `legacy_tj_transform_sizes_a_grayscale_source_as_gray` now asserts the
 post-quirk contract (success within the grayscale bound, canary untouched).
 `norealloc_all_entry_points`: 18/18.
+
+## P4-158. Native `compress_12bit` Ignores `TJPARAM_LOSSLESS` and Encodes a Lossy Stream — **OPEN**
+
+**Motivation.** Found by the #539 review round (2026-08-13). `TjHandle`'s
+`compress_12bit` / `compress_12bit_with_precision` dispatch on component
+count only (`src/api/precision.rs`) and never read `self.lossless`: a caller
+who sets `TJPARAM_LOSSLESS` and calls them gets `Ok(jpeg)` holding a **lossy**
+SOF1 stream — neither the requested format nor an error. The P4-150 / P4-39
+shape at the native layer.
+
+P4-155 makes it observable one step earlier: `require_lossy_params` waves the
+lossless flag through with quality unset, and the sentinel placeholder (75)
+then feeds `quality_scale_quant_table_ext` in a stream the caller never asked
+for. The placeholder becomes unobservable only once this item routes the
+flag; until then the comment at those call sites names this item instead of
+claiming the property.
+
+**Acceptance criteria.**
+
+1. With `TJPARAM_LOSSLESS` set, `compress_12bit` produces an SOF3 lossless
+   stream honouring PSV/Pt (or refuses with a documented error if 12-bit
+   lossless is out of scope for it), cross-validated against C.
+2. The unset-quality sentinel provably cannot reach quantization on any path
+   (the `configure_encoder` shape, where `.lossless(...)` is passed through,
+   is the model).
+3. The capi `tj3Compress12` route is traced for the same configuration.
+

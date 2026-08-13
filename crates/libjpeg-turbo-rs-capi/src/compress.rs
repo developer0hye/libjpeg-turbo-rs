@@ -97,6 +97,12 @@ pub unsafe extern "C" fn tj3Compress8(
                 }
             };
 
+            // P4-155 (#539): after argument validation, before any encoding
+            // state — upstream's order (`turbojpeg-mp.c:95-98`).
+            if !crate::tj3::require_lossy_compress_params(inst, "tj3Compress8") {
+                return -1;
+            }
+
             let w: usize = width as usize;
             let h: usize = height as usize;
             let bpp: usize = pf.bytes_per_pixel();

@@ -22,7 +22,9 @@ use alloc::{format, vec};
 /// libjpeg-turbo conventions (e.g., subsampling as 0-5, booleans as 0/1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TjParam {
-    /// TJPARAM_QUALITY: Quality factor 1-100.
+    /// TJPARAM_QUALITY: Quality factor 1-100 once set. A fresh handle
+    /// reports -1 (unset, as upstream's does — P4-155); `set` rejects
+    /// writing -1 back, as upstream's `SET_PARAM(quality, 1, 100)` does.
     Quality,
     /// TJPARAM_SUBSAMP: Chroma subsampling (0=444, 1=422, 2=420, 3=Gray, 4=440, 5=411).
     Subsampling,
@@ -138,8 +140,13 @@ impl TjHandle {
     /// Create a new TJ3 handle with default parameters (like `tj3Init`).
     pub fn new() -> Self {
         Self {
-            quality: 75,
-            subsampling: 2, // S420
+            // Upstream initialises both to *unset* — quality -1 and
+            // TJSAMP_UNKNOWN — and every lossy compress path refuses until
+            // the caller supplies them (`turbojpeg-mp.c:95-98`). Defaulting
+            // to 75 / 4:2:0 made those errors unreachable and silently
+            // substituted values a caller never chose (P4-155, #539).
+            quality: -1,
+            subsampling: -1, // TJSAMP_UNKNOWN
             width: 0,
             height: 0,
             precision: 8,
@@ -420,6 +427,26 @@ impl TjHandle {
         }
     }
 
+    /// Upstream's "must be specified" gates (`turbojpeg-mp.c:95-98`): a
+    /// lossy compress refuses until the caller supplies quality and
+    /// subsampling; a lossless one consults neither (P4-155, #539).
+    fn require_lossy_params(&self) -> Result<()> {
+        if self.lossless != 0 {
+            return Ok(());
+        }
+        if self.quality == -1 {
+            return Err(JpegError::CorruptData(alloc::string::String::from(
+                "TJPARAM_QUALITY must be specified",
+            )));
+        }
+        if self.subsampling == -1 {
+            return Err(JpegError::CorruptData(alloc::string::String::from(
+                "TJPARAM_SUBSAMP must be specified",
+            )));
+        }
+        Ok(())
+    }
+
     /// Convert the subsampling integer to the `Subsampling` enum.
     fn subsampling_enum(&self) -> Subsampling {
         match self.subsampling {
@@ -433,6 +460,12 @@ impl TjHandle {
             6 => Subsampling::S441,
             7 => Subsampling::S410,
             8 => Subsampling::S24,
+            // `set` rejects anything outside 0-8, so the only value reaching
+            // here is the P4-155 unset sentinel, and only on the lossless
+            // path that `require_lossy_params` waves through. Upstream's
+            // `setCompDefaults` returns before touching the sampling factors
+            // there (`turbojpeg.c:381-386`), leaving `jpeg_set_defaults`'
+            // 2x2 luma (`jcparam.c:378-381`) — which is this S420.
             _ => Subsampling::S420,
         }
     }
@@ -442,8 +475,26 @@ impl TjHandle {
         &'a self,
         encoder: crate::api::encoder::Encoder<'a>,
     ) -> crate::api::encoder::Encoder<'a> {
+        // `-1` is the P4-155 unset sentinel. Lossy paths never reach here
+        // with it — `require_lossy_params` refused already — so it flows only
+        // where quality is not consulted (lossless), and the placeholder is
+        // unobservable. Casting the sentinel itself would wrap to 255 and
+        // underflow `quality_scaling`'s `200 - q * 2`.
+        let effective_quality: u8 = if self.quality == -1 {
+            75
+        } else {
+            self.quality as u8
+        };
+        // The `_ => S420` arm of `subsampling_enum` is only correct for the
+        // unset sentinel on the lossless path (see its comment); make the
+        // invariant enforceable rather than documentary.
+        debug_assert!(
+            self.subsampling != -1 || self.lossless != 0,
+            "unset subsampling reached configure_encoder on a lossy path — \
+             require_lossy_params must refuse first (P4-155)"
+        );
         let mut enc = encoder
-            .quality(self.quality as u8)
+            .quality(effective_quality)
             .subsampling(self.subsampling_enum())
             .optimize_huffman(self.optimize != 0)
             .progressive(self.progressive != 0)
@@ -501,6 +552,8 @@ impl TjHandle {
         pixel_format: PixelFormat,
     ) -> Result<Vec<u8>> {
         use crate::api::encoder::Encoder;
+
+        self.require_lossy_params()?;
 
         // Wire BottomUp: flip rows before encoding
         if self.bottom_up != 0 {
@@ -562,12 +615,23 @@ impl TjHandle {
         height: usize,
         num_components: usize,
     ) -> Result<Vec<u8>> {
+        self.require_lossy_params()?;
+        // The unset sentinel flows here only under `TJPARAM_LOSSLESS` — but
+        // unlike `configure_encoder`, this path does not route the flag:
+        // `compress_12bit_with_precision` encodes lossy regardless and feeds
+        // the placeholder into its quant tables (P4-158). The placeholder
+        // keeps that pre-existing mis-shape at its historical quality rather
+        // than wrapping -1 to 255; P4-158 is the fix, not this substitution.
         crate::api::precision::compress_12bit_with_precision(
             pixels,
             width,
             height,
             num_components,
-            self.quality as u8,
+            if self.quality == -1 {
+                75
+            } else {
+                self.quality as u8
+            },
             self.subsampling_enum(),
             None,
         )
@@ -586,12 +650,23 @@ impl TjHandle {
         num_components: usize,
         precision: u8,
     ) -> Result<Vec<u8>> {
+        self.require_lossy_params()?;
+        // The unset sentinel flows here only under `TJPARAM_LOSSLESS` — but
+        // unlike `configure_encoder`, this path does not route the flag:
+        // `compress_12bit_with_precision` encodes lossy regardless and feeds
+        // the placeholder into its quant tables (P4-158). The placeholder
+        // keeps that pre-existing mis-shape at its historical quality rather
+        // than wrapping -1 to 255; P4-158 is the fix, not this substitution.
         crate::api::precision::compress_12bit_with_precision(
             pixels,
             width,
             height,
             num_components,
-            self.quality as u8,
+            if self.quality == -1 {
+                75
+            } else {
+                self.quality as u8
+            },
             self.subsampling_enum(),
             Some(precision),
         )

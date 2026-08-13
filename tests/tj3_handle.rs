@@ -4,10 +4,11 @@ use libjpeg_turbo_rs::{compress, decompress, PixelFormat, Subsampling};
 #[test]
 fn handle_default_values() {
     let handle = TjHandle::new();
-    // Default quality = 75
-    assert_eq!(handle.get(TjParam::Quality), 75);
-    // Default subsampling = S420 = index 2
-    assert_eq!(handle.get(TjParam::Subsampling), 2);
+    // Quality and subsampling default to *unset*, exactly as upstream's
+    // handle does (`tjInit`: quality -1, subsamp TJSAMP_UNKNOWN) — a lossy
+    // compress refuses until the caller supplies them (P4-155, #539).
+    assert_eq!(handle.get(TjParam::Quality), -1);
+    assert_eq!(handle.get(TjParam::Subsampling), -1);
     // Default precision = 8
     assert_eq!(handle.get(TjParam::Precision), 8);
     // Default colorspace = TJCS_DEFAULT = -1 (auto-detect)
@@ -262,6 +263,9 @@ fn handle_compress_progressive() {
     let height: usize = 16;
     let pixels = vec![100u8; width * height * 3];
     let mut handle = TjHandle::new();
+    // Explicit since P4-155 (#539): a fresh handle's quality/subsampling
+    // are *unset*, as upstream's are, and a lossy compress refuses them.
+    handle.set(TjParam::Subsampling, 2).unwrap();
     handle.set(TjParam::Quality, 75).unwrap();
     handle.set(TjParam::Progressive, 1).unwrap();
 
@@ -279,6 +283,9 @@ fn handle_compress_arithmetic() {
     let height: usize = 16;
     let pixels = vec![100u8; width * height * 3];
     let mut handle = TjHandle::new();
+    // Explicit since P4-155 (#539): a fresh handle's quality/subsampling
+    // are *unset*, as upstream's are, and a lossy compress refuses them.
+    handle.set(TjParam::Subsampling, 2).unwrap();
     handle.set(TjParam::Quality, 80).unwrap();
     handle.set(TjParam::Arithmetic, 1).unwrap();
 
@@ -295,6 +302,9 @@ fn handle_compress_optimized() {
     let height: usize = 16;
     let pixels = vec![100u8; width * height * 3];
     let mut handle = TjHandle::new();
+    // Explicit since P4-155 (#539): a fresh handle's quality/subsampling
+    // are *unset*, as upstream's are, and a lossy compress refuses them.
+    handle.set(TjParam::Subsampling, 2).unwrap();
     handle.set(TjParam::Quality, 75).unwrap();
     handle.set(TjParam::Optimize, 1).unwrap();
 
@@ -470,12 +480,18 @@ fn handle_quality_affects_output_size() {
     let pixels: Vec<u8> = (0..width * height * 3).map(|i| (i % 251) as u8).collect();
 
     let mut handle_low = TjHandle::new();
+    // Explicit since P4-155 (#539): a fresh handle's quality/subsampling
+    // are *unset*, as upstream's are, and a lossy compress refuses them.
+    handle_low.set(TjParam::Subsampling, 2).unwrap();
     handle_low.set(TjParam::Quality, 10).unwrap();
     let jpeg_low = handle_low
         .compress(&pixels, width, height, PixelFormat::Rgb)
         .unwrap();
 
     let mut handle_high = TjHandle::new();
+    // Explicit since P4-155 (#539): a fresh handle's quality/subsampling
+    // are *unset*, as upstream's are, and a lossy compress refuses them.
+    handle_high.set(TjParam::Subsampling, 2).unwrap();
     handle_high.set(TjParam::Quality, 95).unwrap();
     let jpeg_high = handle_high
         .compress(&pixels, width, height, PixelFormat::Rgb)
@@ -497,12 +513,18 @@ fn handle_subsampling_affects_output() {
     let pixels: Vec<u8> = (0..width * height * 3).map(|i| (i % 251) as u8).collect();
 
     let mut handle_444 = TjHandle::new();
+    // Explicit since P4-155 (#539): a fresh handle's quality/subsampling
+    // are *unset*, as upstream's are, and a lossy compress refuses them.
+    handle_444.set(TjParam::Quality, 75).unwrap();
     handle_444.set(TjParam::Subsampling, 0).unwrap(); // S444
     let jpeg_444 = handle_444
         .compress(&pixels, width, height, PixelFormat::Rgb)
         .unwrap();
 
     let mut handle_420 = TjHandle::new();
+    // Explicit since P4-155 (#539): a fresh handle's quality/subsampling
+    // are *unset*, as upstream's are, and a lossy compress refuses them.
+    handle_420.set(TjParam::Quality, 75).unwrap();
     handle_420.set(TjParam::Subsampling, 2).unwrap(); // S420
     let jpeg_420 = handle_420
         .compress(&pixels, width, height, PixelFormat::Rgb)
@@ -564,6 +586,10 @@ fn handle_density_roundtrip_through_compress_decompress() {
     let pixels = vec![128u8; width * height * 3];
 
     let mut handle = TjHandle::new();
+    // Explicit since P4-155 (#539): a fresh handle's quality/subsampling
+    // are *unset*, as upstream's are, and a lossy compress refuses them.
+    handle.set(TjParam::Quality, 75).unwrap();
+    handle.set(TjParam::Subsampling, 2).unwrap();
     handle.set(TjParam::XDensity, 300).unwrap();
     handle.set(TjParam::YDensity, 600).unwrap();
     handle.set(TjParam::DensityUnits, 1).unwrap(); // DPI
@@ -587,6 +613,10 @@ fn handle_density_roundtrip_through_compress_decompress() {
 
     // Decompress and verify handle captures density from JFIF
     let mut handle2 = TjHandle::new();
+    // Explicit since P4-155 (#539): a fresh handle's quality/subsampling
+    // are *unset*, as upstream's are, and a lossy compress refuses them.
+    handle2.set(TjParam::Quality, 75).unwrap();
+    handle2.set(TjParam::Subsampling, 2).unwrap();
     let _img = handle2.decompress(&jpeg).unwrap();
     assert_eq!(handle2.get(TjParam::DensityUnits), 1);
     assert_eq!(handle2.get(TjParam::XDensity), 300);
@@ -601,6 +631,8 @@ fn handle_decompress_updates_colorspace_and_subsampling() {
 
     // Compress with S422
     let mut enc_handle = TjHandle::new();
+    // Explicit since P4-155 (#539): a fresh handle's quality is *unset*.
+    enc_handle.set(TjParam::Quality, 75).unwrap();
     enc_handle.set(TjParam::Subsampling, 1).unwrap(); // S422
     let jpeg = enc_handle
         .compress(&pixels, width, height, PixelFormat::Rgb)
@@ -630,7 +662,11 @@ fn handle_decompress_grayscale_updates_colorspace() {
     let height: usize = 16;
     let pixels = vec![128u8; width * height];
 
-    let enc_handle = TjHandle::new();
+    let mut enc_handle = TjHandle::new();
+    // Explicit since P4-155 (#539): a fresh handle's quality/subsampling are
+    // *unset*, as upstream's are, and a lossy compress refuses them.
+    enc_handle.set(TjParam::Quality, 75).unwrap();
+    enc_handle.set(TjParam::Subsampling, 3).unwrap(); // TJSAMP_GRAY
     let jpeg = enc_handle
         .compress(&pixels, width, height, PixelFormat::Grayscale)
         .unwrap();
@@ -659,6 +695,10 @@ fn handle_progressive_produces_multiple_sos_markers() {
     let pixels: Vec<u8> = (0..width * height * 3).map(|i| (i % 251) as u8).collect();
 
     let mut handle = TjHandle::new();
+    // Explicit since P4-155 (#539): a fresh handle's quality/subsampling
+    // are *unset*, as upstream's are, and a lossy compress refuses them.
+    handle.set(TjParam::Quality, 75).unwrap();
+    handle.set(TjParam::Subsampling, 2).unwrap();
     handle.set(TjParam::Progressive, 1).unwrap();
     let jpeg = handle
         .compress(&pixels, width, height, PixelFormat::Rgb)
@@ -881,13 +921,21 @@ fn handle_colorspace_rgb_override_in_compress() {
     let pixels: Vec<u8> = (0..width * height * 3).map(|i| (i % 200) as u8).collect();
 
     // Default colorspace (-1 = auto = YCbCr for RGB input)
-    let handle_default = TjHandle::new();
+    let mut handle_default = TjHandle::new();
+    // Explicit since P4-155 (#539): a fresh handle's quality/subsampling
+    // are *unset*, as upstream's are, and a lossy compress refuses them.
+    handle_default.set(TjParam::Quality, 75).unwrap();
+    handle_default.set(TjParam::Subsampling, 2).unwrap();
     let jpeg_default = handle_default
         .compress(&pixels, width, height, PixelFormat::Rgb)
         .unwrap();
 
     // Explicit RGB colorspace (0) - should produce different output (no color conversion)
     let mut handle_rgb = TjHandle::new();
+    // Explicit since P4-155 (#539): a fresh handle's quality/subsampling
+    // are *unset*, as upstream's are, and a lossy compress refuses them.
+    handle_rgb.set(TjParam::Quality, 75).unwrap();
+    handle_rgb.set(TjParam::Subsampling, 2).unwrap();
     handle_rgb.set(TjParam::ColorSpace, 0).unwrap(); // TJCS_RGB
     let jpeg_rgb = handle_rgb
         .compress(&pixels, width, height, PixelFormat::Rgb)
@@ -930,6 +978,10 @@ fn handle_compress_decompress_12bit() {
     let pixels: Vec<i16> = (0..width * height).map(|i| (i * 50) as i16).collect();
 
     let mut handle = TjHandle::new();
+    // Explicit since P4-155 (#539): a fresh handle's quality/subsampling
+    // are *unset*, as upstream's are, and a lossy compress refuses them.
+    handle.set(TjParam::Quality, 75).unwrap();
+    handle.set(TjParam::Subsampling, 2).unwrap();
 
     let jpeg = handle
         .compress_12bit(&pixels, width, height, num_components)
@@ -940,4 +992,47 @@ fn handle_compress_decompress_12bit() {
     assert_eq!(img.height, height);
     assert_eq!(handle.get(TjParam::Precision), 12);
     assert_eq!(img.num_components, num_components);
+}
+
+/// P4-155 (#539): the native gates themselves, independent of any C oracle.
+///
+/// The oracle matrix in `capi_compress_precision.rs` cross-validates the
+/// C-ABI shape but returns early without a TurboJPEG install; this pins the
+/// `TjHandle` layer everywhere: a fresh handle's lossy compress refuses with
+/// upstream's message for each missing parameter, and a lossless compress
+/// consults neither (`turbojpeg-mp.c:95-98`).
+#[test]
+fn handle_lossy_compress_refuses_unset_params() {
+    let width: usize = 16;
+    let height: usize = 16;
+    let pixels: Vec<u8> = vec![128u8; width * height * 3];
+
+    let fresh = TjHandle::new();
+    let err = fresh
+        .compress(&pixels, width, height, PixelFormat::Rgb)
+        .expect_err("unset quality must refuse");
+    assert!(
+        err.to_string()
+            .contains("TJPARAM_QUALITY must be specified"),
+        "got: {err}"
+    );
+
+    let mut with_quality = TjHandle::new();
+    with_quality.set(TjParam::Quality, 75).unwrap();
+    let err = with_quality
+        .compress(&pixels, width, height, PixelFormat::Rgb)
+        .expect_err("unset subsampling must refuse");
+    assert!(
+        err.to_string()
+            .contains("TJPARAM_SUBSAMP must be specified"),
+        "got: {err}"
+    );
+
+    // The lossless bypass: neither parameter is consulted.
+    let gray: Vec<u8> = vec![128u8; width * height];
+    let mut lossless = TjHandle::new();
+    lossless.set(TjParam::Lossless, 1).unwrap();
+    lossless
+        .compress(&gray, width, height, PixelFormat::Grayscale)
+        .expect("lossless compress consults neither parameter");
 }
