@@ -885,7 +885,7 @@ The subtlety worth recording: **enabling smoothing changes the padding of compon
 
 **Root cause.** C pads twice, in different places and by different rules: the **input** side completes the final row group by repeating the last real row (`jcprepct.c:171-178`), and the **output** side fills the rest of the iMCU by repeating the last *downsampled* row (`jcprepct.c:197-205`). Carried back to full resolution, that second rule means different things per component. A component sampled at the maximum downsamples 1:1, so repeating its last output row is just repeating its last input row. A component subsampled `v` ways has one output row per `v` input rows, so repeating its last output row means repeating the last complete **group** of `v` input rows.
 
-CMYK has both kinds in one image — components 0 and 3 carry the sampling factors, 1 and 2 sit at 1x1 — so no single rule is right for the whole image, and letting the per-block edge path clamp is right for neither when `v > 1`. This is the same distinction as [P4-47](#p4-47-progressive-420--440-diverges-from-cjpeg-at-every-even-height-not-a-multiple-of-16--closed-2026-07-26) (#324), arrived at from the other direction.
+CMYK has both kinds in one image — components 0 and 3 carry the sampling factors, 1 and 2 sit at 1x1 — so no single rule is right for the whole image, and letting the per-block edge path clamp is right for neither when `v > 1`. This is the same distinction as [P4-47](#p4-47-progressive-encoding-diverges-from-cjpeg-at-every-even-height-not-a-multiple-of-16--closed-2026-07-26) (#324), arrived at from the other direction.
 
 **Status (2026-07-26): closed.** `pad_plane_to_mcu_grid` takes the row-group height as a parameter and each component passes its own. Byte-exact against the C oracle for every legal CMYK subsampling; before the fix, 1x2 and 2x2 were 15/21 and the six failures per subsampling were exactly the geometries whose height is a multiple of `v_samp` but not of the MCU height.
 
@@ -1211,7 +1211,7 @@ Review of the fix found two more, both in configurations the sweep could not rea
 - **Row-based restarts used the wrong effective MCU width.** `jpeg_set_colorspace(JCS_RGB)` defaults R, G, and B to 1x1 sampling (`jcparam.c:367-373`), but that is not an RGB restriction in JPEG: T.81 B.2.2 defines sampling factors per component, and `cjpeg` applies an explicit `-sample` after the colorspace defaults (`cjpeg.c:544-552,609-611`; `rdswitch.c:397-425`). Thus implicit RGB-direct has an 8-pixel MCU width, while explicit `2x2,1x1,1x1` sampling has `Hmax=2` and a 16-pixel width. This is RGB component sampling, not JFIF/YCbCr chroma subsampling. `compute_restart_interval` instead counted rows from the requested subsampling without distinguishing the default from an explicit request; the divergence is visible where `ceil(width/8) != ceil(width/16)`.
 - **16-bit quantization tables were declared SOF0.** Below quality ~20 with `force_baseline` off, or with a coarse custom table, the DQT entries exceed 255 — which baseline forbids. C switches to SOF1 and emits `JTRC_16BIT_TABLES` (`jcmarker.c:517-535`); we wrote SOF0 and a non-conforming stream. The fix lands in the shared core, so it closes the same latent hole on the CMYK side: 180 `customquant|cmyk` fixture rows moved, and nothing else.
 
-**The matrix gained a colorspace axis**, which is the part that generalizes: the next entry point to early-return past the option set gets caught by the suite rather than by someone thinking to look. It immediately earned its keep by surfacing [P4-54](#p4-54-colorspacergb-silently-ignores-progressive--arithmetic--lossless--open).
+**The matrix gained a colorspace axis**, which is the part that generalizes: the next entry point to early-return past the option set gets caught by the suite rather than by someone thinking to look. It immediately earned its keep by surfacing [P4-54](#p4-54-colorspacergb-silently-ignores-progressive--arithmetic--lossless--closed-2026-07-26).
 
 ## P4-54. `colorspace(Rgb)` Silently Ignores `progressive` / `arithmetic` / `lossless` — **CLOSED 2026-07-26**
 
@@ -5486,7 +5486,7 @@ This item is no longer a soundness blocker for the [#481](https://github.com/dev
 **Status (2026-08-10): CLOSED — criteria 3–6 delivered.** The three `set_len`
 sites in `src/encode/pipeline_impl/progressive_entropy.rs` (`:65`, `:96`,
 `:145`) stay out of scope and move to
-[P4-139](#p4-139-memory-layout-arithmetic-is-decentralised-and-uses-saturatingunchecked-multiplication--open)
+[P4-139](#p4-139-memory-layout-arithmetic-is-decentralised-and-uses-saturatingunchecked-multiplication--partial-every-span-is-checked-and-the-rule-is-enforced-centralisation-and-scalingfactor-outstanding)
 as recorded below.
 
 * **Criterion 3 — met.** `experiments/progressive.tsv` records the zero-init
@@ -5497,7 +5497,7 @@ as recorded below.
   row's own *uninit* figure. Treat the +4.7% as unconfirmed — on this host
   zero-init is free, exactly as the criterion's `calloc` hint predicted.
 * **Criterion 4 — met for the geometry-sized allocations; metadata copies split
-  out to [P4-144](#p4-144-metadata-copies-are-input-sized-but-still-allocate-infallibly--open).**
+  out to [P4-144](#p4-144-metadata-copies-are-input-sized-but-still-allocate-infallibly--closed-2026-08-12).**
   Every allocation in `src/api/progressive_output.rs` whose size comes from
   *header geometry* goes through `try_filled_vec`, `try_reserved_vec` or
   `try_copy_of`, which use `try_reserve_exact` and report refusal as
@@ -5739,7 +5739,7 @@ full capi suite at 54 blocks / 0 failures and both CI clippy legs clean.
   memory-sizing `saturating_mul` at `:6697`, `:7382-7383`, `:7444`,
   `:9429/:9432` and `:10467`. Those size `Vec` allocations rather than raw
   slices, so they are outside criterion 5's wording but squarely inside
-  [P4-139](#p4-139-memory-layout-arithmetic-is-decentralised-and-uses-saturatingunchecked-multiplication--open)
+  [P4-139](#p4-139-memory-layout-arithmetic-is-decentralised-and-uses-saturatingunchecked-multiplication--partial-every-span-is-checked-and-the-rule-is-enforced-centralisation-and-scalingfactor-outstanding)
   criterion 3, which is where they are recorded.
 
 * **Criterion 7 — done.** The crate root states the boundary plainly: invalid

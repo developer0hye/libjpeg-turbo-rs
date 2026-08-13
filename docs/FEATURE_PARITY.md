@@ -517,7 +517,7 @@ closed 2026-08-08.
 ## Testing Infrastructure Additions
 
 - **Fuzz corpus**: expanded from 22 → ~2,194 seeds across 7 targets (Cartesian product of subsamp × quality × content × entropy-mode); new `fuzz_encode_roundtrip` target; `scripts/fuzz_minimize.sh`; OSS-Fuzz stub at `oss-fuzz/`; nightly `.github/workflows/fuzz-smoke.yml`.
-- **Cross-arch CI matrix** (`.github/workflows/cross-arch.yml`): `ubuntu-24.04-arm` (aarch64 NEON), x86_64 AVX2 default, x86_64 SSE2-only via `-C target-feature=-avx2,-sse4.2`, macOS arm64 retained, WASM SIMD128 smoke on every PR.
+- **Cross-arch CI matrix** (`.github/workflows/cross-arch.yml`): `ubuntu-24.04-arm` (aarch64 NEON), x86_64 AVX2 default, an x86_64 AVX2-disabled **build check** via `-C target-feature=-avx2,-sse4.2` (compile-time only — the workflow's own comment records that it does not exercise the runtime fallback; the CPUID-masked `test-linux-x86_64-no-avx2-emulated` job is what tests it, #320), macOS arm64 retained, WASM SIMD128 smoke on every PR.
 - **Per-SIMD bit-exact parity suite** (`tests/simd_parity.rs`): 20 kernel × backend combinations (NEON / AVX2 / SSE2 / WASM), 1000-iteration Mulberry32 PRNG, scalar↔SIMD bit-exact assertions.
 - **Conformance suite**: `scripts/fetch_conformance.sh` + `tests/worker_b3_conformance_t83*.rs` iterating `references/libjpeg-turbo/testimages/*.jpg` for pixel-exact djpeg comparison + decoded-pixel hash regression in `tests/reference_hashes_conformance.json`.
 - **Real-world corpus**: fetch scripts + seed fixtures for Kodak PhotoCD (PSNR round-trip), USC-SIPI Miscellaneous (djpeg byte-exact), EXIF Orientation 1..8, CMYK scanner, JPEG-in-RAW thumbnail.

@@ -571,8 +571,8 @@ impl HuffmanEncoder {
                 #[cfg(all(
                     not(target_arch = "x86_64"),
                     target_arch = "wasm32",
-                    target_feature = "simd128",
-                    feature = "simd"
+                    feature = "simd",
+                    target_feature = "simd128"
                 ))]
                 {
                     encode_ac_wasm_local(&mut pb, &mut fb, &mut buf, coeffs_zigzag, ac_table);
