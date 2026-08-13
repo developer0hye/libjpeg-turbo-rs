@@ -1401,6 +1401,16 @@ C expands instead of ignoring: `djpeg -rgb` on a `cjpeg -precision 12` grayscale
 
 **Acceptance criteria.** Each numbered item lands with tests/benches per the project rules; #389 closes only when all four do. The phase-1 Miri job (non-SIMD `--lib` subset, 191 tests) must stay green throughout.
 
+**Scope note (2026-08-13, from the P4-143 review):** the `src/simd/*_tests.rs`
+in-module suites pass vacuously when the `simd` feature is off — with `simd`
+disabled on aarch64 all 11 `simd_parity_tests` still run and report `ok`
+while every assertion sits inside a now-excluded `cfg` block (lib test count
+drops 313 → 232). No CI job runs tests with `--no-default-features`, so
+nothing is fooled today, but it is the "don't assert around an unrunnable
+path" shape: when this item restructures the SIMD tests, gate the *test
+functions* on the same predicate as the kernels they assert against, so a
+config with no kernels has no green tests claiming parity.
+
 ## P4-70. Clippy Structural-Lint Allow-List in Test Code — **OPEN**
 
 **Motivation.** Filed 2026-07-28 while closing the clippy half of #390. The Clippy CI job was widened from `--lib` to two gates: `--workspace` with zero allowances, and `--workspace --all-targets` with exactly three structural lints allowed: `clippy::needless_range_loop`, `clippy::too_many_arguments`, `clippy::type_complexity`. Everything else in the test/bench long tail (~80 warnings across ~25 files: manual `div_ceil`, doc-list indentation, dead test helpers, `vec_init_then_push`, `manual_memcpy`, …) was fixed in the same PR. The three allowed classes remained at 56 warnings when measured on **aarch64-apple-darwin** (`cargo clippy --workspace --all-targets`, 2026-07-28): 43× `needless_range_loop` (index-synchronized multi-array loops in the `#[cfg(test)]` modules of `src/encode/fdct.rs`/`tables.rs`/`huff_opt.rs`/`pipeline.rs`, `src/transform/spatial.rs`, `src/simd/aarch64/mod.rs`, and in `tests/`), 9× `too_many_arguments`, 4× `type_complexity` — all in test code, none in the library proper (the zero-allowance `--workspace` gate proves that). **The total is host-dependent**: on x86_64 it is 47 (34× `needless_range_loop`), because `src/simd/aarch64/mod.rs` (2) and the `#[cfg(target_arch = "aarch64")]` bodies of `tests/simd_neon_encode.rs` (3) / `tests/simd_neon_scaled.rs` (4) are not compiled there. Re-measure on the same host before concluding the count moved.
@@ -5326,7 +5336,7 @@ unchecked lengths any more. Two separate routes had to be shut:
   failed with `error[E0599]: no method named 'ycbcr_to_rgb_row' … field, not a
   method`, i.e. rustc resolving the `pub` field from an external test crate.
 
-Criteria 1–4 are met; 5 is deliberately deferred:
+Criteria 1–5 are met (5 as of 2026-08-13, with P4-143):
 
 | # | Criterion | Disposition |
 | --- | --- | --- |
@@ -5334,24 +5344,24 @@ Criteria 1–4 are met; 5 is deliberately deferred:
 | 2 | `simd::*` no longer resolves externally | Met earlier; `tests/simd_module_privacy.rs` |
 | 3 | Entry points validate lengths + `checked` byte counts before dispatch | Met — `require_samples` / `require_bytes` in `src/simd/mod.rs` |
 | 4 | Length preconditions removed from `SimdRoutines` fn-pointer types | Met, recorded per field below |
-| 5 | Arch backends compile only under `feature = "simd"` | **Not done, deliberately** — see below |
+| 5 | Arch backends compile only under `feature = "simd"` | Met 2026-08-13 with P4-143 — see below |
 
-**Why criterion 5 was backed out.** Adding `feature = "simd"` to the three
-module `cfg`s compiles clean locally and in CI — but only because
-`.cargo/config.toml` forces `-C target-feature=+simd128` on both wasm targets.
-A downstream crate inherits no such thing. Roughly 30 call sites disagree about
-which condition guards them: `encode/pipeline_impl/{dispatch,sampling}.rs` gate
-on the Cargo `simd` feature, `mcu.rs` on the Cargo feature *and* `simd128`, and
-six `neon_*`/`simd_*_tests.rs` files on `target_arch` alone. Narrowing the
-module gate without aligning every one of them turns the documented scalar
-fallback (`crates/libjpeg-turbo-rs-wasm/README.md`) into `E0433` for anyone
-building baseline `wasm32` without `+simd128`.
+**Criterion 5's history.** The first attempt was backed out: adding
+`feature = "simd"` to the module `cfg`s compiled clean everywhere — but only
+because `.cargo/config.toml` forces `+simd128` on both wasm targets, and
+narrowing the gates without aligning the disagreeing call sites was a hidden
+`E0433` for anyone building baseline `wasm32`. That regression was caught by
+review, not by any build or CI job, and the masking was filed as P4-143.
 
-That regression was caught by review, not by any local build or CI job, which is
-the point worth recording: **the repo-local `.cargo/config.toml` masks wasm
-target-feature regressions from the entire test matrix.** Criterion 5 needs its
-own change — align the call sites first, then narrow the module gates — and
-wants a CI leg that builds `wasm32-unknown-unknown` *without* `+simd128`.
+The second attempt (2026-08-13) landed it in the order the back-out
+prescribed: every call site aligned to its arch's canonical predicate first
+(13 pipeline sites and 9 `src/simd/*_tests.rs` files were missing a
+condition; `detect`/`detect_encoder`'s wasm arms too), then the module gates
+narrowed — wasm32's requiring `simd128` as well, since its kernels cannot
+exist in a baseline module — with P4-143's `Check baseline wasm32` CI leg
+proving the scalar fallback compiles warning-free without `+simd128`
+(verified red against the pre-alignment tree: 67 dead-code errors). See the
+P4-143 closure for the full delivery.
 
 Per-field disposition for criterion 4:
 
@@ -5369,18 +5379,19 @@ bounds, short-input/short-output cases for all three entry points, and
 `width * 3` overflow rejected by `checked_mul` rather than wrapping into a
 bound a short buffer satisfies.
 
-**What remains (criteria 6 and 7).** Both are in-crate hygiene, not
-reachability:
+**What remains.** In-crate hygiene, not reachability:
 
 * The kernel wrappers inside the arch modules are still safe `pub(crate) fn`
   fronting `target_feature` bodies. A *crate-local* caller can therefore still
   misuse one without writing `unsafe`. No such call site exists today, and none
   is reachable from outside the crate, so this is defence-in-depth rather than
   a live defect — but criterion 1's "kernels become `pub(crate) unsafe fn`"
-  sub-clause is genuinely not done.
-* Criterion 5, backed out for the reason above, plus a CI leg that builds
-  baseline `wasm32` without `+simd128` so the next attempt cannot pass on a
-  masked matrix.
+  sub-clause is genuinely not done. The direct-call surface that sweep must
+  annotate was measured 2026-08-13 (review recount): 129 pipeline call sites
+  — `decode/pipeline_impl/color.rs` 39, `encode/pipeline_impl/mcu.rs` 40,
+  `optimized.rs` 12, `sampling.rs` 9, `dispatch.rs` 9, `baseline.rs` 8,
+  `progressive_entropy.rs` 5, `api/progressive_output.rs` 7 — plus the
+  `src/simd/*_tests.rs` callers.
 * Criterion 6 (`#[allow(unsafe_op_in_unsafe_fn)]` on `pub mod simd`) and
   criterion 7 (SAFETY-comment content) are the ~630–679-site sweep measured in
   `src/lib.rs`. The issue itself calls criterion 6 "a consequence of the work,
@@ -6274,7 +6285,7 @@ C comparison: it flips a currently-failing call into a succeeding one, which is
 exactly the kind of change that should not ride along in a patch about YUV
 validation order.
 
-## P4-143. `.cargo/config.toml` Forces `+simd128`, Hiding wasm Target-Feature Regressions From the Whole Matrix — **OPEN**
+## P4-143. `.cargo/config.toml` Forces `+simd128`, Hiding wasm Target-Feature Regressions From the Whole Matrix — **CLOSED 2026-08-13**
 
 **GitHub:** filed from the [#474](https://github.com/developer0hye/libjpeg-turbo-rs/issues/474) (P4-135) review.
 
@@ -6327,6 +6338,37 @@ into a hard error. Review caught it; no automated gate did.
 **Why it matters beyond P4-135.** It is a *coverage* defect, not a code defect:
 the tests are green on a build nobody ships. Any future change to a wasm `cfg`
 is equally invisible until a user reports it.
+
+**Status (2026-08-13): closed.** All four criteria delivered alongside P4-135
+criterion 5:
+
+1. The `Check baseline wasm32` leg in `wasm.yml` compiles
+   `wasm32-unknown-unknown` and `wasm32-wasip1` with `RUSTFLAGS: -D warnings` —
+   the env var overrides the config's target rustflags, removing `+simd128`,
+   and denying warnings makes compiled-but-gated-out SIMD code fail the leg.
+   Verified discriminating: against the pre-alignment tree the leg fails with
+   67 dead-code errors; against the aligned tree it passes.
+2. Every SIMD call site now states the canonical predicate for its arch —
+   `all(target_arch, feature = "simd")` for aarch64/x86_64,
+   `all(target_arch = "wasm32", feature = "simd", target_feature = "simd128")`
+   for wasm — and the module gates in `src/simd/mod.rs` match. 13 pipeline
+   sites gained the missing `simd128` condition (including one in
+   `src/api/progressive_output.rs` outside the ~30 the filing counted), 9
+   `src/simd/*_tests.rs` files gained the missing Cargo-feature condition,
+   and `detect`/`detect_encoder`'s wasm arms gained it too. Wasm SIMD test
+   coverage is unchanged: 17 `simd::` tests run under wasip1+simd128 before
+   and after the alignment.
+3. `.cargo/config.toml` opens with a note recording that its rustflags change
+   what the matrix covers and naming the CI leg that compensates.
+4. Audit of the same masking elsewhere: aarch64 NEON is mandatory (no
+   equivalent gap); the x86_64 `target-cpu=native` case is the same
+   "CI tests a configuration consumers do not get" class and is already
+   tracked as its own item —
+   [P4-133](#p4-133-bmi2fma-paths-are-reachable-only-via-target-cpunative-so-portable-builds-leave-them-off--open)
+   — so it stays there rather than being duplicated. `.cargo/config.toml`
+   sets no rustflags beyond the two wasm targets, so nothing else is masked
+   repo-wide; the per-job `RUSTFLAGS` in `cross-arch.yml`/`armv7.yml`/
+   `sanitizers.yml` add configurations rather than hiding one.
 
 ## P4-144. Metadata Copies Are Input-Sized But Still Allocate Infallibly — **CLOSED 2026-08-12**
 

@@ -6,7 +6,7 @@
 //! can be private. Moved verbatim apart from the path rewrite.
 
 //! NEON fancy h2v1 upsampling tests.
-#![cfg(target_arch = "aarch64")]
+#![cfg(all(target_arch = "aarch64", feature = "simd"))]
 
 use crate::decode::upsample;
 use crate::simd;

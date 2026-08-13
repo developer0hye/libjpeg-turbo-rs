@@ -6,7 +6,7 @@
 //! can be private. Moved verbatim apart from the path rewrite.
 
 //! x86_64 SSE2 SIMD tests -- verify byte-exact match with scalar implementation.
-#![cfg(target_arch = "x86_64")]
+#![cfg(all(target_arch = "x86_64", feature = "simd"))]
 
 use crate::simd;
 

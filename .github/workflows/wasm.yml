@@ -40,6 +40,23 @@ jobs:
       - name: Check main crate compiles for wasm32
         run: cargo check --target wasm32-unknown-unknown
 
+      # P4-143 (#474): `.cargo/config.toml` forces `+simd128` on every in-tree
+      # build, so without this leg no job ever compiles the baseline wasm32
+      # configuration downstream consumers actually get. Setting RUSTFLAGS
+      # overrides the config's target rustflags, removing `+simd128`; denying
+      # warnings makes gated-out-but-still-compiled SIMD code (dead-code
+      # warnings) a failure, since that is the drift shape this leg exists to
+      # catch. Three feature configs: default (simd on, no simd128 -> scalar),
+      # simd off entirely, and simd on without std.
+      - name: Check baseline wasm32 (no +simd128, scalar fallback)
+        env:
+          RUSTFLAGS: -D warnings
+        run: |
+          cargo check --target wasm32-unknown-unknown -p libjpeg-turbo-rs
+          cargo check --target wasm32-wasip1 -p libjpeg-turbo-rs
+          cargo check --target wasm32-unknown-unknown -p libjpeg-turbo-rs --no-default-features --features std
+          cargo check --target wasm32-unknown-unknown -p libjpeg-turbo-rs --no-default-features --features simd
+
       - name: Check wrapper crate compiles for wasm32
         run: cargo check --target wasm32-unknown-unknown -p libjpeg-turbo-rs-wasm --tests
 

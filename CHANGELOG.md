@@ -10,6 +10,14 @@ and `git log` between tags.
 
 ### Changed
 
+- `wasm32` with `+simd128` but **without** the Cargo `simd` feature now uses
+  the scalar path, honoring the feature exactly as aarch64/x86_64 always did
+  (P4-135 criterion 5, #474). Previously the hand-written SIMD kernels were
+  selected on the target feature alone. The published wasm wrapper crate
+  enables `simd` and is unaffected; a consumer depending on the core crate
+  with `default-features = false` who wants the hand-written kernels must
+  enable the `simd` feature (the scalar path still autovectorizes under
+  `+simd128`).
 - **Breaking (Rust API):** `TjHandle::new()` now initialises `TJPARAM_QUALITY`
   to `-1` and `TJPARAM_SUBSAMP` to `TJSAMP_UNKNOWN` (unset), exactly as
   upstream TurboJPEG does, and every lossy compress path — native and C ABI —
@@ -24,6 +32,20 @@ and `git log` between tags.
   runs system/Rust bidirectional cross-decodes.
 
 ### Fixed
+- Baseline `wasm32` builds (no `+simd128`) no longer emit SIMD128
+  instructions (P4-135 criterion 5 / P4-143, #474). Previously the wasm
+  backend compiled unconditionally and 13 pipeline call sites dispatched
+  to it regardless of the target feature, so a baseline module
+  carried 889 SIMD instructions and was rejected at validation by engines
+  without WebAssembly SIMD ("SIMD support is not enabled") — the scalar
+  fallback documented in the wasm crate's README never ran. Now the arch
+  backend modules are gated on the Cargo `simd` feature — wasm32
+  additionally on the `simd128` target feature — every call site states the
+  same predicate, and a new CI leg builds both wasm targets without the
+  repo's forced `+simd128` (denying warnings), covering the configuration
+  downstream consumers actually get. Consumers building baseline `wasm32`
+  from crates.io are affected; in-repo builds always forced `+simd128` and
+  are not.
 - The classic decode sequence (`jpeg_read_header` → `jpeg_start_decompress` →
   `jpeg_read_scanlines`) now honors `cinfo->mem->max_memory_to_use` exactly as
   upstream does (P4-14, #467): the budget applies to multi-scan streams

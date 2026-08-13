@@ -54,7 +54,7 @@ pub(super) fn select_rgba_to_ycbcr_fn() -> ColorConvertRowFn {
     {
         return crate::simd::aarch64::color_encode::neon_rgba_to_ycbcr_row;
     }
-    #[cfg(all(target_arch = "wasm32", feature = "simd"))]
+    #[cfg(all(target_arch = "wasm32", feature = "simd", target_feature = "simd128"))]
     {
         return crate::simd::wasm32::color_encode::wasm_rgba_to_ycbcr_row;
     }
@@ -74,7 +74,7 @@ pub(super) fn select_bgr_to_ycbcr_fn() -> ColorConvertRowFn {
     {
         return crate::simd::aarch64::color_encode::neon_bgr_to_ycbcr_row;
     }
-    #[cfg(all(target_arch = "wasm32", feature = "simd"))]
+    #[cfg(all(target_arch = "wasm32", feature = "simd", target_feature = "simd128"))]
     {
         return crate::simd::wasm32::color_encode::wasm_bgr_to_ycbcr_row;
     }
@@ -94,7 +94,7 @@ pub(super) fn select_bgra_to_ycbcr_fn() -> ColorConvertRowFn {
     {
         return crate::simd::aarch64::color_encode::neon_bgra_to_ycbcr_row;
     }
-    #[cfg(all(target_arch = "wasm32", feature = "simd"))]
+    #[cfg(all(target_arch = "wasm32", feature = "simd", target_feature = "simd128"))]
     {
         return crate::simd::wasm32::color_encode::wasm_bgra_to_ycbcr_row;
     }

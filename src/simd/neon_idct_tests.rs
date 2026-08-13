@@ -12,7 +12,7 @@
 //! dequantized values (|coeff * quant| >= ~8192), intermediate narrowing
 //! can overflow i16. All tests use realistic JPEG value ranges where both
 //! paths agree.
-#![cfg(target_arch = "aarch64")]
+#![cfg(all(target_arch = "aarch64", feature = "simd"))]
 
 use crate::simd;
 

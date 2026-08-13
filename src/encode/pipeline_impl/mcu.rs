@@ -72,7 +72,7 @@ pub(super) fn encode_single_block(
                 return;
             }
         }
-        #[cfg(all(target_arch = "wasm32", target_feature = "simd128", feature = "simd"))]
+        #[cfg(all(target_arch = "wasm32", feature = "simd", target_feature = "simd128"))]
         {
             unsafe {
                 crate::simd::wasm32::wasm_extract_fdct_quantize(

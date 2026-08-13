@@ -10,7 +10,7 @@
 //! Verifies that NEON-accelerated FDCT, RGB->YCbCr color conversion,
 //! and chroma downsampling produce identical results to their scalar equivalents.
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "simd"))]
 mod tests {
     use crate::encode::color::rgb_to_ycbcr_row;
     use crate::encode::fdct::fdct_islow;

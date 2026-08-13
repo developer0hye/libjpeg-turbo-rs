@@ -10,7 +10,7 @@
 //! Each AVX2 function is validated against the scalar implementation to ensure
 //! bit-exact (or within-tolerance) output. Tests are only compiled on x86_64.
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", feature = "simd"))]
 mod tests {
     use crate::decode::{color, idct, upsample};
     use crate::simd::x86_64::{avx2_color, avx2_idct, avx2_upsample};

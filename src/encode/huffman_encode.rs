@@ -579,7 +579,7 @@ impl HuffmanEncoder {
                 }
                 #[cfg(not(any(
                     all(target_arch = "x86_64", feature = "simd"),
-                    all(target_arch = "wasm32", target_feature = "simd128", feature = "simd")
+                    all(target_arch = "wasm32", feature = "simd", target_feature = "simd128")
                 )))]
                 {
                     encode_ac_scalar_local(&mut pb, &mut fb, &mut buf, coeffs_zigzag, ac_table);
@@ -967,7 +967,7 @@ unsafe fn encode_ac_sparse_local(
 #[cfg(not(any(
     all(target_arch = "aarch64", feature = "simd"),
     all(target_arch = "x86_64", feature = "simd"),
-    all(target_arch = "wasm32", target_feature = "simd128", feature = "simd")
+    all(target_arch = "wasm32", feature = "simd", target_feature = "simd128")
 )))]
 unsafe fn encode_ac_scalar_local(
     pb: &mut u64,
@@ -1048,7 +1048,7 @@ unsafe fn encode_ac_scalar_local(
 /// # Safety
 /// Requires simd128. `pb`, `fb`, `buf` must be valid hoisted state from
 /// `BitWriter::begin_block`.
-#[cfg(all(target_arch = "wasm32", target_feature = "simd128", feature = "simd"))]
+#[cfg(all(target_arch = "wasm32", feature = "simd", target_feature = "simd128"))]
 #[target_feature(enable = "simd128")]
 unsafe fn encode_ac_wasm_local(
     pb: &mut u64,

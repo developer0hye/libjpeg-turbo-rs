@@ -1,3 +1,11 @@
+# P4-143 (#474): these rustflags change what the test matrix covers. Every
+# in-tree build — local and CI — compiles wasm WITH simd128, but downstream
+# consumers inherit none of this file, so most of them build baseline wasm32.
+# A `cfg` narrowed against this configuration can pass the whole matrix and
+# still break consumers (that happened: P4-135 criterion 5, caught by review).
+# The `Check baseline wasm32` leg in .github/workflows/wasm.yml compiles both
+# wasm targets with RUSTFLAGS overriding these flags; keep it in sync if you
+# add a target or flag here.
 [target.wasm32-unknown-unknown]
 rustflags = ["-C", "target-feature=+simd128"]
 

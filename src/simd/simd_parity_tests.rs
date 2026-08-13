@@ -218,14 +218,14 @@ fn parity_idct_islow_full() {
         let mut scalar_out: [u8; 64] = [0u8; 64];
         scalar::scalar_idct_islow(&coeffs, &quant, &mut scalar_out);
 
-        #[cfg(target_arch = "aarch64")]
+        #[cfg(all(target_arch = "aarch64", feature = "simd"))]
         {
             use crate::simd::aarch64::idct::neon_idct_islow;
             let mut simd_out: [u8; 64] = [0u8; 64];
             neon_idct_islow(&coeffs, &quant, &mut simd_out);
             assert_eq!(simd_out, scalar_out, "NEON idct_islow mismatch at iter {i}");
         }
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(all(target_arch = "x86_64", feature = "simd"))]
         {
             if is_x86_feature_detected!("avx2") {
                 use crate::simd::x86_64::avx2_idct::avx2_idct_islow;
@@ -240,7 +240,7 @@ fn parity_idct_islow_full() {
                 assert_eq!(simd_out, scalar_out, "SSE2 idct_islow mismatch at iter {i}");
             }
         }
-        #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+        #[cfg(all(target_arch = "wasm32", feature = "simd", target_feature = "simd128"))]
         {
             use crate::simd::wasm32::idct::wasm_idct_islow;
             let mut simd_out: [u8; 64] = [0u8; 64];
@@ -271,7 +271,7 @@ fn parity_idct_4x4() {
         let mut scalar_out: [u8; 16] = [0u8; 16];
         idct_4x4(&coeffs, &quant, &mut scalar_out);
 
-        #[cfg(target_arch = "aarch64")]
+        #[cfg(all(target_arch = "aarch64", feature = "simd"))]
         {
             use crate::simd::aarch64::idct_scaled::neon_idct_4x4;
             let mut simd_out: [u8; 16] = [0u8; 16];
@@ -292,7 +292,7 @@ fn parity_idct_2x2() {
         let mut scalar_out: [u8; 4] = [0u8; 4];
         idct_2x2(&coeffs, &quant, &mut scalar_out);
 
-        #[cfg(target_arch = "aarch64")]
+        #[cfg(all(target_arch = "aarch64", feature = "simd"))]
         {
             use crate::simd::aarch64::idct_scaled::neon_idct_2x2;
             let mut simd_out: [u8; 4] = [0u8; 4];
@@ -312,7 +312,7 @@ fn parity_idct_1x1() {
         let quant: [u16; 64] = random_quant(&mut rng);
         let scalar_out: u8 = idct_1x1(&coeffs, &quant);
 
-        #[cfg(target_arch = "aarch64")]
+        #[cfg(all(target_arch = "aarch64", feature = "simd"))]
         {
             use crate::simd::aarch64::idct_scaled::neon_idct_1x1;
             let mut simd_out: [u8; 1] = [0u8; 1];
@@ -343,7 +343,7 @@ fn parity_ycbcr_to_rgb_rows() {
             let mut scalar_rgb: Vec<u8> = vec![0u8; width * 3];
             scalar::scalar_ycbcr_to_rgb_row(&y, &cb, &cr, &mut scalar_rgb, width);
 
-            #[cfg(target_arch = "aarch64")]
+            #[cfg(all(target_arch = "aarch64", feature = "simd"))]
             {
                 use crate::simd::aarch64::color::{
                     neon_ycbcr_to_bgr_row, neon_ycbcr_to_bgra_row, neon_ycbcr_to_rgb_row,
@@ -380,7 +380,7 @@ fn parity_ycbcr_to_rgb_rows() {
                 );
             }
 
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(all(target_arch = "x86_64", feature = "simd"))]
             {
                 if is_x86_feature_detected!("avx2") {
                     use crate::simd::x86_64::avx2_color::avx2_ycbcr_to_rgb_row;
@@ -396,7 +396,7 @@ fn parity_ycbcr_to_rgb_rows() {
                 }
             }
 
-            #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+            #[cfg(all(target_arch = "wasm32", feature = "simd", target_feature = "simd128"))]
             {
                 use crate::simd::wasm32::color::{
                     wasm_ycbcr_to_bgr_row, wasm_ycbcr_to_bgra_row, wasm_ycbcr_to_rgb_row,
@@ -449,7 +449,7 @@ fn parity_fancy_upsample_h2v1() {
             let mut scalar_out: Vec<u8> = vec![0u8; in_width * 2];
             scalar::scalar_fancy_upsample_h2v1(&input, in_width, &mut scalar_out);
 
-            #[cfg(target_arch = "aarch64")]
+            #[cfg(all(target_arch = "aarch64", feature = "simd"))]
             {
                 use crate::simd::aarch64::upsample::neon_fancy_upsample_h2v1;
                 let mut simd_out: Vec<u8> = vec![0u8; in_width * 2];
@@ -459,7 +459,7 @@ fn parity_fancy_upsample_h2v1() {
                     "NEON fancy_h2v1 mismatch w={in_width} iter={i}"
                 );
             }
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(all(target_arch = "x86_64", feature = "simd"))]
             {
                 if is_x86_feature_detected!("avx2") {
                     use crate::simd::x86_64::avx2_upsample::avx2_fancy_upsample_h2v1;
@@ -480,7 +480,7 @@ fn parity_fancy_upsample_h2v1() {
                     );
                 }
             }
-            #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+            #[cfg(all(target_arch = "wasm32", feature = "simd", target_feature = "simd128"))]
             {
                 use crate::simd::wasm32::upsample::wasm_fancy_upsample_h2v1;
                 let mut simd_out: Vec<u8> = vec![0u8; in_width * 2];
@@ -520,7 +520,7 @@ fn parity_fancy_upsample_h2v2() {
             let mut scalar_out: Vec<u8> = vec![0u8; out_w * out_h];
             fancy_h2v2(&input, w, h, &mut scalar_out, out_w, out_h);
 
-            #[cfg(target_arch = "aarch64")]
+            #[cfg(all(target_arch = "aarch64", feature = "simd"))]
             {
                 use crate::simd::aarch64::upsample::neon_fancy_upsample_h2v2;
                 let mut simd_out: Vec<u8> = vec![0u8; out_w * out_h];
@@ -530,7 +530,7 @@ fn parity_fancy_upsample_h2v2() {
                     "NEON fancy_h2v2 mismatch w={w} h={h} iter={i}"
                 );
             }
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(all(target_arch = "x86_64", feature = "simd"))]
             {
                 if is_x86_feature_detected!("avx2") {
                     use crate::simd::x86_64::avx2_upsample::avx2_fancy_upsample_h2v2;
@@ -551,7 +551,7 @@ fn parity_fancy_upsample_h2v2() {
                     );
                 }
             }
-            #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+            #[cfg(all(target_arch = "wasm32", feature = "simd", target_feature = "simd128"))]
             {
                 use crate::simd::wasm32::upsample::wasm_fancy_upsample_h2v2;
                 let mut simd_out: Vec<u8> = vec![0u8; out_w * out_h];
@@ -584,7 +584,7 @@ fn parity_merged_upsample_h2v1() {
             let mut scalar_rgb: Vec<u8> = vec![0u8; luma_w * 3];
             merged_h2v1_ycbcr_to_rgb(&y, &cb, &cr, &mut scalar_rgb, luma_w);
 
-            #[cfg(target_arch = "aarch64")]
+            #[cfg(all(target_arch = "aarch64", feature = "simd"))]
             {
                 use crate::simd::aarch64::merged::neon_merged_h2v1_ycbcr_to_rgb;
                 let mut simd_rgb: Vec<u8> = vec![0u8; luma_w * 3];
@@ -594,7 +594,7 @@ fn parity_merged_upsample_h2v1() {
                     "NEON merged_h2v1 mismatch w={luma_w} iter={i}"
                 );
             }
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(all(target_arch = "x86_64", feature = "simd"))]
             {
                 if is_x86_feature_detected!("avx2") {
                     use crate::simd::x86_64::avx2_merged::avx2_merged_h2v1_ycbcr_to_rgb;
@@ -606,7 +606,7 @@ fn parity_merged_upsample_h2v1() {
                     );
                 }
             }
-            #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+            #[cfg(all(target_arch = "wasm32", feature = "simd", target_feature = "simd128"))]
             {
                 use crate::simd::wasm32::merged::wasm_merged_h2v1_ycbcr_to_rgb;
                 let mut simd_rgb: Vec<u8> = vec![0u8; luma_w * 3];
@@ -645,7 +645,7 @@ fn parity_merged_upsample_h2v2() {
                 luma_w,
             );
 
-            #[cfg(target_arch = "aarch64")]
+            #[cfg(all(target_arch = "aarch64", feature = "simd"))]
             {
                 use crate::simd::aarch64::merged::neon_merged_h2v2_ycbcr_to_rgb;
                 let mut simd_rgb0: Vec<u8> = vec![0u8; luma_w * 3];
@@ -668,7 +668,7 @@ fn parity_merged_upsample_h2v2() {
                     "NEON merged_h2v2 row1 mismatch w={luma_w} iter={i}"
                 );
             }
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(all(target_arch = "x86_64", feature = "simd"))]
             {
                 if is_x86_feature_detected!("avx2") {
                     use crate::simd::x86_64::avx2_merged::avx2_merged_h2v2_ycbcr_to_rgb;
@@ -693,7 +693,7 @@ fn parity_merged_upsample_h2v2() {
                     );
                 }
             }
-            #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+            #[cfg(all(target_arch = "wasm32", feature = "simd", target_feature = "simd128"))]
             {
                 use crate::simd::wasm32::merged::wasm_merged_h2v2_ycbcr_to_rgb;
                 let mut simd_rgb0: Vec<u8> = vec![0u8; luma_w * 3];
@@ -744,7 +744,7 @@ fn parity_rgb_to_ycbcr_rows() {
                 width,
             );
 
-            #[cfg(target_arch = "aarch64")]
+            #[cfg(all(target_arch = "aarch64", feature = "simd"))]
             {
                 use crate::simd::aarch64::color_encode::{
                     neon_bgr_to_ycbcr_row, neon_bgra_to_ycbcr_row, neon_rgb_to_ycbcr_row,
@@ -815,7 +815,7 @@ fn parity_rgb_to_ycbcr_rows() {
                 assert_eq!(sd_cb3, sc_cb3, "NEON BGRA→Cb w={width}");
                 assert_eq!(sd_cr3, sc_cr3, "NEON BGRA→Cr w={width}");
             }
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(all(target_arch = "x86_64", feature = "simd"))]
             {
                 if is_x86_feature_detected!("avx2") {
                     use crate::simd::x86_64::avx2_color_encode::{
@@ -885,7 +885,7 @@ fn parity_rgb_to_ycbcr_rows() {
                     assert_eq!(sd_cr3, sc_cr3, "AVX2 BGRA→Cr w={width}");
                 }
             }
-            #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+            #[cfg(all(target_arch = "wasm32", feature = "simd", target_feature = "simd128"))]
             {
                 use crate::simd::wasm32::color_encode::{
                     wasm_bgr_to_ycbcr_row, wasm_bgra_to_ycbcr_row, wasm_rgb_to_ycbcr_row,
@@ -980,7 +980,7 @@ fn parity_fdct_quantize_islow() {
         let mut scalar_out: [i16; 64] = [0i16; 64];
         scalar::scalar_fdct_quantize(&mut scalar_in, &quant_divisors, &mut scalar_out);
 
-        #[cfg(target_arch = "aarch64")]
+        #[cfg(all(target_arch = "aarch64", feature = "simd"))]
         {
             // There is no pub `neon_fdct_quantize`; the dispatcher picks
             // it via EncoderSimdRoutines. Use the public encoder detector
@@ -991,7 +991,7 @@ fn parity_fdct_quantize_islow() {
             (routines.fdct_quantize)(&mut simd_in, &quant_divisors, &mut simd_out);
             assert_eq!(simd_out, scalar_out, "NEON fdct_quantize mismatch iter={i}");
         }
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(all(target_arch = "x86_64", feature = "simd"))]
         {
             if is_x86_feature_detected!("avx2") {
                 let routines = crate::simd::detect_encoder();
@@ -1001,7 +1001,7 @@ fn parity_fdct_quantize_islow() {
                 assert_eq!(simd_out, scalar_out, "AVX2 fdct_quantize mismatch iter={i}");
             }
         }
-        #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+        #[cfg(all(target_arch = "wasm32", feature = "simd", target_feature = "simd128"))]
         {
             let routines = crate::simd::detect_encoder();
             let mut simd_in: [i16; 64] = scalar_input;
