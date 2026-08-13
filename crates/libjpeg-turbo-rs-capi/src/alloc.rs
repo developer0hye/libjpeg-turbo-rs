@@ -18,11 +18,50 @@ extern "C" {
     fn memcpy(dst: *mut c_void, src: *const c_void, n: usize) -> *mut c_void;
 }
 
+std::thread_local! {
+    /// P4-120 (#467): countdown to a forced NULL, armed only by tests.
+    static FAIL_COUNTDOWN: std::cell::Cell<Option<u32>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Test hook (P4-120, #467): make the `countdown`-th subsequent
+/// [`libc_malloc`] on this thread return NULL, exactly as a real allocator
+/// under memory pressure would — `0` fails the very next allocation.
+/// Disarms itself once it fires. Everything the shim allocates for the
+/// classic dest managers funnels through `libc_malloc`, so without this the
+/// `JERR_OUT_OF_MEMORY` paths (`jdatadst.c`'s `ERREXIT1(…, 10)` twins) were
+/// unreachable from any test. Not part of the C ABI: the symbol is not
+/// `extern "C"` and is not exported from the cdylib.
+pub fn fail_nth_allocation_for_tests(countdown: u32) {
+    FAIL_COUNTDOWN.with(|c| c.set(Some(countdown)));
+}
+
+/// Disarm [`fail_nth_allocation_for_tests`] (idempotent).
+pub fn disarm_allocation_failure_for_tests() {
+    FAIL_COUNTDOWN.with(|c| c.set(None));
+}
+
 /// Allocate `size` bytes through libc `malloc`. Returns NULL on OOM or on
 /// `size == 0` (matching TurboJPEG behavior — callers treat NULL as
 /// either OOM or "nothing to allocate" and don't distinguish).
 pub(crate) fn libc_malloc(size: usize) -> *mut u8 {
     if size == 0 {
+        return std::ptr::null_mut();
+    }
+    // P4-120 (#467): the injected failure, indistinguishable to callers
+    // from a real NULL. One thread-local read on the production path.
+    let inject: bool = FAIL_COUNTDOWN.with(|c| match c.get() {
+        Some(0) => {
+            c.set(None);
+            true
+        }
+        Some(n) => {
+            c.set(Some(n - 1));
+            false
+        }
+        None => false,
+    });
+    if inject {
         return std::ptr::null_mut();
     }
     // SAFETY: `malloc` is a standard C function; we check for NULL before

@@ -249,7 +249,7 @@
 
 | C Function | Description | Rust | Status |
 |---|---|---|---|
-| `jpeg_has_multiple_scans(cinfo)` | Check if progressive/multi-scan | Native progressive query exists; classic sequential multi-scan/state semantics remain P4-114 | 🔶 |
+| `jpeg_has_multiple_scans(cinfo)` | Check if progressive/multi-scan | Reports upstream's bit (progressive ∨ non-interleaved sequential, 2026-08-13); P4-114 state semantics remain | 🔶 |
 | `jpeg_start_output(cinfo, scan_number)` | Begin output for specific scan | Native output exists; classic input-pull/state behavior remains P4-26/P4-104 | 🔶 |
 | `jpeg_finish_output(cinfo)` | Finish scan output | Native finish exists; classic input-pull/state behavior remains P4-26/P4-104 | 🔶 |
 | `jpeg_input_complete(cinfo)` | Check if all input consumed | Native query exists; deeper streaming/state fidelity remains P4-26/P4-104 | 🔶 |

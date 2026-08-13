@@ -199,9 +199,9 @@ The build script then auto-derives `CAPI_SONAME=libjpeg.so.62` and `CAPI_INSTALL
 
 Without `CAPI_ACK_V6B_SONAME=1`, build.rs emits a loud `cargo:warning=` if v6b SONAME or install_name is requested by hand — the same warning fires if SONAME and install_name disagree on v6b vs v8 (which would silently break load-time resolution on macOS).
 
-### `mem->max_memory_to_use` is enforced in the memory manager, not yet on the decode path (P4-14)
+### `mem->max_memory_to_use` is enforced in the memory manager and on the classic decode sequence (P4-14)
 
-**Updated 2026-08-11.** This section previously said the field was never
+**Updated 2026-08-13.** This section previously said the field was never
 enforced and defaulted to `1000000000L`. Both statements are now out of date,
 and the second was wrong when written: upstream's `jpeg_mem_init` returns **0**
 (`jmemnobs.c:101-104`), meaning unlimited, and our default matches it.
@@ -213,12 +213,24 @@ against it, which is the only place upstream consults it either. Exceeding it
 raises `JERR_NO_BACKING_STORE` ("Memory limit exceeded", code 51), matching
 upstream's shipped no-backing-store build.
 
-**What still does not work:** the classic decode path does not route through
-that vtable, so lowering the field does not yet bound
-`jpeg_read_header` → `jpeg_start_decompress` → `jpeg_read_scanlines`. A C
-consumer relying on the budget to cap a hostile image is not yet protected by
-this field alone; use `TJPARAM_MAXPIXELS` or the Rust `DecodeLimits` until
-P4-14 closes.
+**The classic decode sequence is bounded too (2026-08-13):**
+`jpeg_read_header` → `jpeg_start_decompress` → `jpeg_read_scanlines` runs on
+the native decoder rather than through the vtable, so `jpeg_start_decompress`
+performs the equivalent check itself, with upstream's scope and accounting:
+the budget applies exactly when whole-image coefficient arrays would exist —
+multi-scan streams (progressive or non-interleaved sequential) and
+buffered-image mode — and weighs only those coefficient-array bytes
+(byte-equal to upstream's `maximum_space` on 13 bisected geometries),
+including upstream's clamp that realizes a stream at *any* positive budget
+when every array fits one access window. Refusal is
+`JERR_NO_BACKING_STORE` at start; baseline single-scan decodes outside
+buffered-image mode are never bounded, matching stock (measured:
+`examples/classic_budget_oracle.c` trace-compared verbatim). Known residue: for multi-window streams stock's
+refusal threshold sits above the coefficient bytes (strip mechanics plus
+the already-allocated deduction — measured 1.5×–4.1× above on small
+images, 1.7% at 1024×1024), so in that band we accept where stock refuses;
+and a *suspending* source in buffered-image mode defers decoding past the
+check entirely. Both are recorded in P4-14.
 
 **Scope of the enforcement, precisely.** `realize_virt_arrays` compares the
 budget against the virtual arrays' full footprint and raises
@@ -237,15 +249,16 @@ refuses.
 
 `alloc_small`, `alloc_large`, `alloc_sarray`, `request_virt_sarray` and
 `request_virt_barray` still allocate without consulting the budget; upstream
-does not check it there either, but our decode path additionally bypasses the
-vtable entirely (see above), which upstream's does not.
+does not check it there either.
 
-**What to do meanwhile.** For a hard bound on untrusted input, use the
-Rust-side controls, which are enforced end to end: `TJPARAM_MAXMEMORY` and
+**For the tightest bound on untrusted input**, the Rust-side controls remain
+stronger than upstream's field ever was: `TJPARAM_MAXMEMORY` and
 `TJPARAM_MAXPIXELS` on the TurboJPEG API, or `Decoder::set_max_memory()` /
-`DecodeLimits` on the Rust API. `docs/FEATURE_PARITY.md` marks this area ✅ on
-the strength of those; the ✅ now extends partially — but not yet fully — to
-the classic `cinfo->mem` field documented here.
+`DecodeLimits` on the Rust API, bound the whole pipeline (output buffers and
+planes included), not just the coefficient arrays. `docs/FEATURE_PARITY.md`
+marks this area ✅ on the strength of those; the classic `cinfo->mem` field
+documented here now matches upstream's behaviour on the documented decode
+sequence, with the strip-wise and overhead residues P4-14 records.
 
 ## Field-presence reference
 
