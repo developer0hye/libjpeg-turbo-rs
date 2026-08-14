@@ -6,19 +6,33 @@
 //! so wrong routing — the easy mistake, since three different upstream codes
 //! are in play — fails here rather than shipping.
 //!
-//! **Coverage, stated honestly.** On a 64-bit host only the `JDIMENSION` guard
-//! is reachable through the public API: `image_width` is a `u32` and
+//! **Coverage, stated honestly.** Of the *classic-ABI* guards, only the
+//! `JDIMENSION` one is reachable on a 64-bit host: `image_width` is a `u32` and
 //! `input_components` a small `c_int`, so their product cannot overflow
-//! `usize`. The `usize`-overflow and `isize::MAX` arms of the same guards —
-//! and `tj3Compress8`'s source-span guard — are 32-bit-only and **are not
-//! exercised anywhere today**.
+//! `usize`. Those guards' `usize`-overflow and `isize::MAX` arms are
+//! 32-bit-only and **are not exercised anywhere today**.
+//!
+//! The *TJ3* source-span guards are a different case, which this comment used
+//! to lump in with the above. Their width and height are both
+//! caller-supplied `c_int`s, so their `isize::MAX` arm is reachable on 64-bit:
+//! `capi_layout_adoption.rs`'s `source_span_bounds` module exercises it for
+//! `tj3Compress12`/`tj3Compress16`, where the two-byte element puts the byte
+//! span past the bound, and for `tj3Compress8` — `c_int::MAX` square at
+//! `TJPF_RGBA` spans 18446744056529682436 bytes, which fits `usize` and
+//! exceeds `isize::MAX`. `tj3Compress8`'s guard predates that file (P4-137
+//! wrote it); what it lacked was a test, because this comment said the arm
+//! was unreachable.
 //!
 //! An earlier version of this comment claimed the `armv7` and `wasm32-wasip1`
-//! legs covered them. They do not: `armv7.yml` runs the root crate's `--lib`
-//! and `no_std_dispatch` only, and the WASI leg selects the root workspace
-//! member. Neither builds this crate's C-ABI tests. Getting a 32-bit C-ABI leg
-//! is real infrastructure work and is recorded under P4-139 criterion 5 rather
-//! than asserted here.
+//! legs covered the 32-bit-only arms. They do not: `armv7.yml` runs the root
+//! crate's `--lib` and `no_std_dispatch` only, and the WASI leg selects the
+//! root workspace member. Neither builds this crate's C-ABI tests. What changed
+//! with P4-139 chunk 1 is that they now *could*: gating the encode ABI-offset
+//! block on `target_pointer_width = "64"` removed the assertion that made this
+//! crate uncompilable on ILP32, and `cargo check -p libjpeg-turbo-rs-capi
+//! --tests --target armv7-unknown-linux-gnueabihf` succeeds. Adding the CI leg
+//! is still work, and is recorded under P4-139 criterion 5 rather than asserted
+//! here.
 
 use std::ffi::{c_int, c_void};
 

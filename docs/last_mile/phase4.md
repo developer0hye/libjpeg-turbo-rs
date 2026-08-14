@@ -6258,6 +6258,12 @@ instance; this entry is the common cause.
 **Status (2026-08-11): partial — criterion 3 done, and with it every
 *confirmed instance*. What remains is the refactor, not a live defect.**
 
+**Status (2026-08-14): still partial — criterion 1 done, criterion 2 half
+done, criterion 5's property-test half done.** `ImageLayout` exists
+(`src/common/layout.rs`) and the C-ABI crate adopted it; the root crate's
+decode/encode sites are chunk 2. Criterion 4 (`ScalingFactor`) is untouched and
+still waits on 0.9.0. Details in **What remains** below.
+
 * **Criterion 3 — done, and it is the load-bearing one.** The rule is enforced
   by `tests/sizing_arithmetic_gate.rs` against
   `docs/sizing_arithmetic_inventory.tsv`, which classifies all 86 remaining
@@ -6330,12 +6336,28 @@ instance; this entry is the common cause.
 
 **What remains.**
 
-* **Criteria 1–2 — the `ImageLayout` abstraction and its adoption.** Not
-  started. This is now a *consistency* refactor rather than a safety fix: the
-  spans are individually checked, but the checking is still written out at each
-  site. Sequence it after the classic-ABI work rather than before — it touches
-  every subsystem in criterion 2's list, and each of those is under active
-  change.
+* **Criteria 1–2 — the `ImageLayout` abstraction and its adoption. Chunk 1 of
+  2 landed; the root crate's decode/encode sites remain.** Criterion 1 is done:
+  `src/common/layout.rs` owns `width`/`height`/`bytes_per_pixel`/optional
+  `stride`, rejects `stride < row_bytes`, and produces `total_bytes` through
+  checked arithmetic bounded by `isize::MAX` with a typed error, plus a
+  `checked_span` free function for spans that are not 2-D. Criterion 2 is
+  partial: the C-ABI crate adopted it (`compress.rs`, `precision.rs`,
+  `imageio.rs`, `yuv.rs`), which covers TJ3 compress, 12/16-bit, YUV plane
+  sizing and the image-file entry points. Still written out per site: baseline
+  and progressive decode, scaling, crop, transform output and the classic
+  `jpeg_*` staging buffers — chunk 2, deliberately left because each is under
+  active change. This is a *consistency* refactor rather than a safety fix; the
+  spans were already individually checked.
+
+  Adoption was not behaviour-neutral, and the three caller-visible changes are
+  pinned by `crates/libjpeg-turbo-rs-capi/tests/capi_layout_adoption.rs`:
+  `tj3SaveImage8` now refuses a negative `pitch` instead of reading it as
+  "dense" (`turbojpeg-mp.c:511-513`), `tj3LoadImage8` requires `align` to be a
+  positive power of two instead of clamping with `align.max(1)`
+  (`turbojpeg-mp.c:317-321`), and `tj3Compress12`/`tj3Compress16` bound their
+  source span in *bytes*, putting the ×2 element size inside the checked chain
+  where `from_raw_parts`' precondition needs it.
 * **Criterion 4 — `ScalingFactor`. Decision recorded: do it, in 0.9.0, as
   private fields plus `try_new`.** Not the 16-variant enum: the type is
   constructed from caller-supplied `num`/`denom` at the C ABI boundary
@@ -6352,23 +6374,64 @@ instance; this entry is the common cause.
   cannot overflow — `input_dim` is bounded by a JPEG's 65535 dimension limit and
   `num` by 16 — so what is left is the `assert!` on `denom == 0`, a panic on
   public input. That is an API-quality defect, not a memory-safety one.
-* **Criterion 5 — property tests, and a 32-bit C-ABI leg.** The second half was
-  discovered while closing criterion 3 and is the more useful of the two: the
-  `usize`-overflow and `isize::MAX` arms of the new span guards are 32-bit-only
-  and **no CI leg exercises them**. `armv7.yml` runs the root crate's `--lib`
-  and `no_std_dispatch`; the WASI leg selects the root workspace member; neither
-  builds the C-ABI crate's tests, and selecting it there currently fails a
-  pointer-width ABI assertion. So the 64-bit-reachable `JDIMENSION` arm is
-  covered by `capi_span_overflow_guards.rs` and the rest is argued, not tested.
-  A 32-bit C-ABI leg would close both this and the equivalent gap P4-136's
-  pointer-width tests have.
+* **Criterion 5 — a 32-bit C-ABI leg.** The compile blocker is gone: chunk 1
+  gated the encode ABI-offset assertion block on `target_pointer_width = "64"`
+  (it was the one ungated LP64 block left, and it failed the *build* on ILP32
+  rather than flagging a real mismatch), so `cargo check -p
+  libjpeg-turbo-rs-capi --tests --target armv7-unknown-linux-gnueabihf` now
+  succeeds, warning-free (the 64-bit-only tests live in one
+  `cfg(target_pointer_width = "64")` module rather than carrying three separate
+  gates, so nothing is left unused on ILP32). What remains is the CI job
+  itself: `armv7.yml` runs the root crate's `--lib` and `no_std_dispatch`; the
+  WASI leg selects the root workspace member; neither builds the C-ABI crate's
+  tests.
 
-* **Criterion 5 (original) — property tests over adversarial geometry.** The individual
-  guards have targeted regressions (`yuv_packed_length_overflow.rs`,
-  `norealloc_buffer_capacity.rs`, the P4-136 pointer-width pair), but there is no
-  generative test sweeping huge dimensions and `stride < row_bytes` across both
-  pointer widths. Wants `proptest` or a hand-rolled matrix; the 32-bit leg exists
-  already (`armv7.yml`, `wasm32-wasip1`).
+  **Correction (chunk 1):** this entry previously said the `usize`-overflow and
+  `isize::MAX` arms of *the* span guards were 32-bit-only. That is true only of
+  the classic-ABI guards, whose `image_width` is a `u32`. The TJ3 source-span
+  guards take caller-supplied `c_int` width and height, so their `isize::MAX`
+  arm is 64-bit-reachable. `capi_layout_adoption.rs`'s `source_span_bounds`
+  module now exercises it for all three: `tj3Compress12`/`tj3Compress16`
+  (`c_int::MAX` x 800_000_000 at `TJPF_RGB`, 1.03e19 bytes) and `tj3Compress8`
+  (`c_int::MAX` square at `TJPF_RGBA`, 18446744056529682436 bytes) — each
+  inside `usize` and past `isize::MAX`. `tj3Compress8`'s guard predates this
+  work (P4-137 wrote it); what it lacked was any test, because the file that
+  looked like its home said the arm was unreachable.
+
+* **Criterion 5 (original) — property tests over adversarial geometry. Done for
+  `ImageLayout`.** `common::layout::tests::adversarial_geometry_matches_the_u128_model`
+  sweeps a hand-picked edge matrix plus 4096 deterministic Mulberry32 cases
+  against a `u128` reference model that cannot overflow, asserting both the
+  accepted totals and the refusals. It is a `--lib` test, so it runs on the
+  32-bit legs (`armv7.yml` under qemu, `wasm32-wasip1`) as well as the 64-bit
+  ones, where the interesting boundary moves to ~2 GiB. Hand-rolled rather than
+  `proptest`, for reproducibility. What it does *not* cover is the call sites:
+  the per-entry-point guards still rely on targeted regressions
+  (`yuv_packed_length_overflow.rs`, `norealloc_buffer_capacity.rs`,
+  `capi_layout_adoption.rs`, the P4-136 pointer-width pair).
+
+  The sweep earned its keep during chunk 1's review: extending it to validate
+  `(height - 1) * stride` *before* the zero-area early-out caught a real hole
+  in `ImageLayout` itself. A layout like `strided(0, 1000, 3, usize::MAX / 2)`
+  was accepted — `row_bytes` is 0, so the under-stride test is vacuous and the
+  total is honestly 0 — while `row_offset(999)` wrapped, and `compress.rs`
+  turns that offset into a `ptr::add`. Construction now proves the head
+  unconditionally.
+
+* **Chunk 1 gap: no sanitizer leg runs `capi_layout_adoption.rs`.**
+  `tj3_decompress12_writes_only_the_pitched_extent` hands the library a
+  destination sized at exactly upstream's minimum, so the pre-chunk-1
+  `pitch * height` span built a `from_raw_parts_mut` past the caller's `Vec`.
+  Its assertions (rows match a dense decode, inter-row padding untouched) pass
+  either way; only Miri or ASAN sees the out-of-bounds slice.
+  `sanitizers.yml` excludes integration tests and the capi Miri step names
+  `capi_create_abi_guards` alone. Adding a leg is not a one-liner — the test
+  performs a real encode and decode, so Miri stops at the first SIMD intrinsic
+  the dispatcher picks (measured locally: `llvm.aarch64.neon.ushl.v8i16`),
+  which is why the library's own Miri run passes `--skip simd::`. A
+  scalar-only capi build under Miri belongs to
+  [P4-141](#p4-141-soundness-verification-program-mirisanitizerfuzz-coverage-gaps-and-an-unsafe-inventory-gate--open),
+  not here.
 
 **Also recorded: resource-limit defaults.** `DecodeLimits` currently defaults to
 roughly 2.1 billion pixels with `max_memory = None`. That is a compatibility

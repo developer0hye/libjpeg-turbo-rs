@@ -52,6 +52,7 @@ use libjpeg_turbo_rs::api::yuv::{
     compress_from_yuv_planes, decode_yuv_planes, decompress_to_yuv_planes, encode_yuv,
     encode_yuv_planes,
 };
+use libjpeg_turbo_rs::common::layout::checked_span;
 use libjpeg_turbo_rs::tj3::FrameInfo;
 use libjpeg_turbo_rs::{yuv_plane_height, yuv_plane_width, PixelFormat, Subsampling};
 
@@ -72,7 +73,9 @@ use crate::alloc::{deliver_compressed_output, OutputDelivery};
 /// worst possible way: the result went straight into `slice::from_raw_parts`,
 /// so an overflow produced a slice of `usize::MAX` bytes — immediate UB, not a
 /// short read. The `isize::MAX` bound is `from_raw_parts`'s own documented
-/// precondition.
+/// precondition, and it now comes from [`checked_span`] rather than being
+/// respelled here, so a plane's span and every other span in the port refuse
+/// at the same boundary (P4-139).
 fn packed_yuv_len(
     width: usize,
     height: usize,
@@ -89,7 +92,8 @@ fn packed_yuv_len(
         let pw: usize = yuv_plane_width(c, width, ss);
         let ph: usize = yuv_plane_height(c, height, ss);
         let stride: usize = pw.div_ceil(align).checked_mul(align)?;
-        total = total.checked_add(stride.checked_mul(ph)?)?;
+        let plane: usize = checked_span(&[stride, ph], "packed YUV plane").ok()?;
+        total = total.checked_add(plane)?;
     }
     (total <= isize::MAX as usize).then_some(total)
 }

@@ -12,6 +12,7 @@
 
 use std::ffi::{c_char, c_int, c_void, CStr};
 
+use libjpeg_turbo_rs::common::layout::{checked_span, ImageLayout};
 use libjpeg_turbo_rs::PixelFormat;
 
 use crate::alloc::{libc_free, libc_from_slice};
@@ -91,7 +92,20 @@ unsafe fn cstr_to_path(filename: *const c_char) -> Option<&'static str> {
     cs.to_str().ok()
 }
 
+/// Round `v` up to a multiple of `align`, which its sole caller has already
+/// validated as a **positive** power of two.
+///
+/// The multiply cannot wrap under that contract: the result is at most
+/// `v + align - 1`; `v` is a row length bounded by `isize::MAX` (a
+/// `checked_span` proved it); and positivity caps `align` at 2^30, since 2^31
+/// is negative as a `c_int`. Worst case on ILP32 is `(2^31 - 1) + (2^30 - 1)`,
+/// still inside `usize`. Both halves of that argument are the caller's to
+/// keep, so the debug assertion states the one this function can see.
 fn align_to(v: usize, align: usize) -> usize {
+    debug_assert!(
+        align.is_power_of_two(),
+        "align_to: caller must validate align ({align}) as a positive power of two"
+    );
     if align <= 1 {
         v
     } else {
@@ -125,8 +139,10 @@ fn align_to(v: usize, align: usize) -> usize {
 ///   matches Rust's `PixelFormat` losslessly.
 ///
 /// `align` is the minimum row stride alignment in bytes; we honour
-/// it by padding each row out to a multiple of `align`. `align == 0`
-/// or `1` means dense (no padding).
+/// it by padding each row out to a multiple of `align`. It must be a
+/// positive power of two, as upstream requires
+/// (`turbojpeg-mp.c:317-321`); `align == 1` means dense (no padding),
+/// and `0`, a negative or a non-power-of-two is an error.
 ///
 /// # Safety
 ///
@@ -166,6 +182,33 @@ pub unsafe extern "C" fn tj3LoadImage8(
                     return std::ptr::null_mut();
                 }
             };
+            // `align` is a row-stride quantum, so only a positive power of two
+            // describes one. Upstream refuses anything else — `align < 1` with
+            // "Invalid argument" and a non-power-of-two with "Alignment must be
+            // a power of 2" (`turbojpeg-mp.c:317-321`) — while this port used
+            // to run `align.max(1)`, silently rounding 0 and negatives up to
+            // "dense" and computing `div_ceil(3) * 3` for a nonsense quantum
+            // like 3. Both then reported success on a buffer whose stride the
+            // caller could not have predicted (P4-139).
+            //
+            // Placed after the read so a missing file still wins, as it does
+            // upstream: `tj3LoadImage8` opens the file before the helper that
+            // validates `align` (`turbojpeg-mp.c:459-464`).
+            if align < 1 {
+                inst.set_error(
+                    format!("tj3LoadImage8: align must be >= 1 (got {align})"),
+                    TJERR_FATAL,
+                );
+                return std::ptr::null_mut();
+            }
+            if (align as u32).count_ones() != 1 {
+                inst.set_error(
+                    format!("tj3LoadImage8: align must be a power of 2 (got {align})"),
+                    TJERR_FATAL,
+                );
+                return std::ptr::null_mut();
+            }
+
             // Probe the first 8 bytes for the PNG signature before dispatching.
             // When PNG is detected but the `png` feature is not compiled in, return
             // a clear diagnostic so the caller knows what to do.
@@ -238,21 +281,84 @@ pub unsafe extern "C" fn tj3LoadImage8(
             }
             let native_tj: c_int = effective_tj;
 
+            // Every factor below comes from the decoded file rather than a
+            // constant, so the products are checked: `row_dense * height`
+            // sized a `libc_malloc` with nothing between it and a wrap
+            // (P4-139). The row length is separated from the total because
+            // they fail for different reasons and on 32-bit the row is the
+            // arm that fires first — collapsing them would cost the caller
+            // the diagnostic that says which factor was at fault.
+            let bpp: usize = img.pixel_format.bytes_per_pixel();
+            let row_dense: usize = match checked_span(&[img.width, bpp], "tj3LoadImage8 image row")
+            {
+                Ok(bytes) => bytes,
+                Err(_) => {
+                    inst.set_error(
+                        "tj3LoadImage8: width * bytes_per_pixel overflows",
+                        TJERR_FATAL,
+                    );
+                    return std::ptr::null_mut();
+                }
+            };
+            let dense: ImageLayout =
+                match ImageLayout::packed(img.width, img.height, bpp, "tj3LoadImage8 image") {
+                    Ok(layout) => layout,
+                    Err(_) => {
+                        inst.set_error(
+                            "tj3LoadImage8: image dimensions overflow the buffer size",
+                            TJERR_FATAL,
+                        );
+                        return std::ptr::null_mut();
+                    }
+                };
+
             // Bottom-up row order: stock TurboJPEG returns rows top-to-bottom
             // by default. When the caller set TJPARAM_BOTTOMUP / TJFLAG_BOTTOMUP,
             // flip the row order in-place before we copy out. Use the live
             // `inst` borrow rather than re-dereferencing `handle` to avoid
             // aliasing two `&mut TjInstance` to the same allocation.
+            //
+            // Runs after the guard above, not before: the flip needs the same
+            // row length, and computing it a second time as a plain product
+            // put an unchecked multiply ahead of the check that was supposed
+            // to cover it.
             if inst.bottom_up_flag() {
-                let bpp_for_flip: usize = img.pixel_format.bytes_per_pixel();
-                flip_rows_in_place(&mut img.pixels, img.width * bpp_for_flip);
+                flip_rows_in_place(&mut img.pixels, row_dense);
             }
 
             // Pad rows out to `align` bytes if requested.
-            let bpp: usize = img.pixel_format.bytes_per_pixel();
-            let row_dense: usize = img.width * bpp;
-            let row_stride: usize = align_to(row_dense, align.max(1) as usize);
-            let total: usize = row_stride * img.height;
+            let row_stride: usize = align_to(row_dense, align as usize);
+            // Deliberately `row_stride * height` and not the layout's strided
+            // total: the returned buffer's documented length is `pitch *
+            // height` (`turbojpeg-mp.c:400-408` mallocs exactly that), padding
+            // past the final row included, and callers size their reads by the
+            // same formula. Only the arithmetic is borrowed here, not the
+            // last-row rule.
+            let total: usize = match checked_span(
+                &[row_stride, img.height],
+                "tj3LoadImage8 aligned output buffer",
+            ) {
+                Ok(bytes) => bytes,
+                Err(_) => {
+                    inst.set_error(
+                        "tj3LoadImage8: aligned row stride overflows the buffer size",
+                        TJERR_FATAL,
+                    );
+                    return std::ptr::null_mut();
+                }
+            };
+            // The loader's contract, made self-checking now that the expected
+            // length is in hand: the row loop below reads `height` rows of
+            // `row_dense` from `img.pixels`, so a short buffer would be an
+            // out-of-bounds read rather than a wrong picture.
+            debug_assert_eq!(
+                img.pixels.len(),
+                dense.packed_bytes(),
+                "load_image_from_bytes returned {} bytes for a {}x{} image at {bpp} bpp",
+                img.pixels.len(),
+                img.width,
+                img.height
+            );
             let buf_ptr: *mut u8 = if row_stride == row_dense {
                 // No padding — copy the dense buffer directly.
                 libc_from_slice(&img.pixels)
@@ -260,7 +366,7 @@ pub unsafe extern "C" fn tj3LoadImage8(
                 let p: *mut u8 = crate::alloc::libc_malloc(total);
                 if !p.is_null() {
                     for y in 0..img.height {
-                        let src_off: usize = y * row_dense;
+                        let src_off: usize = dense.row_offset(y);
                         let dst_off: usize = y * row_stride;
                         // SAFETY: `p` owns `total` bytes; `row_dense ≤ row_stride`
                         // ensures the copy stays inside the destination row.
@@ -375,7 +481,8 @@ pub unsafe extern "C" fn tj3LoadImage16(
 /// with an error installed on failure.
 ///
 /// `pitch` is bytes per row in the input buffer. `pitch == 0` means
-/// dense (`width * bytes_per_pixel`).
+/// dense (`width * bytes_per_pixel`); a negative `pitch` is an error,
+/// as upstream requires (`turbojpeg-mp.c:511-513`).
 ///
 /// # Safety
 ///
@@ -407,6 +514,21 @@ pub unsafe extern "C" fn tj3SaveImage8(
                 inst.set_error("tj3SaveImage8: width and height must be > 0", TJERR_FATAL);
                 return -1;
             }
+            // Upstream rejects a negative pitch alongside the other argument
+            // checks, before it opens the output file
+            // (`turbojpeg-mp.c:511-513`). This port instead folded it into the
+            // "tight rows" default with `pitch <= 0`, so `-1` was quietly read
+            // as "dense" and the caller got a file whose rows came from a
+            // stride they had not asked for (P4-139). `pitch == 0` still means
+            // dense — that is upstream's own convention
+            // (`turbojpeg-mp.c:587`).
+            if pitch < 0 {
+                inst.set_error(
+                    format!("tj3SaveImage8: pitch must not be negative (got {pitch})"),
+                    TJERR_FATAL,
+                );
+                return -1;
+            }
             let path: &str = match unsafe { cstr_to_path(filename) } {
                 Some(p) => p,
                 None => {
@@ -433,10 +555,13 @@ pub unsafe extern "C" fn tj3SaveImage8(
             // 32-bit, and the total can exceed `isize::MAX` on 64-bit for
             // `c_int::MAX`-square RGBA — both violate `from_raw_parts`'s
             // documented precondition rather than merely reading too little
-            // (P4-137 criterion 5).
-            let row_dense: usize = match w.checked_mul(bpp) {
-                Some(r) => r,
-                None => {
+            // (P4-137 criterion 5). `ImageLayout` is now where that chain
+            // lives (P4-139). The row keeps its own arm: on 32-bit `w * bpp`
+            // wraps long before `w * bpp * h` does, so folding the two would
+            // lose the diagnostic naming the factor at fault.
+            let row_dense: usize = match checked_span(&[w, bpp], "tj3SaveImage8 source row") {
+                Ok(bytes) => bytes,
+                Err(_) => {
                     inst.set_error(
                         "tj3SaveImage8: width * bytes_per_pixel overflows",
                         TJERR_FATAL,
@@ -444,12 +569,9 @@ pub unsafe extern "C" fn tj3SaveImage8(
                     return -1;
                 }
             };
-            let dense_total: usize = match row_dense
-                .checked_mul(h)
-                .filter(|total| *total <= isize::MAX as usize)
-            {
-                Some(t) => t,
-                None => {
+            let dense: ImageLayout = match ImageLayout::packed(w, h, bpp, "tj3SaveImage8 image") {
+                Ok(layout) => layout,
+                Err(_) => {
                     inst.set_error(
                         "tj3SaveImage8: image dimensions overflow the buffer size",
                         TJERR_FATAL,
@@ -457,7 +579,8 @@ pub unsafe extern "C" fn tj3SaveImage8(
                     return -1;
                 }
             };
-            let stride: usize = if pitch <= 0 {
+            let dense_total: usize = dense.total_bytes();
+            let stride: usize = if pitch == 0 {
                 row_dense
             } else {
                 pitch as usize
@@ -469,6 +592,22 @@ pub unsafe extern "C" fn tj3SaveImage8(
                 );
                 return -1;
             }
+            // The pitched source the caller actually owns. Its extent is
+            // `(h-1)*stride + row_dense` — upstream reads
+            // `&buffer[scanline * pitch]` for `width * ps` bytes
+            // (`turbojpeg-mp.c:594-598`), so padding past the final row is not
+            // the caller's to allocate.
+            let src: ImageLayout =
+                match ImageLayout::strided(w, h, bpp, stride, "tj3SaveImage8 source") {
+                    Ok(layout) => layout,
+                    Err(_) => {
+                        inst.set_error(
+                            "tj3SaveImage8: pitch * height overflows the buffer size",
+                            TJERR_FATAL,
+                        );
+                        return -1;
+                    }
+                };
 
             // Repack into a dense buffer if pitch != width*bpp; the Rust
             // saver expects dense rows.
@@ -481,10 +620,11 @@ pub unsafe extern "C" fn tj3SaveImage8(
             } else {
                 let mut v: Vec<u8> = Vec::with_capacity(dense_total);
                 for y in 0..h {
-                    // SAFETY: caller asserts buffer holds at least `stride * h`
-                    // bytes; `y * stride + row_dense ≤ stride * h`.
-                    let row: &[u8] =
-                        unsafe { std::slice::from_raw_parts(buffer.add(y * stride), row_dense) };
+                    // SAFETY: caller asserts buffer holds `src`'s extent;
+                    // `src.row_offset(y) + row_dense ≤ src.total_bytes()`.
+                    let row: &[u8] = unsafe {
+                        std::slice::from_raw_parts(buffer.add(src.row_offset(y)), row_dense)
+                    };
                     v.extend_from_slice(row);
                 }
                 v

@@ -10,11 +10,116 @@
 
 use std::ffi::{c_int, c_short, c_void};
 
+use libjpeg_turbo_rs::common::layout::{checked_span, ImageLayout};
 use libjpeg_turbo_rs::tj3::TjParam;
 
 use crate::alloc::{deliver_compressed_output, OutputDelivery};
 use crate::convert::pixel_format_from_tj;
 use crate::tj3::{with_handle, TJERR_FATAL};
+
+/// Bytes in one 12-bit or 16-bit sample. Both this module's element types
+/// (`c_short` and `u16`) are two bytes wide.
+const SAMPLE_BYTES: usize = 2;
+
+/// Why a caller's geometry cannot describe a sample buffer.
+///
+/// One variant per message the entry points phrase, so the diagnostic names
+/// the factor actually at fault.
+enum SampleSpanError {
+    /// `pitch` is below the dense row it must contain.
+    PitchTooSmall {
+        pitch_samples: usize,
+        row_samples: usize,
+    },
+    /// `width * components` alone is unrepresentable, before any pitch or
+    /// height enters. Separate from [`SampleSpanError::Overflow`] because
+    /// that one's message names `pitch * height`, and pitch is not implicated
+    /// here — on a 32-bit target this is the arm that fires first.
+    RowOverflow,
+    /// The pitched span left `usize`, or its byte total left `isize::MAX`.
+    Overflow,
+}
+
+/// A caller's pitched 12-/16-bit sample buffer.
+///
+/// `turbojpeg.h` measures `pitch` in *samples*, but
+/// `slice::from_raw_parts`' precondition is `len * size_of::<T>() <=
+/// isize::MAX` — about bytes. The four entry points here used to guard with a
+/// bare `pitch.checked_mul(height)` and hand the result straight to
+/// `from_raw_parts` over `i16`/`u16`, so the ×2 was never in the chain: a
+/// geometry whose sample count fits `usize` but whose *byte* span does not
+/// built an out-of-contract slice (P4-139, #478).
+///
+/// This wraps an [`ImageLayout`] whose element is one sample, so the checks
+/// happen in bytes while every accessor answers in the samples the C
+/// signatures use.
+struct SampleGrid {
+    layout: ImageLayout,
+}
+
+impl SampleGrid {
+    /// Validate `width x height` of `components` samples each, laid out with
+    /// TurboJPEG's `pitch` convention (`0` means a dense row).
+    fn new(
+        width: usize,
+        components: usize,
+        height: usize,
+        pitch: c_int,
+        what: &'static str,
+    ) -> Result<Self, SampleSpanError> {
+        debug_assert!(pitch >= 0, "callers reject a negative pitch first");
+        let row_samples: usize =
+            checked_span(&[width, components], what).map_err(|_| SampleSpanError::RowOverflow)?;
+        let pitch_samples: usize = if pitch == 0 {
+            row_samples
+        } else {
+            pitch as usize
+        };
+        if pitch_samples < row_samples {
+            return Err(SampleSpanError::PitchTooSmall {
+                pitch_samples,
+                row_samples,
+            });
+        }
+        let stride_bytes: usize = checked_span(&[pitch_samples, SAMPLE_BYTES], what)
+            .map_err(|_| SampleSpanError::Overflow)?;
+        let layout: ImageLayout =
+            ImageLayout::strided(row_samples, height, SAMPLE_BYTES, stride_bytes, what)
+                .map_err(|_| SampleSpanError::Overflow)?;
+        Ok(Self { layout })
+    }
+
+    /// Samples in one row's pixels, excluding pitch padding.
+    fn row_samples(&self) -> usize {
+        self.layout.row_bytes() / SAMPLE_BYTES
+    }
+
+    /// Whether the rows are back-to-back, so the buffer needs no repacking.
+    fn is_dense(&self) -> bool {
+        self.layout.stride() == self.layout.row_bytes()
+    }
+
+    /// The buffer's extent: `(height - 1) * pitch + row_samples`.
+    ///
+    /// The final row's padding is deliberately excluded — upstream indexes
+    /// `&srcBuf[i * pitch]` and copies `width * components` samples
+    /// (`turbojpeg-mp.c:130` compressing, `:242` decompressing), so a caller
+    /// is not required to allocate past the last row's pixels. Sizing the
+    /// slice at `pitch * height` claimed memory such a caller never had.
+    fn total_samples(&self) -> usize {
+        self.layout.total_bytes() / SAMPLE_BYTES
+    }
+
+    /// Samples a dense (unpitched) copy of the same image needs.
+    fn dense_samples(&self) -> usize {
+        self.layout.packed_bytes() / SAMPLE_BYTES
+    }
+
+    /// Index of `row`'s first sample.
+    fn row_start(&self, row: usize) -> usize {
+        self.layout.row_offset(row) / SAMPLE_BYTES
+    }
+}
 
 fn num_components_from_tjpf(tjpf: c_int) -> Option<usize> {
     // Only Grayscale / RGB / CMYK are supported for non-8-bit precision
@@ -102,40 +207,45 @@ pub unsafe extern "C" fn tj3Compress12(
 
             let w: usize = width as usize;
             let h: usize = height as usize;
-            let line_samples: usize = if pitch == 0 {
-                w * components
-            } else {
-                pitch as usize
-            };
-            if line_samples < w * components {
-                inst.set_error(
-                    format!(
-                        "tj3Compress12: pitch {line_samples} smaller than width*components ({})",
-                        w * components
-                    ),
-                    TJERR_FATAL,
-                );
-                return -1;
-            }
+            let grid: SampleGrid =
+                match SampleGrid::new(w, components, h, pitch, "tj3Compress12 source") {
+                    Ok(g) => g,
+                    Err(SampleSpanError::PitchTooSmall {
+                        pitch_samples,
+                        row_samples,
+                    }) => {
+                        inst.set_error(
+                            format!(
+                                "tj3Compress12: pitch {pitch_samples} smaller than \
+                                 width*components ({row_samples})"
+                            ),
+                            TJERR_FATAL,
+                        );
+                        return -1;
+                    }
+                    Err(SampleSpanError::RowOverflow) => {
+                        inst.set_error("tj3Compress12: width * components overflows", TJERR_FATAL);
+                        return -1;
+                    }
+                    Err(SampleSpanError::Overflow) => {
+                        inst.set_error("tj3Compress12: pitch * height overflows", TJERR_FATAL);
+                        return -1;
+                    }
+                };
 
-            // SAFETY: caller guarantees `src_buf` is valid for
-            // `line_samples * h` samples.
-            let total_samples: usize = match line_samples.checked_mul(h) {
-                Some(v) => v,
-                None => {
-                    inst.set_error("tj3Compress12: pitch * height overflows", TJERR_FATAL);
-                    return -1;
-                }
-            };
-            let raw: &[i16] = unsafe { std::slice::from_raw_parts(src_buf, total_samples) };
+            // SAFETY: caller guarantees `src_buf` is valid for the pitched
+            // extent `grid` describes, which `SampleGrid::total_samples`
+            // proved fits `isize::MAX` *in bytes* — `from_raw_parts`' own
+            // precondition for a two-byte element.
+            let raw: &[i16] = unsafe { std::slice::from_raw_parts(src_buf, grid.total_samples()) };
 
-            let dense: Vec<i16> = if line_samples == w * components {
+            let dense: Vec<i16> = if grid.is_dense() {
                 raw.to_vec()
             } else {
-                let mut out: Vec<i16> = Vec::with_capacity(w * components * h);
+                let mut out: Vec<i16> = Vec::with_capacity(grid.dense_samples());
                 for row in 0..h {
-                    let start: usize = row * line_samples;
-                    out.extend_from_slice(&raw[start..start + w * components]);
+                    let start: usize = grid.row_start(row);
+                    out.extend_from_slice(&raw[start..start + grid.row_samples()]);
                 }
                 out
             };
@@ -314,33 +424,41 @@ pub unsafe extern "C" fn tj3Decompress12(
                 return -1;
             }
 
-            let line_samples: usize = if pitch == 0 {
-                img.width * components
-            } else {
-                pitch as usize
-            };
-            if line_samples < img.width * components {
-                inst.set_error(
-                    "tj3Decompress12: pitch too small for width*components",
-                    TJERR_FATAL,
-                );
-                return -1;
-            }
-
-            // SAFETY: caller guarantees `dst_buf` holds at least
-            // `line_samples * height` samples.
-            let total: usize = match line_samples.checked_mul(img.height) {
-                Some(v) => v,
-                None => {
+            let grid: SampleGrid = match SampleGrid::new(
+                img.width,
+                components,
+                img.height,
+                pitch,
+                "tj3Decompress12 destination",
+            ) {
+                Ok(g) => g,
+                Err(SampleSpanError::PitchTooSmall { .. }) => {
+                    inst.set_error(
+                        "tj3Decompress12: pitch too small for width*components",
+                        TJERR_FATAL,
+                    );
+                    return -1;
+                }
+                Err(SampleSpanError::RowOverflow) => {
+                    inst.set_error("tj3Decompress12: width * components overflows", TJERR_FATAL);
+                    return -1;
+                }
+                Err(SampleSpanError::Overflow) => {
                     inst.set_error("tj3Decompress12: pitch * height overflows", TJERR_FATAL);
                     return -1;
                 }
             };
-            let out: &mut [i16] = unsafe { std::slice::from_raw_parts_mut(dst_buf, total) };
-            let row_samples: usize = img.width * components;
+
+            // SAFETY: caller guarantees `dst_buf` holds the pitched extent
+            // `grid` describes, whose byte span construction bounded by
+            // `isize::MAX`.
+            let out: &mut [i16] =
+                unsafe { std::slice::from_raw_parts_mut(dst_buf, grid.total_samples()) };
+            let row_samples: usize = grid.row_samples();
             for row in 0..img.height {
                 let s: &[i16] = &img.data[row * row_samples..row * row_samples + row_samples];
-                let d: &mut [i16] = &mut out[row * line_samples..row * line_samples + row_samples];
+                let start: usize = grid.row_start(row);
+                let d: &mut [i16] = &mut out[start..start + row_samples];
                 d.copy_from_slice(s);
             }
 
@@ -420,26 +538,25 @@ pub unsafe extern "C" fn tj3Compress16(
 
             let w: usize = width as usize;
             let h: usize = height as usize;
-            let line_samples: usize = if pitch == 0 {
-                w * components
-            } else {
-                pitch as usize
-            };
-            if line_samples < w * components {
-                inst.set_error(
-                    "tj3Compress16: pitch smaller than width*components",
-                    TJERR_FATAL,
-                );
-                return -1;
-            }
-
-            let total: usize = match line_samples.checked_mul(h) {
-                Some(v) => v,
-                None => {
-                    inst.set_error("tj3Compress16: pitch * height overflows", TJERR_FATAL);
-                    return -1;
-                }
-            };
+            let grid: SampleGrid =
+                match SampleGrid::new(w, components, h, pitch, "tj3Compress16 source") {
+                    Ok(g) => g,
+                    Err(SampleSpanError::PitchTooSmall { .. }) => {
+                        inst.set_error(
+                            "tj3Compress16: pitch smaller than width*components",
+                            TJERR_FATAL,
+                        );
+                        return -1;
+                    }
+                    Err(SampleSpanError::RowOverflow) => {
+                        inst.set_error("tj3Compress16: width * components overflows", TJERR_FATAL);
+                        return -1;
+                    }
+                    Err(SampleSpanError::Overflow) => {
+                        inst.set_error("tj3Compress16: pitch * height overflows", TJERR_FATAL);
+                        return -1;
+                    }
+                };
 
             let is_lossless: bool = inst.inner.get(TjParam::Lossless) != 0;
 
@@ -548,15 +665,17 @@ pub unsafe extern "C" fn tj3Compress16(
                 return -1;
             }
 
-            // SAFETY: caller guarantees `src_buf` is valid for `total` u16s.
-            let raw: &[u16] = unsafe { std::slice::from_raw_parts(src_buf, total) };
-            let dense: Vec<u16> = if line_samples == w * components {
+            // SAFETY: caller guarantees `src_buf` is valid for the pitched
+            // extent `grid` describes, whose byte span construction bounded by
+            // `isize::MAX`.
+            let raw: &[u16] = unsafe { std::slice::from_raw_parts(src_buf, grid.total_samples()) };
+            let dense: Vec<u16> = if grid.is_dense() {
                 raw.to_vec()
             } else {
-                let mut out: Vec<u16> = Vec::with_capacity(w * components * h);
+                let mut out: Vec<u16> = Vec::with_capacity(grid.dense_samples());
                 for row in 0..h {
-                    let start: usize = row * line_samples;
-                    out.extend_from_slice(&raw[start..start + w * components]);
+                    let start: usize = grid.row_start(row);
+                    out.extend_from_slice(&raw[start..start + grid.row_samples()]);
                 }
                 out
             };
@@ -683,31 +802,41 @@ pub unsafe extern "C" fn tj3Decompress16(
                 return -1;
             }
 
-            let line_samples: usize = if pitch == 0 {
-                img.width * components
-            } else {
-                pitch as usize
-            };
-            if line_samples < img.width * components {
-                inst.set_error(
-                    "tj3Decompress16: pitch too small for width*components",
-                    TJERR_FATAL,
-                );
-                return -1;
-            }
-
-            let total: usize = match line_samples.checked_mul(img.height) {
-                Some(v) => v,
-                None => {
+            let grid: SampleGrid = match SampleGrid::new(
+                img.width,
+                components,
+                img.height,
+                pitch,
+                "tj3Decompress16 destination",
+            ) {
+                Ok(g) => g,
+                Err(SampleSpanError::PitchTooSmall { .. }) => {
+                    inst.set_error(
+                        "tj3Decompress16: pitch too small for width*components",
+                        TJERR_FATAL,
+                    );
+                    return -1;
+                }
+                Err(SampleSpanError::RowOverflow) => {
+                    inst.set_error("tj3Decompress16: width * components overflows", TJERR_FATAL);
+                    return -1;
+                }
+                Err(SampleSpanError::Overflow) => {
                     inst.set_error("tj3Decompress16: pitch * height overflows", TJERR_FATAL);
                     return -1;
                 }
             };
-            let out: &mut [u16] = unsafe { std::slice::from_raw_parts_mut(dst_buf, total) };
-            let row_samples: usize = img.width * components;
+
+            // SAFETY: caller guarantees `dst_buf` holds the pitched extent
+            // `grid` describes, whose byte span construction bounded by
+            // `isize::MAX`.
+            let out: &mut [u16] =
+                unsafe { std::slice::from_raw_parts_mut(dst_buf, grid.total_samples()) };
+            let row_samples: usize = grid.row_samples();
             for row in 0..img.height {
                 let s: &[u16] = &img.data[row * row_samples..row * row_samples + row_samples];
-                let d: &mut [u16] = &mut out[row * line_samples..row * line_samples + row_samples];
+                let start: usize = grid.row_start(row);
+                let d: &mut [u16] = &mut out[start..start + row_samples];
                 d.copy_from_slice(s);
             }
 

@@ -25,7 +25,8 @@
 //! - No `cc` on PATH.
 //! - Cross-compile target where host `cc` cannot match the target ABI.
 //! - Non-64-bit host (matches the `cfg(target_pointer_width = "64")`
-//!   gate on the Rust assertion block; the offsets change on ILP32).
+//!   gates on the Rust assertion blocks — decompress and, since the
+//!   P4-139 32-bit fix, encode too; the offsets change on ILP32).
 
 use std::collections::HashMap;
 use std::path::PathBuf;

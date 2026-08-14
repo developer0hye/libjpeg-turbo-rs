@@ -5,6 +5,11 @@ pub mod exif;
 pub mod huffman_table;
 pub mod icc;
 pub mod jfif;
+// `pub` rather than `pub(crate)`: the C-ABI crate is a separate compilation
+// unit and its span arithmetic is exactly what this module exists to own
+// (P4-139 chunk 1). It reaches it as `libjpeg_turbo_rs::common::layout`, the
+// same way it already reaches `libjpeg_turbo_rs::decode::boundary`.
+pub mod layout;
 pub mod quant_table;
 pub mod sample;
 pub mod tables;

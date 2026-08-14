@@ -12422,6 +12422,13 @@ pub unsafe extern "C" fn jpeg_capi_test_get_compress_state(
 // for `JPEG_LIB_VERSION >= 80` on LP64. If Rust's default struct packing
 // ever diverges from the C layout, these fail at build time before a
 // broken ABI reaches the linker.
+//
+// Gated exactly like the decompress block above: the constants are LP64
+// numerology, so on ILP32 or LLP64 they would fail the *build* rather
+// than flag a real mismatch. This block was the one ungated straggler
+// that made the whole crate uncompilable on 32-bit targets (P4-139
+// criterion 5's 32-bit-leg finding, #478).
+#[cfg(all(target_pointer_width = "64", not(windows)))]
 const _: () = {
     // --- jpeg_common_fields -------------------------------------------
     assert!(std::mem::offset_of!(JpegCompressPublic, err) == 0);

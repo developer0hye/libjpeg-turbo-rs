@@ -10,6 +10,21 @@ and `git log` between tags.
 
 ### Changed
 
+- **Breaking (C ABI, argument validation):** `tj3SaveImage8` now refuses a
+  negative `pitch` instead of reading it as "tightly packed", and
+  `tj3LoadImage8` now requires `align` to be a positive power of two instead
+  of clamping it with `align.max(1)` (P4-139, #478). Both match upstream,
+  which rejects the same values (`turbojpeg-mp.c:511-513` and `:317-321`);
+  `pitch == 0` still means dense and `align == 1` still means no padding.
+  A caller passing `-1` or `0` previously got a success return and a buffer
+  whose row stride they could not have predicted.
+- `tj3Compress12` / `tj3Compress16` now bound their source span in **bytes**
+  rather than samples (P4-139, #478). `slice::from_raw_parts` requires
+  `len * size_of::<T>() <= isize::MAX`, and the guards multiplied
+  `pitch * height` over two-byte elements without the x2, so a geometry whose
+  sample count fit `usize` while its byte span did not was accepted and built
+  an out-of-contract slice. Such a call is now refused; no geometry that was
+  accepted before and is representable is refused now.
 - `wasm32` with `+simd128` but **without** the Cargo `simd` feature now uses
   the scalar path, honoring the feature exactly as aarch64/x86_64 always did
   (P4-135 criterion 5, #474). Previously the hand-written SIMD kernels were
