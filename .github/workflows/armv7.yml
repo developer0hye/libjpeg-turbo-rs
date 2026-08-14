@@ -96,3 +96,27 @@ jobs:
                 qemu-arm -L /usr/arm-linux-gnueabihf "$binary"
               done
         timeout-minutes: 30
+      # The C-ABI crate on a real 32-bit target (P4-139 criterion 5, #478).
+      # Until the encode ABI-assertion block gained its pointer-width gate
+      # this crate did not even COMPILE on ILP32, so the usize-overflow and
+      # isize::MAX arms of the span guards were argued, not executed. The
+      # two named suites are where those arms live: capi_layout_adoption
+      # (ImageLayout adoption behaviors) and capi_span_overflow_guards
+      # (JDIMENSION/isize::MAX split). Their C-oracle comparisons self-skip
+      # without LIBJPEG_TURBO_PREFIX — deliberate here: the point of this
+      # leg is 32-bit arithmetic, which `-C overflow-checks=on` above turns
+      # from silent wrap into loud failure. Selected by name because a
+      # blanket capi test build would drag in suites that compile C.
+      - name: Run C-ABI crate under qemu-arm (P4-139, 32-bit spans)
+        run: |
+          set -euo pipefail
+          cargo test --release --target armv7-unknown-linux-gnueabihf --no-run \
+            --message-format=json \
+            -p libjpeg-turbo-rs-capi --lib \
+            --test capi_layout_adoption --test capi_span_overflow_guards \
+            | jq -r 'select(.executable != null) | .executable' \
+            | while read -r binary; do
+                echo "=== $binary ==="
+                qemu-arm -L /usr/arm-linux-gnueabihf "$binary"
+              done
+        timeout-minutes: 30

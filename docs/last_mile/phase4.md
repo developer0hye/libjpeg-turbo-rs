@@ -6502,10 +6502,16 @@ an infallible constructor and so needs an API decision (panic, or a fallible
   libjpeg-turbo-rs-capi --tests --target armv7-unknown-linux-gnueabihf` now
   succeeds, warning-free (the 64-bit-only tests live in one
   `cfg(target_pointer_width = "64")` module rather than carrying three separate
-  gates, so nothing is left unused on ILP32). What remains is the CI job
-  itself: `armv7.yml` runs the root crate's `--lib` and `no_std_dispatch`; the
-  WASI leg selects the root workspace member; neither builds the C-ABI crate's
-  tests.
+  gates, so nothing is left unused on ILP32). **The CI job landed with the
+  final chunk (2026-08-14):** `armv7.yml`'s job gained a second qemu-arm step
+  building and running `-p libjpeg-turbo-rs-capi --lib --test
+  capi_layout_adoption --test capi_span_overflow_guards` — the suites where
+  the `usize`-overflow and `isize::MAX` arms live — under the job's existing
+  `-C overflow-checks=on`, which turns a 32-bit wrap into a loud failure.
+  Suites are selected by name because a blanket capi test build would drag in
+  C-compiling harnesses; the C-oracle comparisons inside them self-skip
+  without `LIBJPEG_TURBO_PREFIX`, which is deliberate — this leg gates the
+  arithmetic, not the oracle.
 
   **Correction (chunk 1):** this entry previously said the `usize`-overflow and
   `isize::MAX` arms of *the* span guards were 32-bit-only. That is true only of
