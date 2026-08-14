@@ -388,9 +388,9 @@
 - [x] Memory-to-memory decompress (byte slice → `Image`)
 - [x] Classic `jpeg_CreateCompress` / `jpeg_CreateDecompress` version/size guards — P4-110 (closed 2026-08-11; `JERR_BAD_LIB_VERSION` / `JERR_BAD_STRUCT_SIZE` compared against a real libjpeg by `capi_create_abi_guards.rs`)
 - [x] Full classic `jpeg_stdio_dest()` contract — short writes, `fflush`, and `ferror` raise `JERR_FILE_WRITE`; foreign-manager reuse raises `JERR_BUFFER_SIZE` (P4-108)
-- [ ] Full classic `jpeg_stdio_src()` contract — native file I/O exists; FILE buffering/Windows/error semantics remain P4-109
+- [x] Full classic `jpeg_stdio_src()` contract — chunked `fread` through the caller's `FILE *`, trace-compared vs stock (P4-109, 2026-08-14)
 - [x] Full classic `jpeg_mem_dest()` ownership/reallocation contract — caller capacity honoured, caller buffers never freed, doubling growth into library memory (P4-108)
-- [ ] Full classic `jpeg_mem_src()` validation/manager-replacement contract — native slice input exists; P4-109
+- [x] Full classic `jpeg_mem_src()` validation/manager-replacement contract — trace-compared vs stock (P4-109, 2026-08-14)
 - [x] Custom `jpeg_destination_mgr` — User-defined output stream (`stream::compress_to_writer`)
 - [x] Custom `jpeg_source_mgr` — User-defined input stream (`stream::decompress_from_reader`, buffering; `decompress_from_reader_incremental` for bounded input memory on interleaved baseline — P4-58)
 - [x] `TJPARAM_NOREALLOC` — Pre-allocated output buffer (`compress_into()`)
@@ -428,7 +428,7 @@
 - [x] `num_warnings` counter — `Image.warnings` vec (count via `.len()`)
 - [x] `msg_code` / `msg_parm` / `jpeg_message_table` — the native API uses typed `JpegError` / `DecodeWarning` enums instead of C integer codes + format strings; the C ABI carries all three, `jpeg_std_error` installing the 129-entry upstream table (P4-146, 2026-08-11)
 - [x] `tj3GetErrorStr()` / `tj3GetErrorCode()` — Rust `Result<T, JpegError>` with `Display` impl replaces C per-handle error getters
-- [ ] Classic `jpeg_resync_to_restart()` default algorithm — native strategy extension exists; C callback behavior remains P4-97
+- [x] Classic `jpeg_resync_to_restart()` default algorithm — suspending-source trace vs stock; native strategy extension remains available separately (P4-97, 2026-08-14)
 
 ---
 

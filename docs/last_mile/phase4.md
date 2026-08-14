@@ -55,19 +55,19 @@
 | P4-94 | OPEN (classic 12/16-bit scanline buffers never reach a high-precision encoder) |
 | P4-95 | OPEN (classic raw-data compression drops most public encode options) |
 | P4-96 | OPEN (classic decompression color quantization and colormap switching are not wired) |
-| P4-97 | OPEN (`jpeg_resync_to_restart` is an unconditional success no-op) |
+| P4-97 | CLOSED 2026-08-14 (C algorithm shared by export + default callback; suspending-source trace vs stock, `discarded_bytes` survives suspension) |
 | P4-98 | OPEN (classic 12/16-bit decode bypasses lifecycle and public output options) |
 | P4-99 | OPEN (classic decode dispatcher ignores output options and colorspace metadata) |
 | P4-100 | PARTIAL (classic codec failures are reported as suspension or silent success — translator + finish/start landed 2026-08-08) |
 | P4-101 | OPEN (classic header parse does not publish coding tables/scan state) |
 | P4-102 | OPEN (classic raw-data decode bypasses public options and state contracts) |
 | P4-103 | OPEN (`jpeg_crop_scanline` does not implement iMCU-aligned C semantics) |
-| P4-104 | OPEN (classic decompressor state constants/transitions and finish lifecycle diverge) |
+| P4-104 | CLOSED 2026-08-14 (state constants/transitions cross-validated; 17-row lifecycle trace vs stock) |
 | P4-105 | OPEN (classic marker writers ignore state and declared lengths) |
-| P4-106 | OPEN (`jpeg_finish_compress` accepts incomplete input and bad states) |
+| P4-106 | CLOSED 2026-08-14 (finish/abort lifecycle guards match stock's trace) |
 | P4-107 | OPEN (`jpeg_enable_lossless` clamps invalid input and omits public state) |
 | P4-108 | CLOSED 2026-08-08 (classic destination managers violate buffer ownership and I/O errors) |
-| P4-109 | OPEN (classic source-manager setup/stdio semantics diverge) |
+| P4-109 | CLOSED 2026-08-14 (setup guards + chunked `FILE*` stdio reader, 10-case trace vs stock) |
 | P4-110 | CLOSED 2026-08-11 (`jpeg_Create*` version/struct-size ABI guards, compared against a real libjpeg) |
 | P4-111 | OPEN (classic progress-manager callbacks/counters are not wired) |
 | P4-112 | OPEN (`jpeg_set_marker_processor` callbacks are stored but never invoked) |
@@ -1479,6 +1479,8 @@ Proof the refactor is behaviour-preserving: a temporary differential harness com
 
 **Acceptance criteria.** `cargo clippy --workspace --all-targets -- -D warnings` (with P4-70's three allowances) is green on a Windows host; the `read_c_file` Windows arm either reads the handle correctly with a test, or documents why it cannot and returns a typed error instead of a silently unused parameter. Consider adding a Windows leg to the Clippy job so this cannot regress undetected.
 
+**Update (2026-08-14), from the P4-109 closure.** All three cited sites are gone: `read_c_file` was deleted with the fd-dup slurp, taking the `FromRawHandle`/`RawHandle` imports and the unused `file` parameter with it, and `use std::io::Read;` was removed from the same file. `jpeg_stdio_src` now reads through the caller's `FILE *` with C-ABI `fread` and has no platform gating, which also discharges the "functionally incomplete Windows arm" half of the criteria. The item stays OPEN because the criteria are a *measurement* — `cargo clippy --workspace --all-targets -- -D warnings` on a Windows host — that has not been re-run since; re-measure before closing rather than closing on this note.
+
 ## P4-78. No 32-bit ARM (AArch32) NEON Backend — ARMv7 Is Our Widest Gap vs C — **OPEN**
 
 **Motivation.** Filed 2026-07-30 from GitHub [#424](https://github.com/developer0hye/libjpeg-turbo-rs/issues/424), a user question about decode speed on ARMv7 Cortex-A. It is also the concrete downstream request that `phase2.md` item 2 ("32-bit ABI targets … add these only when a downstream consumer requests that platform") named as this entry's trigger.
@@ -2094,7 +2096,7 @@ external palette through `jpeg_new_colormap` and prove re-quantized output.
 Unsupported state transitions fail visibly; no test may infer completion from
 only a one-component row length.
 
-## P4-97. `jpeg_resync_to_restart` Is an Unconditional Success No-Op — **PARTIAL: C algorithm ported and shared; suspending-source C cross-validation pending**
+## P4-97. `jpeg_resync_to_restart` Is an Unconditional Success No-Op — **CLOSED 2026-08-14**
 
 **Motivation.** Filed 2026-08-02 after the C-ABI encode test's null-only
 utility smoke was compared with upstream `jdmarker.c`. Native restart recovery
@@ -2181,17 +2183,44 @@ caller and made scan-forward report suspension on a source that can never
 resume; it also let `drain_caller_source_mgr` spin on a truncated stream. This
 is really P4-109's territory and is noted there.
 
-**What remains** is the harness the criteria actually name: a real **suspending
-C source manager** cross-validated against stock libjpeg-turbo, exercising
-refill mid-scan and a `FALSE` return under genuine suspension. The current tests
-drive the algorithm directly; they now reach a real source at end-of-buffer, but
-not a manager that genuinely suspends and resumes.
+**What remained** was the harness the criteria actually name: a real
+**suspending C source manager** cross-validated against stock libjpeg-turbo,
+exercising refill mid-scan and a `FALSE` return under genuine suspension. The
+2026-08-10 tests drove the algorithm directly; they reached a real source at
+end-of-buffer, but not a manager that genuinely suspends and resumes.
 
 One known divergence for that harness to close: upstream keeps `discarded_bytes`
 in the private `cinfo->marker`, so the count survives a suspension mid-scan;
-this port threads it as a local, so a scan split by suspension under-reports the
-byte count in `JWRN_EXTRANEOUS_DATA`. The chosen action and the return value are
-unaffected.
+the port threaded it as a local, so a scan split by suspension under-reported
+the byte count in `JWRN_EXTRANEOUS_DATA`. The chosen action and the return
+value were unaffected.
+
+**Status (2026-08-14): closed.** `LIBJPEG_TURBO_PREFIX=… cargo test -p
+libjpeg-turbo-rs-capi --test capi_resync_suspend` compares the full
+suspending-source trace verbatim against
+`examples/classic_resync_suspend_oracle.c` linked to stock: a source manager
+implementing libjpeg.txt's suspension contract (the driver authorizes bytes in
+stages; fill re-presents the unconsumed restart-point tail or returns `FALSE`),
+driven over seven scenarios — desired RST, both next-expected RSTs, a non-RST
+marker, a prior RST scanning garbage that spans a suspension, an invalid byte
+over a stuffed-zero pair, and a suspension inside an FF pad run. The trace pins
+return values, `unread_marker`, the full `emit_message` sequence
+(`JWRN_MUST_RESYNC` / `JTRC_RECOVERY_ACTION` / `JWRN_EXTRANEOUS_DATA` with both
+parameters), and per-fill `bytes_in_buffer` — the last being the observable
+form of `INPUT_SYNC` discipline (scenario s6's refill sees the two uncommitted
+pad FFs re-presented, `bib 2`).
+
+The `discarded_bytes` divergence is fixed the way upstream stores it: the count
+now lives in `DecompressPrivate::resync_discarded_bytes` (the shim's stand-in
+for `cinfo->marker->discarded_bytes`, `jpegint.h:395`), loaded into a working
+copy at `resync_to_restart_impl` entry, written back at every exit, and zeroed
+where upstream's `reset_marker_reader` runs — the fresh-datastream parse.
+**Falsification measured**: reverting only the entry load to a constant `0`
+flips exactly scenario s4's warning from `p0 8` to `p0 3` (5 bytes discarded
+before the suspension + 3 after; stock reports 8) and nothing else. CI runs the
+suite against the pinned-submodule build in the "Classic C-ABI state
+transitions (P4-104)" step, where the prefix makes the comparison mandatory
+rather than skippable.
 
 ## P4-98. Classic 12/16-Bit Decode Bypasses Lifecycle and Public Output Options — **OPEN**
 
@@ -2939,7 +2968,7 @@ reachable only through `cinfo->dest`), which is both sound and what upstream
 does (`my_mem_destination_mgr`, jdatadst.c:43-53). The same re-derivation
 pattern exists elsewhere in the shim and is not addressed here.
 
-## P4-109. Classic Source-Manager Setup and Stdio Semantics Diverge — **OPEN**
+## P4-109. Classic Source-Manager Setup and Stdio Semantics Diverge — **CLOSED 2026-08-14**
 
 **Motivation.** Filed 2026-08-02 during the destination review. Source setup is
 documented as complete but misses public validation, FILE buffering, and
@@ -2957,7 +2986,7 @@ stock C on Unix/Windows. Preserve FILE position/buffer semantics and exact
 
 **Partial progress (2026-08-10), from the P4-97 review.** `fill_input_buffer`
 for the built-in memory source returned `TRUE` while supplying no bytes. Stock's
-`fill_mem_input_buffer` (`jdatasrc.c:125-137`) instead warns `JWRN_JPEG_EOF` and
+`fill_mem_input_buffer` (`jdatasrc.c:125-142`) instead warns `JWRN_JPEG_EOF` and
 inserts a fake `FF D9`.
 
 The old shape reads as "more data arrived" to every caller. Two concrete
@@ -2966,10 +2995,71 @@ source that can never resume, where stock returns `TRUE` with an unread EOI; and
 `drain_caller_source_mgr` could spin on a truncated stream, since each iteration
 saw `bytes_in_buffer == 0`, no EOI, and a growing-by-nothing accumulator.
 
-Now `default_fill_input_buffer` mirrors stock. This closes none of the criteria
-above on its own — validation, FILE buffering and Windows all remain — but it
-removes a divergence those cross-validations would otherwise have to encode.
+Now `default_fill_input_buffer` mirrors stock. This closed none of the criteria
+above on its own — validation, FILE buffering and Windows all remained — but it
+removed a divergence those cross-validations would otherwise have to encode.
 Pinned by `capi_resync_to_restart.rs::scan_forward_past_end_of_memory_source_yields_fake_eoi`.
+
+**Status (2026-08-14): closed.** `LIBJPEG_TURBO_PREFIX=… cargo test -p
+libjpeg-turbo-rs-capi --test capi_classic_source_mgr` compares a 10-case,
+14-line trace verbatim against `examples/classic_source_mgr_oracle.c` linked
+to stock (f4 alone emits five lines — three fills and the two warnings between
+them), covering every criterion:
+
+- **null/empty** (m1/m2): `jpeg_mem_src` raises `JERR_INPUT_EMPTY` (43)
+  before touching state.
+- **foreign-manager replacement** (m3, m5, m6): a manager the same family did
+  not install is refused with `JERR_BUFFER_SIZE` (24) — including
+  cross-installing stdio over mem and mem over stdio, which stock treats as
+  foreign because each setup keys on its own `init_source` identity
+  (`jdatasrc.c:270-279` for mem, `230-238` for stdio). Rust fn-pointer
+  comparison is not ICF-safe, so the shim keys on `ShimSourceKind` +
+  pointer-eq against its own manager box —
+  same observable, different mechanism. **Falsification measured**: disabling
+  the guard flips m3/m6 to `ok`.
+- **reuse** (m4): `jpeg_mem_src` twice on one object decodes twice.
+- **pre-read/buffered FILE positions** (f1/f2): `jpeg_stdio_src` now reads
+  through the caller's `FILE *` with C-ABI `fread` in 4096-byte chunks — the
+  fd-dup/`read_to_end` slurp is gone — so a stream pre-positioned with
+  `fseek` (fd offset) or `fgetc` (stdio buffer) decodes from the current
+  position, and after a completed decode the position rests strictly before
+  EOF when a > read-ahead trailer exists (f1 `pos_class before_eof`, the
+  djpeg-concatenated-streams observable; a slurp lands at EOF). One
+  intentional difference `pos_class` coarsens away: the shim drains to the
+  datastream's EOI at `jpeg_read_header` where stock reads lazily, so the
+  *intermediate* position after read-header is further along than stock's
+  one-chunk read-ahead; measured resting positions after `finish` are
+  identical across single-image, two-image and trailer files. The chunked
+  drain stops at the datastream's EOI by marker walk (`find_first_sos` +
+  `scan_next_boundary`, safe against embedded-thumbnail EOIs), and bytes read
+  past it are retained for handle reuse, as stock keeps them in
+  `bytes_in_buffer`.
+- **I/O failure** (f3/f4): an empty `FILE` raises `JERR_INPUT_EMPTY` (43)
+  when `jpeg_read_header` pulls the first marker, stock's `start_of_file`
+  branch; a later dry read warns `JWRN_JPEG_EOF` (123) and fabricates
+  `FF D9` (`jdatasrc.c:106-118`, which folds read errors into EOF) — f4
+  drives the installed `fill_input_buffer` directly through the ABI and
+  pins the whole serve/warn/fake-EOI sequence against stock. The
+  drift audit caught the first cut fabricating the EOI *without* the
+  warning; `stdio_fill_after_decode_serves_trailing_bytes_first`
+  additionally pins (Rust-side) that a fill after a drained decode serves
+  the retained post-EOI remainder before touching the stream — the drain
+  already read those bytes, so a fresh `fread` would silently skip them.
+- **`term_source` and reuse across decodes**: the P4-104 lifecycle trace
+  (`capi_classic_lifecycle_state`, d5 `term 1`) pins term through finish, and
+  m4 exercises the full cycle twice.
+
+**Windows disposition.** The root cause's "Windows is unavailable" is
+resolved by mechanism: the stdio path has no platform gating left (the only
+`cfg(unix)`/`cfg(windows)` in the shim is the stderr line writer) and reads
+through the caller's `FILE *` via C-ABI `fread`, which is exactly stock's
+`jdatasrc.c` reader on every platform — no fd duplication, no Unix-only
+syscalls. The stock-trace comparison itself runs where a stock install is
+provisioned (macOS local against 3.1.4.1; ubuntu CI against the pinned
+submodule build in the "Classic C-ABI state transitions (P4-104)" step); on
+the Windows CI leg the suite compiles against the MSVC CRT and self-skips the
+comparison for lack of a stock install, the same soft-skip every classic
+oracle suite has there.
 
 ## P4-110. `jpeg_Create*` Ignores Version and Struct-Size ABI Guards — **CLOSED 2026-08-11**
 
@@ -7433,3 +7523,53 @@ reads all rows and finishes TRUE; the explicit `calc` call is removed
 from `capi_jpeg_read_raw_data.rs` so the test exercises the consumer's
 real sequence.
 
+
+## P4-164. Classic Source-Manager Residuals: Dangling Post-Decode Window, Pre-Parse Fill Continuity, Stream-Error Codes — **OPEN**
+
+**Motivation.** Filed 2026-08-14 from the P4-109 closure's adversarial
+review. The 10-case oracle closed P4-109's named criteria; the review's
+differential probes (C programs linked alternately against stock 3.1.4.1
+and this shim's cdylib) surfaced three adjacent divergences that are
+outside those criteria but sit on the same path the item declares parity
+for. None is a regression of the closure — the first reproduces
+identically under the previous slurp implementation, and the third
+reproduces through `jpeg_mem_src` too.
+
+**Gaps.**
+
+1. **The published window dangles after the `Owned` source drops.**
+   `jpeg_read_header` publishes `next_input_byte`/`bytes_in_buffer` into
+   the drained `JpegSource::Owned` Vec; `jpeg_finish_decompress`,
+   `jpeg_abort_decompress`, and `jpeg_read_header`'s tables-only and
+   splice paths drop that Vec without republishing. Measured: after
+   finish on a two-image file the shim advertises `bytes_in_buffer =
+   29886` over freed memory where stock reads `2882` (the unconsumed
+   tail), and `29886` where stock reads `0` on a single image. The
+   canonical consumer idiom `if (src->bytes_in_buffer == 0) fill();`
+   then reads freed memory instead of calling fill. Fix shape: on every
+   source-drop site republish an honest window — empty, or the
+   still-owned `stdio_remainder` (which is exactly stock's post-finish
+   leftover for the stdio family).
+2. **A fill served before `jpeg_read_header` is not part of the parse.**
+   Stock parses starting from the currently-published window, so
+   `jpeg_stdio_src` → ABI-level `fill_input_buffer` → `jpeg_read_header`
+   loses nothing; the shim's drain reads from the `FILE *` offset and
+   ignores served-but-unconsumed window bytes, so the stream head served
+   by that fill is skipped. Fix shape: the drain prepends the unconsumed
+   window when `next_input_byte` points into `stdio_fill_backing` (the
+   discriminator excludes dangling `Owned` windows, gap 1).
+3. **Stream-error code and warning gaps.** A no-SOI stream raises
+   `JERR_BAD_LENGTH` (12) where stock raises `JERR_NO_SOI` (55), and a
+   truncated stream decodes without stock's `JWRN_JPEG_EOF` (123) +
+   `JWRN_HIT_MARKER` (120) warnings. Both reproduce through
+   `jpeg_mem_src` as well, so this is error-translation work in the
+   decode path (P4-100's theme), recorded here because the measurements
+   came from this path's probes.
+
+**Acceptance criteria.** Extend the P4-109 oracle (or a sibling) with
+rows that pin: post-finish/abort window contents against stock on
+single-image, two-image and trailer files; the fill-then-read-header
+sequence; no-SOI and truncated-stream error/warning traces. Fix the
+shim until the traces match. Gap 1's fix must also be exercised by a
+consumer-idiom probe (`bytes_in_buffer == 0 ? fill : read window`) that
+never touches freed memory under ASan.

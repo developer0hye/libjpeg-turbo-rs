@@ -183,9 +183,9 @@
 | C Function | Description | Rust | Status |
 |---|---|---|---|
 | `jpeg_stdio_dest(cinfo, file)` | Output to FILE* | Full classic contract: `OUTPUT_BUF_SIZE` staging, short-write/`fflush`/`ferror` → `JERR_FILE_WRITE`, foreign-manager reuse → `JERR_BUFFER_SIZE` (P4-108) | ✅ |
-| `jpeg_stdio_src(cinfo, file)` | Input from FILE* | Native reader exists; classic FILE buffering/Windows/error semantics remain P4-109 | 🔶 |
+| `jpeg_stdio_src(cinfo, file)` | Input from FILE* | Chunked C-ABI `fread` through the caller's `FILE *`, position/buffer/trailing-bytes and error semantics trace-compared vs stock (P4-109 closed 2026-08-14, `capi_classic_source_mgr`) | ✅ |
 | `jpeg_mem_dest(cinfo, &outbuf, &outsize)` | Output to memory buffer | Full classic contract: `*outsize` is caller capacity, caller buffers are filled in place and never freed, growth doubles into library memory (P4-108) | ✅ |
-| `jpeg_mem_src(cinfo, inbuf, insize)` | Input from memory buffer | Native `&[u8]` exists; classic validation/manager replacement remains P4-109 | 🔶 |
+| `jpeg_mem_src(cinfo, inbuf, insize)` | Input from memory buffer | Null/empty `JERR_INPUT_EMPTY`, foreign-manager `JERR_BUFFER_SIZE`, reuse — trace-compared vs stock (P4-109 closed 2026-08-14) | ✅ |
 
 ### Compression Setup
 
@@ -282,7 +282,7 @@
 
 | C Function | Description | Rust | Status |
 |---|---|---|---|
-| `jpeg_resync_to_restart(cinfo, desired)` | Resync to restart marker after error | `jdmarker.c` decision table + `next_marker` scan-forward + `JWRN_MUST_RESYNC`/`JWRN_EXTRANEOUS_DATA` + `FALSE` suspension ported 2026-08-10, shared with the default source-manager callback. P4-97 stays PARTIAL for the suspending-source C cross-validation | 🔶 |
+| `jpeg_resync_to_restart(cinfo, desired)` | Resync to restart marker after error | `jdmarker.c` decision table + `next_marker` scan-forward, shared with the default source-manager callback; suspending-source trace vs stock incl. `discarded_bytes` across suspension (P4-97 closed 2026-08-14, `capi_resync_suspend`) | ✅ |
 
 ### ICC Profile
 
@@ -498,7 +498,7 @@
 | `jpeg_error_mgr` | Error handler (5 callbacks + state) | `ErrorHandler` trait (3 callbacks) | 🔶 |
 | `jpeg_progress_mgr` | Progress callback + counters | Native `ProgressListener` exists; classic callback/counters remain P4-111 | 🔶 |
 | `jpeg_destination_mgr` | Output stream (buffer + 3 callbacks) | Built-in mem/stdio managers are full-contract (P4-108 closed); an application-supplied manager returning `FALSE` from `empty_output_buffer` still gets `JERR_CANT_SUSPEND` instead of suspending (deferred-encode shim, P3-5) | 🔶 |
-| `jpeg_source_mgr` | Input stream (buffer + 5 callbacks) | Native readers exist; classic setup/stdio semantics remain P4-109 | 🔶 |
+| `jpeg_source_mgr` | Input stream (buffer + 5 callbacks) | Built-in mem/stdio managers are full-contract (P4-109 closed 2026-08-14); an application-supplied suspending manager reaches SOS/EOI/SUSPENDED lock-step but decode stays buffered, and the deeper streaming contracts remain P4-13/P4-26 | 🔶 |
 | `jpeg_memory_mgr` | Memory allocator (12 methods) | N/A (Rust allocator) | N/A |
 
 ---

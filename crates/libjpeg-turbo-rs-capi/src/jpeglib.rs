@@ -22,7 +22,6 @@
 //! `cinfo` pointer and is freed in `jpeg_destroy_decompress`.
 
 use std::ffi::{c_int, c_long, c_short, c_uint, c_void, CString};
-use std::io::Read;
 
 use libjpeg_turbo_rs::{decompress, PixelFormat};
 
@@ -622,6 +621,37 @@ struct DecompressPrivate {
     /// (`jdinput.c:153-156`). TRUE for non-interleaved *sequential* streams
     /// too, which `progressive_mode` alone misses.
     has_multiple_scans: bool,
+    /// Which family installed `source_mgr` (P4-109, #469): upstream keys
+    /// the reuse check on `init_source` identity, but Rust fn-pointer
+    /// comparison is not ICF-safe, so the shim records the family
+    /// explicitly and compares `c.src` against its own box address.
+    source_mgr_kind: ShimSourceKind,
+    /// The caller's `FILE *` from `jpeg_stdio_src` (P4-109, #469). Never
+    /// closed by the shim; reads go through C `fread` so the stream's stdio
+    /// buffer and fd offset behave exactly as stock's `jdatasrc.c` reader.
+    stdio_file: *mut c_void,
+    /// Whether the next stdio fill is the first for this datastream —
+    /// stock's `start_of_file`, deciding `JERR_INPUT_EMPTY` vs the
+    /// fake-EOI warning path.
+    stdio_start_of_file: bool,
+    /// Bytes read from the caller's `FILE *` but not yet handed to the
+    /// library: the chunked stdio drain parks its post-EOI overshoot here,
+    /// and whichever comes first consumes it — the next drain prepends it
+    /// (back-to-back JPEGs closer than one chunk survive handle reuse,
+    /// stock's `bytes_in_buffer`), or `stdio_fill_input_buffer` serves it
+    /// before touching the stream again.
+    stdio_remainder: Vec<u8>,
+    /// The stdio source's permanent read buffer
+    /// ([`STDIO_INPUT_BUF_SIZE`] bytes): `stdio_fill_input_buffer` freads
+    /// into it and publishes windows from it, so `next_input_byte` is
+    /// address-stable for the handle's life — stock allocates its
+    /// `INPUT_BUF_SIZE` buffer once from `JPOOL_PERMANENT` in
+    /// `jpeg_stdio_src` and never moves it. Allocated by the first
+    /// `jpeg_stdio_src` on this handle (`Box::into_raw`), reused by later
+    /// installs, freed in `Drop`. Kept apart from `stdio_remainder`, whose
+    /// Vec the next drain takes and grows — a realloc there would leave
+    /// the published pointer dangling.
+    stdio_fill_backing: *mut u8,
     /// Owned backing for `JpegDecompressPublic::comp_info`. Populated in
     /// `jpeg_read_header`; the public struct exposes a raw pointer into
     /// this vector so real libjpeg callers can iterate components.
@@ -705,6 +735,13 @@ struct DecompressPrivate {
     /// the first SOS header) and advances past each boundary `consume_input`
     /// reports.
     body_scan_cursor: usize,
+    /// Mirror of upstream's `cinfo->marker->discarded_bytes`
+    /// (`jpegint.h:395`), accumulated by the resync scan-forward so a scan
+    /// split by suspension still reports the whole span in
+    /// `JWRN_EXTRANEOUS_DATA` (P4-97, #469). Zeroed where upstream's
+    /// `reset_marker_reader` runs — the fresh-datastream parse — and by a
+    /// successful scan's own flush.
+    resync_discarded_bytes: c_int,
     /// `TRUE` once the EOI marker has been drained into `source`, i.e. the input
     /// is complete and the buffered decode can run.
     eoi_seen: bool,
@@ -725,10 +762,16 @@ impl Default for DecompressPrivate {
             crop_width: 0,
             crop_active: false,
             has_multiple_scans: false,
+            source_mgr_kind: ShimSourceKind::Mem,
+            stdio_file: std::ptr::null_mut(),
+            stdio_start_of_file: true,
+            stdio_remainder: Vec::new(),
+            stdio_fill_backing: std::ptr::null_mut(),
             comp_info_storage: Vec::new(),
             marker_list_storage: Vec::new(),
             bridge_partial: Vec::new(),
             header_parsed_ok: false,
+            resync_discarded_bytes: 0,
             raw_image_cache: None,
             raw_image_cache_12: None,
             raw_rows_consumed: Vec::new(),
@@ -753,6 +796,17 @@ impl Drop for DecompressPrivate {
         if !self.coef_array_ptr.is_null() {
             coef_unregister_array(self.coef_array_ptr as *const c_void);
             self.coef_array_ptr = std::ptr::null_mut();
+        }
+        if !self.stdio_fill_backing.is_null() {
+            // SAFETY: allocated by `jpeg_stdio_src` via
+            // `Box::into_raw(Box::new([0u8; STDIO_INPUT_BUF_SIZE]))` and
+            // never freed elsewhere.
+            unsafe {
+                drop(Box::from_raw(
+                    self.stdio_fill_backing as *mut [u8; STDIO_INPUT_BUF_SIZE],
+                ));
+            }
+            self.stdio_fill_backing = std::ptr::null_mut();
         }
     }
 }
@@ -2148,6 +2202,122 @@ pub unsafe extern "C" fn jpeg_destroy_decompress(cinfo: *mut c_void) {
 // safely be stubs. If a consumer does invoke them (e.g. to fill/skip),
 // we keep `bytes_in_buffer`/`next_input_byte` consistent.
 unsafe extern "C" fn noop_init_source(_cinfo: *mut c_void) {}
+
+/// Which shim family installed the source manager — see
+/// `DecompressPrivate::source_mgr_kind`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ShimSourceKind {
+    Mem,
+    Stdio,
+}
+
+/// Stock's `INPUT_BUF_SIZE` (`jdatasrc.c`): the stdio source's permanent
+/// read buffer size, and the drain's chunk size.
+const STDIO_INPUT_BUF_SIZE: usize = 4096;
+
+/// The stdio manager's identity callback (upstream compares `init_source`
+/// to decide whether an installed manager is its own — `jdatasrc.c`; the
+/// mem and stdio families are foreign to each other, m5/m6 in the P4-109
+/// oracle). The body resets the start-of-file flag, which also keeps the
+/// two no-op-shaped functions from being folded to one address.
+unsafe extern "C" fn stdio_init_source(cinfo: *mut c_void) {
+    let pp: *mut DecompressPrivate = decompress_private_raw(cinfo) as *mut DecompressPrivate;
+    if !pp.is_null() {
+        // SAFETY: raw place write; no `&mut DecompressPrivate` is formed in
+        // an ABI-visible callback (an outer shim frame may hold one).
+        unsafe { (*pp).stdio_start_of_file = true };
+    }
+}
+
+/// `fill_input_buffer` for the stdio source, mirroring stock's
+/// `fill_input_buffer` (`jdatasrc.c:100-122`): serve the drain's saved
+/// post-EOI remainder first — those bytes were already read from the
+/// stream and sit logically before anything `fread` would return next —
+/// then one `fread` chunk through the caller's `FILE *` into the permanent
+/// `stdio_fill_backing` buffer (address-stable for the handle's life, as
+/// stock's `JPOOL_PERMANENT` buffer is). An empty first read raises
+/// `JERR_INPUT_EMPTY`; a later empty read warns `JWRN_JPEG_EOF` and
+/// fabricates `FF D9`.
+///
+/// Reentrancy matches stock's shared-buffer shape: if a caller's
+/// `emit_message` re-enters this fill, the nested call overwrites the same
+/// buffer and the outer dry-read path then publishes the static fake EOI
+/// over it — exactly what stock's one permanent buffer does.
+///
+/// Only raw place reads/writes touch the private state here: this callback
+/// is ABI-visible, so an outer shim frame may hold `&mut
+/// DecompressPrivate` while a caller-installed callback re-enters —
+/// forming another `&mut` in this frame would alias it.
+unsafe extern "C" fn stdio_fill_input_buffer(cinfo: *mut c_void) -> CBoolean {
+    static FAKE_EOI: [u8; 2] = [0xFF, 0xD9];
+    extern "C" {
+        fn fread(ptr: *mut c_void, size: usize, n: usize, f: *mut c_void) -> usize;
+    }
+    let pp: *mut DecompressPrivate = decompress_private_raw(cinfo) as *mut DecompressPrivate;
+    if pp.is_null() {
+        return 0;
+    }
+    // SAFETY: raw place reads of Copy fields.
+    let file: *mut c_void = unsafe { (*pp).stdio_file };
+    let backing: *mut u8 = unsafe { (*pp).stdio_fill_backing };
+    if file.is_null() || backing.is_null() {
+        return 0;
+    }
+    // Move the remainder out bitwise (no reference to the raw-deref place);
+    // whatever is not served this call is written back the same way.
+    // SAFETY: `pp` is live; the field holds a valid Vec.
+    let mut remainder: Vec<u8> =
+        unsafe { std::ptr::replace(&raw mut (*pp).stdio_remainder, Vec::new()) };
+    let served: usize = if remainder.is_empty() {
+        // SAFETY: `backing` is the permanent STDIO_INPUT_BUF_SIZE
+        // allocation; `file` is the caller's stream per the
+        // `jpeg_stdio_src` contract.
+        let got: usize = unsafe { fread(backing as *mut c_void, 1, STDIO_INPUT_BUF_SIZE, file) };
+        if got == 0 {
+            // SAFETY: raw place read.
+            if unsafe { (*pp).stdio_start_of_file } {
+                invoke_error_exit(cinfo, JERR_INPUT_EMPTY);
+                return 0;
+            }
+            // Stock warns before fabricating the EOI (`jdatasrc.c:110`).
+            // No private borrow exists here: the caller's `emit_message`
+            // may re-enter the shim.
+            // SAFETY: `cinfo` has `j_common_ptr` layout.
+            unsafe { emit_message_no_parms(cinfo, JWRN_JPEG_EOF, -1) };
+            // SAFETY: `src` is this manager.
+            unsafe {
+                let c: *mut JpegDecompressPublic = cinfo as *mut JpegDecompressPublic;
+                if !(*c).src.is_null() {
+                    (*(*c).src).next_input_byte = FAKE_EOI.as_ptr();
+                    (*(*c).src).bytes_in_buffer = 2;
+                }
+            }
+            return 1;
+        }
+        got
+    } else {
+        let n: usize = remainder.len().min(STDIO_INPUT_BUF_SIZE);
+        // SAFETY: `n` bytes fit both the remainder and the backing buffer.
+        unsafe { std::ptr::copy_nonoverlapping(remainder.as_ptr(), backing, n) };
+        if remainder.len() > n {
+            remainder.drain(..n);
+            // SAFETY: raw place write; drops the placeholder Vec::new().
+            unsafe { (*pp).stdio_remainder = remainder };
+        }
+        n
+    };
+    // SAFETY: raw place write.
+    unsafe { (*pp).stdio_start_of_file = false };
+    // SAFETY: as above; publish the window from the permanent buffer.
+    unsafe {
+        let c: *mut JpegDecompressPublic = cinfo as *mut JpegDecompressPublic;
+        if !(*c).src.is_null() {
+            (*(*c).src).next_input_byte = backing;
+            (*(*c).src).bytes_in_buffer = served;
+        }
+    }
+    1
+}
 /// The static fake-EOI upstream hands back at end of buffer
 /// (`jdatasrc.c::fill_mem_input_buffer`). Only the first two bytes are used.
 static FAKE_EOI: [u8; 4] = [0xFF, 0xD9, 0x00, 0x00];
@@ -2255,22 +2425,51 @@ pub unsafe extern "C" fn jpeg_mem_src(
             invoke_error_exit(cinfo, JERR_INPUT_EMPTY);
             return;
         }
+        // Upstream refuses to reuse a source manager it did not create
+        // (`jdatasrc.c:270-279`); the stdio family is foreign to the mem
+        // family too (oracle m3/m6: stock raises `JERR_BUFFER_SIZE`).
+        // Identity is "the manager this shim installed for this family":
+        // `c.src` must be our own box AND the recorded family must match —
+        // upstream's `init_source` comparison without the fn-pointer-ICF
+        // hazard. P4-109, #469.
+        if !c.src.is_null() {
+            let ours: bool = priv_state
+                .source_mgr
+                .as_mut()
+                .map(|b| std::ptr::eq(b.as_mut() as *mut JpegSourceMgr, c.src))
+                .unwrap_or(false);
+            if !ours || priv_state.source_mgr_kind != ShimSourceKind::Mem {
+                invoke_error_exit(cinfo, JERR_BUFFER_SIZE);
+                return;
+            }
+        }
         let len: usize = size as usize;
         priv_state.source = JpegSource::Memory { ptr: buf, len };
+        priv_state.stdio_file = std::ptr::null_mut();
+        priv_state.source_mgr_kind = ShimSourceKind::Mem;
         install_source_mgr(c, priv_state, buf, len);
+        // Restore the mem family's callbacks in case the slot previously
+        // held the stdio family's (unreachable today — the guard above
+        // refuses cross-installs — but the invariant is cheap to keep
+        // local).
+        if let Some(mgr) = priv_state.source_mgr.as_mut() {
+            mgr.init_source = Some(noop_init_source);
+            mgr.fill_input_buffer = Some(default_fill_input_buffer);
+        }
     })
 }
 
 /// Attach a source manager that reads from a `FILE *`. libjpeg's signature
 /// takes `FILE *`; we accept `*mut c_void` since stable Rust does not
-/// commit to an `stdio::FILE` layout. Internally we promote to a `File`
-/// via the POSIX `fileno` + `fdopen`-equivalent path.
+/// commit to an `stdio::FILE` layout. Reads go through C `fread` on that
+/// stream — no `fileno`, no fd duplication — so the platform's own stdio
+/// buffering and fd offset apply, on every platform.
 ///
-/// For simplicity and portability, this implementation slurps the entire
-/// file into memory at `jpeg_stdio_src` time and delegates to `jpeg_mem_src`.
-/// libjpeg does not guarantee that the `FILE *` remains valid after
-/// `jpeg_finish_decompress`, so eagerly copying the bytes matches the
-/// semantics applications rely on in practice.
+/// The bytes are pulled lazily by the chunked drain at `jpeg_read_header`
+/// time (`stdio_drain_to_eoi`), which stops at the datastream's EOI: a
+/// pre-positioned stream decodes from its current position, and bytes past
+/// the chunk containing EOI stay readable by the caller — stock's
+/// `jdatasrc.c` reader semantics (P4-109, #469).
 ///
 /// # Safety
 ///
@@ -2284,7 +2483,9 @@ pub unsafe extern "C" fn jpeg_mem_src(
 /// `infile` is **retained**: the `FILE *` is stored on `cinfo` and read during
 /// later calls, so it must stay open until the source is replaced or the
 /// `cinfo` is finished, aborted, or destroyed — see
-/// [Retained pointers](crate#pointer-contract).
+/// [Retained pointers](crate#pointer-contract). A NULL `infile` is ignored
+/// outright — stock has no such check, and disarming the already-installed
+/// source instead would strand a stale `FILE *` for the next parse.
 #[no_mangle]
 pub unsafe extern "C" fn jpeg_stdio_src(cinfo: *mut c_void, infile: *mut c_void) {
     crate::unwind_guard!((), {
@@ -2298,63 +2499,158 @@ pub unsafe extern "C" fn jpeg_stdio_src(cinfo: *mut c_void, infile: *mut c_void)
             None => return,
         };
         if infile.is_null() {
-            priv_state.source = JpegSource::None;
+            // Stock has no NULL check and would crash; a defensive no-op
+            // keeps memory safety without inventing an error stock lacks.
+            // Touch NOTHING: dropping `source` here would discard a
+            // previously-installed mem source while an earlier
+            // `stdio_file` stayed armed, so the next `jpeg_read_header`
+            // would fread a stale — possibly closed — `FILE *`.
             return;
         }
-        let bytes: Vec<u8> = match read_c_file(infile) {
-            Ok(b) => b,
-            Err(msg) => {
-                priv_state.last_error =
-                    CString::new(format!("jpeg_stdio_src: {msg}")).unwrap_or_default();
+        // Upstream's identity check, as in `jpeg_mem_src` above: a manager
+        // the stdio family did not create is foreign (oracle m5: installing
+        // stdio over mem raises `JERR_BUFFER_SIZE` on stock). P4-109, #469.
+        if !c.src.is_null() {
+            let ours: bool = priv_state
+                .source_mgr
+                .as_mut()
+                .map(|b| std::ptr::eq(b.as_mut() as *mut JpegSourceMgr, c.src))
+                .unwrap_or(false);
+            if !ours || priv_state.source_mgr_kind != ShimSourceKind::Stdio {
+                invoke_error_exit(cinfo, JERR_BUFFER_SIZE);
                 return;
             }
-        };
-        let buf_ptr: *const u8 = bytes.as_ptr();
-        let buf_len: usize = bytes.len();
-        priv_state.source = JpegSource::Owned(bytes);
-        // Re-resolve the pointer from the stored buffer to avoid pointing at
-        // the stack-local `bytes` variable whose lifetime ended above.
-        if let JpegSource::Owned(ref v) = priv_state.source {
-            install_source_mgr(c, priv_state, v.as_ptr(), v.len());
-            let _ = (buf_ptr, buf_len); // silence unused on the borrow path
+        }
+        // Defer all reading to the chunked drain at `jpeg_read_header`
+        // (`stdio_drain_to_eoi`): reads go through C `fread` on the
+        // caller's stream, so the stdio buffer and fd offset behave
+        // exactly as stock's chunked reader — a pre-positioned stream
+        // decodes from its current position, and trailing bytes beyond
+        // the chunk containing EOI stay readable (oracle f1/f2). The
+        // previous implementation slurped the whole file through a
+        // dup'd fd, which skipped stdio-buffered bytes and consumed
+        // trailers (P4-109, #469).
+        priv_state.source = JpegSource::None;
+        priv_state.stdio_file = infile;
+        priv_state.stdio_start_of_file = true;
+        priv_state.stdio_remainder.clear();
+        // Allocate the permanent read buffer once per handle; a later
+        // re-install reuses it, so the published window address never
+        // changes for the handle's life (stock's JPOOL_PERMANENT buffer).
+        if priv_state.stdio_fill_backing.is_null() {
+            priv_state.stdio_fill_backing =
+                Box::into_raw(Box::new([0u8; STDIO_INPUT_BUF_SIZE])) as *mut u8;
+        }
+        priv_state.source_mgr_kind = ShimSourceKind::Stdio;
+        install_source_mgr(c, priv_state, std::ptr::null(), 0);
+        // Swap in the stdio family's callbacks (identity + fread fill).
+        if let Some(mgr) = priv_state.source_mgr.as_mut() {
+            mgr.init_source = Some(stdio_init_source);
+            mgr.fill_input_buffer = Some(stdio_fill_input_buffer);
         }
     })
 }
 
-/// Slurp a `FILE *` by converting it to a POSIX fd via `fileno` and
-/// reading through `std::fs::File::from_raw_fd`. We duplicate the fd so
-/// closing the Rust `File` on drop doesn't affect the caller's stream.
-fn read_c_file(file: *mut c_void) -> Result<Vec<u8>, String> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::io::{FromRawFd, RawFd};
-        extern "C" {
-            fn fileno(stream: *mut c_void) -> c_int;
-            fn dup(oldfd: c_int) -> c_int;
-        }
-        let fd_raw: c_int = unsafe { fileno(file) };
-        if fd_raw < 0 {
-            return Err("fileno returned -1".into());
-        }
-        let dup_fd: RawFd = unsafe { dup(fd_raw) };
-        if dup_fd < 0 {
-            return Err("dup(fileno) returned -1".into());
-        }
-        let mut f: std::fs::File = unsafe { std::fs::File::from_raw_fd(dup_fd) };
-        let mut buf: Vec<u8> = Vec::new();
-        f.read_to_end(&mut buf).map_err(|e| e.to_string())?;
-        Ok(buf)
+/// Why `stdio_drain_to_eoi` gave up: an empty stream (stock's
+/// `JERR_INPUT_EMPTY` shape) or the 256 MiB no-EOI accumulation cap
+/// (raised as `JERR_OUT_OF_MEMORY`, the bridge drain's cap case).
+enum StdioDrainError {
+    Empty,
+    CapExceeded,
+}
+
+/// Chunked stdio drain (P4-109, #469): `fread` the caller's stream in
+/// 4096-byte chunks — through its stdio buffer, from its current position —
+/// until the marker walk (`find_first_sos` + `scan_next_boundary`, the
+/// P4-13 primitives, which skip APPn/COM segment bodies so an embedded
+/// EXIF-thumbnail EOI cannot end the walk early) reaches the datastream's
+/// EOI. Bytes read past the EOI within the final chunk are retained in
+/// `stdio_remainder` for the next image on a reused handle, mirroring what
+/// stock keeps in `bytes_in_buffer`. Returns the image bytes, or what was
+/// read if the stream ends without EOI (the lenient truncated-stream path);
+/// a stream that yielded nothing at all and the cap below are the two `Err`
+/// arms.
+///
+/// Accumulation is capped at the same 256 MiB as the caller-source bridge
+/// drain: a stream that produces that much without an EOI (e.g. junk with
+/// no SOS for the walk to anchor on) will never be satisfied, and the cap
+/// turns an unbounded read into a clean error.
+fn stdio_drain_to_eoi(priv_state: &mut DecompressPrivate) -> Result<Vec<u8>, StdioDrainError> {
+    const CHUNK: usize = STDIO_INPUT_BUF_SIZE;
+    const MAX_BYTES: usize = 256 * 1024 * 1024;
+    extern "C" {
+        fn fread(ptr: *mut c_void, size: usize, n: usize, f: *mut c_void) -> usize;
     }
-    #[cfg(windows)]
-    {
-        use std::os::windows::io::{FromRawHandle, RawHandle};
-        // We don't have a stable equivalent of `fileno` on Windows in a
-        // minimal shim; callers on Windows should prefer `jpeg_mem_src`.
-        Err("jpeg_stdio_src is unavailable on Windows; use jpeg_mem_src instead".into())
+    let file: *mut c_void = priv_state.stdio_file;
+    if file.is_null() {
+        return Err(StdioDrainError::Empty);
     }
-    #[cfg(not(any(unix, windows)))]
-    {
-        Err("jpeg_stdio_src is unavailable on this platform".into())
+    let mut acc: Vec<u8> = std::mem::take(&mut priv_state.stdio_remainder);
+    let mut sos_end: Option<usize> = libjpeg_turbo_rs::decode::boundary::find_first_sos(&acc);
+    let mut cursor: usize = sos_end.unwrap_or(0);
+    loop {
+        // Walk as far as the buffered bytes allow.
+        if let Some(start) = sos_end {
+            let _ = start;
+            match libjpeg_turbo_rs::decode::boundary::scan_next_boundary(&acc, cursor) {
+                libjpeg_turbo_rs::decode::boundary::MarkerBoundary::Sos(off) => {
+                    cursor = off;
+                    continue;
+                }
+                libjpeg_turbo_rs::decode::boundary::MarkerBoundary::Eoi(off) => {
+                    // Keep the post-EOI overshoot for the next image.
+                    priv_state.stdio_remainder = acc.split_off(off);
+                    priv_state.stdio_start_of_file = false;
+                    return Ok(acc);
+                }
+                libjpeg_turbo_rs::decode::boundary::MarkerBoundary::NeedMore(resume) => {
+                    cursor = resume;
+                }
+            }
+        } else {
+            sos_end = libjpeg_turbo_rs::decode::boundary::find_first_sos(&acc);
+            if let Some(off) = sos_end {
+                cursor = off;
+                continue;
+            }
+            // A tables-only stream (SOI..EOI, no SOS) ends the drain too.
+            if let libjpeg_turbo_rs::decode::boundary::MarkerBoundary::Eoi(off) =
+                libjpeg_turbo_rs::decode::boundary::scan_next_boundary(
+                    &acc,
+                    usize::from(acc.len() >= 2) * 2,
+                )
+            {
+                priv_state.stdio_remainder = acc.split_off(off);
+                priv_state.stdio_start_of_file = false;
+                return Ok(acc);
+            }
+        }
+        // Need more bytes: one fread chunk.
+        let old_len: usize = acc.len();
+        acc.resize(old_len + CHUNK, 0);
+        // SAFETY: the freshly-resized tail is a live CHUNK-byte region;
+        // `file` is the caller's stream per the `jpeg_stdio_src` contract.
+        let got: usize =
+            unsafe { fread(acc.as_mut_ptr().add(old_len) as *mut c_void, 1, CHUNK, file) };
+        acc.truncate(old_len + got);
+        if got == 0 {
+            // EOF without EOI: hand back what exists (truncated stream);
+            // downstream reports the decode error, as the lenient bridge
+            // drain does.
+            priv_state.stdio_start_of_file = acc.is_empty() && priv_state.stdio_start_of_file;
+            if acc.is_empty() {
+                return Err(StdioDrainError::Empty);
+            }
+            return Ok(acc);
+        }
+        priv_state.stdio_start_of_file = false;
+        if acc.len() > MAX_BYTES {
+            // Free the accumulation before the caller raises: its
+            // `error_exit` ends in longjmp, which runs no Rust destructor
+            // on that frame (same reasoning as the bridge drain's cap).
+            drop(acc);
+            return Err(StdioDrainError::CapExceeded);
+        }
     }
 }
 
@@ -2859,6 +3155,46 @@ pub unsafe extern "C" fn jpeg_read_header(cinfo: *mut c_void, require_image: CBo
         // `INHEADER` re-entry is a suspension resume of the same datastream.
         if c.global_state == DSTATE_START {
             priv_state.eoi_seen = false;
+            // P4-97: `reset_marker_reader` runs here upstream, zeroing the
+            // extraneous-byte count carried by the resync scan-forward
+            // (`jdmarker.c:1276`).
+            priv_state.resync_discarded_bytes = 0;
+        }
+
+        // P4-109 (#469): a stdio source reads lazily — the chunked drain
+        // pulls through the caller's `FILE *` here, stopping at the chunk
+        // containing the datastream's EOI so the stream position and any
+        // trailing bytes behave as stock's chunked reader (oracle f1/f2).
+        if priv_state.source.as_bytes().is_none() && !priv_state.stdio_file.is_null() {
+            match stdio_drain_to_eoi(priv_state) {
+                Ok(bytes) => {
+                    priv_state.source = JpegSource::Owned(bytes);
+                    if let (Some(mgr), JpegSource::Owned(ref v)) =
+                        (priv_state.source_mgr.as_mut(), &priv_state.source)
+                    {
+                        mgr.next_input_byte = v.as_ptr();
+                        mgr.bytes_in_buffer = v.len();
+                    }
+                }
+                Err(StdioDrainError::Empty) => {
+                    invoke_error_exit(cinfo, JERR_INPUT_EMPTY);
+                    return JPEG_SUSPENDED;
+                }
+                Err(StdioDrainError::CapExceeded) => {
+                    // Same failure the caller-source bridge raises at its
+                    // 256 MiB cap; the drain freed the accumulation
+                    // before returning (longjmp runs no Rust destructor).
+                    raise_classic_error(
+                        cinfo,
+                        &mut priv_state.last_error,
+                        "jpeg_read_header: stdio stream produced more than the \
+                         256 MiB buffering cap without an EOI marker",
+                        JERR_OUT_OF_MEMORY,
+                        Some(OOM_CASE_SUSPENDED_BODY_CAP),
+                    );
+                    return JPEG_SUSPENDED;
+                }
+            }
         }
 
         // If `jpeg_mem_src` / `jpeg_stdio_src` were called, `priv_state.source`
@@ -11605,11 +11941,11 @@ impl ResyncInput {
 /// manager's cursor at the last committed restart point, so the retry re-reads
 /// the speculative prefix rather than losing it.
 ///
-/// `discarded` is threaded in by the caller rather than held in a marker struct:
-/// upstream keeps it in the private `cinfo->marker`, which this shim does not
-/// mirror. Within a single non-suspending call the two agree; across a
-/// suspension C carries the running count forward and this does not, which
-/// affects only the number printed in the warning.
+/// `discarded` is the caller's working copy of the persistent count upstream
+/// keeps in `cinfo->marker->discarded_bytes`: [`resync_to_restart_impl`] loads
+/// it from `DecompressPrivate::resync_discarded_bytes` on entry and writes it
+/// back at every exit, so a scan split by suspension reports the whole span —
+/// pinned by `capi_resync_suspend`'s s4 against stock.
 ///
 /// # Safety
 /// `cinfo` must be a live decompress object whose `src` is non-NULL and follows
@@ -11673,6 +12009,14 @@ unsafe fn resync_next_marker(
     }
 }
 
+/// Write the resync scan's working extraneous-byte count back to the private
+/// state — the shim's stand-in for upstream's `cinfo->marker->discarded_bytes`
+/// (P4-97). A no-op for a cinfo this shim did not create. Uses a scoped
+/// borrow; never called while a caller callback is running.
+fn store_resync_discarded(cinfo: *mut c_void, count: c_int) {
+    let _: Option<()> = with_decompress_private(cinfo, |p| p.resync_discarded_bytes = count);
+}
+
 /// The C default `resync_to_restart` algorithm (`jdmarker.c`), shared by the
 /// exported [`jpeg_resync_to_restart`] and by the source manager's installed
 /// default callback so the two cannot drift (P4-97).
@@ -11707,7 +12051,15 @@ unsafe fn resync_to_restart_impl(cinfo: *mut c_void, desired: c_int) -> CBoolean
 
     // SAFETY: non-NULL and ABI-shaped; the borrow ends with this statement.
     let mut marker: c_int = unsafe { (*cinfo_typed).unread_marker };
-    let mut discarded: c_int = 0;
+    // Upstream keeps the extraneous-byte count in the private marker state
+    // (`cinfo->marker->discarded_bytes`, `jpegint.h:395`), so a scan split
+    // by suspension still reports the whole span when the eventual
+    // `JWRN_EXTRANEOUS_DATA` fires. The local is the working copy; every
+    // exit below writes it back. A cinfo this shim did not create has no
+    // private state — the count is then call-local, which can only shrink
+    // the figure in the warning, never change the action or return value.
+    let mut discarded: c_int =
+        with_decompress_private(cinfo, |p| p.resync_discarded_bytes).unwrap_or(0);
 
     // `cinfo->src` is deliberately *not* cached here. Upstream calls
     // `next_marker(cinfo)` after the warning and trace, and that re-reads
@@ -11756,6 +12108,7 @@ unsafe fn resync_to_restart_impl(cinfo: *mut c_void, desired: c_int) -> CBoolean
                 // Discard the marker and let the entropy decoder resume.
                 // SAFETY: live and ABI-shaped; borrow ends with the statement.
                 unsafe { (*cinfo_typed).unread_marker = 0 };
+                store_resync_discarded(cinfo, discarded);
                 return 1;
             }
             2 => {
@@ -11768,18 +12121,25 @@ unsafe fn resync_to_restart_impl(cinfo: *mut c_void, desired: c_int) -> CBoolean
                     // dereferenced `datasrc`; reporting suspension is the
                     // honest answer, and never claiming success is the point of
                     // this item.
+                    store_resync_discarded(cinfo, discarded);
                     return 0;
                 }
                 // SAFETY: `cinfo` is live and `src` is its ABI-shaped manager.
                 if !unsafe { resync_next_marker(cinfo, src, &mut discarded) } {
-                    return 0; // suspension
+                    // Suspension mid-scan: the count survives in the private
+                    // state so the retry resumes it, as upstream's marker
+                    // struct does.
+                    store_resync_discarded(cinfo, discarded);
+                    return 0;
                 }
+                store_resync_discarded(cinfo, discarded);
                 // SAFETY: as above.
                 marker = unsafe { (*cinfo_typed).unread_marker };
             }
             _ => {
                 // Return without advancing: the entropy decoder is forced to
                 // process an empty segment and will re-see this marker.
+                store_resync_discarded(cinfo, discarded);
                 return 1;
             }
         }

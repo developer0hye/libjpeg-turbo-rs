@@ -507,12 +507,18 @@ jobs:
           --test capi_input_complete_contract
           --test capi_consume_input_states
           --test capi_preload_resume
-          --test capi_classic_lifecycle_state -- --nocapture
+          --test capi_classic_lifecycle_state
+          --test capi_classic_source_mgr
+          --test capi_resync_suspend -- --nocapture
         env:
           # capi_classic_lifecycle_state is the P4-104/P4-106 (#468)
           # differential trace — 17 lines compared verbatim against a stock
-          # libjpeg oracle. Without the prefix it soft-skips, which is
-          # exactly the vacuous green this step exists to prevent.
+          # libjpeg oracle. capi_classic_source_mgr (P4-109) and
+          # capi_resync_suspend (P4-97) are the #469 differential traces —
+          # source-manager setup/stdio semantics and suspending-source
+          # resync — compared the same way. Without the prefix all three
+          # soft-skip, which is exactly the vacuous green this step exists
+          # to prevent.
           LIBJPEG_TURBO_PREFIX: /tmp/ljt8/prefix
 
       - name: Classic destination ownership + stdio I/O parity (P4-108)
