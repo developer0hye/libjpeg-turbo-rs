@@ -24,6 +24,7 @@
 
 use std::ffi::{c_int, c_void};
 
+use libjpeg_turbo_rs::common::layout::{checked_span, ImageLayout};
 use libjpeg_turbo_rs::tj3::TjParam;
 use libjpeg_turbo_rs::PixelFormat;
 
@@ -109,9 +110,9 @@ pub unsafe extern "C" fn tj3Compress8(
             // Checked: `row_bytes` and the span built from it below size a
             // `slice::from_raw_parts` (P4-139 criterion 3). On a 32-bit target
             // `w * bpp` overflows well inside the dimensions TurboJPEG accepts.
-            let row_bytes: usize = match w.checked_mul(bpp) {
-                Some(bytes) => bytes,
-                None => {
+            let row_bytes: usize = match checked_span(&[w, bpp], "tj3Compress8 source row") {
+                Ok(bytes) => bytes,
+                Err(_) => {
                     inst.set_error(
                         "tj3Compress8: width * bytes_per_pixel overflows",
                         TJERR_FATAL,
@@ -138,46 +139,50 @@ pub unsafe extern "C" fn tj3Compress8(
             // `width * bpp * height` bytes without per-row padding, so we repack
             // when the caller supplied a non-default pitch.
             //
-            // SAFETY: caller guarantees `src_buf` is valid for
-            // `effective_pitch * height` bytes laid out row-major with the given
-            // pitch.
+            // The source span is `pitch * (h - 1) + row_bytes`: every row but
+            // the last is a full pitch, and the last needs only its own pixels
+            // — a caller is not required to allocate padding past the final
+            // row. That is exactly `ImageLayout::strided`'s rule, so the
+            // formula lives there now rather than being spelled out here
+            // (P4-139); this site was the shape the type was modelled on.
             //
-            // The span is `pitch * (h - 1) + row_bytes`: every row but the last
-            // is a full pitch, and the last needs only its own pixels — a
-            // caller is not required to allocate padding past the final row.
-            //
-            // This was `checked_mul(h).unwrap_or(0).saturating_sub(...)`, which
-            // is worse than it looks: an overflow did not error, it produced a
-            // *zero-length* source slice and the encode silently proceeded on
-            // no input. Overflow is now the caller's error (P4-139).
-            let src_len: usize = match h
-                .checked_sub(1)
-                .and_then(|full_rows| effective_pitch.checked_mul(full_rows))
-                .and_then(|head| head.checked_add(row_bytes))
-                .filter(|len| *len <= isize::MAX as usize)
-            {
-                Some(len) => len,
-                None => {
-                    inst.set_error(
-                        "tj3Compress8: pitch * height overflows the source buffer size",
-                        TJERR_FATAL,
-                    );
-                    return -1;
-                }
-            };
-            let src_slice: &[u8] = unsafe { std::slice::from_raw_parts(src_buf, src_len) };
+            // P4-137 had already replaced the original `checked_mul(h)
+            // .unwrap_or(0).saturating_sub(...)` here — worse than it looked,
+            // since an overflow did not error but produced a *zero-length*
+            // source slice, and the encode proceeded on no input. What this
+            // change does is move that corrected formula into `ImageLayout`,
+            // not rediscover it.
+            let src: ImageLayout =
+                match ImageLayout::strided(w, h, bpp, effective_pitch, "tj3Compress8 source") {
+                    Ok(layout) => layout,
+                    Err(_) => {
+                        inst.set_error(
+                            "tj3Compress8: pitch * height overflows the source buffer size",
+                            TJERR_FATAL,
+                        );
+                        return -1;
+                    }
+                };
+            // SAFETY: caller guarantees `src_buf` is valid for the pitched
+            // extent above, which `ImageLayout` proved fits `isize::MAX` —
+            // `from_raw_parts`' own precondition.
+            let src_slice: &[u8] =
+                unsafe { std::slice::from_raw_parts(src_buf, src.total_bytes()) };
 
-            let dense: Vec<u8> = if effective_pitch == w * bpp {
+            let dense: Vec<u8> = if src.stride() == src.row_bytes() {
                 src_slice.to_vec()
             } else {
-                let mut packed: Vec<u8> = Vec::with_capacity(w * bpp * h);
+                let mut packed: Vec<u8> = Vec::with_capacity(src.packed_bytes());
                 // SAFETY: re-slice the caller's buffer row-by-row using the
-                // declared pitch; last row reads exactly `w*bpp` bytes.
+                // declared pitch; last row reads exactly `row_bytes` bytes, so
+                // every read stays inside the extent asserted above.
                 for row in 0..h {
-                    let row_start: usize = row * effective_pitch;
-                    // Caller's buffer is valid for (h-1)*pitch + w*bpp bytes.
-                    let row_slice: &[u8] =
-                        unsafe { std::slice::from_raw_parts(src_buf.add(row_start), w * bpp) };
+                    let row_slice: &[u8] = unsafe {
+                        std::slice::from_raw_parts(
+                            src_buf.add(src.row_offset(row)),
+                            src.row_bytes(),
+                        )
+                    };
                     packed.extend_from_slice(row_slice);
                 }
                 packed

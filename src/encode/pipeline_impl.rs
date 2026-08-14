@@ -6,6 +6,9 @@
 
 use crate::api::encoder::HuffmanTableDef;
 use crate::common::error::{JpegError, Result};
+// Every mode's input check sizes the same `width x height x bytes_per_pixel`
+// rectangle, so they all size it through one implementation (P4-139 chunk 2).
+use crate::common::layout::{checked_span, ImageLayout};
 use crate::common::types::{DctMethod, PixelFormat, SavedMarker, ScanScript, Subsampling};
 use crate::encode::color;
 use crate::encode::huffman_encode::{

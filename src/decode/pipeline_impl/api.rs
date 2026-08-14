@@ -515,6 +515,33 @@ impl<'a> Decoder<'a> {
         }
     }
 
+    /// Columns a decode will actually emit — the horizontal twin of
+    /// [`Self::output_height`], and the space [`Self::set_crop`]'s
+    /// coordinates live in.
+    pub fn output_width(&self) -> usize {
+        let frame = self.header();
+        let w: usize = frame.width as usize;
+        if frame.precision != 12 && !frame.is_lossless {
+            self.scale.scale_dim(w)
+        } else {
+            w
+        }
+    }
+
+    /// The IDCT block size a decode will emit, which is the unit
+    /// [`Self::set_crop`]'s iMCU alignment is measured in: 8 at 1/1, scaled
+    /// with the requested factor otherwise, and 8 on the 12-bit and lossless
+    /// paths that bypass scaled decode. Mirrors the `scaled_imcu_w` the output
+    /// stage computes.
+    pub(crate) fn output_block_size(&self) -> usize {
+        let frame = self.header();
+        if frame.precision != 12 && !frame.is_lossless {
+            self.scale.block_size()
+        } else {
+            8
+        }
+    }
+
     /// Set full crop region (horizontal + vertical).
     /// MCU rows outside the vertical range will skip IDCT during decoding.
     pub fn set_crop_region(&mut self, x: usize, y: usize, width: usize, height: usize) {

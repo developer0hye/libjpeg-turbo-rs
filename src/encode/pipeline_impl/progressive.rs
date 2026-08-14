@@ -3,8 +3,8 @@ use super::{
     encode_progressive_dc_scan, format, inject_metadata, is_y_dummy, marker_writer,
     progressive_fdct_chroma_block, progressive_fdct_y_block, resolve_quant_tables,
     scale_quant_for_fdct, scale_quant_for_ifast, tables, vec, BitWriter, CompressParams, DctMethod,
-    HuffTable, JpegError, PixelFormat, ProgressiveScan, QuantDivisors, Result, ScanScript,
-    Subsampling, ToString, Vec, MAX_CORR_BITS,
+    HuffTable, ImageLayout, JpegError, PixelFormat, ProgressiveScan, QuantDivisors, Result,
+    ScanScript, Subsampling, ToString, Vec, MAX_CORR_BITS,
 };
 
 /// Per-component block layout for progressive encoding.
@@ -225,7 +225,8 @@ fn compress_progressive_with_scans(
     }
 
     let bpp = pixel_format.bytes_per_pixel();
-    let expected_size = width * height * bpp;
+    let expected_size: usize =
+        ImageLayout::packed(width, height, bpp, "progressive encode input")?.total_bytes();
     if pixels.len() < expected_size {
         return Err(JpegError::BufferTooSmall {
             need: expected_size,

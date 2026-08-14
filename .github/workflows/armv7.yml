@@ -96,3 +96,40 @@ jobs:
                 qemu-arm -L /usr/arm-linux-gnueabihf "$binary"
               done
         timeout-minutes: 30
+      # The C-ABI crate on a real 32-bit target (P4-139 criterion 5, #478).
+      # Until the encode ABI-assertion block gained its pointer-width gate
+      # this crate did not even COMPILE on ILP32, so none of its span
+      # arithmetic had ever run at half pointer width.
+      #
+      # What this leg newly executes, stated exactly. In
+      # capi_span_overflow_guards, 65500 x 65573 is 4,295,031,500 and so
+      # exceeds u32::MAX: on ILP32 the classic guard refuses at
+      # `checked_samples_per_row`'s usize-overflow arm, which no 64-bit leg
+      # can reach because there the product fits and only the JDIMENSION
+      # bound fires. The rest is the crate's ordinary span arithmetic run
+      # at 32 bits under the `-C overflow-checks=on` above, which turns a
+      # wrap into a loud failure instead of a silent one.
+      #
+      # What it does NOT execute: capi_layout_adoption's
+      # `source_span_bounds` module is cfg(target_pointer_width = "64"), so
+      # 3 of that suite's 10 tests compile out here. That is by design —
+      # the TJ3 source-span guards' isize::MAX arm is 64-bit-reachable, and
+      # on ILP32 the same call is refused one step earlier by the usize
+      # wrap, which proves a different arm. The other 7 run.
+      #
+      # Selected by name because a blanket capi test build would drag in
+      # suites that compile C against a real libjpeg install; neither suite
+      # named here links an oracle at all.
+      - name: Run C-ABI crate under qemu-arm (P4-139, 32-bit spans)
+        run: |
+          set -euo pipefail
+          cargo test --release --target armv7-unknown-linux-gnueabihf --no-run \
+            --message-format=json \
+            -p libjpeg-turbo-rs-capi --lib \
+            --test capi_layout_adoption --test capi_span_overflow_guards \
+            | jq -r 'select(.executable != null) | .executable' \
+            | while read -r binary; do
+                echo "=== $binary ==="
+                qemu-arm -L /usr/arm-linux-gnueabihf "$binary"
+              done
+        timeout-minutes: 30

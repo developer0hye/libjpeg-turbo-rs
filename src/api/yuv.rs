@@ -13,6 +13,7 @@
 use crate::api::raw_data::{compress_raw, decompress_raw};
 use crate::common::bufsize::{yuv_plane_height, yuv_plane_size, yuv_plane_width};
 use crate::common::error::{JpegError, Result};
+use crate::common::layout::ImageLayout;
 use crate::common::types::{PixelFormat, Subsampling};
 use crate::decode::color as decode_color;
 use crate::encode::color as encode_color;
@@ -45,7 +46,34 @@ fn rgb_offsets(pixel_format: PixelFormat) -> Option<(usize, usize, usize, usize)
     Some((r_off, g_off, b_off, bpp))
 }
 
+/// The three packed-plane sizes as one span, refusing a total that is not
+/// representable.
+///
+/// Each plane individually fits `isize::MAX` — `yuv_plane_size` proves that —
+/// but their sum need not, and both call sites use the total as the bound on a
+/// caller-supplied buffer, where a wrapped value compares too low
+/// (P4-139 chunk 2).
+fn checked_sum_of_planes(y: usize, cb: usize, cr: usize) -> Result<usize> {
+    let total: Option<usize> = y
+        .checked_add(cb)
+        .and_then(|partial| partial.checked_add(cr))
+        .filter(|sum| *sum <= isize::MAX as usize);
+    total.ok_or(JpegError::LimitExceeded {
+        what: "packed YUV buffer",
+        actual: u64::MAX,
+        limit: isize::MAX as u64,
+    })
+}
+
 /// Validate that a pixel buffer has the expected size.
+///
+/// This is the entry gate for the pixels-in direction — `encode_yuv_planes`,
+/// and `encode_yuv` through it — so the product has to be
+/// the checked one: `width * height * bpp` unchecked wraps, and a wrapped
+/// expectation compares *below* the caller's length — `(1 << 62) x 4` at three
+/// bytes per pixel wraps to exactly 0, so an **empty** buffer passed the check
+/// that exists to reject it and the row loops then indexed it
+/// (P4-139 chunk 2).
 fn validate_pixel_buffer(
     pixels: &[u8],
     width: usize,
@@ -53,7 +81,8 @@ fn validate_pixel_buffer(
     pixel_format: PixelFormat,
 ) -> Result<()> {
     let bpp: usize = pixel_format.bytes_per_pixel();
-    let expected: usize = width * height * bpp;
+    let expected: usize =
+        ImageLayout::packed(width, height, bpp, "YUV source image")?.total_bytes();
     if pixels.len() < expected {
         return Err(JpegError::BufferTooSmall {
             need: expected,
@@ -320,7 +349,10 @@ pub fn compress_from_yuv(
             Subsampling::S444,
         )
     } else {
-        let expected_total: usize = y_size + cb_size + cr_size;
+        // A gate, so the sum is checked: three plane sizes each bounded by
+        // `isize::MAX` can still exceed it together, and a wrapped total
+        // compares below the caller's length (P4-139 chunk 2).
+        let expected_total: usize = checked_sum_of_planes(y_size, cb_size, cr_size)?;
         if yuv_buf.len() < expected_total {
             return Err(JpegError::BufferTooSmall {
                 need: expected_total,
@@ -562,7 +594,7 @@ pub fn decode_yuv(
 
     let cb_size: usize = yuv_plane_size(1, width, height, subsampling);
     let cr_size: usize = yuv_plane_size(2, width, height, subsampling);
-    let expected_total: usize = y_size + cb_size + cr_size;
+    let expected_total: usize = checked_sum_of_planes(y_size, cb_size, cr_size)?;
 
     if yuv_buf.len() < expected_total {
         return Err(JpegError::BufferTooSmall {

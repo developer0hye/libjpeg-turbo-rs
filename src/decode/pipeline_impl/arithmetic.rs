@@ -1,7 +1,9 @@
 use super::scan::CompInfo;
 use super::Decoder;
 use crate::common::error::{DecodeWarning, JpegError, Result};
+use crate::common::layout::checked_span;
 use crate::common::quant_table::QuantTable;
+use crate::common::try_alloc::try_filled_vec;
 use crate::common::types::FrameHeader;
 use alloc::{format, vec, vec::Vec};
 
@@ -33,18 +35,28 @@ impl<'a> Decoder<'a> {
 
         let scan = &self.metadata.scan;
 
-        // Allocate component planes
+        // Allocate component planes. Same treatment as the progressive path
+        // below: header-derived factors, so checked product and fallible
+        // allocation (P4-136, P4-139 chunk 2).
         let mut component_planes: Vec<Vec<u8>> = frame
             .components
             .iter()
             .enumerate()
             .map(|(ci, comp)| {
-                let comp_w = mcus_x * comp.horizontal_sampling as usize * comp_block_sizes[ci];
-                let comp_h = mcus_y * comp.vertical_sampling as usize * comp_block_sizes[ci];
-                let size = comp_w * comp_h;
-                vec![0u8; size]
+                let size: usize = checked_span(
+                    &[
+                        mcus_x,
+                        comp.horizontal_sampling as usize,
+                        comp_block_sizes[ci],
+                        mcus_y,
+                        comp.vertical_sampling as usize,
+                        comp_block_sizes[ci],
+                    ],
+                    "arithmetic component plane",
+                )?;
+                try_filled_vec(size, 0u8, "arithmetic component plane")
             })
-            .collect();
+            .collect::<Result<Vec<Vec<u8>>>>()?;
 
         struct CompLayout {
             comp_w: usize,
@@ -430,11 +442,23 @@ impl<'a> Decoder<'a> {
             })
             .collect();
 
-        // Allocate coefficient buffers (zero-initialized for progressive accumulation)
+        // Allocate coefficient buffers (zero-initialized for progressive
+        // accumulation). Header-derived geometry, so the product is checked
+        // and the allocation fallible (P4-136, P4-139 chunk 2).
         let mut coeff_bufs: Vec<Vec<[i16; 64]>> = comp_infos
             .iter()
-            .map(|ci| vec![[0i16; 64]; ci.blocks_x * ci.blocks_y])
-            .collect();
+            .map(|ci| {
+                let blocks: usize = checked_span(
+                    &[ci.blocks_x, ci.blocks_y],
+                    "arithmetic progressive coefficient buffer",
+                )?;
+                try_filled_vec(
+                    blocks,
+                    [0i16; 64],
+                    "arithmetic progressive coefficient buffer",
+                )
+            })
+            .collect::<Result<Vec<Vec<[i16; 64]>>>>()?;
 
         // Process each scan, enforcing scan_limit if set
         for (scan_idx, scan_info) in self.metadata.scans.iter().enumerate() {
@@ -572,10 +596,13 @@ impl<'a> Decoder<'a> {
         let mut component_planes: Vec<Vec<u8>> = comp_infos
             .iter()
             .map(|ci| {
-                let size = ci.comp_w * ci.blocks_y * ci.block_size;
-                vec![0u8; size]
+                let size: usize = checked_span(
+                    &[ci.comp_w, ci.blocks_y, ci.block_size],
+                    "arithmetic component plane",
+                )?;
+                try_filled_vec(size, 0u8, "arithmetic component plane")
             })
-            .collect();
+            .collect::<Result<Vec<Vec<u8>>>>()?;
 
         for (comp_idx, ci) in comp_infos.iter().enumerate() {
             let qt_values = &quant_tables[comp_idx].values;

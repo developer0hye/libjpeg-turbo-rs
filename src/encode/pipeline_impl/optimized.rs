@@ -2,7 +2,7 @@ use super::{
     build_huff_table, compress_cmyk, convert_to_ycbcr_padded, downsample_chroma_block,
     extract_block, format, fullsize_smooth_plane, h2v2_smooth_downsample_plane, marker_writer,
     may_use_islow_simd_kernel, scale_quant_for_fdct, scale_quant_for_ifast, tables, vec, BitWriter,
-    CompressParams, DctMethod, HuffmanEncoder, JpegError, PixelFormat, QuantDivisors,
+    CompressParams, DctMethod, HuffmanEncoder, ImageLayout, JpegError, PixelFormat, QuantDivisors,
     ResolvedHuffman, Result, Subsampling, ToString, Vec,
 };
 
@@ -71,7 +71,8 @@ pub fn compress_optimized_with_params(params: &CompressParams<'_>) -> Result<Vec
     }
 
     let bpp = pixel_format.bytes_per_pixel();
-    let expected_size = width * height * bpp;
+    let expected_size: usize =
+        ImageLayout::packed(width, height, bpp, "optimized encode input")?.total_bytes();
     if pixels.len() < expected_size {
         return Err(JpegError::BufferTooSmall {
             need: expected_size,

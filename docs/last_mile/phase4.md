@@ -6204,7 +6204,7 @@ instance; this entry is the common cause.
   then bound a raw slice. It must be a typed error.
 - **Unchecked products.** `src/api/progressive_output.rs:257`
   (`ci.comp_w * ci.blocks_y * block_size`) wraps in release. **Fixed by P4-136**
-  (closed 2026-08-10) — every span in that file is now `checked_plane_size` +
+  (closed 2026-08-10) — every span in that file is now `checked_span` +
   `try_filled_vec`. Listed here because it is the shape, not because it is open.
 - **Inherited from P4-137 (recorded 2026-08-11):** memory-sizing
   `saturating_mul` in `crates/libjpeg-turbo-rs-capi/src/jpeglib.rs` at `:6697`
@@ -6257,6 +6257,133 @@ instance; this entry is the common cause.
 
 **Status (2026-08-11): partial — criterion 3 done, and with it every
 *confirmed instance*. What remains is the refactor, not a live defect.**
+
+**Status (2026-08-14, chunk 1): still partial — criterion 1 done, criterion 2
+half done, criterion 5's property-test half done.** `ImageLayout` exists
+(`src/common/layout.rs`) and the C-ABI crate adopted it; the root crate's
+decode/encode sites are chunk 2. Criterion 4 (`ScalingFactor`) is untouched and
+still waits on 0.9.0. Details in **What remains** below.
+
+**Status (2026-08-14, chunk 2): criterion 2 now covers the root crate's
+encode input, crop, YUV, plane-size and coefficient families, and adoption
+found five live defects.** Pinned by `tests/layout_adoption.rs` (22 tests), the
+root-crate counterpart to chunk 1's `capi_layout_adoption.rs`. Each was
+verified red first — the observation is recorded in the test's doc comment,
+because "returns an error" is the same assertion whether the old behaviour was
+a panic, a wrap, or an unrelated error raised by accident. All `file:line`
+coordinates in the middle column are **pre-fix**; the lines have since moved.
+
+| Defect | Observed before the fix | Now |
+| --- | --- | --- |
+| `Encoder::encode` reads rows before any path's size check (`bottom_up`, `fancy_downsampling`, `grayscale_from_color`) | slice-range panic at `encoder.rs:471` / `:789`, index-out-of-bounds at `:577` | `BufferTooSmall`, from a `checked_input_layout` inside each of the three steps |
+| `StreamingDecoder::crop_scanline` computes `image_width - aligned_x` and `xoffset + width` unchecked | "attempt to subtract with overflow" / "attempt to add with overflow" at `streaming.rs:58` / `:57` | `Unsupported`, with the end still clamped to the image for in-range windows |
+| `ScanlineDecoder`'s crop guard is `x + width > img.width` on an unchecked sum | "attempt to add with overflow" at `scanline.rs:163`; in release the sum wraps *below* the width and the guard passes | `Unsupported`, from `checked_add` |
+| `compress_raw` / `compress_raw_12` size the plane check with an unchecked product and cap nothing | "attempt to multiply with overflow" at `raw.rs:70` / `raw_data_12.rs:485`; in release `(usize::MAX / 4 + 1) x 4` wraps to 0 and an **empty** plane passes | `LimitExceeded`; a representable short plane still reports `BufferTooSmall` |
+| `api/yuv.rs`'s `validate_pixel_buffer` — the entry gate for the pixels-in direction, `encode_yuv_planes` and `encode_yuv` — sizes `width * height * bpp` unchecked | "attempt to multiply with overflow" at `yuv.rs:56`; in release `(usize::MAX / 4 + 1) x 4` at `Rgb` wraps to 0 and an **empty** buffer passes, after which the row loops index it | `LimitExceeded`; the two packed-plane totals are summed through `checked_sum_of_planes` for the same reason |
+
+Two are worth naming. The third and fifth are the same mistake: **a bounds
+check written on a wrapping product is not a weaker check, it is an *inverted*
+one** — the larger the input, the smaller the value it compares, so the check
+admits exactly the geometry it exists to reject.
+
+And the first taught the sharper lesson, in review rather than in the original
+fix. The obvious shape — one validation gate at the top of `Encoder::encode` —
+*regressed* four error-precedence cases, because a new first gate does not only
+add an error, it takes precedence over every error that used to come first. A
+caller passing `lossless_predictor(9)` with a short buffer was told
+"BufferTooSmall" about a buffer the lossless encoder had not reached, where it
+used to be told the predictor was out of range. The check therefore lives in
+the three helpers that read rows (`flip_rows`, `apply_triangle_prefilter`, the
+grayscale extraction), each calling `checked_input_layout` first, so it cannot
+fire unless the buffer is about to be indexed.
+`an_option_error_still_precedes_the_buffer_check` pins every error that must
+still come first: the lossless predictor at both a short buffer and a zero
+dimension, the smoothing/progressive combination, and the two dimension errors
+as controls.
+
+The surviving claim is narrower than "precedence is preserved", and worth
+stating exactly: an encode that rearranges nothing never reaches the check, so
+nothing moves. On the three paths that *do* rearrange, a short buffer now
+reports `BufferTooSmall` where some other error might have come first — but
+there it previously reported nothing at all, because the step panicked.
+
+Families converted in chunk 2, all behaviour-neutral except where noted above:
+
+* **Encode input (10 sites + the 12-bit twin).** The `width * height * bpp`
+  products in `encode/pipeline_impl/{baseline,optimized,progressive,arithmetic,custom_sampling,lossless}.rs`
+  (nine sites) and `api/encoder.rs`'s `checked_input_layout` (the tenth) now go
+  through `ImageLayout::packed`, and the two caller-supplied plane loops
+  (`raw.rs`, `api/raw_data_12.rs`) through `checked_span`. On 64-bit the nine
+  pipeline sites are unreachable behind the 65535 dimension cap and this is
+  hardening; on 32-bit `65535 x 65535 x bpp` does not fit `usize` and the wrap
+  was live. One consequence worth stating, since the 32-bit legs run the lib
+  tests: on ILP32 those sites now answer `LimitExceeded` where they answered
+  `BufferTooSmall`, because `65535^2` exceeds `isize::MAX` before any buffer is
+  compared.
+* **`common/bufsize.rs`, the unchecked twins of the C-ABI crate's checked
+  forms.** `pad` became `checked_pad`, and `jpeg_buf_size`, `yuv_plane_size`,
+  `yuv_buf_size`, `yuv_plane_width`/`_height`, `calc_jpeg_dimensions` and
+  `calc_output_dimensions` now report **0** for unrepresentable geometry
+  rather than a wrapped product.
+  Saturating was not an option (criterion 3 bars it, and `tests/sizing_arithmetic_gate.rs`
+  enforces that), and these signatures are infallible `usize` — so the refusal
+  is 0, which is what the C twins already answer (`tj3JPEGBufSize` returns 0
+  and records "Image is too large"; `tj3YUVPlaneWidth` returns 0 for an
+  argument it rejects). The rule is stated once in the module header rather
+  than per function. Three sites needed more than a mechanical swap:
+  `yuv_buf_size` must distinguish a plane that *refused* (reporting 0) from a
+  genuinely empty one, since summing the refusal would under-report the total;
+  `jpeg_buf_size` puts its `+ 2048` header allowance inside the `isize::MAX`
+  ceiling rather than outside it; and the chroma arms of
+  `yuv_plane_width`/`_height` dropped an algebraic no-op, `padded * 8 /
+  (factor * 8)`, whose only effect was that the `* 8` could wrap — at 4:2:0 a
+  width of `2^62 + 2` reported a chroma width of **1** instead of `2^60 + 1`,
+  under-sizing by nine orders of magnitude. Review caught that one; the
+  original conversion had left it and the new module header would have been
+  false the day it was written.
+* **Decode coefficient and plane allocations.** `decode/pipeline_impl/progressive.rs`
+  (coefficient buffers, AC-max buffers, component planes),
+  `decode/pipeline_impl/arithmetic.rs` (both the sequential and the progressive
+  allocations) and `api/coefficient.rs`'s whole-image coefficient array route
+  their counts through `checked_span` and their allocations through
+  `try_filled_vec`, so a hostile SOF gets `LimitExceeded`/`AllocationFailed`
+  rather than an abort.
+* **The `checked_plane_size` twin is gone.** `api/progressive_output.rs`'s
+  private copy was contract-identical to `checked_span`; it is deleted and its
+  twelve call sites repointed, which is what chunk 1's rustdoc said had not
+  happened yet. That rustdoc now says what is true.
+
+* **The two YUV entry gates.** `api/yuv.rs`'s `validate_pixel_buffer` routes
+  through `ImageLayout::packed`, and the packed-plane totals in `decode_yuv`
+  and `compress_from_yuv` through a new `checked_sum_of_planes` — three plane
+  sizes each bounded by `isize::MAX` can still exceed it together, and both
+  totals bound a caller-supplied buffer.
+* **`crop_scanline` now measures in output space.** Its bounds and its iMCU
+  alignment used `header.width` and a hard-coded block size 8, but `set_crop`'s
+  coordinates are post-scale (`output.rs`'s `scaled_imcu_w`). At 1/1 the two
+  agree, which is why nothing noticed; under an upscaled decode the old code
+  aligned to the wrong grid and compared against the wrong edge, and the new
+  refusal would have rejected valid offsets. `Decoder` gained `output_width()`
+  (the twin of the existing `output_height()`) and `output_block_size()`.
+
+**Not in chunk 2, and why.** `decode/pipeline_impl/output.rs` and `color.rs`
+hold 17 more allocations sized by an unchecked geometry product (14 and 3;
+the other 16 allocation sites in those files are row buffers, fixed
+capacities, or sized by a length rather than by a geometry product). They are
+the same shape, but they are the *scaling and transform
+output* families the final chunk owns, and converting them touches the
+merged-upsample and RGB565 kernels that are under active optimisation. The
+same goes for `api/yuv.rs`'s *internal* plane allocations (`y_w * y_h` and
+friends): the entry gates are checked now, so a wrapping geometry is refused
+before it reaches them, but the allocations themselves are still written out.
+Also left, from the final drift audit: `checked_staging_span`'s `isize::MAX`
+arm is exercised by no leg at any pointer width — the width test returns at
+the row check first and the companion geometry is 64x64; documented in
+`capi_span_overflow_guards.rs` and here so the gap is tracked, not hidden.
+
+Also left: `ScanlineEncoder::new`'s `vec![0u8; width * height * bpp]`, which is
+an infallible constructor and so needs an API decision (panic, or a fallible
+`try_new`) rather than a mechanical conversion — file it with the final chunk.
 
 * **Criterion 3 — done, and it is the load-bearing one.** The rule is enforced
   by `tests/sizing_arithmetic_gate.rs` against
@@ -6330,12 +6457,33 @@ instance; this entry is the common cause.
 
 **What remains.**
 
-* **Criteria 1–2 — the `ImageLayout` abstraction and its adoption.** Not
-  started. This is now a *consistency* refactor rather than a safety fix: the
-  spans are individually checked, but the checking is still written out at each
-  site. Sequence it after the classic-ABI work rather than before — it touches
-  every subsystem in criterion 2's list, and each of those is under active
-  change.
+* **Criteria 1–2 — the `ImageLayout` abstraction and its adoption. Chunks 1
+  and 2 landed; the transform-output, scaling and classic `jpeg_*` staging
+  families remain.** Criterion 1 is done: `src/common/layout.rs` owns
+  `width`/`height`/`bytes_per_pixel`/optional `stride`, rejects
+  `stride < row_bytes`, and produces `total_bytes` through checked arithmetic
+  bounded by `isize::MAX` with a typed error, plus a `checked_span` free
+  function for spans that are not 2-D. Criterion 2 is partial: the C-ABI crate
+  adopted it in chunk 1 (`compress.rs`, `precision.rs`, `imageio.rs`,
+  `yuv.rs` — TJ3 compress, 12/16-bit, YUV plane sizing, the image-file entry
+  points), and the root crate in chunk 2 (encode input across all six modes,
+  both raw-plane loops, `common/bufsize.rs`, the crop paths, the progressive
+  and arithmetic decode allocations, `api/coefficient.rs`, and the deletion of
+  `progressive_output`'s `checked_plane_size` twin). Still written out per
+  site: the baseline decode output and upsample buffers
+  (`decode/pipeline_impl/output.rs`, `color.rs`), scaling, transform output and
+  the classic `jpeg_*` staging buffers — the final chunk. Chunk 2 was *not*
+  purely a consistency refactor: it surfaced five live defects, tabulated in
+  the chunk-2 status above.
+
+  Adoption was not behaviour-neutral, and the three caller-visible changes are
+  pinned by `crates/libjpeg-turbo-rs-capi/tests/capi_layout_adoption.rs`:
+  `tj3SaveImage8` now refuses a negative `pitch` instead of reading it as
+  "dense" (`turbojpeg-mp.c:511-513`), `tj3LoadImage8` requires `align` to be a
+  positive power of two instead of clamping with `align.max(1)`
+  (`turbojpeg-mp.c:317-321`), and `tj3Compress12`/`tj3Compress16` bound their
+  source span in *bytes*, putting the ×2 element size inside the checked chain
+  where `from_raw_parts`' precondition needs it.
 * **Criterion 4 — `ScalingFactor`. Decision recorded: do it, in 0.9.0, as
   private fields plus `try_new`.** Not the 16-variant enum: the type is
   constructed from caller-supplied `num`/`denom` at the C ABI boundary
@@ -6352,23 +6500,82 @@ instance; this entry is the common cause.
   cannot overflow — `input_dim` is bounded by a JPEG's 65535 dimension limit and
   `num` by 16 — so what is left is the `assert!` on `denom == 0`, a panic on
   public input. That is an API-quality defect, not a memory-safety one.
-* **Criterion 5 — property tests, and a 32-bit C-ABI leg.** The second half was
-  discovered while closing criterion 3 and is the more useful of the two: the
-  `usize`-overflow and `isize::MAX` arms of the new span guards are 32-bit-only
-  and **no CI leg exercises them**. `armv7.yml` runs the root crate's `--lib`
-  and `no_std_dispatch`; the WASI leg selects the root workspace member; neither
-  builds the C-ABI crate's tests, and selecting it there currently fails a
-  pointer-width ABI assertion. So the 64-bit-reachable `JDIMENSION` arm is
-  covered by `capi_span_overflow_guards.rs` and the rest is argued, not tested.
-  A 32-bit C-ABI leg would close both this and the equivalent gap P4-136's
-  pointer-width tests have.
+* **Criterion 5 — a 32-bit C-ABI leg. Done 2026-08-14; kept here because the
+  rest of this list is not.** The compile blocker went first: chunk 1
+  gated the encode ABI-offset assertion block on `target_pointer_width = "64"`
+  (it was the one ungated LP64 block left, and it failed the *build* on ILP32
+  rather than flagging a real mismatch), so `cargo check -p
+  libjpeg-turbo-rs-capi --tests --target armv7-unknown-linux-gnueabihf` now
+  succeeds, warning-free (the 64-bit-only tests live in one
+  `cfg(target_pointer_width = "64")` module rather than carrying three separate
+  gates, so nothing is left unused on ILP32). **The CI leg landed 2026-08-14:**
+  `armv7.yml`'s job gained a second qemu-arm step building and running
+  `-p libjpeg-turbo-rs-capi --lib --test capi_layout_adoption --test
+  capi_span_overflow_guards` under the job's existing `-C overflow-checks=on`,
+  which turns a 32-bit wrap into a loud failure. Suites are selected by name
+  because a blanket capi test build would drag in C-compiling harnesses;
+  neither suite named here links a C oracle at all.
 
-* **Criterion 5 (original) — property tests over adversarial geometry.** The individual
-  guards have targeted regressions (`yuv_packed_length_overflow.rs`,
-  `norealloc_buffer_capacity.rs`, the P4-136 pointer-width pair), but there is no
-  generative test sweeping huge dimensions and `stride < row_bytes` across both
-  pointer widths. Wants `proptest` or a hand-rolled matrix; the 32-bit leg exists
-  already (`armv7.yml`, `wasm32-wasip1`).
+  What the leg adds, stated exactly, because the suite names invite a stronger
+  reading than is true. It executes one guard arm that no 64-bit leg reaches:
+  `capi_span_overflow_guards`' 65500 x 65573 is 4,295,031,500, past `u32::MAX`,
+  so on ILP32 the refusal comes from `checked_samples_per_row`'s `usize`
+  overflow rather than from the `JDIMENSION` bound that fires on a 64-bit host.
+  Everything else it adds is the crate's ordinary span arithmetic run at half
+  pointer width. It does **not** execute the TJ3 `isize::MAX` arm:
+  `capi_layout_adoption`'s `source_span_bounds` module is
+  `cfg(target_pointer_width = "64")`, so 3 of that suite's 10 tests compile out
+  here — by design, per the correction below. The classic guard's own
+  `isize::MAX` arm (`checked_staging_span`) is still unexercised on either
+  width; the two tests in that suite return at the row-width check or use a
+  64x64 geometry.
+
+  **Correction (chunk 1):** this entry previously said the `usize`-overflow and
+  `isize::MAX` arms of *the* span guards were 32-bit-only. That is true only of
+  the classic-ABI guards, whose `image_width` is a `u32`. The TJ3 source-span
+  guards take caller-supplied `c_int` width and height, so their `isize::MAX`
+  arm is 64-bit-reachable. `capi_layout_adoption.rs`'s `source_span_bounds`
+  module now exercises it for all three: `tj3Compress12`/`tj3Compress16`
+  (`c_int::MAX` x 800_000_000 at `TJPF_RGB`, 1.03e19 bytes) and `tj3Compress8`
+  (`c_int::MAX` square at `TJPF_RGBA`, 18446744056529682436 bytes) — each
+  inside `usize` and past `isize::MAX`. `tj3Compress8`'s guard predates this
+  work (P4-137 wrote it); what it lacked was any test, because the file that
+  looked like its home said the arm was unreachable.
+
+* **Criterion 5 (original) — property tests over adversarial geometry. Done for
+  `ImageLayout`.** `common::layout::tests::adversarial_geometry_matches_the_u128_model`
+  sweeps a hand-picked edge matrix plus 4096 deterministic Mulberry32 cases
+  against a `u128` reference model that cannot overflow, asserting both the
+  accepted totals and the refusals. It is a `--lib` test, so it runs on the
+  32-bit legs (`armv7.yml` under qemu, `wasm32-wasip1`) as well as the 64-bit
+  ones, where the interesting boundary moves to ~2 GiB. Hand-rolled rather than
+  `proptest`, for reproducibility. What it does *not* cover is the call sites:
+  the per-entry-point guards still rely on targeted regressions
+  (`yuv_packed_length_overflow.rs`, `norealloc_buffer_capacity.rs`,
+  `capi_layout_adoption.rs`, the P4-136 pointer-width pair).
+
+  The sweep earned its keep during chunk 1's review: extending it to validate
+  `(height - 1) * stride` *before* the zero-area early-out caught a real hole
+  in `ImageLayout` itself. A layout like `strided(0, 1000, 3, usize::MAX / 2)`
+  was accepted — `row_bytes` is 0, so the under-stride test is vacuous and the
+  total is honestly 0 — while `row_offset(999)` wrapped, and `compress.rs`
+  turns that offset into a `ptr::add`. Construction now proves the head
+  unconditionally.
+
+* **Chunk 1 gap: no sanitizer leg runs `capi_layout_adoption.rs`.**
+  `tj3_decompress12_writes_only_the_pitched_extent` hands the library a
+  destination sized at exactly upstream's minimum, so the pre-chunk-1
+  `pitch * height` span built a `from_raw_parts_mut` past the caller's `Vec`.
+  Its assertions (rows match a dense decode, inter-row padding untouched) pass
+  either way; only Miri or ASAN sees the out-of-bounds slice.
+  `sanitizers.yml` excludes integration tests and the capi Miri step names
+  `capi_create_abi_guards` alone. Adding a leg is not a one-liner — the test
+  performs a real encode and decode, so Miri stops at the first SIMD intrinsic
+  the dispatcher picks (measured locally: `llvm.aarch64.neon.ushl.v8i16`),
+  which is why the library's own Miri run passes `--skip simd::`. A
+  scalar-only capi build under Miri belongs to
+  [P4-141](#p4-141-soundness-verification-program-mirisanitizerfuzz-coverage-gaps-and-an-unsafe-inventory-gate--open),
+  not here.
 
 **Also recorded: resource-limit defaults.** `DecodeLimits` currently defaults to
 roughly 2.1 billion pixels with `max_memory = None`. That is a compatibility
@@ -6395,8 +6602,9 @@ out, but do not leave it unstated.
 
 What is worth doing instead, and is *not* claimed as done here: document
 recommended bounds for untrusted input in the crate docs next to
-`DecodeLimits`, as guidance rather than a second default. Recorded with
-criterion 5's remaining work above.
+`DecodeLimits`, as guidance rather than a second default. Carried with the
+final chunk's remaining work above — it was parked against criterion 5, which
+closed 2026-08-14.
 
 ## P4-140. Public Documentation Claims Safety and Drop-In Status the Code Does Not Support — **CLOSED 2026-08-09**
 
@@ -7573,3 +7781,192 @@ sequence; no-SOI and truncated-stream error/warning traces. Fix the
 shim until the traces match. Gap 1's fix must also be exercised by a
 consumer-idiom probe (`bytes_in_buffer == 0 ? fill : read window`) that
 never touches freed memory under ASan.
+
+## P4-165. Packed-YUV and Plane-Array Paths Size Three Planes for `TJSAMP_GRAY` — **CLOSED 2026-08-14**
+
+**Motivation.** Filed 2026-08-14 by the P4-139 span-computation survey,
+before the `ImageLayout` refactor touches these lines. `tj3YUVBufSize`
+correctly sizes **one** plane for `TJSAMP_GRAY` (`bufsize.rs:189`,
+`is_gray → n_planes = 1`, matching stock), but the YUV worker paths in
+`crates/libjpeg-turbo-rs-capi/src/yuv.rs` hardcode three (`yuv.rs` line
+numbers as of filing, before the fix below moved them):
+
+- `subsamp_from_tj` maps `3 => Subsampling::S444 /* TJSAMP_GRAY */`
+  (`yuv.rs:79`), so `packed_yuv_len` (`:63`, `for c in 0..3`) and
+  `split_packed_yuv` (`:162`) compute a three-full-resolution-plane
+  span for GRAY.
+- `tj3CompressFromYUV8` (`:522`) and `tj3DecodeYUV8` (`:1014`) hand that
+  length to `slice::from_raw_parts` over the caller's packed buffer — a
+  caller who allocated `tj3YUVBufSize(w, align, h, TJSAMP_GRAY)` bytes
+  (the documented contract) is read ~3× past the allocation.
+- `tj3CompressFromYUVPlanes8` (`:673`) and `tj3DecodeYUVPlanes8`
+  (`:1135`) loop `0..3` over the caller's `planes`/`strides` arrays;
+  stock touches only `planes[0]` for GRAY, so a legal one-element array
+  is read past its end.
+
+**Root cause.** The GRAY→S444 mapping conflates "no chroma subsampling"
+with "chroma present"; every consumer then trusts `Subsampling` alone to
+imply the plane count.
+
+**Acceptance criteria.** All six YUV entry points agree with
+`tj3YUVBufSize`'s plane count for `TJSAMP_GRAY`, cross-validated against
+stock TurboJPEG (round-trip byte comparisons and, for the OOB shape, a
+buffer sized exactly to `tj3YUVBufSize` under ASan or with guard
+allocations). A capi test covers `TJSAMP_GRAY` in the packed and planar
+suites — today `tests/yuv.rs` has none.
+
+**Status (2026-08-14): closed.** The plane count now travels separately
+from the geometry. `plane_count_from_tj` in `yuv.rs` is upstream's
+`nc = (subsamp == TJSAMP_GRAY ? 1 : 3)` (`turbojpeg.c:1038`) built on the
+*same* `bufsize::is_gray` predicate `tj3YUVBufSize` sizes by, so the two
+cannot drift; `packed_yuv_len` and `split_packed_yuv` take it as a
+parameter, `pack_yuv_planes` packs exactly the planes it is handed, and
+all six affected entry points thread it. The GRAY→`S444` mapping stays —
+it is right for plane 0's dimensions, which is all a `Subsampling` can
+say. The two packed entry points also stopped routing through
+`compress_from_yuv` / `decode_yuv`, which infer the plane count from the
+buffer *length*: a one-plane GRAY buffer and one plane of a three-plane
+4:4:4 image are the same length, so that inference cannot be trusted with
+a length this layer already knows.
+
+Proved by `crates/libjpeg-turbo-rs-capi/tests/capi_yuv_gray.rs`
+(10 tests), whose full trace is compared verbatim against
+`examples/tj3_yuv_gray_oracle.c` linked against real TurboJPEG, over five
+geometries — 64×64 and 33×17 at `align` 1 and 4, 17×33 at `align` 1.
+Destinations are over-allocated and guard-filled past the one-plane
+contract length and sources sentinel-filled past it, with the chroma
+slots of every plane array pointing at owned buffers, so the overrun is
+observable without the test ever performing one. Before the fix, six of
+the eight entry points diverged: `encodeyuv8` left `guard=DIRTY` and
+`encodeplanes8` `guard1`/`guard2=DIRTY`, `decodeyuv8`/`decodeplanes8`
+returned `rgbgray=no` (sentinel bytes folded in as chroma), and
+`fromyuv8`/`fromyuvplanes8` produced `jsubsamp=0` —
+a three-component JPEG for a grayscale request.
+`toyuv8`/`toyuvplanes8` were already correct, taking their count from the
+JPEG's own SOF as upstream does, and are now pinned. Falsified by forcing
+`plane_count_from_tj` to 3, which reproduces exactly those six failures.
+Five of the tests state the contract without reference to the oracle, so
+the gate keeps its teeth where no TurboJPEG development install exists.
+
+The two packed entry points changed route for *every* subsampling, not
+only for GRAY, so the trace carries three-plane controls that the GRAY
+cases cannot see: `decodeyuv8_420rgb` and `decodeyuv8_420gray` compare a
+4:2:0 packed decode against stock — `TJPF_GRAY` because that output
+format is the one whose internal branch moved — and
+`packed_and_planar_three_plane_compress_agree` pins the compress half as
+an internal equivalence. It is stated that way rather than as an oracle
+line because `tj3CompressFromYUV8` diverges from stock at 4:2:0 for two
+reasons that predate this change and are now filed as **P4-167**: it
+refuses non-MCU-aligned dimensions, and its output cannot be decompressed
+to `TJPF_GRAY`. A `fromyuv8_420` oracle case was written during this work
+and removed when those two divergences turned out to be pre-existing, so
+it is **not** in the tree waiting to be un-commented — writing it again is
+part of P4-167.
+
+The audit also found one deliberate non-divergence, excluded from the
+trace rather than filed: this port zero-fills the inter-row alignment
+padding of a packed buffer while upstream leaves those bytes untouched
+(its row copies are `pw` wide though its row pointers advance by the
+stride). Both stay inside the caller's own allocation, and upstream
+documents nothing about their contents, so the digests compare `pw` bytes
+per row at the stride. A second divergence *was* filed: the encode entry
+points accept a grayscale source under a non-grayscale subsampling, which
+upstream refuses — pre-existing, and the reason the plane-count clamp
+here is a `min` rather than an equality check (**P4-166**).
+
+
+## P4-166. `tj3EncodeYUV*8` Silently Accepts a Grayscale Source Under a Non-Grayscale Subsampling — **OPEN**
+
+**Motivation.** Filed 2026-08-14 from the P4-165 review. With
+`TJPARAM_SUBSAMP` set to anything but `TJSAMP_GRAY` and `pixelFormat`
+`TJPF_GRAY`, `tj3EncodeYUV8` / `tj3EncodeYUVPlanes8` return 0 having
+filled only the luma plane. The caller sized `dstBuf` from
+`tj3YUVBufSize(w, align, h, TJSAMP_420)` and gets its chroma third left
+at whatever was there before; feeding that buffer to
+`tj3CompressFromYUV8` compresses uninitialised memory as chroma.
+
+Upstream refuses the call. `setCompDefaults(this, pixelFormat, TRUE)`
+reaches its `default:` arm (`turbojpeg.c:402-409`) and, with a non-GRAY
+subsampling and a non-CMYK format, calls
+`jpeg_set_colorspace(cinfo, JCS_YCbCr)`. `pf2cs[TJPF_GRAY]` is
+`JCS_GRAYSCALE`, so `jinit_color_converter` hits `case JCS_YCbCr:` with
+an `in_color_space` that is neither ExtRGB nor YCbCr and raises
+`JERR_CONVERSION_NOTIMPL` (`jccolor.c:624-628`). The entry point returns
+-1 with "Unsupported color conversion request".
+
+**Root cause.** `encode_yuv_planes` derives its plane count from the
+*pixel format* (`src/api/yuv.rs:143`, grayscale ⇒ one plane) while the
+destination is sized from the *subsampling*. The C-ABI layer reconciles
+the two by clamping — `current_plane_count(inst).min(planes.len())` at
+`yuv.rs:391` and `:505` — which turns the mismatch into a short write.
+This is pre-existing: before P4-165 the same shape produced the same
+one-plane output, because `pack_yuv_planes` iterated whatever it was
+handed. P4-165 made the clamp explicit without changing what it does, and
+its `min` is still needed in the other direction (a three-plane RGB
+source under `TJSAMP_GRAY` must truncate).
+
+This is the P4-39 / P4-150 shape — a silent substitute where upstream
+raises a documented error — and the substituted value is uninitialised
+caller memory, which makes it worse than the usual case.
+
+**Acceptance criteria.** Both encode entry points refuse a grayscale
+source under a non-grayscale subsampling with an error, and the
+`TJSAMP_GRAY` truncation direction keeps working. Cross-validated against
+stock in `tests/capi_yuv_gray.rs`'s oracle trace, which must also pin the
+refusal's *position* in the argument-validation chain — P4-155 showed the
+YUV entry points disagree about whether the subsampling gate or the
+pixel-format check runs first, so where this refusal lands relative to
+`TJPARAM_SUBSAMP`-unset and a bad `align` is part of the contract, not an
+implementation detail. Audit `tj3CompressFromYUV*8` for the same shape
+while there: it takes its planes from the caller rather than from a pixel
+format, so the mismatch cannot arise the same way, but the plane-count
+validation is worth stating rather than assuming.
+
+## P4-167. `tj3CompressFromYUV*8` Refuses MCU-Padded Planes, and `tj3Decompress8` Cannot Emit `TJPF_GRAY` From a Colour JPEG — **OPEN**
+
+**Motivation.** Filed 2026-08-14 by the P4-165 three-plane control cases,
+which compare `tj3CompressFromYUV8` at 4:2:0 against stock. Two
+independent divergences, both pre-existing (confirmed by re-running the
+control against the pre-P4-165 call path, which fails identically):
+
+1. **Non-MCU-aligned dimensions are refused.** At 33×17 and 17×33 with
+   `TJSAMP_420`, `tj3CompressFromYUV8` returns -1 with
+   `"corrupt data: Y plane dimensions 34x18 do not match image dimensions
+   33x17"`, where stock returns 0. The YUV plane contract *is* MCU-padded
+   — `tj3YUVPlaneWidth(0, 33, TJSAMP_420)` is `PAD(33, 2) = 34` — so the
+   planes are the size the caller was told to allocate, and
+   `api::raw_data::compress_raw` rejects them for being larger than the
+   image. Upstream handles the same mismatch by copying rows into
+   MCU-sized scratch and replicating the last sample
+   (`turbojpeg.c:1372-1423`, the `usetmpbuf` path — detected at `:1376`,
+   copied and replicated at `:1412-1423`). Only 4:4:4 and
+   already-aligned geometries work today; a caller doing
+   `tj3DecompressToYUV8` → `tj3CompressFromYUV8` on any odd-sized 4:2:0
+   image gets a hard failure where stock round-trips.
+2. **`TJPF_GRAY` output from a three-component JPEG fails.**
+   `tj3Decompress8(.., TJPF_GRAY)` on a 4:2:0 JPEG errors out:
+   `repack_into_pitched`
+   (`crates/libjpeg-turbo-rs-capi/src/decompress.rs:189`)
+   handles grayscale *source* → RGB destination but has no
+   RGB source → grayscale destination arm, and `PixelFormat::Grayscale`
+   has no `red_offset`, so the generic path refuses. Upstream sets
+   `out_color_space = JCS_GRAYSCALE` and lets `jdcolor` return the luma
+   directly. This is a common TurboJPEG call — `tjbench` and any
+   luma-only consumer make it.
+
+**Acceptance criteria.** (1) `tj3CompressFromYUV8` /
+`tj3CompressFromYUVPlanes8` accept MCU-padded planes for every
+subsampling at arbitrary dimensions, matching upstream's `usetmpbuf`
+handling; (2) `tj3Decompress8` and the 12/16-bit siblings emit `TJPF_GRAY`
+from a colour JPEG. Cross-validated by adding a `fromyuv8_420` case to
+`tests/capi_yuv_gray.rs`'s oracle trace and the matching case to
+`examples/tj3_yuv_gray_oracle.c`, both of which must report
+`rc=0 … jsubsamp=2 roundtrip=ok` against stock at all five geometries.
+Such a pair existed while P4-165 was being written and was **removed**
+once these divergences proved pre-existing — it must be written afresh,
+not un-commented. The internal-equivalence test
+`packed_and_planar_three_plane_compress_agree` stays either way. Note
+that criterion 1 is about the *root crate's* `compress_raw` contract, so
+check whether `api::raw_data` should pad internally or whether the C-ABI
+layer should, and whether `P4-95`'s classic raw-data path has the same
+hole.

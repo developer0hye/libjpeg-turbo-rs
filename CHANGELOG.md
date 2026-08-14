@@ -10,6 +10,28 @@ and `git log` between tags.
 
 ### Changed
 
+- **Breaking (C ABI, argument validation):** `tj3SaveImage8` now refuses a
+  negative `pitch` instead of reading it as "tightly packed", and
+  `tj3LoadImage8` now requires `align` to be a positive power of two instead
+  of clamping it with `align.max(1)` (P4-139, #478). Both match upstream,
+  which rejects the same values (`turbojpeg-mp.c:511-513` and `:317-321`);
+  `pitch == 0` still means dense and `align == 1` still means no padding.
+  A caller passing `-1` or `0` previously got a success return and a buffer
+  whose row stride they could not have predicted.
+- `tj3Compress12` / `tj3Compress16` now bound their source span in **bytes**
+  rather than samples (P4-139, #478). `slice::from_raw_parts` requires
+  `len * size_of::<T>() <= isize::MAX`, and the guards multiplied
+  `pitch * height` over two-byte elements without the x2, so a geometry whose
+  sample count fit `usize` while its byte span did not was accepted and built
+  an out-of-contract slice. Such a call is now refused; no geometry that was
+  accepted before and is representable is refused now.
+- The public buffer-sizing helpers (`jpeg_buf_size`, `transform_buf_size`,
+  `yuv_plane_size`, `yuv_buf_size`, `yuv_plane_width`/`_height`,
+  `calc_jpeg_dimensions`, `calc_output_dimensions`) return **0** for geometry
+  whose size is not representable, where they previously returned a wrapped
+  product (P4-139, #478). Their signatures are infallible `usize`, so 0 is the refusal — the
+  same answer the C entry points give, and one a caller cannot mistake for a
+  usable capacity. Every size a caller could previously use is unchanged.
 - `wasm32` with `+simd128` but **without** the Cargo `simd` feature now uses
   the scalar path, honoring the feature exactly as aarch64/x86_64 always did
   (P4-135 criterion 5, #474). Previously the hand-written SIMD kernels were
@@ -27,11 +49,75 @@ and `git log` between tags.
   a fresh handle reports the unset values.
 
 ### Added
+- `Decoder::output_width()`, the horizontal twin of the existing
+  `output_height()`: the column count a decode will actually emit, and the
+  space `set_crop`'s coordinates live in (P4-139, #478).
 - A pinned Ubuntu 24.04/OpenCV 4.6 replacement harness that proves OpenCV's
   JPEG compression/decompression symbols bind to the Rust `libjpeg.so.8` and
   runs system/Rust bidirectional cross-decodes.
 
 ### Fixed
+- `Encoder::encode` validates the caller's pixel buffer against
+  `width x height x bytes_per_pixel` **before** it rearranges it (P4-139,
+  #478). `bottom_up`, `fancy_downsampling` and `grayscale_from_color` each
+  walk every row of the input, and they ran ahead of the per-mode size check —
+  so a short buffer panicked with a slice-range error where the encoder's own
+  `BufferTooSmall` was the documented answer. The check lives inside those
+  three steps rather than at the top of `encode`, so an encode that rearranges
+  nothing never reaches it and every error it used to report still comes first:
+  a zero or over-65535 dimension reports `CorruptData`, an out-of-range
+  `lossless_predictor` or an unsupported `smoothing_factor` combination reports
+  `Unsupported`. On the three rearranging paths a short buffer now reports
+  `BufferTooSmall` instead of one of those, because there it previously
+  reported nothing — the step panicked.
+- The YUV conversion entry points refuse a source geometry whose pixel span is
+  not representable (P4-139, #478). `validate_pixel_buffer` sized
+  `width x height x bytes_per_pixel` unchecked and used it as the sole bound on
+  the caller's buffer, so a wrapped expectation compared *below* the caller's
+  length: at `(usize::MAX / 4 + 1)` by `4` it wraps to exactly 0 and an empty
+  buffer passed the check that exists to reject it. The packed-plane totals in
+  `decode_yuv` and `compress_from_yuv` are summed with checked addition for the
+  same reason.
+- `yuv_plane_width` / `yuv_plane_height` compute a chroma plane as
+  `padded / factor` instead of `padded * 8 / (factor * 8)` (P4-139, #478). The
+  `* 8` was an algebraic no-op whose only effect was that it could wrap, and
+  wrap downward: at 4:2:0 a width of `2^62 + 2` reported a chroma width of 1
+  instead of `2^60 + 1`.
+- `StreamingDecoder::crop_scanline` measures its bounds and its iMCU alignment
+  in **output** (post-scale) space, which is what the crop it sets consumes
+  (P4-139, #478). It used the unscaled `header.width` and a hard-coded block
+  size of 8; at 1/1 the two agree, but an upscaled decode aligned the crop to
+  the wrong grid and compared the origin against the wrong edge.
+- `StreamingDecoder::crop_scanline` refuses a crop origin past the right edge
+  and an `xoffset + width` that is not representable, instead of computing
+  `image_width - aligned_xoffset` on values it had not checked (P4-139, #478).
+  Both wrapped in release; in debug they panicked. A window that merely *ends*
+  past the right edge is still clamped to the image, unchanged.
+- `ScanlineDecoder`'s horizontal crop performs its `x + width <= image_width`
+  bounds check with checked addition (P4-139, #478). The unchecked sum wrapped,
+  and a wrapped sum compares *below* the image width — so a crop origin near
+  the top of the address space passed the guard that exists to reject it and
+  was then turned into an out-of-bounds row offset.
+- `compress_raw` and `compress_raw_12` refuse plane dimensions whose product is
+  not representable (P4-139, #478). Nothing caps caller-supplied plane
+  geometry, and the size check multiplied the two unchecked:
+  `(usize::MAX / 4 + 1) x 4` wraps to exactly 0, so an **empty** plane passed
+  the buffer check. A short-but-representable plane still reports
+  `BufferTooSmall` with the same numbers.
+- The TurboJPEG YUV entry points now size **one** plane for `TJSAMP_GRAY`,
+  matching `tj3YUVBufSize` and stock (P4-165). They sized three, because
+  `TJSAMP_GRAY` was mapped onto the 4:4:4 geometry — right for the luma plane's
+  dimensions, wrong for the plane count. A caller who allocated the documented
+  `tj3YUVBufSize(w, align, h, TJSAMP_GRAY)` bytes therefore had that buffer
+  overrun: `tj3EncodeYUV8` **wrote** a three-plane packed length into it, while
+  `tj3CompressFromYUV8` and `tj3DecodeYUV8` **read** roughly three times its
+  length; the `…Planes8` spellings of all three walked slots 1 and 2 of a plane
+  array upstream lets the caller size at one element. `tj3CompressFromYUV*8`
+  also emitted a three-component JPEG for a grayscale request, with the chroma
+  invented from whatever followed the caller's buffer. The decompress
+  direction (`tj3DecompressToYUV*8`) was already correct and is now pinned.
+  Cross-validated line for line against real TurboJPEG over five geometries
+  including odd dimensions and `align > 1`.
 - Classic source-manager setup and stdio semantics now match stock libjpeg
   (P4-109, #469), trace-compared verbatim: `jpeg_mem_src` refuses NULL/empty
   input with `JERR_INPUT_EMPTY` and a manager it did not install with

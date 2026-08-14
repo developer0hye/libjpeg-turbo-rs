@@ -1,6 +1,10 @@
 // libjpeg-turbo-rs: alloc prelude (no_std support, issue #356)
 use crate::common::error::{JpegError, Result};
 use crate::common::icc;
+// P4-139 chunk 2: this file's private `checked_plane_size` was
+// contract-identical to `checked_span` and is gone; the one implementation
+// lives in `common::layout`.
+use crate::common::layout::checked_span;
 use crate::common::quant_table::QuantTable;
 use crate::common::try_alloc::try_clone_saved_markers;
 /// Progressive buffered output / scan-by-scan decode.
@@ -63,33 +67,6 @@ pub struct ProgressiveDecoder {
     max_v: usize,
     /// Number of scans consumed so far.
     scans_consumed: usize,
-}
-
-/// Byte size of a plane, refusing geometry that would wrap `usize`.
-///
-/// The factors come from header geometry an attacker controls, so an unchecked
-/// product wraps in release and yields a short allocation that the IDCT then
-/// writes past — a memory-safety bug independent of how the buffer is
-/// initialized (P4-136). `isize::MAX` is the ceiling because a single
-/// allocation larger than that violates the allocator contract regardless of
-/// available memory.
-fn checked_plane_size(factors: &[usize], what: &'static str) -> Result<usize> {
-    let mut total: usize = 1;
-    for factor in factors {
-        total = total.checked_mul(*factor).ok_or(JpegError::LimitExceeded {
-            what,
-            actual: u64::MAX,
-            limit: isize::MAX as u64,
-        })?;
-    }
-    if total > isize::MAX as usize {
-        return Err(JpegError::LimitExceeded {
-            what,
-            actual: total as u64,
-            limit: isize::MAX as u64,
-        });
-    }
-    Ok(total)
 }
 
 impl ProgressiveDecoder {
@@ -187,7 +164,7 @@ impl ProgressiveDecoder {
         let coeff_bufs: Vec<Vec<[i16; 64]>> = comp_infos
             .iter()
             .map(|ci| {
-                let blocks: usize = checked_plane_size(
+                let blocks: usize = checked_span(
                     &[ci.blocks_x, ci.blocks_y],
                     "progressive coefficient buffer",
                 )?;
@@ -198,7 +175,7 @@ impl ProgressiveDecoder {
             .iter()
             .map(|ci| {
                 let blocks: usize =
-                    checked_plane_size(&[ci.blocks_x, ci.blocks_y], "progressive AC-max buffer")?;
+                    checked_span(&[ci.blocks_x, ci.blocks_y], "progressive AC-max buffer")?;
                 try_filled_vec(blocks, 0u8, "progressive AC-max buffer")
             })
             .collect::<Result<Vec<Vec<u8>>>>()?;
@@ -297,7 +274,7 @@ impl ProgressiveDecoder {
             .comp_infos
             .iter()
             .map(|ci| -> Result<Vec<u8>> {
-                let size: usize = checked_plane_size(
+                let size: usize = checked_span(
                     &[ci.comp_w, ci.blocks_y, block_size],
                     "progressive component plane",
                 )?;
@@ -638,7 +615,7 @@ impl ProgressiveDecoder {
         exif_data: Option<Vec<u8>>,
     ) -> Result<Image> {
         let comp_w: usize = self.comp_infos[0].comp_w;
-        let data_size: usize = checked_plane_size(
+        let data_size: usize = checked_span(
             &[out_width, out_height],
             "progressive grayscale output image",
         )?;
@@ -746,7 +723,7 @@ impl ProgressiveDecoder {
         if h_factor == 1 && v_factor == 1 && all_full_sampling {
             // 4:4:4: no upsampling needed
             let data_size: usize =
-                checked_plane_size(&[out_width, out_height, bpp], "progressive output image")?;
+                checked_span(&[out_width, out_height, bpp], "progressive output image")?;
             let mut data: Vec<u8> = try_filled_vec(data_size, 0u8, "progressive output image")?;
             for y in 0..out_height {
                 self.ycbcr_to_rgb_row(
@@ -774,7 +751,7 @@ impl ProgressiveDecoder {
             })
         } else {
             // Upsample chroma
-            let alloc_size: usize = checked_plane_size(
+            let alloc_size: usize = checked_span(
                 &[full_width, full_height],
                 "progressive upsampled chroma plane",
             )?;
@@ -850,7 +827,7 @@ impl ProgressiveDecoder {
             }
 
             let data_size: usize =
-                checked_plane_size(&[out_width, out_height, bpp], "progressive output image")?;
+                checked_span(&[out_width, out_height, bpp], "progressive output image")?;
             let mut data: Vec<u8> = try_filled_vec(data_size, 0u8, "progressive output image")?;
             for y in 0..out_height {
                 self.ycbcr_to_rgb_row(
@@ -895,7 +872,7 @@ impl ProgressiveDecoder {
     ) -> Result<Image> {
         // For 4-component, output as CMYK (no color conversion)
         let bpp: usize = 4;
-        let data_size: usize = checked_plane_size(
+        let data_size: usize = checked_span(
             &[out_width, out_height, bpp],
             "progressive CMYK output image",
         )?;
@@ -1195,7 +1172,7 @@ mod tests {
     fn thirty_two_bit_geometry_overflow_is_rejected() {
         // 8192 x 8192 blocks = 2^26 blocks; x 128 bytes/block = 2^33 bytes.
         let blocks: usize =
-            checked_plane_size(&[8192, 8192], "test blocks").expect("block count fits both widths");
+            checked_span(&[8192, 8192], "test blocks").expect("block count fits both widths");
         assert_eq!(blocks, 1 << 26);
 
         let bytes: Option<usize> = blocks.checked_mul(core::mem::size_of::<[i16; 64]>());
@@ -1226,16 +1203,16 @@ mod tests {
     fn plane_size_overflow_is_rejected_on_every_pointer_width() {
         let half: usize = (isize::MAX as usize) / 2 + 1;
         assert!(matches!(
-            checked_plane_size(&[half, 4], "test plane"),
+            checked_span(&[half, 4], "test plane"),
             Err(JpegError::LimitExceeded { .. })
         ));
         // Exactly `isize::MAX` is the last accepted value; one more is not.
         assert_eq!(
-            checked_plane_size(&[isize::MAX as usize, 1], "test plane").expect("boundary is legal"),
+            checked_span(&[isize::MAX as usize, 1], "test plane").expect("boundary is legal"),
             isize::MAX as usize
         );
         assert!(matches!(
-            checked_plane_size(&[isize::MAX as usize / 2 + 1, 2], "test plane"),
+            checked_span(&[isize::MAX as usize / 2 + 1, 2], "test plane"),
             Err(JpegError::LimitExceeded { .. })
         ));
     }

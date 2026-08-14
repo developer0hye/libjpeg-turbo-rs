@@ -91,14 +91,14 @@
 
 | C Function | Description | Rust | Status |
 |---|---|---|---|
-| `tj3CompressFromYUV8(handle, src, w, align, h, &dst, &size)` | Compress packed YUV to JPEG | `yuv::compress_from_yuv()` | ✅ |
+| `tj3CompressFromYUV8(handle, src, w, align, h, &dst, &size)` | Compress packed YUV to JPEG | `yuv::compress_from_yuv_planes()` — the entry point splits the packed buffer itself; `compress_from_yuv()` infers the plane count from the buffer *length*, which cannot tell `TJSAMP_GRAY` from one plane of 4:4:4 (P4-165) | ✅ |
 | `tj3CompressFromYUVPlanes8(handle, planes, w, strides, h, &dst, &size)` | Compress planar YUV to JPEG | `yuv::compress_from_yuv_planes()` | ✅ |
 
 ### Color Encode (RGB → YUV, no JPEG)
 
 | C Function | Description | Rust | Status |
 |---|---|---|---|
-| `tj3EncodeYUV8(handle, src, w, pitch, h, pf, dst, align)` | RGB → packed YUV | `yuv::encode_yuv()` | ✅ |
+| `tj3EncodeYUV8(handle, src, w, pitch, h, pf, dst, align)` | RGB → packed YUV | `yuv::encode_yuv_planes()` + packing | ✅ |
 | `tj3EncodeYUVPlanes8(handle, src, w, pitch, h, pf, planes, strides)` | RGB → planar YUV | `yuv::encode_yuv_planes()` | ✅ |
 
 ### Decompression Header
@@ -134,7 +134,7 @@
 
 | C Function | Description | Rust | Status |
 |---|---|---|---|
-| `tj3DecodeYUV8(handle, src, align, dst, w, pitch, h, pf)` | Packed YUV → RGB | `yuv::decode_yuv()` | ✅ |
+| `tj3DecodeYUV8(handle, src, align, dst, w, pitch, h, pf)` | Packed YUV → RGB | `yuv::decode_yuv_planes()` — same reroute as `tj3CompressFromYUV8`: `decode_yuv()`'s length-based plane count cannot express `TJSAMP_GRAY` (P4-165) | ✅ |
 | `tj3DecodeYUVPlanes8(handle, planes, strides, dst, w, pitch, h, pf)` | Planar YUV → RGB | `yuv::decode_yuv_planes()` | ✅ |
 
 ### Lossless Transform

@@ -1,7 +1,8 @@
 use super::{
     build_huff_table, convert_to_ycbcr, encode_downsampled_chroma_block, encode_dummy_block,
     encode_single_block, format, is_y_dummy, marker_writer, scale_quant_for_fdct, tables, vec,
-    BitWriter, HuffTable, JpegError, PixelFormat, QuantDivisors, Result, ToString, Vec,
+    BitWriter, HuffTable, ImageLayout, JpegError, PixelFormat, QuantDivisors, Result, ToString,
+    Vec,
 };
 
 /// Compress raw pixel data into a JPEG byte stream using explicit per-component
@@ -42,7 +43,8 @@ pub fn compress_custom_sampling(
     }
 
     let bpp: usize = pixel_format.bytes_per_pixel();
-    let expected_size: usize = width * height * bpp;
+    let expected_size: usize =
+        ImageLayout::packed(width, height, bpp, "custom-sampling encode input")?.total_bytes();
     if pixels.len() < expected_size {
         return Err(JpegError::BufferTooSmall {
             need: expected_size,

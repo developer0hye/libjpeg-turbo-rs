@@ -45,7 +45,12 @@ fn mcu_for_tj(tjsamp: c_int) -> Option<(usize, usize)> {
 
 /// Is the subsampling `TJSAMP_GRAY`? Gray images only have a Y plane, so
 /// the chrominance plane sizes are 0.
-fn is_gray(tjsamp: c_int) -> bool {
+///
+/// Shared with `yuv.rs` rather than restated there: this module sizes the
+/// buffer and the YUV workers fill it, so the two disagreeing about how many
+/// planes a GRAY image has is precisely the P4-165 defect — the workers read
+/// and wrote three planes' worth of a buffer sized here at one.
+pub(crate) fn is_gray(tjsamp: c_int) -> bool {
     tjsamp == 3
 }
 

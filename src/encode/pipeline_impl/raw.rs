@@ -1,6 +1,7 @@
 use super::{
-    build_huff_table, encode_single_block, format, marker_writer, scale_quant_for_fdct, tables,
-    vec, BitWriter, HuffTable, JpegError, QuantDivisors, Result, Subsampling, ToString, Vec,
+    build_huff_table, checked_span, encode_single_block, format, marker_writer,
+    scale_quant_for_fdct, tables, vec, BitWriter, HuffTable, JpegError, QuantDivisors, Result,
+    Subsampling, ToString, Vec,
 };
 
 /// Compress JPEG from raw downsampled component planes.
@@ -66,8 +67,13 @@ pub fn compress_raw(
             }
         }
     }
+    // The plane dimensions are the caller's and nothing above caps them — the
+    // grayscale arm skips the cross-checks entirely. An unchecked product
+    // therefore wraps: `(usize::MAX / 4 + 1) x 4` is exactly 0, so an *empty*
+    // plane passed the very check that exists to reject it (P4-139 chunk 2).
     for (i, plane) in planes.iter().enumerate() {
-        let expected_size: usize = plane_widths[i] * plane_heights[i];
+        let expected_size: usize =
+            checked_span(&[plane_widths[i], plane_heights[i]], "raw component plane")?;
         if plane.len() < expected_size {
             return Err(JpegError::BufferTooSmall {
                 need: expected_size,
