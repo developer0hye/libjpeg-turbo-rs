@@ -32,6 +32,24 @@ and `git log` between tags.
   runs system/Rust bidirectional cross-decodes.
 
 ### Fixed
+- Classic source-manager setup and stdio semantics now match stock libjpeg
+  (P4-109, #469), trace-compared verbatim: `jpeg_mem_src` refuses NULL/empty
+  input with `JERR_INPUT_EMPTY` and a manager it did not install with
+  `JERR_BUFFER_SIZE` (including stdio↔mem cross-installs); `jpeg_stdio_src`
+  reads through the caller's `FILE *` with chunked C-ABI `fread` instead of
+  slurping a duplicated fd, so pre-positioned streams (fseek or fgetc),
+  post-decode resting position with trailing bytes (djpeg-style concatenated
+  streams), empty-file `JERR_INPUT_EMPTY`, the `JWRN_JPEG_EOF`-then-fake-EOI
+  dry-read path, and handle reuse across back-to-back JPEGs all behave as
+  stock's `jdatasrc.c` reader. The reader is platform-neutral C-ABI `fread`
+  (the old implementation's Unix-only fd handling is gone); the stock-trace
+  comparison itself runs on Unix, where a stock install is provisioned.
+- `jpeg_resync_to_restart` now survives suspension exactly as stock
+  (P4-97, #469): a genuinely suspending source manager is cross-validated
+  against stock over the whole decision table, and the extraneous-byte count
+  behind `JWRN_EXTRANEOUS_DATA` lives in per-decompressor state (upstream's
+  `cinfo->marker->discarded_bytes`), so a scan split by suspension reports
+  the full discarded span instead of only the bytes after the last refill.
 - The classic decompressor's state machine and finish lifecycle now match
   stock libjpeg (P4-104/P4-106, #468), trace-compared verbatim: a direct
   `jpeg_read_header` lands on `DSTATE_READY`; `jpeg_finish_decompress`
