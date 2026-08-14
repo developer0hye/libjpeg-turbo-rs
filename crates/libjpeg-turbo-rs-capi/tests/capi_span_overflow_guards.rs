@@ -10,7 +10,13 @@
 //! `JDIMENSION` one is reachable on a 64-bit host: `image_width` is a `u32` and
 //! `input_components` a small `c_int`, so their product cannot overflow
 //! `usize`. Those guards' `usize`-overflow and `isize::MAX` arms are
-//! 32-bit-only and **are not exercised anywhere today**.
+//! 32-bit-only, and since 2026-08-14 exactly one of the two is exercised.
+//! `armv7.yml` runs this file under qemu-arm, where `65500 * 65573` is
+//! 4,295,031,500 and so leaves a 32-bit `usize`: the same test below that pins
+//! the `JDIMENSION` bound on a 64-bit host takes `checked_samples_per_row`'s
+//! *overflow* arm there. `checked_staging_span`'s `isize::MAX` arm is still
+//! **not exercised anywhere** — the width test returns before reaching it and
+//! the companion is 64x64.
 //!
 //! The *TJ3* source-span guards are a different case, which this comment used
 //! to lump in with the above. Their width and height are both
@@ -23,16 +29,17 @@
 //! wrote it); what it lacked was a test, because this comment said the arm
 //! was unreachable.
 //!
-//! An earlier version of this comment claimed the `armv7` and `wasm32-wasip1`
-//! legs covered the 32-bit-only arms. They do not: `armv7.yml` runs the root
-//! crate's `--lib` and `no_std_dispatch` only, and the WASI leg selects the
-//! root workspace member. Neither builds this crate's C-ABI tests. What changed
-//! with P4-139 chunk 1 is that they now *could*: gating the encode ABI-offset
-//! block on `target_pointer_width = "64"` removed the assertion that made this
-//! crate uncompilable on ILP32, and `cargo check -p libjpeg-turbo-rs-capi
-//! --tests --target armv7-unknown-linux-gnueabihf` succeeds. Adding the CI leg
-//! is still work, and is recorded under P4-139 criterion 5 rather than asserted
-//! here.
+//! How the 32-bit half got covered, since an earlier version of this comment
+//! claimed it already was. Until P4-139 chunk 1 neither 32-bit leg built this
+//! crate's C-ABI tests: `armv7.yml` ran the root crate's `--lib` and
+//! `no_std_dispatch` only, and the WASI leg selects the root workspace member.
+//! Chunk 1 made it possible — gating the encode ABI-offset block on
+//! `target_pointer_width = "64"` removed the assertion that made this crate
+//! uncompilable on ILP32 — and criterion 5's CI leg landed on 2026-08-14:
+//! `armv7.yml` gained a second qemu-arm step running `-p
+//! libjpeg-turbo-rs-capi --lib --test capi_layout_adoption --test
+//! capi_span_overflow_guards`. The WASI leg still selects the root workspace
+//! member and still does not build this file.
 
 use std::ffi::{c_int, c_void};
 

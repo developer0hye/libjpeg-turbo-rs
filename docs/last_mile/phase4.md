@@ -6376,6 +6376,11 @@ merged-upsample and RGB565 kernels that are under active optimisation. The
 same goes for `api/yuv.rs`'s *internal* plane allocations (`y_w * y_h` and
 friends): the entry gates are checked now, so a wrapping geometry is refused
 before it reaches them, but the allocations themselves are still written out.
+Also left, from the final drift audit: `checked_staging_span`'s `isize::MAX`
+arm is exercised by no leg at any pointer width — the width test returns at
+the row check first and the companion geometry is 64x64; documented in
+`capi_span_overflow_guards.rs` and here so the gap is tracked, not hidden.
+
 Also left: `ScanlineEncoder::new`'s `vec![0u8; width * height * bpp]`, which is
 an infallible constructor and so needs an API decision (panic, or a fallible
 `try_new`) rather than a mechanical conversion — file it with the final chunk.
@@ -6495,23 +6500,35 @@ an infallible constructor and so needs an API decision (panic, or a fallible
   cannot overflow — `input_dim` is bounded by a JPEG's 65535 dimension limit and
   `num` by 16 — so what is left is the `assert!` on `denom == 0`, a panic on
   public input. That is an API-quality defect, not a memory-safety one.
-* **Criterion 5 — a 32-bit C-ABI leg.** The compile blocker is gone: chunk 1
+* **Criterion 5 — a 32-bit C-ABI leg. Done 2026-08-14; kept here because the
+  rest of this list is not.** The compile blocker went first: chunk 1
   gated the encode ABI-offset assertion block on `target_pointer_width = "64"`
   (it was the one ungated LP64 block left, and it failed the *build* on ILP32
   rather than flagging a real mismatch), so `cargo check -p
   libjpeg-turbo-rs-capi --tests --target armv7-unknown-linux-gnueabihf` now
   succeeds, warning-free (the 64-bit-only tests live in one
   `cfg(target_pointer_width = "64")` module rather than carrying three separate
-  gates, so nothing is left unused on ILP32). **The CI job landed with the
-  final chunk (2026-08-14):** `armv7.yml`'s job gained a second qemu-arm step
-  building and running `-p libjpeg-turbo-rs-capi --lib --test
-  capi_layout_adoption --test capi_span_overflow_guards` — the suites where
-  the `usize`-overflow and `isize::MAX` arms live — under the job's existing
-  `-C overflow-checks=on`, which turns a 32-bit wrap into a loud failure.
-  Suites are selected by name because a blanket capi test build would drag in
-  C-compiling harnesses; the C-oracle comparisons inside them self-skip
-  without `LIBJPEG_TURBO_PREFIX`, which is deliberate — this leg gates the
-  arithmetic, not the oracle.
+  gates, so nothing is left unused on ILP32). **The CI leg landed 2026-08-14:**
+  `armv7.yml`'s job gained a second qemu-arm step building and running
+  `-p libjpeg-turbo-rs-capi --lib --test capi_layout_adoption --test
+  capi_span_overflow_guards` under the job's existing `-C overflow-checks=on`,
+  which turns a 32-bit wrap into a loud failure. Suites are selected by name
+  because a blanket capi test build would drag in C-compiling harnesses;
+  neither suite named here links a C oracle at all.
+
+  What the leg adds, stated exactly, because the suite names invite a stronger
+  reading than is true. It executes one guard arm that no 64-bit leg reaches:
+  `capi_span_overflow_guards`' 65500 x 65573 is 4,295,031,500, past `u32::MAX`,
+  so on ILP32 the refusal comes from `checked_samples_per_row`'s `usize`
+  overflow rather than from the `JDIMENSION` bound that fires on a 64-bit host.
+  Everything else it adds is the crate's ordinary span arithmetic run at half
+  pointer width. It does **not** execute the TJ3 `isize::MAX` arm:
+  `capi_layout_adoption`'s `source_span_bounds` module is
+  `cfg(target_pointer_width = "64")`, so 3 of that suite's 10 tests compile out
+  here — by design, per the correction below. The classic guard's own
+  `isize::MAX` arm (`checked_staging_span`) is still unexercised on either
+  width; the two tests in that suite return at the row-width check or use a
+  64x64 geometry.
 
   **Correction (chunk 1):** this entry previously said the `usize`-overflow and
   `isize::MAX` arms of *the* span guards were 32-bit-only. That is true only of
@@ -6585,8 +6602,9 @@ out, but do not leave it unstated.
 
 What is worth doing instead, and is *not* claimed as done here: document
 recommended bounds for untrusted input in the crate docs next to
-`DecodeLimits`, as guidance rather than a second default. Recorded with
-criterion 5's remaining work above.
+`DecodeLimits`, as guidance rather than a second default. Carried with the
+final chunk's remaining work above — it was parked against criterion 5, which
+closed 2026-08-14.
 
 ## P4-140. Public Documentation Claims Safety and Drop-In Status the Code Does Not Support — **CLOSED 2026-08-09**
 
