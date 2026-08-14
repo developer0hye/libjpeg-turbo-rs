@@ -317,11 +317,11 @@
 ## 10. YUV / Planar API
 
 ### RGB → YUV (color conversion only, no JPEG)
-- [x] `tj3EncodeYUV8()` — RGB → packed YUV buffer (`yuv::encode_yuv()`)
+- [x] `tj3EncodeYUV8()` — RGB → packed YUV buffer (runs `yuv::encode_yuv_planes()` and packs the result itself, keeping one plane for `TJSAMP_GRAY`; `encode_yuv()` packs whatever the *pixel* format implies, which is not the same count — P4-165)
 - [x] `tj3EncodeYUVPlanes8()` — RGB → separate Y/Cb/Cr plane buffers (`yuv::encode_yuv_planes()`)
 
 ### YUV → JPEG (compress from YUV)
-- [x] `tj3CompressFromYUV8()` — Packed YUV → JPEG (`yuv::compress_from_yuv()`)
+- [x] `tj3CompressFromYUV8()` — Packed YUV → JPEG (the entry point splits the packed buffer itself and runs `yuv::compress_from_yuv_planes()`; `compress_from_yuv()` infers the plane count from the buffer length, which cannot express `TJSAMP_GRAY` — P4-165)
 - [x] `tj3CompressFromYUVPlanes8()` — Planar YUV → JPEG (`yuv::compress_from_yuv_planes()`)
 
 ### JPEG → YUV (decompress to YUV)
@@ -329,7 +329,7 @@
 - [x] `tj3DecompressToYUVPlanes8()` — JPEG → separate Y/Cb/Cr plane buffers (`yuv::decompress_to_yuv_planes()`; same divergence — the Rust function returns one plane per SOF component, so four for CMYK/YCCK)
 
 ### YUV → RGB (color conversion only, no JPEG)
-- [x] `tj3DecodeYUV8()` — Packed YUV → RGB (`yuv::decode_yuv()`)
+- [x] `tj3DecodeYUV8()` — Packed YUV → RGB (splits the packed buffer and runs `yuv::decode_yuv_planes()`; same reason as `tj3CompressFromYUV8` — P4-165)
 - [x] `tj3DecodeYUVPlanes8()` — Planar YUV → RGB (`yuv::decode_yuv_planes()`)
 
 ### Buffer Size Helpers

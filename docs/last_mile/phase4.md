@@ -7573,3 +7573,192 @@ sequence; no-SOI and truncated-stream error/warning traces. Fix the
 shim until the traces match. Gap 1's fix must also be exercised by a
 consumer-idiom probe (`bytes_in_buffer == 0 ? fill : read window`) that
 never touches freed memory under ASan.
+
+## P4-165. Packed-YUV and Plane-Array Paths Size Three Planes for `TJSAMP_GRAY` — **CLOSED 2026-08-14**
+
+**Motivation.** Filed 2026-08-14 by the P4-139 span-computation survey,
+before the `ImageLayout` refactor touches these lines. `tj3YUVBufSize`
+correctly sizes **one** plane for `TJSAMP_GRAY` (`bufsize.rs:189`,
+`is_gray → n_planes = 1`, matching stock), but the YUV worker paths in
+`crates/libjpeg-turbo-rs-capi/src/yuv.rs` hardcode three (`yuv.rs` line
+numbers as of filing, before the fix below moved them):
+
+- `subsamp_from_tj` maps `3 => Subsampling::S444 /* TJSAMP_GRAY */`
+  (`yuv.rs:79`), so `packed_yuv_len` (`:63`, `for c in 0..3`) and
+  `split_packed_yuv` (`:162`) compute a three-full-resolution-plane
+  span for GRAY.
+- `tj3CompressFromYUV8` (`:522`) and `tj3DecodeYUV8` (`:1014`) hand that
+  length to `slice::from_raw_parts` over the caller's packed buffer — a
+  caller who allocated `tj3YUVBufSize(w, align, h, TJSAMP_GRAY)` bytes
+  (the documented contract) is read ~3× past the allocation.
+- `tj3CompressFromYUVPlanes8` (`:673`) and `tj3DecodeYUVPlanes8`
+  (`:1135`) loop `0..3` over the caller's `planes`/`strides` arrays;
+  stock touches only `planes[0]` for GRAY, so a legal one-element array
+  is read past its end.
+
+**Root cause.** The GRAY→S444 mapping conflates "no chroma subsampling"
+with "chroma present"; every consumer then trusts `Subsampling` alone to
+imply the plane count.
+
+**Acceptance criteria.** All six YUV entry points agree with
+`tj3YUVBufSize`'s plane count for `TJSAMP_GRAY`, cross-validated against
+stock TurboJPEG (round-trip byte comparisons and, for the OOB shape, a
+buffer sized exactly to `tj3YUVBufSize` under ASan or with guard
+allocations). A capi test covers `TJSAMP_GRAY` in the packed and planar
+suites — today `tests/yuv.rs` has none.
+
+**Status (2026-08-14): closed.** The plane count now travels separately
+from the geometry. `plane_count_from_tj` in `yuv.rs` is upstream's
+`nc = (subsamp == TJSAMP_GRAY ? 1 : 3)` (`turbojpeg.c:1038`) built on the
+*same* `bufsize::is_gray` predicate `tj3YUVBufSize` sizes by, so the two
+cannot drift; `packed_yuv_len` and `split_packed_yuv` take it as a
+parameter, `pack_yuv_planes` packs exactly the planes it is handed, and
+all six affected entry points thread it. The GRAY→`S444` mapping stays —
+it is right for plane 0's dimensions, which is all a `Subsampling` can
+say. The two packed entry points also stopped routing through
+`compress_from_yuv` / `decode_yuv`, which infer the plane count from the
+buffer *length*: a one-plane GRAY buffer and one plane of a three-plane
+4:4:4 image are the same length, so that inference cannot be trusted with
+a length this layer already knows.
+
+Proved by `crates/libjpeg-turbo-rs-capi/tests/capi_yuv_gray.rs`
+(10 tests), whose full trace is compared verbatim against
+`examples/tj3_yuv_gray_oracle.c` linked against real TurboJPEG, over five
+geometries — 64×64 and 33×17 at `align` 1 and 4, 17×33 at `align` 1.
+Destinations are over-allocated and guard-filled past the one-plane
+contract length and sources sentinel-filled past it, with the chroma
+slots of every plane array pointing at owned buffers, so the overrun is
+observable without the test ever performing one. Before the fix, six of
+the eight entry points diverged: `encodeyuv8` left `guard=DIRTY` and
+`encodeplanes8` `guard1`/`guard2=DIRTY`, `decodeyuv8`/`decodeplanes8`
+returned `rgbgray=no` (sentinel bytes folded in as chroma), and
+`fromyuv8`/`fromyuvplanes8` produced `jsubsamp=0` —
+a three-component JPEG for a grayscale request.
+`toyuv8`/`toyuvplanes8` were already correct, taking their count from the
+JPEG's own SOF as upstream does, and are now pinned. Falsified by forcing
+`plane_count_from_tj` to 3, which reproduces exactly those six failures.
+Five of the tests state the contract without reference to the oracle, so
+the gate keeps its teeth where no TurboJPEG development install exists.
+
+The two packed entry points changed route for *every* subsampling, not
+only for GRAY, so the trace carries three-plane controls that the GRAY
+cases cannot see: `decodeyuv8_420rgb` and `decodeyuv8_420gray` compare a
+4:2:0 packed decode against stock — `TJPF_GRAY` because that output
+format is the one whose internal branch moved — and
+`packed_and_planar_three_plane_compress_agree` pins the compress half as
+an internal equivalence. It is stated that way rather than as an oracle
+line because `tj3CompressFromYUV8` diverges from stock at 4:2:0 for two
+reasons that predate this change and are now filed as **P4-167**: it
+refuses non-MCU-aligned dimensions, and its output cannot be decompressed
+to `TJPF_GRAY`. A `fromyuv8_420` oracle case was written during this work
+and removed when those two divergences turned out to be pre-existing, so
+it is **not** in the tree waiting to be un-commented — writing it again is
+part of P4-167.
+
+The audit also found one deliberate non-divergence, excluded from the
+trace rather than filed: this port zero-fills the inter-row alignment
+padding of a packed buffer while upstream leaves those bytes untouched
+(its row copies are `pw` wide though its row pointers advance by the
+stride). Both stay inside the caller's own allocation, and upstream
+documents nothing about their contents, so the digests compare `pw` bytes
+per row at the stride. A second divergence *was* filed: the encode entry
+points accept a grayscale source under a non-grayscale subsampling, which
+upstream refuses — pre-existing, and the reason the plane-count clamp
+here is a `min` rather than an equality check (**P4-166**).
+
+
+## P4-166. `tj3EncodeYUV*8` Silently Accepts a Grayscale Source Under a Non-Grayscale Subsampling — **OPEN**
+
+**Motivation.** Filed 2026-08-14 from the P4-165 review. With
+`TJPARAM_SUBSAMP` set to anything but `TJSAMP_GRAY` and `pixelFormat`
+`TJPF_GRAY`, `tj3EncodeYUV8` / `tj3EncodeYUVPlanes8` return 0 having
+filled only the luma plane. The caller sized `dstBuf` from
+`tj3YUVBufSize(w, align, h, TJSAMP_420)` and gets its chroma third left
+at whatever was there before; feeding that buffer to
+`tj3CompressFromYUV8` compresses uninitialised memory as chroma.
+
+Upstream refuses the call. `setCompDefaults(this, pixelFormat, TRUE)`
+reaches its `default:` arm (`turbojpeg.c:402-409`) and, with a non-GRAY
+subsampling and a non-CMYK format, calls
+`jpeg_set_colorspace(cinfo, JCS_YCbCr)`. `pf2cs[TJPF_GRAY]` is
+`JCS_GRAYSCALE`, so `jinit_color_converter` hits `case JCS_YCbCr:` with
+an `in_color_space` that is neither ExtRGB nor YCbCr and raises
+`JERR_CONVERSION_NOTIMPL` (`jccolor.c:624-628`). The entry point returns
+-1 with "Unsupported color conversion request".
+
+**Root cause.** `encode_yuv_planes` derives its plane count from the
+*pixel format* (`src/api/yuv.rs:143`, grayscale ⇒ one plane) while the
+destination is sized from the *subsampling*. The C-ABI layer reconciles
+the two by clamping — `current_plane_count(inst).min(planes.len())` at
+`yuv.rs:391` and `:505` — which turns the mismatch into a short write.
+This is pre-existing: before P4-165 the same shape produced the same
+one-plane output, because `pack_yuv_planes` iterated whatever it was
+handed. P4-165 made the clamp explicit without changing what it does, and
+its `min` is still needed in the other direction (a three-plane RGB
+source under `TJSAMP_GRAY` must truncate).
+
+This is the P4-39 / P4-150 shape — a silent substitute where upstream
+raises a documented error — and the substituted value is uninitialised
+caller memory, which makes it worse than the usual case.
+
+**Acceptance criteria.** Both encode entry points refuse a grayscale
+source under a non-grayscale subsampling with an error, and the
+`TJSAMP_GRAY` truncation direction keeps working. Cross-validated against
+stock in `tests/capi_yuv_gray.rs`'s oracle trace, which must also pin the
+refusal's *position* in the argument-validation chain — P4-155 showed the
+YUV entry points disagree about whether the subsampling gate or the
+pixel-format check runs first, so where this refusal lands relative to
+`TJPARAM_SUBSAMP`-unset and a bad `align` is part of the contract, not an
+implementation detail. Audit `tj3CompressFromYUV*8` for the same shape
+while there: it takes its planes from the caller rather than from a pixel
+format, so the mismatch cannot arise the same way, but the plane-count
+validation is worth stating rather than assuming.
+
+## P4-167. `tj3CompressFromYUV*8` Refuses MCU-Padded Planes, and `tj3Decompress8` Cannot Emit `TJPF_GRAY` From a Colour JPEG — **OPEN**
+
+**Motivation.** Filed 2026-08-14 by the P4-165 three-plane control cases,
+which compare `tj3CompressFromYUV8` at 4:2:0 against stock. Two
+independent divergences, both pre-existing (confirmed by re-running the
+control against the pre-P4-165 call path, which fails identically):
+
+1. **Non-MCU-aligned dimensions are refused.** At 33×17 and 17×33 with
+   `TJSAMP_420`, `tj3CompressFromYUV8` returns -1 with
+   `"corrupt data: Y plane dimensions 34x18 do not match image dimensions
+   33x17"`, where stock returns 0. The YUV plane contract *is* MCU-padded
+   — `tj3YUVPlaneWidth(0, 33, TJSAMP_420)` is `PAD(33, 2) = 34` — so the
+   planes are the size the caller was told to allocate, and
+   `api::raw_data::compress_raw` rejects them for being larger than the
+   image. Upstream handles the same mismatch by copying rows into
+   MCU-sized scratch and replicating the last sample
+   (`turbojpeg.c:1372-1423`, the `usetmpbuf` path — detected at `:1376`,
+   copied and replicated at `:1412-1423`). Only 4:4:4 and
+   already-aligned geometries work today; a caller doing
+   `tj3DecompressToYUV8` → `tj3CompressFromYUV8` on any odd-sized 4:2:0
+   image gets a hard failure where stock round-trips.
+2. **`TJPF_GRAY` output from a three-component JPEG fails.**
+   `tj3Decompress8(.., TJPF_GRAY)` on a 4:2:0 JPEG errors out:
+   `repack_into_pitched`
+   (`crates/libjpeg-turbo-rs-capi/src/decompress.rs:189`)
+   handles grayscale *source* → RGB destination but has no
+   RGB source → grayscale destination arm, and `PixelFormat::Grayscale`
+   has no `red_offset`, so the generic path refuses. Upstream sets
+   `out_color_space = JCS_GRAYSCALE` and lets `jdcolor` return the luma
+   directly. This is a common TurboJPEG call — `tjbench` and any
+   luma-only consumer make it.
+
+**Acceptance criteria.** (1) `tj3CompressFromYUV8` /
+`tj3CompressFromYUVPlanes8` accept MCU-padded planes for every
+subsampling at arbitrary dimensions, matching upstream's `usetmpbuf`
+handling; (2) `tj3Decompress8` and the 12/16-bit siblings emit `TJPF_GRAY`
+from a colour JPEG. Cross-validated by adding a `fromyuv8_420` case to
+`tests/capi_yuv_gray.rs`'s oracle trace and the matching case to
+`examples/tj3_yuv_gray_oracle.c`, both of which must report
+`rc=0 … jsubsamp=2 roundtrip=ok` against stock at all five geometries.
+Such a pair existed while P4-165 was being written and was **removed**
+once these divergences proved pre-existing — it must be written afresh,
+not un-commented. The internal-equivalence test
+`packed_and_planar_three_plane_compress_agree` stays either way. Note
+that criterion 1 is about the *root crate's* `compress_raw` contract, so
+check whether `api::raw_data` should pad internally or whether the C-ABI
+layer should, and whether `P4-95`'s classic raw-data path has the same
+hole.

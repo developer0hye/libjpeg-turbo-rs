@@ -32,6 +32,20 @@ and `git log` between tags.
   runs system/Rust bidirectional cross-decodes.
 
 ### Fixed
+- The TurboJPEG YUV entry points now size **one** plane for `TJSAMP_GRAY`,
+  matching `tj3YUVBufSize` and stock (P4-165). They sized three, because
+  `TJSAMP_GRAY` was mapped onto the 4:4:4 geometry — right for the luma plane's
+  dimensions, wrong for the plane count. A caller who allocated the documented
+  `tj3YUVBufSize(w, align, h, TJSAMP_GRAY)` bytes therefore had that buffer
+  overrun: `tj3EncodeYUV8` **wrote** a three-plane packed length into it, while
+  `tj3CompressFromYUV8` and `tj3DecodeYUV8` **read** roughly three times its
+  length; the `…Planes8` spellings of all three walked slots 1 and 2 of a plane
+  array upstream lets the caller size at one element. `tj3CompressFromYUV*8`
+  also emitted a three-component JPEG for a grayscale request, with the chroma
+  invented from whatever followed the caller's buffer. The decompress
+  direction (`tj3DecompressToYUV*8`) was already correct and is now pinned.
+  Cross-validated line for line against real TurboJPEG over five geometries
+  including odd dimensions and `align > 1`.
 - Classic source-manager setup and stdio semantics now match stock libjpeg
   (P4-109, #469), trace-compared verbatim: `jpeg_mem_src` refuses NULL/empty
   input with `JERR_INPUT_EMPTY` and a manager it did not install with
