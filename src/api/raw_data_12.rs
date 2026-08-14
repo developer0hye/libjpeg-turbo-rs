@@ -8,6 +8,7 @@
 /// This mirrors `jpeg12_write_raw_data()` / `jpeg12_read_raw_data()` from
 /// libjpeg-turbo's 12-bit build (`jcapistd.c` / `jdapistd.c`).
 use crate::common::error::{JpegError, Result};
+use crate::common::layout::checked_span;
 use crate::common::types::Subsampling;
 use crate::decode::bitstream::BitReader;
 use crate::decode::huffman;
@@ -481,8 +482,16 @@ pub fn compress_raw_12(
         }
     }
 
+    // Same shape as `compress_raw`'s 8-bit loop: the plane dimensions are the
+    // caller's, so the product must be checked before it can bound anything.
+    // The span is in *samples* because `plane.len()` is — each is one `i16`,
+    // and a sample count that fits `isize::MAX` cannot exceed a slice that
+    // already exists (P4-139 chunk 2).
     for (i, plane) in planes.iter().enumerate() {
-        let expected_size: usize = plane_widths[i] * plane_heights[i];
+        let expected_size: usize = checked_span(
+            &[plane_widths[i], plane_heights[i]],
+            "12-bit raw component plane",
+        )?;
         if plane.len() < expected_size {
             return Err(JpegError::BufferTooSmall {
                 need: expected_size,

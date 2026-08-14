@@ -215,10 +215,10 @@ impl ImageLayout {
 /// The empty product is `1`, as arithmetic requires; no caller passes an
 /// empty slice, and one that did would be asking for a factorless span.
 ///
-/// This generalises `progressive_output`'s private `checked_plane_size`,
-/// which is contract-identical but **not yet repointed here** — converting
-/// the root crate's decode/encode sites is P4-139 chunk 2, so the twin still
-/// exists for now.
+/// This absorbed `progressive_output`'s private `checked_plane_size`, which
+/// was contract-identical. Chunk 2 deleted that twin and repointed its twelve
+/// call sites here, so the formula has one implementation rather than two that
+/// could drift.
 #[must_use = "the checked span is the result; discarding it discards the check"]
 pub fn checked_span(factors: &[usize], what: &'static str) -> Result<usize> {
     let mut total: usize = 1;

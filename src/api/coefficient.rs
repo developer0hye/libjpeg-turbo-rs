@@ -4,7 +4,9 @@
 /// Provides read_coefficients() / write_coefficients() / transform() API
 /// similar to libjpeg-turbo's jpegtran workflow.
 use crate::common::error::{JpegError, Result};
+use crate::common::layout::checked_span;
 use crate::common::quant_table::NATURAL_ORDER;
+use crate::common::try_alloc::try_filled_vec;
 use crate::common::types::{MarkerSaveConfig, SavedMarker};
 use crate::decode::marker::{JpegMetadata, MarkerReader};
 use crate::encode::huffman_encode::{build_huff_table, BitWriter, HuffTable, HuffmanEncoder};
@@ -239,15 +241,25 @@ pub fn read_coefficients(data: &[u8]) -> Result<JpegCoefficients> {
         }
     }
 
-    // Allocate component coefficient buffers
+    // Allocate component coefficient buffers. Every factor is header geometry
+    // an attacker controls, so the block count is checked and the allocation
+    // fallible rather than a wrapping product handed to `vec![]`, which aborts
+    // on refusal (P4-136, P4-139 chunk 2).
     let mut comp_data: Vec<ComponentCoefficients> = frame
         .components
         .iter()
         .map(|comp| {
-            let bx = mcus_x * comp.horizontal_sampling as usize;
-            let by = mcus_y * comp.vertical_sampling as usize;
-            ComponentCoefficients {
-                blocks: vec![[0i16; 64]; bx * by],
+            let bx: usize = checked_span(
+                &[mcus_x, comp.horizontal_sampling as usize],
+                "coefficient block columns",
+            )?;
+            let by: usize = checked_span(
+                &[mcus_y, comp.vertical_sampling as usize],
+                "coefficient block rows",
+            )?;
+            let blocks: usize = checked_span(&[bx, by], "whole-image coefficient array")?;
+            Ok(ComponentCoefficients {
+                blocks: try_filled_vec(blocks, [0i16; 64], "whole-image coefficient array")?,
                 blocks_x: bx,
                 blocks_y: by,
                 h_sampling: comp.horizontal_sampling,
@@ -258,9 +270,9 @@ pub fn read_coefficients(data: &[u8]) -> Result<JpegCoefficients> {
                 // defined table keeps the output self-consistent.
                 quant_table_index: slot_to_dense[comp.quant_table_index as usize].unwrap_or(0),
                 component_id: comp.id,
-            }
+            })
         })
-        .collect();
+        .collect::<Result<Vec<ComponentCoefficients>>>()?;
 
     if frame.is_progressive && metadata.is_arithmetic {
         // SOF10: arithmetic progressive — use arithmetic decoder with progressive scans.

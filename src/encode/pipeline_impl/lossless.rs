@@ -1,6 +1,6 @@
 use super::{
-    build_huff_table, format, marker_writer, vec, BitWriter, HuffTable, HuffmanEncoder, JpegError,
-    PixelFormat, Result, ToString, Vec,
+    build_huff_table, format, marker_writer, vec, BitWriter, HuffTable, HuffmanEncoder,
+    ImageLayout, JpegError, PixelFormat, Result, ToString, Vec,
 };
 
 /// Compress as lossless JPEG (SOF3).
@@ -96,7 +96,8 @@ pub fn compress_lossless_extended_precision(
     }
 
     let bpp: usize = pixel_format.bytes_per_pixel();
-    let expected_size: usize = width * height * bpp;
+    let expected_size: usize =
+        ImageLayout::packed(width, height, bpp, "lossless encode input")?.total_bytes();
     if pixels.len() < expected_size {
         return Err(JpegError::BufferTooSmall {
             need: expected_size,
@@ -483,7 +484,8 @@ pub fn compress_lossless_arithmetic(
     }
 
     let bpp: usize = pixel_format.bytes_per_pixel();
-    let expected_size: usize = width * height * bpp;
+    let expected_size: usize =
+        ImageLayout::packed(width, height, bpp, "lossless encode input")?.total_bytes();
     if pixels.len() < expected_size {
         return Err(JpegError::BufferTooSmall {
             need: expected_size,

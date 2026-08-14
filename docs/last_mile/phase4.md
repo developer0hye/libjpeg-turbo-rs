@@ -6204,7 +6204,7 @@ instance; this entry is the common cause.
   then bound a raw slice. It must be a typed error.
 - **Unchecked products.** `src/api/progressive_output.rs:257`
   (`ci.comp_w * ci.blocks_y * block_size`) wraps in release. **Fixed by P4-136**
-  (closed 2026-08-10) — every span in that file is now `checked_plane_size` +
+  (closed 2026-08-10) — every span in that file is now `checked_span` +
   `try_filled_vec`. Listed here because it is the shape, not because it is open.
 - **Inherited from P4-137 (recorded 2026-08-11):** memory-sizing
   `saturating_mul` in `crates/libjpeg-turbo-rs-capi/src/jpeglib.rs` at `:6697`
@@ -6258,11 +6258,127 @@ instance; this entry is the common cause.
 **Status (2026-08-11): partial — criterion 3 done, and with it every
 *confirmed instance*. What remains is the refactor, not a live defect.**
 
-**Status (2026-08-14): still partial — criterion 1 done, criterion 2 half
-done, criterion 5's property-test half done.** `ImageLayout` exists
+**Status (2026-08-14, chunk 1): still partial — criterion 1 done, criterion 2
+half done, criterion 5's property-test half done.** `ImageLayout` exists
 (`src/common/layout.rs`) and the C-ABI crate adopted it; the root crate's
 decode/encode sites are chunk 2. Criterion 4 (`ScalingFactor`) is untouched and
 still waits on 0.9.0. Details in **What remains** below.
+
+**Status (2026-08-14, chunk 2): criterion 2 now covers the root crate's
+encode input, crop, YUV, plane-size and coefficient families, and adoption
+found five live defects.** Pinned by `tests/layout_adoption.rs` (22 tests), the
+root-crate counterpart to chunk 1's `capi_layout_adoption.rs`. Each was
+verified red first — the observation is recorded in the test's doc comment,
+because "returns an error" is the same assertion whether the old behaviour was
+a panic, a wrap, or an unrelated error raised by accident. All `file:line`
+coordinates in the middle column are **pre-fix**; the lines have since moved.
+
+| Defect | Observed before the fix | Now |
+| --- | --- | --- |
+| `Encoder::encode` reads rows before any path's size check (`bottom_up`, `fancy_downsampling`, `grayscale_from_color`) | slice-range panic at `encoder.rs:471` / `:789`, index-out-of-bounds at `:577` | `BufferTooSmall`, from a `checked_input_layout` inside each of the three steps |
+| `StreamingDecoder::crop_scanline` computes `image_width - aligned_x` and `xoffset + width` unchecked | "attempt to subtract with overflow" / "attempt to add with overflow" at `streaming.rs:58` / `:57` | `Unsupported`, with the end still clamped to the image for in-range windows |
+| `ScanlineDecoder`'s crop guard is `x + width > img.width` on an unchecked sum | "attempt to add with overflow" at `scanline.rs:163`; in release the sum wraps *below* the width and the guard passes | `Unsupported`, from `checked_add` |
+| `compress_raw` / `compress_raw_12` size the plane check with an unchecked product and cap nothing | "attempt to multiply with overflow" at `raw.rs:70` / `raw_data_12.rs:485`; in release `(usize::MAX / 4 + 1) x 4` wraps to 0 and an **empty** plane passes | `LimitExceeded`; a representable short plane still reports `BufferTooSmall` |
+| `api/yuv.rs`'s `validate_pixel_buffer` — the entry gate for the pixels-in direction, `encode_yuv_planes` and `encode_yuv` — sizes `width * height * bpp` unchecked | "attempt to multiply with overflow" at `yuv.rs:56`; in release `(usize::MAX / 4 + 1) x 4` at `Rgb` wraps to 0 and an **empty** buffer passes, after which the row loops index it | `LimitExceeded`; the two packed-plane totals are summed through `checked_sum_of_planes` for the same reason |
+
+Two are worth naming. The third and fifth are the same mistake: **a bounds
+check written on a wrapping product is not a weaker check, it is an *inverted*
+one** — the larger the input, the smaller the value it compares, so the check
+admits exactly the geometry it exists to reject.
+
+And the first taught the sharper lesson, in review rather than in the original
+fix. The obvious shape — one validation gate at the top of `Encoder::encode` —
+*regressed* four error-precedence cases, because a new first gate does not only
+add an error, it takes precedence over every error that used to come first. A
+caller passing `lossless_predictor(9)` with a short buffer was told
+"BufferTooSmall" about a buffer the lossless encoder had not reached, where it
+used to be told the predictor was out of range. The check therefore lives in
+the three helpers that read rows (`flip_rows`, `apply_triangle_prefilter`, the
+grayscale extraction), each calling `checked_input_layout` first, so it cannot
+fire unless the buffer is about to be indexed.
+`an_option_error_still_precedes_the_buffer_check` pins every error that must
+still come first: the lossless predictor at both a short buffer and a zero
+dimension, the smoothing/progressive combination, and the two dimension errors
+as controls.
+
+The surviving claim is narrower than "precedence is preserved", and worth
+stating exactly: an encode that rearranges nothing never reaches the check, so
+nothing moves. On the three paths that *do* rearrange, a short buffer now
+reports `BufferTooSmall` where some other error might have come first — but
+there it previously reported nothing at all, because the step panicked.
+
+Families converted in chunk 2, all behaviour-neutral except where noted above:
+
+* **Encode input (10 sites + the 12-bit twin).** The `width * height * bpp`
+  products in `encode/pipeline_impl/{baseline,optimized,progressive,arithmetic,custom_sampling,lossless}.rs`
+  (nine sites) and `api/encoder.rs`'s `checked_input_layout` (the tenth) now go
+  through `ImageLayout::packed`, and the two caller-supplied plane loops
+  (`raw.rs`, `api/raw_data_12.rs`) through `checked_span`. On 64-bit the nine
+  pipeline sites are unreachable behind the 65535 dimension cap and this is
+  hardening; on 32-bit `65535 x 65535 x bpp` does not fit `usize` and the wrap
+  was live. One consequence worth stating, since the 32-bit legs run the lib
+  tests: on ILP32 those sites now answer `LimitExceeded` where they answered
+  `BufferTooSmall`, because `65535^2` exceeds `isize::MAX` before any buffer is
+  compared.
+* **`common/bufsize.rs`, the unchecked twins of the C-ABI crate's checked
+  forms.** `pad` became `checked_pad`, and `jpeg_buf_size`, `yuv_plane_size`,
+  `yuv_buf_size`, `yuv_plane_width`/`_height`, `calc_jpeg_dimensions` and
+  `calc_output_dimensions` now report **0** for unrepresentable geometry
+  rather than a wrapped product.
+  Saturating was not an option (criterion 3 bars it, and `tests/sizing_arithmetic_gate.rs`
+  enforces that), and these signatures are infallible `usize` — so the refusal
+  is 0, which is what the C twins already answer (`tj3JPEGBufSize` returns 0
+  and records "Image is too large"; `tj3YUVPlaneWidth` returns 0 for an
+  argument it rejects). The rule is stated once in the module header rather
+  than per function. Three sites needed more than a mechanical swap:
+  `yuv_buf_size` must distinguish a plane that *refused* (reporting 0) from a
+  genuinely empty one, since summing the refusal would under-report the total;
+  `jpeg_buf_size` puts its `+ 2048` header allowance inside the `isize::MAX`
+  ceiling rather than outside it; and the chroma arms of
+  `yuv_plane_width`/`_height` dropped an algebraic no-op, `padded * 8 /
+  (factor * 8)`, whose only effect was that the `* 8` could wrap — at 4:2:0 a
+  width of `2^62 + 2` reported a chroma width of **1** instead of `2^60 + 1`,
+  under-sizing by nine orders of magnitude. Review caught that one; the
+  original conversion had left it and the new module header would have been
+  false the day it was written.
+* **Decode coefficient and plane allocations.** `decode/pipeline_impl/progressive.rs`
+  (coefficient buffers, AC-max buffers, component planes),
+  `decode/pipeline_impl/arithmetic.rs` (both the sequential and the progressive
+  allocations) and `api/coefficient.rs`'s whole-image coefficient array route
+  their counts through `checked_span` and their allocations through
+  `try_filled_vec`, so a hostile SOF gets `LimitExceeded`/`AllocationFailed`
+  rather than an abort.
+* **The `checked_plane_size` twin is gone.** `api/progressive_output.rs`'s
+  private copy was contract-identical to `checked_span`; it is deleted and its
+  twelve call sites repointed, which is what chunk 1's rustdoc said had not
+  happened yet. That rustdoc now says what is true.
+
+* **The two YUV entry gates.** `api/yuv.rs`'s `validate_pixel_buffer` routes
+  through `ImageLayout::packed`, and the packed-plane totals in `decode_yuv`
+  and `compress_from_yuv` through a new `checked_sum_of_planes` — three plane
+  sizes each bounded by `isize::MAX` can still exceed it together, and both
+  totals bound a caller-supplied buffer.
+* **`crop_scanline` now measures in output space.** Its bounds and its iMCU
+  alignment used `header.width` and a hard-coded block size 8, but `set_crop`'s
+  coordinates are post-scale (`output.rs`'s `scaled_imcu_w`). At 1/1 the two
+  agree, which is why nothing noticed; under an upscaled decode the old code
+  aligned to the wrong grid and compared against the wrong edge, and the new
+  refusal would have rejected valid offsets. `Decoder` gained `output_width()`
+  (the twin of the existing `output_height()`) and `output_block_size()`.
+
+**Not in chunk 2, and why.** `decode/pipeline_impl/output.rs` and `color.rs`
+hold 17 more allocations sized by an unchecked geometry product (14 and 3;
+the other 16 allocation sites in those files are row buffers, fixed
+capacities, or sized by a length rather than by a geometry product). They are
+the same shape, but they are the *scaling and transform
+output* families the final chunk owns, and converting them touches the
+merged-upsample and RGB565 kernels that are under active optimisation. The
+same goes for `api/yuv.rs`'s *internal* plane allocations (`y_w * y_h` and
+friends): the entry gates are checked now, so a wrapping geometry is refused
+before it reaches them, but the allocations themselves are still written out.
+Also left: `ScanlineEncoder::new`'s `vec![0u8; width * height * bpp]`, which is
+an infallible constructor and so needs an API decision (panic, or a fallible
+`try_new`) rather than a mechanical conversion — file it with the final chunk.
 
 * **Criterion 3 — done, and it is the load-bearing one.** The rule is enforced
   by `tests/sizing_arithmetic_gate.rs` against
@@ -6336,19 +6452,24 @@ still waits on 0.9.0. Details in **What remains** below.
 
 **What remains.**
 
-* **Criteria 1–2 — the `ImageLayout` abstraction and its adoption. Chunk 1 of
-  2 landed; the root crate's decode/encode sites remain.** Criterion 1 is done:
-  `src/common/layout.rs` owns `width`/`height`/`bytes_per_pixel`/optional
-  `stride`, rejects `stride < row_bytes`, and produces `total_bytes` through
-  checked arithmetic bounded by `isize::MAX` with a typed error, plus a
-  `checked_span` free function for spans that are not 2-D. Criterion 2 is
-  partial: the C-ABI crate adopted it (`compress.rs`, `precision.rs`,
-  `imageio.rs`, `yuv.rs`), which covers TJ3 compress, 12/16-bit, YUV plane
-  sizing and the image-file entry points. Still written out per site: baseline
-  and progressive decode, scaling, crop, transform output and the classic
-  `jpeg_*` staging buffers — chunk 2, deliberately left because each is under
-  active change. This is a *consistency* refactor rather than a safety fix; the
-  spans were already individually checked.
+* **Criteria 1–2 — the `ImageLayout` abstraction and its adoption. Chunks 1
+  and 2 landed; the transform-output, scaling and classic `jpeg_*` staging
+  families remain.** Criterion 1 is done: `src/common/layout.rs` owns
+  `width`/`height`/`bytes_per_pixel`/optional `stride`, rejects
+  `stride < row_bytes`, and produces `total_bytes` through checked arithmetic
+  bounded by `isize::MAX` with a typed error, plus a `checked_span` free
+  function for spans that are not 2-D. Criterion 2 is partial: the C-ABI crate
+  adopted it in chunk 1 (`compress.rs`, `precision.rs`, `imageio.rs`,
+  `yuv.rs` — TJ3 compress, 12/16-bit, YUV plane sizing, the image-file entry
+  points), and the root crate in chunk 2 (encode input across all six modes,
+  both raw-plane loops, `common/bufsize.rs`, the crop paths, the progressive
+  and arithmetic decode allocations, `api/coefficient.rs`, and the deletion of
+  `progressive_output`'s `checked_plane_size` twin). Still written out per
+  site: the baseline decode output and upsample buffers
+  (`decode/pipeline_impl/output.rs`, `color.rs`), scaling, transform output and
+  the classic `jpeg_*` staging buffers — the final chunk. Chunk 2 was *not*
+  purely a consistency refactor: it surfaced five live defects, tabulated in
+  the chunk-2 status above.
 
   Adoption was not behaviour-neutral, and the three caller-visible changes are
   pinned by `crates/libjpeg-turbo-rs-capi/tests/capi_layout_adoption.rs`:

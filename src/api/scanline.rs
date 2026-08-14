@@ -8,6 +8,7 @@
 /// `ScanlineEncoder` accumulates pixel rows one at a time, then delegates to the
 /// existing compression pipeline on `finish()`.
 use crate::common::error::{JpegError, Result};
+use crate::common::layout::ImageLayout;
 use crate::common::types::{ColorSpace, DctMethod, FrameHeader, PixelFormat, Subsampling};
 use crate::decode::pipeline::{Decoder, Image};
 #[allow(unused_imports)]
@@ -160,19 +161,29 @@ impl<'a> ScanlineDecoder<'a> {
 
     fn apply_horizontal_crop(img: Image, x: usize, width: usize) -> Result<Image> {
         let bpp: usize = img.pixel_format.bytes_per_pixel();
-        if x + width > img.width {
+        // `x + width` on an unchecked sum wraps, and a wrapped sum compares
+        // *below* `img.width` — so a crop origin near the top of the address
+        // space passed this very guard and was then turned into a row offset
+        // that indexed the image out of bounds (P4-139 chunk 2). The sum is
+        // the guard, so it has to be the checked one.
+        let crop_end: usize = x.checked_add(width).ok_or_else(|| {
+            JpegError::Unsupported(format!(
+                "crop region {}..+{} is not representable",
+                x, width
+            ))
+        })?;
+        if crop_end > img.width {
             return Err(JpegError::Unsupported(format!(
                 "crop region {}..{} exceeds image width {}",
-                x,
-                x + width,
-                img.width
+                x, crop_end, img.width
             )));
         }
-        let src_row_bytes: usize = img.width * bpp;
-        let dst_row_bytes: usize = width * bpp;
-        let mut data: Vec<u8> = Vec::with_capacity(dst_row_bytes * img.height);
+        let src: ImageLayout = ImageLayout::packed(img.width, img.height, bpp, "crop source")?;
+        let dst: ImageLayout = ImageLayout::packed(width, img.height, bpp, "crop output")?;
+        let dst_row_bytes: usize = dst.row_bytes();
+        let mut data: Vec<u8> = Vec::with_capacity(dst.total_bytes());
         for y in 0..img.height {
-            let src_start: usize = y * src_row_bytes + x * bpp;
+            let src_start: usize = src.row_offset(y) + x * bpp;
             data.extend_from_slice(&img.data[src_start..src_start + dst_row_bytes]);
         }
         Ok(Image {

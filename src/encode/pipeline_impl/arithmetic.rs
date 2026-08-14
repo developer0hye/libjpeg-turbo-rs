@@ -2,8 +2,8 @@ use super::{
     convert_to_ycbcr, convert_to_ycbcr_padded, downsample_chroma_block, extract_block, format,
     gather_block, gather_downsampled_block, inject_metadata, is_y_dummy, marker_writer,
     pad_plane_to_mcu_grid, resolve_quant_tables, scale_quant_for_fdct, scale_quant_for_ifast, vec,
-    CompLayout, CompressParams, DctMethod, JpegError, PixelFormat, QuantDivisors, Result,
-    Subsampling, ToString, Vec,
+    CompLayout, CompressParams, DctMethod, ImageLayout, JpegError, PixelFormat, QuantDivisors,
+    Result, Subsampling, ToString, Vec,
 };
 
 /// Compress with arithmetic entropy coding (SOF9).
@@ -93,7 +93,8 @@ fn compress_arithmetic_inner(
     }
 
     let bpp = pixel_format.bytes_per_pixel();
-    let expected_size = width * height * bpp;
+    let expected_size: usize =
+        ImageLayout::packed(width, height, bpp, "arithmetic encode input")?.total_bytes();
     if pixels.len() < expected_size {
         return Err(JpegError::BufferTooSmall {
             need: expected_size,
@@ -729,7 +730,8 @@ fn compress_arithmetic_progressive_inner(
     }
 
     let bpp: usize = pixel_format.bytes_per_pixel();
-    let expected_size: usize = width * height * bpp;
+    let expected_size: usize =
+        ImageLayout::packed(width, height, bpp, "arithmetic encode input")?.total_bytes();
     if pixels.len() < expected_size {
         return Err(JpegError::BufferTooSmall {
             need: expected_size,

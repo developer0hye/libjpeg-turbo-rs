@@ -6,8 +6,8 @@ use super::{
     gather_block, gather_downsampled_block, h2v2_smooth_downsample_plane, marker_writer,
     pad_plane_to_mcu_grid, scale_quant_for_fdct, scale_quant_for_ifast, select_bgr_to_ycbcr_fn,
     select_bgra_to_ycbcr_fn, select_rgba_to_ycbcr_fn, tables, vec, BitWriter, ColorConvertRowFn,
-    CompressParams, DctMethod, HuffTable, HuffmanEncoder, HuffmanTableDef, JpegError, PixelFormat,
-    QuantDivisors, ResolvedHuffman, Result, Subsampling, ToString, Vec,
+    CompressParams, DctMethod, HuffTable, HuffmanEncoder, HuffmanTableDef, ImageLayout, JpegError,
+    PixelFormat, QuantDivisors, ResolvedHuffman, Result, Subsampling, ToString, Vec,
 };
 
 /// Single-pass baseline encode — the one implementation behind `compress`,
@@ -55,7 +55,8 @@ pub fn compress_with_params(params: &CompressParams<'_>) -> Result<Vec<u8>> {
     }
 
     let bpp = pixel_format.bytes_per_pixel();
-    let expected_size = width * height * bpp;
+    let expected_size: usize =
+        ImageLayout::packed(width, height, bpp, "baseline encode input")?.total_bytes();
     if pixels.len() < expected_size {
         return Err(JpegError::BufferTooSmall {
             need: expected_size,
@@ -1464,7 +1465,9 @@ pub fn compress_rgb_direct_with_params(
             params.width, params.height
         )));
     }
-    let expected_size: usize = params.width * params.height * 3;
+    let expected_size: usize =
+        ImageLayout::packed(params.width, params.height, 3, "direct-RGB encode input")?
+            .total_bytes();
     if params.pixels.len() < expected_size {
         return Err(JpegError::BufferTooSmall {
             need: expected_size,

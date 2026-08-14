@@ -65,7 +65,8 @@ pub(crate) fn try_filled_vec<T: Clone>(len: usize, value: T, what: &'static str)
 /// paying for a zero-fill the caller immediately overwrites.
 ///
 /// `len` is bytes, so no element-size product can overflow here; callers
-/// still owe `checked_plane_size` on whatever geometry produced `len`.
+/// still owe `common::layout::checked_span` on whatever geometry produced
+/// `len`.
 pub(crate) fn try_reserved_vec(len: usize, what: &'static str) -> Result<Vec<u8>> {
     let mut buf: Vec<u8> = Vec::new();
     buf.try_reserve_exact(len)

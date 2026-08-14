@@ -1,6 +1,7 @@
 // libjpeg-turbo-rs: alloc prelude (no_std support, issue #356)
 use crate::api::quality;
 use crate::common::error::{JpegError, Result};
+use crate::common::layout::ImageLayout;
 use crate::common::types::{
     ColorSpace, DctMethod, PixelFormat, SavedMarker, ScanScript, Subsampling,
 };
@@ -463,14 +464,52 @@ impl<'a> Encoder<'a> {
             || self.custom_huffman_ac.iter().any(|t| t.is_some())
     }
 
-    fn flip_rows(pixels: &[u8], width: usize, height: usize, bpp: usize) -> Vec<u8> {
-        let row_bytes: usize = width * bpp;
-        let mut flipped: Vec<u8> = Vec::with_capacity(pixels.len());
-        for row in (0..height).rev() {
-            let start: usize = row * row_bytes;
+    /// The caller's buffer as a validated layout, refusing a buffer too short
+    /// to walk row by row.
+    ///
+    /// The three steps in `encode` that rearrange the caller's input run
+    /// *before* any encode path validates its length, and each walks `height`
+    /// rows of `width * bpp` bytes — so a short buffer panicked with a
+    /// slice-range error where the path's own `BufferTooSmall` was the
+    /// documented answer (P4-139 chunk 2). Each of those steps calls this
+    /// first, rather than one gate at the top of `encode`, so the check
+    /// happens exactly where the read happens. That placement is what keeps
+    /// the errors in order: an encode that rearranges nothing never reaches
+    /// this, so a zero or over-65535 dimension, an out-of-range lossless
+    /// predictor and an unsupported option combination are each still reported
+    /// by the validation that owns them. A single gate at the top of `encode`
+    /// took precedence over all three — which is what the first version of
+    /// this fix did, and what review caught.
+    ///
+    /// On the three rearranging paths themselves a short buffer now reports
+    /// `BufferTooSmall` where one of those errors might have come first; there
+    /// it previously reported nothing at all, because the step panicked.
+    fn checked_input_layout(
+        pixels: &[u8],
+        width: usize,
+        height: usize,
+        bpp: usize,
+    ) -> Result<ImageLayout> {
+        let layout: ImageLayout = ImageLayout::packed(width, height, bpp, "encoder input")?;
+        if pixels.len() < layout.total_bytes() {
+            return Err(JpegError::BufferTooSmall {
+                need: layout.total_bytes(),
+                got: pixels.len(),
+            });
+        }
+        Ok(layout)
+    }
+
+    /// Reverse the row order of the caller's buffer for bottom-up input.
+    fn flip_rows(pixels: &[u8], width: usize, height: usize, bpp: usize) -> Result<Vec<u8>> {
+        let layout: ImageLayout = Self::checked_input_layout(pixels, width, height, bpp)?;
+        let row_bytes: usize = layout.row_bytes();
+        let mut flipped: Vec<u8> = Vec::with_capacity(layout.total_bytes());
+        for row in (0..layout.height()).rev() {
+            let start: usize = layout.row_offset(row);
             flipped.extend_from_slice(&pixels[start..start + row_bytes]);
         }
-        flipped
+        Ok(flipped)
     }
 
     fn extract_luminance(pixels: &[u8], n: usize, pf: PixelFormat) -> Vec<u8> {
@@ -554,12 +593,14 @@ impl<'a> Encoder<'a> {
         height: usize,
         pixel_format: PixelFormat,
         subsampling: Subsampling,
-    ) -> Vec<u8> {
+    ) -> Result<Vec<u8>> {
         if width <= 2 || height <= 2 {
-            return pixels.to_vec();
+            return Ok(pixels.to_vec());
         }
         let bpp: usize = pixel_format.bytes_per_pixel();
-        let row_stride: usize = width * bpp;
+        // The loops below index every row of the caller's buffer, so the same
+        // precondition `flip_rows` needs applies here (P4-139 chunk 2).
+        let row_stride: usize = Self::checked_input_layout(pixels, width, height, bpp)?.row_bytes();
         let mut output: Vec<u8> = pixels.to_vec();
         let needs_h: bool = matches!(
             subsampling,
@@ -596,7 +637,7 @@ impl<'a> Encoder<'a> {
                 }
             }
         }
-        output
+        Ok(output)
     }
 
     fn patch_jfif_density(mut data: Vec<u8>, unit: u8, x: u16, y: u16) -> Vec<u8> {
@@ -729,6 +770,11 @@ impl<'a> Encoder<'a> {
 
     /// Encode and return the JPEG byte stream.
     pub fn encode(&self) -> Result<Vec<u8>> {
+        // The three steps below rearrange the caller's buffer before any
+        // encode path has validated its length; each carries its own
+        // `checked_input_layout` for that reason (P4-139 chunk 2). The check
+        // deliberately lives in those helpers rather than in one gate here —
+        // see `checked_input_layout` for why the placement is the point.
         let flipped_buf: Vec<u8>;
         let input_pixels: &[u8] = if self.bottom_up {
             flipped_buf = Self::flip_rows(
@@ -736,7 +782,7 @@ impl<'a> Encoder<'a> {
                 self.width,
                 self.height,
                 self.pixel_format.bytes_per_pixel(),
-            );
+            )?;
             &flipped_buf
         } else {
             self.pixels
@@ -763,7 +809,7 @@ impl<'a> Encoder<'a> {
                 self.height,
                 self.pixel_format,
                 self.subsampling,
-            );
+            )?;
             &fancy_buf
         } else {
             after_smooth
@@ -776,17 +822,29 @@ impl<'a> Encoder<'a> {
             // This matches C libjpeg-turbo's NEON rgb_gray_convert, ensuring
             // byte-identical output.  extract_luminance() uses scalar math which
             // can differ by ±1 from NEON due to intermediate rounding.
+            // This is the third step that walks every row of the caller's
+            // buffer ahead of the pipeline's own size check, so it takes the
+            // same validated layout. The Y plane is that geometry at one byte
+            // per pixel, and construction proves both.
+            let source_layout: ImageLayout = Self::checked_input_layout(
+                after_fancy,
+                self.width,
+                self.height,
+                self.pixel_format.bytes_per_pixel(),
+            )?;
+            let gray_layout: ImageLayout =
+                ImageLayout::packed(self.width, self.height, 1, "grayscale plane")?;
             if self.pixel_format == PixelFormat::Rgb {
                 let enc_simd = crate::simd::detect_encoder();
-                let n: usize = self.width * self.height;
+                let n: usize = gray_layout.total_bytes();
                 let mut y_plane: Vec<u8> = vec![0u8; n];
                 let mut cb_dummy: Vec<u8> = vec![0u8; n];
                 let mut cr_dummy: Vec<u8> = vec![0u8; n];
                 for row in 0..self.height {
-                    let src_off: usize = row * self.width * 3;
-                    let dst_off: usize = row * self.width;
+                    let src_off: usize = source_layout.row_offset(row);
+                    let dst_off: usize = gray_layout.row_offset(row);
                     (enc_simd.rgb_to_ycbcr_row)(
-                        &after_fancy[src_off..src_off + self.width * 3],
+                        &after_fancy[src_off..src_off + source_layout.row_bytes()],
                         &mut y_plane[dst_off..dst_off + self.width],
                         &mut cb_dummy[dst_off..dst_off + self.width],
                         &mut cr_dummy[dst_off..dst_off + self.width],
@@ -797,7 +855,7 @@ impl<'a> Encoder<'a> {
             } else {
                 gray_buf = Self::extract_luminance(
                     after_fancy,
-                    self.width * self.height,
+                    gray_layout.total_bytes(),
                     self.pixel_format,
                 );
             }

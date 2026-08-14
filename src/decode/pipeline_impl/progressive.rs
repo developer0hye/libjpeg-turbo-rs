@@ -2,7 +2,9 @@ use super::scan::CompInfo;
 use super::Decoder;
 use crate::common::error::{DecodeWarning, JpegError, Result};
 use crate::common::huffman_table::HuffmanTable;
+use crate::common::layout::checked_span;
 use crate::common::quant_table::QuantTable;
+use crate::common::try_alloc::try_filled_vec;
 use crate::common::types::{FrameHeader, ScanComponentSelector};
 use crate::decode::bitstream::BitReader;
 use crate::decode::marker::ScanInfo;
@@ -53,18 +55,32 @@ impl<'a> Decoder<'a> {
             })
             .collect();
 
-        // Allocate coefficient buffers (zero-initialized for progressive accumulation)
+        // Allocate coefficient buffers (zero-initialized for progressive
+        // accumulation). The block counts come from header geometry an
+        // attacker controls, so the product is checked and the allocation
+        // fallible — `vec![]` aborts the process where `try_filled_vec`
+        // reports (P4-136, P4-139 chunk 2).
         let mut coeff_bufs: Vec<Vec<[i16; 64]>> = comp_infos
             .iter()
-            .map(|ci| vec![[0i16; 64]; ci.blocks_x * ci.blocks_y])
-            .collect();
+            .map(|ci| {
+                let blocks: usize = checked_span(
+                    &[ci.blocks_x, ci.blocks_y],
+                    "progressive coefficient buffer",
+                )?;
+                try_filled_vec(blocks, [0i16; 64], "progressive coefficient buffer")
+            })
+            .collect::<Result<Vec<Vec<[i16; 64]>>>>()?;
         // Per-block highest nonzero AC zigzag index, maintained by the
         // AC scan decoders so refinement EOB-run walks can stop at the
         // block's real spectral extent instead of Se (issue #352).
         let mut ac_max_k_bufs: Vec<Vec<u8>> = comp_infos
             .iter()
-            .map(|ci| vec![0u8; ci.blocks_x * ci.blocks_y])
-            .collect();
+            .map(|ci| {
+                let blocks: usize =
+                    checked_span(&[ci.blocks_x, ci.blocks_y], "progressive AC-max buffer")?;
+                try_filled_vec(blocks, 0u8, "progressive AC-max buffer")
+            })
+            .collect::<Result<Vec<Vec<u8>>>>()?;
 
         // Process each scan, enforcing scan_limit if set
         for (scan_idx, scan_info) in self.metadata.scans.iter().enumerate() {
@@ -147,10 +163,13 @@ impl<'a> Decoder<'a> {
         let mut component_planes: Vec<Vec<u8>> = comp_infos
             .iter()
             .map(|ci| {
-                let size = ci.comp_w * ci.blocks_y * ci.block_size;
-                vec![0u8; size]
+                let size: usize = checked_span(
+                    &[ci.comp_w, ci.blocks_y, ci.block_size],
+                    "progressive component plane",
+                )?;
+                try_filled_vec(size, 0u8, "progressive component plane")
             })
-            .collect();
+            .collect::<Result<Vec<Vec<u8>>>>()?;
 
         for (comp_idx, ci) in comp_infos.iter().enumerate() {
             let qt_values = &quant_tables[comp_idx].values;
