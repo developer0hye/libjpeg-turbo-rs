@@ -271,8 +271,9 @@ fn our_trace() -> String {
     // m5/m6: cross-installing stdio over mem and mem over stdio — both
     // foreign to each other's identity check, as on stock.
     let cross_path = CString::new(format!(
-        "{}/p4109_mirror_cross.bin",
-        std::env::temp_dir().display()
+        "{}/p4109_mirror_cross_{}.bin",
+        std::env::temp_dir().display(),
+        std::process::id()
     ))
     .expect("path");
     // SAFETY: plain C stdio over a temp path.
@@ -317,8 +318,9 @@ fn our_trace() -> String {
 
     // f1/f2: stdio cases over a prefix + JPEG + 8 KiB trailer file.
     let path = CString::new(format!(
-        "{}/p4109_mirror_input.bin",
-        std::env::temp_dir().display()
+        "{}/p4109_mirror_input_{}.bin",
+        std::env::temp_dir().display(),
+        std::process::id()
     ))
     .expect("path");
     let mode_w = CString::new("wb").expect("mode");
