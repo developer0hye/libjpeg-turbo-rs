@@ -195,3 +195,34 @@ When optimizing performance, follow the experiment-driven workflow in `experimen
 6. Merge: `gh pr merge <number> --merge`.
 7. Sync main: `git pull`.
 8. Clean up branches.
+
+## Unattended Issue Loop
+
+`scripts/issue_loop.sh` works through the open issues without supervision: it picks the
+oldest open issue, starts a **fresh** `claude -p` for it, and repeats. One agent per
+issue is the point — a single long session fills its context, auto-compaction drops the
+early instructions, and quality decays; a new process starts empty every time, with
+GitHub holding the state between runs.
+
+```sh
+scripts/issue_loop.sh --once --max-issues 1   # trial one issue
+scripts/issue_loop.sh --model claude-opus-5   # then run it unattended
+```
+
+`scripts/issue_loop_prompt.md` carries the repository-specific half of each agent's
+prompt — the LAST_MILE reading order, the C cross-validation rule, the `.githooks`
+install, and the instruction to land one honest milestone rather than fake a whole
+program. Edit that file, not the driver, when these rules change.
+
+A run counts as progress when the issue closes **or** a pull request citing it merges,
+because the gaps tracked here are programs that advance one milestone at a time and stay
+open meanwhile. Two attempts with neither outcome label the issue `autofix-blocked` and
+take it out of the queue; three consecutive no-progress runs trip a circuit breaker; a
+usage limit pauses for an hour instead of counting as failure; and a disk-space floor
+stops the loop before the filesystem fills. Label an umbrella issue `autofix-skip` so no
+agent tries to "fix" a tracker that closes with its children.
+
+The agent inside a run is headless, so it must never background the CI wait — the
+process dies when its turn ends, taking the watch with it. Because a run reports only
+when its agent exits, use `scripts/issue_loop_watch.py` to see what the current agent is
+doing.
