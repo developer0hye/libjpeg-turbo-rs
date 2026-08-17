@@ -741,16 +741,9 @@ fn cargo_test_argument_lists_in(job_block: &str) -> Vec<Vec<String>> {
                 if cargo_subcommand_after(&tokens, at) != Some("test") {
                     continue;
                 }
-                let mut end: usize = tokens.len();
-                for (index, token) in tokens.iter().enumerate().skip(at + 1) {
-                    if hands_off_to_another_command(token) || token.contains(['>', '<']) {
-                        end = index;
-                        break;
-                    }
-                }
                 invocations.push(
-                    tokens[at + 1..end]
-                        .iter()
+                    arguments_of(&tokens, at)
+                        .into_iter()
                         .map(|token| token.to_string())
                         .collect(),
                 );
@@ -758,6 +751,31 @@ fn cargo_test_argument_lists_in(job_block: &str) -> Vec<Vec<String>> {
         }
     }
     invocations
+}
+
+/// The arguments of the `cargo test` at `at`, ending where the shell takes the
+/// line back.
+fn arguments_of<'a>(tokens: &[&'a str], at: usize) -> Vec<&'a str> {
+    let mut arguments: Vec<&str> = Vec::new();
+    for token in tokens.iter().skip(at + 1) {
+        if hands_off_to_another_command(token) || token.contains(['>', '<']) {
+            // A control operator can be glued to the argument in front of it —
+            // `if cargo test --test c_croptest; then` leaves `c_croptest;` as
+            // one token, and dropping the token drops the suite name with the
+            // separator. A *redirect* is different: whatever precedes `2>&1`
+            // is a file descriptor, not an argument, so a token carrying one
+            // keeps nothing.
+            let redirects: bool = token.contains(['>', '<']);
+            if let Some(head) = token.split([';', '|', '&']).next() {
+                if !redirects && !head.is_empty() && head != *token {
+                    arguments.push(head);
+                }
+            }
+            break;
+        }
+        arguments.push(token);
+    }
+    arguments
 }
 
 /// The C-ABI test binaries a job selects.
@@ -2733,18 +2751,12 @@ fn cargo_test_commands_in(script: &str) -> BTreeSet<String> {
             if cargo_subcommand_after(&tokens, at) != Some("test") {
                 continue;
             }
-            let mut words: Vec<&str> = Vec::new();
-            for (index, token) in tokens.iter().enumerate().skip(start) {
-                // `|`, `&&`, `;`, a redirect: the invocation ends here. Only
-                // past the command word — `if` and `!` are how `test-corpus`
-                // *introduces* a command.
-                let ends_here: bool = index > at
-                    && (hands_off_to_another_command(token) || token.contains(['>', '<']));
-                if ends_here {
-                    break;
-                }
-                words.push(token);
-            }
+            // The command word and everything before it — an environment
+            // prefix, a `sudo` — then the arguments, which end where the shell
+            // takes the line back. `if` and `!` are how `test-corpus`
+            // *introduces* a command, so the head is taken verbatim.
+            let mut words: Vec<&str> = tokens[start..=at].to_vec();
+            words.extend(arguments_of(&tokens, at));
             commands.insert(words.join(" "));
         }
     }
@@ -2992,8 +3004,95 @@ fn each_leg_pair_provisions_the_two_releases_its_roles_name() {
 fn whole_root_crate_runs_in(job_block: &str) -> BTreeSet<TestRun> {
     test_runs_in(job_block)
         .into_iter()
-        .filter(|run| !run.command.contains("--test ") && !run.command.contains(PACKAGE_SELECTOR))
+        .filter(|run| runs_the_root_integration_matrix(&run.command))
         .collect()
+}
+
+/// Cargo's target selectors. A command carrying one of these and not `--tests`
+/// runs that target and not the integration matrix — `cargo test --lib` names
+/// no suite and no package, and reading it as the root matrix would credit
+/// every oracle suite to a pair that runs none of them.
+const CARGO_TARGET_SELECTORS: [&str; 9] = [
+    "--lib",
+    "--bins",
+    "--bin",
+    "--examples",
+    "--example",
+    "--benches",
+    "--bench",
+    "--doc",
+    "--test",
+];
+
+/// Does this command run the root crate's integration tests?
+fn runs_the_root_integration_matrix(command: &str) -> bool {
+    let tokens: Vec<&str> = command.split_whitespace().collect();
+    let Some((_, at)) = cargo_invocations_in(&tokens).first().copied() else {
+        return false;
+    };
+    let arguments: Vec<&str> = arguments_of(&tokens, at);
+    let names_a_package: bool = arguments
+        .iter()
+        .any(|argument| *argument == "-p" || argument.starts_with("--package"));
+    if names_a_package {
+        return false;
+    }
+    if arguments
+        .iter()
+        .any(|argument| *argument == "--tests" || *argument == "--all-targets")
+    {
+        return true;
+    }
+    // No target selector at all: cargo runs every target, integration tests
+    // included.
+    !arguments
+        .iter()
+        .any(|argument| CARGO_TARGET_SELECTORS.contains(argument))
+}
+
+/// Does a shared default run of the root integration matrix cover this
+/// selection?
+///
+/// `All` and a filter are subsets of the default set, so a shared
+/// `cargo test --tests` runs them at both releases. Anything else is a
+/// widening the default run does not reach, with one exception stated rather
+/// than assumed: `--include-ignored` runs the default set *plus* the
+/// `#[ignore]`d tests, so the shared run still covers the default half, and in
+/// this repository the ignored half is the serial timing assertions — a 60 s
+/// liveness bound does not answer differently at another upstream release.
+/// Bare `--ignored` runs *only* the ignored tests, which the shared run covers
+/// none of.
+fn a_default_root_run_covers(selection: &Selection) -> bool {
+    match selection {
+        Selection::All | Selection::Filters(_) => true,
+        Selection::Unrecognised(argument) => argument == "--include-ignored",
+    }
+}
+
+/// Suites a job selects through an invocation that also enables cargo features.
+///
+/// A feature-gated test does not exist in a default `cargo test --tests`
+/// build, so a shared whole-root run cannot vouch for one — `full-c-parity`
+/// gates 12,230 transform cases behind exactly that flag.
+fn suites_named_with_features_in(job_block: &str) -> BTreeSet<String> {
+    let mut suites: BTreeSet<String> = BTreeSet::new();
+    for arguments in cargo_test_argument_lists_in(job_block) {
+        let enables_features: bool = arguments
+            .iter()
+            .any(|argument| argument.starts_with("--features") || argument == "--all-features");
+        if !enables_features {
+            continue;
+        }
+        let mut tokens = arguments.iter();
+        while let Some(token) = tokens.next() {
+            if token == "--test" {
+                if let Some(suite) = tokens.next() {
+                    suites.insert(suite.clone());
+                }
+            }
+        }
+    }
+    suites
 }
 
 /// Does this pair run one identical whole-root-crate command on both legs?
@@ -3026,6 +3125,7 @@ fn compare_oracle_suites(baseline: &str, current: &str, workflow: &str) -> (usiz
     let mut selected: usize = 0;
     let mut missing: Vec<String> = Vec::new();
     let shared_root_run: bool = a_shared_whole_root_run_covers_both_legs(baseline, current);
+    let feature_gated: BTreeSet<String> = suites_named_with_features_in(baseline);
     for (test_dir, select) in [
         (
             ROOT_TEST_DIR,
@@ -3041,9 +3141,16 @@ fn compare_oracle_suites(baseline: &str, current: &str, workflow: &str) -> (usiz
             }
             selected += 1;
             // A shared `cargo test --tests` runs every root suite's default
-            // tests on both legs; it says nothing about the C-ABI crate, whose
-            // suites are only ever selected by name.
-            if test_dir == ROOT_TEST_DIR && shared_root_run {
+            // tests on both legs — but only what a *default* build selects: it
+            // says nothing about the C-ABI crate, whose suites are only ever
+            // named, nothing about a feature-gated suite that build does not
+            // contain, and nothing about a selection widening past the default
+            // set.
+            let covered_by_the_shared_run: bool = test_dir == ROOT_TEST_DIR
+                && shared_root_run
+                && !feature_gated.contains(&suite)
+                && a_default_root_run_covers(&selection);
+            if covered_by_the_shared_run {
                 continue;
             }
             match have.get(&suite) {
@@ -3384,6 +3491,83 @@ fn a_shared_whole_root_run_is_what_covers_a_suite_neither_leg_names() {
             "    runs-on: ubuntu-latest\n    steps:\n      - run: cargo test -p libjpeg-turbo-rs-capi --lib\n"
         )
         .is_empty()
+    );
+    // Nor a command that names no suite and no package but runs a different
+    // target. A review's mutation put `cargo test --lib` on both legs: it
+    // looks whole-crate and runs no integration test at all, so crediting it
+    // would vouch for every root oracle suite over a pair that runs none.
+    for command in ["cargo test --lib", "cargo test --doc", "cargo test --bins"] {
+        assert!(
+            !runs_the_root_integration_matrix(command),
+            "{command:?} runs no integration test"
+        );
+    }
+    for command in [
+        "cargo test",
+        "cargo test --tests",
+        "cargo test --release --all-targets",
+        "RUSTFLAGS=-Copt-level=1 cargo test --tests",
+    ] {
+        assert!(runs_the_root_integration_matrix(command), "{command:?}");
+    }
+    assert!(!runs_the_root_integration_matrix(
+        "cargo test -p libjpeg-turbo-rs-capi --tests"
+    ));
+    assert!(!runs_the_root_integration_matrix("echo cargo test --tests"));
+
+    // The credit reaches exactly what a default run selects. `--include-ignored`
+    // is the one widening it still covers — the default half runs on both legs,
+    // and the ignored half is this repository's serial timing assertions —
+    // while bare `--ignored` selects only tests the shared run never executes.
+    assert!(a_default_root_run_covers(&Selection::All));
+    assert!(a_default_root_run_covers(&Selection::Filters(
+        BTreeSet::from(["restart_bomb".to_string()])
+    )));
+    assert!(a_default_root_run_covers(&Selection::Unrecognised(
+        "--include-ignored".to_string()
+    )));
+    assert!(!a_default_root_run_covers(&Selection::Unrecognised(
+        "--ignored".to_string()
+    )));
+
+    // A feature-gated suite is not in a default build, so a shared whole-root
+    // run cannot vouch for one: `full-c-parity` gates 12,230 transform cases
+    // behind exactly that flag.
+    assert_eq!(
+        suites_named_with_features_in(&job_around(
+            "      - run: cargo test --features full-c-parity --test c_croptest\n\
+             \x20     - run: cargo test --test cross_check_encoder_binary\n"
+        )),
+        BTreeSet::from(["c_croptest".to_string()])
+    );
+}
+
+#[test]
+fn a_control_operator_glued_to_an_argument_does_not_eat_it() {
+    // `test-corpus` writes `if ! cargo run …`, and the same shape with a
+    // trailing `; then` leaves `c_croptest;` as one whitespace token. Dropping
+    // that token drops the suite name with the separator, and the selector
+    // would then see a leg naming no oracle suite at all.
+    assert_eq!(
+        root_suites_selected_by(&job_around(
+            "      - run: if cargo test --test c_croptest; then echo ok; fi\n"
+        ))
+        .into_keys()
+        .collect::<Vec<String>>(),
+        vec!["c_croptest".to_string()]
+    );
+    // A redirect is not a control operator: whatever precedes `2>&1` is a file
+    // descriptor, and keeping it would turn `2` into a libtest filter.
+    assert_eq!(
+        capi_suites_selected_by(&job_around(
+            "      - run: cargo test -p libjpeg-turbo-rs-capi --test capi_jpeglib_encode -- --nocapture 2>&1 | tee log\n"
+        ))
+        .get("capi_jpeglib_encode"),
+        Some(&Selection::All)
+    );
+    assert_eq!(
+        cargo_test_commands_in("cargo test --tests; echo done"),
+        BTreeSet::from(["cargo test --tests".to_string()])
     );
 }
 

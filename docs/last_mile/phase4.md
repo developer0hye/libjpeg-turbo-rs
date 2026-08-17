@@ -5644,7 +5644,7 @@ suites off its twin; a leg that selects none runs whole crates, and then the
 `cargo test` command — with the environment it runs under and the runner it
 runs on — is the only thing there is to compare.
 
-*Two review rounds, seven findings, all of them on the gate again.* The first
+*Three review rounds, ten findings, all of them on the gate again.* The first
 draft was green through each of the substitutions it existed to catch:
 
 - **An echo is not a run.** The command scanner was a substring split on
@@ -5703,17 +5703,43 @@ and that the third had invented a gap:
   never runs, and a 60 s liveness bound does not answer differently at another
   upstream release.
 
-Mechanism-validated in fifteen directions rather than by passing: on the
+A third round found the credit and the tokeniser each one step short again,
+and each miss was the same shape: something that *looks* like the thing being
+credited.
+
+- **`cargo test --lib` looks whole-crate.** It names no suite and no package,
+  so the classifier read it as the root matrix — and putting it on *both* legs
+  of a pair credited every root oracle suite to a pair running no integration
+  test at all. The classification is now cargo's own: a package selector
+  disqualifies, `--tests`/`--all-targets` qualifies, and a command with no
+  target selector qualifies because that is what cargo does with one.
+- **The credit was unconditional.** It has to be exactly as wide as a *default*
+  build of that command: a `--features full-c-parity` selection is not in one
+  (that flag gates 12,230 transform cases), and neither is a selection widening
+  past the default set. `--include-ignored` stays credited and says why — the
+  default half runs on both legs and the ignored half is this repository's
+  serial timing assertions — while bare `--ignored` selects only tests the
+  shared run never executes.
+- **A control operator glued to an argument ate it.** `if cargo test --test
+  c_croptest; then` leaves `c_croptest;` as one whitespace token, and ending
+  the invocation *at* that token dropped the suite name with the separator, so
+  a leg naming an oracle suite read as naming none. The argument in front of
+  the operator is kept now — but not in front of a redirect, where what
+  precedes `2>&1` is a file descriptor, and keeping it would turn `2` into a
+  libtest filter.
+
+Mechanism-validated in eighteen directions rather than by passing: on the
 workflow side, dropping the twin's job-level RUSTFLAGS, overriding RUSTFLAGS on
 its test step, replacing its command with an `echo`, narrowing either leg to a
 single suite (oracle-backed or not), moving the twin to another runner,
 pointing it at 3.1.4.1, renaming it so the pair dissolves, and renaming its
 baseline out from under it each turn the intended gate red; so do the three
 mixed-leg shapes on `ci.yml`'s pair — echoing its twin's whole-root command,
-adding a RUSTFLAGS to it, and echoing its twin's capi step; and on the
-inventory side, deleting a remainder row while its leg stays single, keeping
-one after the leg is paired, and naming a job that does not exist or that
-installs no oracle.
+adding a RUSTFLAGS to it, and echoing its twin's capi step — and swapping both
+its legs' `--tests` for `--lib`, or widening its baseline's selection with
+`--features`; and on the inventory side, deleting a remainder row while its leg
+stays single, keeping one after the leg is paired, and naming a job that does
+not exist or that installs no oracle.
 
 The scanner work also discharges criterion 1 of
 **[P4-177](#p4-177-the-workflow-scanner-does-not-model-heredocs-folded-scalars-or-quoted-substitution-syntax--partial-folded-scalars-are-modelled-heredocs-and-quoteescape-state-remain)**,
