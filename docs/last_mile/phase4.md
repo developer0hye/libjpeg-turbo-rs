@@ -5203,9 +5203,10 @@ measured was whatever homebrew shipped that week.
 
 So the rule moved off the list of workflow files and onto the **job**.
 `tests/oracle_version_pins.rs` enumerates every job in `.github/workflows`
-(42 today, in nine files; the enumeration was checked once against a real YAML
-parser, name for name) and holds each one that provisions a C libjpeg-turbo to
-three things:
+(45 today, in nine files; the enumeration is checked against a real YAML
+parser, name for name, whenever a job is added — 42 when this rule landed, 45
+once the cross-arch pairs below joined) and holds each one that provisions a C
+libjpeg-turbo to three things:
 
 - **pinned** — the install names the release it installs. Upstream's
   `libjpeg-turbo-official_<version>` package and a `--branch <tag>` clone do;
@@ -5590,35 +5591,94 @@ was filed with:
 | beta1-11 | `-nooverwrite` in cjpeg/djpeg/jpegtran | **Non-goal.** Pure CLI file handling in upstream's application code; we ship a library and link *stock* tools against it, so the option is upstream's to implement and ours to inherit. |
 | 3.2.0-1 | Arm64EC Windows build regression fixed | **Non-goal.** An upstream build-system fix with no behavioural surface. |
 
+*Criterion 1, the cross-arch backends — and pairing as a property of the job
+(2026-08-18).* The three legs in `cross-arch.yml` are now paired:
+`test-linux-aarch64-neon-current-oracle`,
+`test-linux-x86_64-avx2-current-oracle` and
+`test-linux-x86_64-no-avx2-build-current-oracle`, each running the same
+`cargo test --tests` command as its baseline twin, on the same runner, under
+the same job-level environment.
+
+Three legs rather than one, for the reason the exhaustive matrices are paired
+per architecture: every case in that root matrix compares *our SIMD bytes*
+against C's, and this workflow exists precisely because the backend differs.
+`ci.yml`'s pair answers for one x86_64 runner at default codegen; these answer
+for Linux NEON, for AVX2-enabled codegen, and for codegen with AVX2 and SSE4.2
+switched off. Three backends against one release is three unmeasured 3.2.0
+answers. The third is the weakest of the three and its job comment says so:
+SIMD *dispatch* is a runtime CPUID query that ignores `-C target-feature`, so
+the kernels are the AVX2 ones on both legs of that pair — what the flags change
+is how LLVM compiles everything that is not a hand-written kernel, which is
+most of what the differential suites compare.
+
+**The membership rule moved onto the job, exactly as the pin-and-name rule
+did.** The three pairing gates that existed each *named* the legs they
+compared — `CI_WORKFLOW`/`BASELINE_LEG_JOB`/`CURRENT_LEG_JOB` and
+`FULL_PARITY_LEG_PAIRS` — which is the shape whose failure this entry already
+records once: a workflow that grows a new oracle leg is covered by nothing
+until someone remembers to add it to a constant, and "someone remembers" is
+what let thirteen pins sit at a superseded release for two months.
+`every_oracle_installing_job_is_paired_or_on_the_recorded_remainder` reads all
+45 jobs in the nine workflows and requires each one that installs a C
+libjpeg-turbo to be a baseline with a `-current-oracle` twin, that twin, or a
+row in `UNPAIRED_ORACLE_JOBS`. Written first and red on the unmodified tree,
+naming exactly the three cross-arch jobs.
+
+That inventory is the item's remainder, moved from this prose into the one
+place a gate can read it, and checked **both ways**: a row naming a job that is
+paired, that installs no oracle, or that does not exist fails as loudly as an
+unpaired job missing from the list. Prose could go stale in either direction —
+a paired leg staying listed, a leg added tomorrow listed nowhere — and this one
+had, in a small way: the paragraph it replaces counted *legs* and said eight,
+while the job scanner counts *jobs* and finds seven, because `fuzz-smoke.yml`'s
+three differential targets are three entries of one matrix job and
+`mutants-in-diff` was left out of the count as "correctly pinned" (a different
+property, as this entry notes above).
+
+`a_whole_suite_leg_and_its_twin_differ_only_in_the_oracle` is the second half,
+because naming a twin is not running one. It applies to the pairs whose legs
+run whole crates — the ones the two suite-level pairing gates cannot speak
+about, since those compare `--test` selections and these name no suites — and
+requires the same `cargo test` commands, the same `runs-on`, and the same
+job-level environment apart from the oracle prefix. RUSTFLAGS is why it reads
+the environment at all: a twin that dropped `-C target-feature=+avx2` would
+compile a different backend, and the pair would report a codegen difference as
+an upstream one.
+
+Mechanism-validated in ten directions rather than by passing: dropping the
+twin's RUSTFLAGS, moving it to another runner, narrowing its command, pointing
+it at 3.1.4.1, renaming it so the pair dissolves, and renaming its baseline out
+from under it each turn the intended gate red; so do deleting a remainder row
+while its leg stays single, keeping one after the leg is paired, and naming a
+job that does not exist or that installs no oracle.
+
 **What remains.**
 
 1. The four filed gaps (P4-171..P4-174) are triaged, not fixed.
-2. **Eight legs across three workflows still measure one release** — matrix
-   entries counted one apiece — and the inventory is written out here rather
-   than left to the next reader's grep:
-   - `cross-arch.yml` — three jobs (linux-aarch64 NEON, linux-x86_64 AVX2,
-     AVX2-disabled build), each running the root `cargo test --tests` matrix
-     against the 3.1.4.1 deb;
-   - `fuzz-smoke.yml` — the three differential fuzz targets
-     (`fuzz_decode_diff_c`, `fuzz_encode_diff_c`, `fuzz_transform_diff_c`)
-     take the 3.1.4.1 deb, and the reproduction instructions they emit name it
-     too;
+2. **Four jobs still measure one release**, and the inventory now lives in
+   `UNPAIRED_ORACLE_JOBS` in `tests/oracle_version_pins.rs`, where a gate reads
+   it, with the reason on each row:
+   - `fuzz-smoke.yml`'s `fuzz` — the three differential fuzz targets
+     (`fuzz_decode_diff_c`, `fuzz_encode_diff_c`, `fuzz_transform_diff_c`) are
+     matrix entries taking the 3.1.4.1 deb, and the reproduction instructions
+     the failure path prints name that release too, so pairing has to reach
+     those as well;
    - `ci.yml`'s `test-corpus` — a 3.1.4.1 source build at `/usr/local`;
    - `ci.yml`'s `test-cross-encode` — a 3.1.4.1 source build at
-     `/tmp/ljt3141/prefix` since 2026-08-18, on the only macOS leg that runs
-     the whole root suite.
+     `/tmp/ljt3141/prefix`, on the only macOS leg that runs the whole root
+     suite; upstream ships no macOS package, so its twin is a *second* source
+     build on every pull request;
+   - `ci.yml`'s `mutants-in-diff` — a mutation run rather than a parity
+     measurement, and `continue-on-error` besides. Recorded as a decision, not
+     a backlog entry: pairing it would double a job's cost to answer the same
+     question twice.
 
-   Every one of them is now **pinned, checked and measured** — the release each
+   Every one of them is **pinned, checked and measured** — the release each
    installs is named in `docs/oracle_versions.tsv`, asserted at the path it was
-   installed to, and selected for the tests that read it. What none of them has
-   is a *second* leg: they answer against 3.1.4.1 alone, so a 3.2.0 divergence
-   in the NEON backend, in the differential fuzz targets, or in the corpus
-   comparison is still unmeasured. Pairing them is the next milestone, and it
-   is a question of runner cost rather than of mechanism: the pairing gates
-   `every_oracle_backed_capi_suite_…` and
-   `every_oracle_backed_full_parity_suite_…` already classify suites from their
-   own source, so a second leg per workflow inherits the membership rule
-   without a list.
+   installed to, and selected for the tests that read it. What none has is a
+   *second* leg, so a 3.2.0 divergence in the differential fuzz targets or in
+   the corpus comparison is still unmeasured. Pairing the remaining three is a
+   question of runner cost rather than of mechanism.
 3. `references/libjpeg-turbo` stays at 3.1.90. Bumping it to 3.2.0 moves every
    `j*.c:NNN` citation in this repository and re-baselines the classic-ABI
    trace oracles at the same time, which is its own change with its own

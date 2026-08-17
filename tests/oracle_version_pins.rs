@@ -1554,9 +1554,10 @@ fn oracle_install_on(line: &str) -> Option<OracleInstall> {
 /// keys of its own (`push:`, `schedule:`, `workflow_dispatch:`), and reading
 /// those as jobs would ask [`job_block`] for a block that is not one.
 ///
-/// Checked once against a real YAML parser while this gate was written: the
-/// scanner's list is identical to PyYAML's for all 42 jobs in the nine
-/// workflows, name for name. The standing protection is the sibling test —
+/// Checked against a real YAML parser whenever a job is added: the scanner's
+/// list is identical to PyYAML's for all 45 jobs in the nine workflows, name
+/// for name (re-checked when the cross-arch pairs took it from 42 to 45). The
+/// standing protection is the sibling test —
 /// a workflow this returns nothing for is a workflow every gate here passes
 /// vacuously.
 fn job_names_in(text: &str) -> Vec<String> {
