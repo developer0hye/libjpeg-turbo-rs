@@ -2554,6 +2554,572 @@ fn the_job_scanner_reads_jobs_and_not_trigger_keys() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// P4-130 criterion 1, the last dimension: *pairing* is a property of the job.
+//
+// The three pairing gates above each name the legs they compare, which is the
+// same shape the pin-and-name rule had before it moved onto the job — and the
+// same failure follows from it. A workflow that grows a new oracle leg is
+// covered by nothing until someone remembers to add it to a constant here, and
+// "someone remembers" is precisely what let thirteen pins sit at a superseded
+// release for two months.
+//
+// So membership moves onto the job too. Every job in `.github/workflows` that
+// installs a C libjpeg-turbo has to be one of three things, and the third one
+// is a decision rather than a default:
+//
+// * a **baseline leg** with a `-current-oracle` twin;
+// * that **twin**, whose baseline exists;
+// * or a leg on the **recorded remainder** below — still answering against one
+//   release, with the reason written down where a gate reads it.
+//
+// The remainder is the point. P4-130's remaining inventory was prose in
+// `docs/last_mile/phase4.md`, so it could go stale in either direction: a leg
+// that got paired would stay listed, and a leg added tomorrow would be listed
+// nowhere. Here it is checked both ways — an entry naming a job that is paired,
+// that installs no oracle, or that does not exist fails as loudly as an
+// unpaired job missing from it.
+// ---------------------------------------------------------------------------
+
+/// Suffix marking a job as the current-parity twin of the job it is named
+/// after. Not invented here: `test-integration-current-oracle` and the four
+/// `full-c-parity-*-current-oracle` legs already spell it this way, and reading
+/// the convention is what lets a new pair be recognised by the commit that adds
+/// it rather than by an edit to this file.
+const CURRENT_ORACLE_SUFFIX: &str = "-current-oracle";
+
+/// Oracle-installing jobs that still answer against one release.
+///
+/// This is P4-130's remaining inventory, in the one place a gate can read it.
+/// Each entry is a decision with a reason, not a silent omission — and the
+/// list is checked in both directions, so pairing a leg means deleting its row
+/// here and leaving one behind is a failure rather than a stale paragraph.
+const UNPAIRED_ORACLE_JOBS: [(&str, &str, &str); 4] = [
+    (
+        "ci.yml",
+        "mutants-in-diff",
+        "a mutation run, not a parity measurement: it asks whether our own \
+         tests kill a mutant, and the oracle is there so the differential \
+         suites can execute at all. Pairing it would double a `continue-on-error` \
+         job's cost to answer the same question twice.",
+    ),
+    (
+        "ci.yml",
+        "test-cross-encode",
+        "the macOS aarch64 leg. Upstream ships no macOS package, so a twin \
+         means a second source build of libjpeg-turbo on every pull request \
+         on top of the 3.1.4.1 one this leg already builds.",
+    ),
+    (
+        "ci.yml",
+        "test-corpus",
+        "the real-world corpus comparison, a 3.1.4.1 source build at \
+         /usr/local. A twin is a second source build per pull request.",
+    ),
+    (
+        "fuzz-smoke.yml",
+        "fuzz",
+        "the three differential fuzz targets inside a matrix over ten targets. \
+         A twin is a second oracle dimension on that matrix — three more \
+         75-minute jobs every six hours — and the reproduction instructions \
+         the failure path prints name the release too, so the pairing has to \
+         reach those as well.",
+    ),
+];
+
+/// `(workflow, baseline job, twin job)` for every leg pair in the repository,
+/// discovered from the naming convention rather than listed.
+fn oracle_leg_pairs() -> Vec<(String, String, String)> {
+    let jobs: Vec<(String, String, String)> = every_job();
+    let mut pairs: Vec<(String, String, String)> = Vec::new();
+    for (workflow, job, _) in &jobs {
+        let Some(baseline) = job.strip_suffix(CURRENT_ORACLE_SUFFIX) else {
+            continue;
+        };
+        assert!(
+            jobs.iter()
+                .any(|(other_file, other, _)| other_file == workflow && other == baseline),
+            "{workflow}'s {job} is named the current-parity twin of \
+             {baseline:?}, but no such job exists in that workflow — a twin \
+             whose baseline was renamed measures a release nothing is compared \
+             against"
+        );
+        pairs.push((workflow.clone(), baseline.to_string(), job.clone()));
+    }
+    pairs
+}
+
+/// The shell lines a job runs, one per logical command line.
+///
+/// [`shell_scripts_in`] joins a `run:` block with spaces, which is the right
+/// shape for asking what a step *contains* and the wrong one for asking what
+/// it *runs*: two commands on two lines are two commands, and flattening them
+/// produces a command word that appears in neither. That is the same defect
+/// the step reader carried until a `set -o pipefail` line hid the `cargo test`
+/// under it.
+///
+/// The two block scalars are read as YAML means them: `|` keeps the newlines,
+/// so each line is its own command, while `>` folds them into one, so the
+/// block is one command. Backslash continuations are rejoined either way.
+fn shell_lines_in(job_block: &str) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    let mut folding: Option<bool> = None;
+    for line in job_block.lines() {
+        let trimmed: &str = line.trim();
+        if trimmed.starts_with('#') {
+            continue;
+        }
+        let starts_a_step: Option<&str> = ["- run:", "run:"]
+            .iter()
+            .find(|key| trimmed.starts_with(**key))
+            .copied();
+        if let Some(key) = starts_a_step {
+            let rest: &str = trimmed[key.len()..].trim();
+            folding = Some(rest.starts_with('>'));
+            let inline: &str = rest.trim_start_matches(['|', '>', '-', '+']).trim();
+            if !inline.is_empty() {
+                lines.push(inline.to_string());
+            }
+            continue;
+        }
+        if STEP_KEYS.iter().any(|key| trimmed.starts_with(key)) {
+            folding = None;
+            continue;
+        }
+        match folding {
+            None => continue,
+            // A folded block is one command: append to the line it started.
+            Some(true) => match lines.last_mut() {
+                Some(last) if !trimmed.is_empty() => {
+                    last.push(' ');
+                    last.push_str(trimmed);
+                }
+                _ => lines.push(trimmed.to_string()),
+            },
+            Some(false) if !trimmed.is_empty() => lines.push(trimmed.to_string()),
+            Some(false) => {}
+        }
+    }
+    logical_lines(&lines.join("\n"))
+}
+
+/// The `cargo test` commands a job runs, normalised for comparison against
+/// another job's.
+///
+/// One entry per invocation, ending where the shell takes the line back, so a
+/// script running two of them yields two commands rather than one that
+/// contains the other. The comment lines [`shell_lines_in`] drops are what
+/// keeps a step's prose about a suite from reading as a run of it.
+fn cargo_test_commands_in(block: &str) -> BTreeSet<String> {
+    let mut commands: BTreeSet<String> = BTreeSet::new();
+    for script in shell_lines_in(block) {
+        for invocation in script.split("cargo test").skip(1) {
+            let mut arguments: Vec<&str> = Vec::new();
+            for token in invocation.split_whitespace() {
+                // `|`, `&&`, `;`, a redirect: the invocation ends here.
+                if token.contains(['|', ';', '&', '>', '<']) {
+                    break;
+                }
+                arguments.push(token);
+            }
+            let command: String = format!("cargo test {}", arguments.join(" "));
+            commands.insert(command.trim_end().to_string());
+        }
+    }
+    commands
+}
+
+/// The `runs-on:` a job declares, verbatim — `ubuntu-24.04-arm` and
+/// `${{ matrix.os }}` alike, since two legs are only a pair if they run the
+/// same measurement on the same machine.
+fn runs_on_in(block: &str) -> Option<String> {
+    block.lines().find_map(|line| {
+        let trimmed: &str = line.trim();
+        if trimmed.starts_with('#') {
+            return None;
+        }
+        trimmed
+            .strip_prefix("runs-on:")
+            .map(|value| value.trim().to_string())
+    })
+}
+
+/// A job's own `env:` mapping — the one every step inherits.
+///
+/// Job level only, read by indentation for the reason
+/// [`oracle_prefixes_assigned_by`] reads it: a step's `env:` overrides the
+/// job's for that step alone, and the two spell identically once trimmed.
+/// Here the distinction decides whether a pair compiles the same code:
+/// `RUSTFLAGS: "-C target-feature=+avx2"` on the baseline and nowhere on the
+/// twin is two different backends being compared to two different releases.
+fn job_level_env_in(block: &str) -> BTreeMap<String, String> {
+    let mut environment: BTreeMap<String, String> = BTreeMap::new();
+    let mut inside_job_env: bool = false;
+    for line in block.lines() {
+        let trimmed: &str = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let indent: usize = line.len() - line.trim_start().len();
+        if indent <= JOB_KEY_INDENT {
+            inside_job_env = indent == JOB_KEY_INDENT && trimmed == "env:";
+            continue;
+        }
+        if !inside_job_env || indent > JOB_KEY_INDENT + 2 {
+            continue;
+        }
+        let Some((name, value)) = trimmed.split_once(':') else {
+            continue;
+        };
+        environment.insert(
+            name.trim().to_string(),
+            value.trim().trim_matches(['"', '\'']).to_string(),
+        );
+    }
+    environment
+}
+
+/// Does this job run tests whose answer depends on the C libjpeg-turbo it
+/// installed — as opposed to merely having one on the runner?
+fn job_installs_an_oracle(block: &str) -> bool {
+    !oracle_installs_in(block).is_empty()
+}
+
+#[test]
+fn every_oracle_installing_job_is_paired_or_on_the_recorded_remainder() {
+    if !repository_tree_is_readable() {
+        eprintln!("SKIP: repository tree not readable; see the sibling test.");
+        return;
+    }
+    let jobs: Vec<(String, String, String)> = every_job();
+    let installing: Vec<(String, String)> = jobs
+        .iter()
+        .filter(|(_, _, block)| job_installs_an_oracle(block))
+        .map(|(workflow, job, _)| (workflow.clone(), job.clone()))
+        .collect();
+    assert!(
+        !installing.is_empty(),
+        "no job in {WORKFLOW_DIR} installs a C oracle — the scanner has \
+         stopped matching, so this gate would pass however many legs run \
+         against a superseded release"
+    );
+
+    let unpaired: Vec<String> = installing
+        .iter()
+        .filter(|(_, job)| !job.ends_with(CURRENT_ORACLE_SUFFIX))
+        .filter(|(workflow, job)| {
+            let twin: String = format!("{job}{CURRENT_ORACLE_SUFFIX}");
+            !jobs
+                .iter()
+                .any(|(other_file, other, _)| other_file == workflow && *other == twin)
+        })
+        .filter(|(workflow, job)| {
+            !UNPAIRED_ORACLE_JOBS
+                .iter()
+                .any(|(recorded_file, recorded_job, _)| {
+                    recorded_file == workflow && recorded_job == job
+                })
+        })
+        .map(|(workflow, job)| format!("  {workflow} :: {job}"))
+        .collect();
+
+    assert!(
+        unpaired.is_empty(),
+        "these jobs install a C libjpeg-turbo and compare against it, but \
+         answer at one release only:\n{}\n\n\
+         A gate that measures one upstream release proves parity with that \
+         release and says nothing about the current one — P4-130's whole \
+         subject. Give the job a `{CURRENT_ORACLE_SUFFIX}` twin at the \
+         `tool-current` release from {MANIFEST}, or record it in \
+         UNPAIRED_ORACLE_JOBS with the reason it stays single.",
+        unpaired.join("\n")
+    );
+}
+
+#[test]
+fn the_recorded_remainder_names_only_unpaired_jobs_that_exist() {
+    if !repository_tree_is_readable() {
+        eprintln!("SKIP: repository tree not readable; see the sibling test.");
+        return;
+    }
+    let jobs: Vec<(String, String, String)> = every_job();
+    for (workflow, job, reason) in UNPAIRED_ORACLE_JOBS {
+        let block: &String = &jobs
+            .iter()
+            .find(|(other_file, other, _)| other_file == workflow && other == job)
+            .unwrap_or_else(|| {
+                panic!(
+                    "UNPAIRED_ORACLE_JOBS records {workflow} :: {job}, which is \
+                     not a job in {WORKFLOW_DIR} — a renamed or deleted leg \
+                     leaves an excuse behind that covers nothing"
+                )
+            })
+            .2;
+        assert!(
+            job_installs_an_oracle(block),
+            "UNPAIRED_ORACLE_JOBS records {workflow} :: {job}, which installs \
+             no C oracle — an excuse for a leg that needs none reads as \
+             remaining work that does not exist"
+        );
+        let twin: String = format!("{job}{CURRENT_ORACLE_SUFFIX}");
+        assert!(
+            !jobs
+                .iter()
+                .any(|(other_file, other, _)| other_file == workflow && *other == twin),
+            "UNPAIRED_ORACLE_JOBS still records {workflow} :: {job}, but {twin} \
+             exists — pairing a leg means deleting its row, or the inventory \
+             overstates what is left exactly the way the prose it replaced did"
+        );
+        assert!(
+            !reason.trim().is_empty(),
+            "{workflow} :: {job} is recorded with no reason — a list of names \
+             is the stale paragraph again"
+        );
+    }
+}
+
+#[test]
+fn each_leg_pair_provisions_the_two_releases_its_roles_name() {
+    if !repository_tree_is_readable() {
+        eprintln!("SKIP: repository tree not readable; see the sibling test.");
+        return;
+    }
+    let rows: Vec<Declared> = manifest_rows();
+    let baseline_version: String = declared_version(&rows, "tool-baseline");
+    let current_version: String = declared_version(&rows, "tool-current");
+    let jobs: Vec<(String, String, String)> = every_job();
+    let pairs: Vec<(String, String, String)> = oracle_leg_pairs();
+    assert!(
+        !pairs.is_empty(),
+        "no `{CURRENT_ORACLE_SUFFIX}` leg found in {WORKFLOW_DIR} — the pair \
+         scanner has stopped matching, and a gate over an empty set passes \
+         whatever the workflows do"
+    );
+
+    for (workflow, baseline_job, current_job) in pairs {
+        let block_of = |wanted: &str| -> String {
+            jobs.iter()
+                .find(|(other_file, other, _)| *other_file == workflow && other == wanted)
+                .map(|(_, _, block)| block.clone())
+                .unwrap_or_else(|| panic!("{workflow} has no {wanted} job"))
+        };
+        for (job, role, expected) in [
+            (&baseline_job, "tool-baseline", &baseline_version),
+            (&current_job, "tool-current", &current_version),
+        ] {
+            let provisioned: BTreeSet<String> = provisioned_versions_in(&block_of(job));
+            assert!(
+                provisioned.contains(expected),
+                "{workflow}'s {job} leg plays the {role} role, so it must \
+                 install libjpeg-turbo {expected}; it provisions {}.\n\n\
+                 A pair whose two legs install the same release measures one \
+                 release twice, and a leg that installs nothing this scanner \
+                 can read answers against whatever the runner happened to \
+                 carry.",
+                if provisioned.is_empty() {
+                    "nothing".to_string()
+                } else {
+                    provisioned.into_iter().collect::<Vec<String>>().join(", ")
+                }
+            );
+        }
+    }
+}
+
+#[test]
+fn a_whole_suite_leg_and_its_twin_differ_only_in_the_oracle() {
+    if !repository_tree_is_readable() {
+        eprintln!("SKIP: repository tree not readable; see the sibling test.");
+        return;
+    }
+    let jobs: Vec<(String, String, String)> = every_job();
+    let mut compared: usize = 0;
+    for (workflow, baseline_job, current_job) in oracle_leg_pairs() {
+        let block_of = |wanted: &str| -> String {
+            jobs.iter()
+                .find(|(other_file, other, _)| *other_file == workflow && other == wanted)
+                .map(|(_, _, block)| block.clone())
+                .unwrap_or_else(|| panic!("{workflow} has no {wanted} job"))
+        };
+        let baseline: String = block_of(&baseline_job);
+        let current: String = block_of(&current_job);
+
+        // Only the legs that run whole crates. A leg that names suites with
+        // `--test` is already compared suite by suite, and by a selection
+        // rather than by a command — `test-integration` deliberately keeps its
+        // self-contained suites off its twin, and demanding the same commands
+        // there would ask for runs that measure the same thing twice.
+        let names_suites: bool = !root_suites_selected_by(&baseline).is_empty()
+            || !capi_suites_selected_by(&baseline).is_empty();
+        if names_suites {
+            continue;
+        }
+        let wanted: BTreeSet<String> = cargo_test_commands_in(&baseline);
+        if wanted.is_empty() {
+            continue;
+        }
+        compared += 1;
+
+        let have: BTreeSet<String> = cargo_test_commands_in(&current);
+        let missing: Vec<&String> = wanted.difference(&have).collect();
+        assert!(
+            missing.is_empty(),
+            "{workflow}'s {current_job} does not run what {baseline_job} runs: \
+             {missing:?} is missing.\n\n\
+             The pair exists to hold the release constant against everything \
+             else. Two legs running different commands measure two things and \
+             attribute the difference to upstream."
+        );
+
+        assert_eq!(
+            runs_on_in(&baseline),
+            runs_on_in(&current),
+            "{workflow}'s {baseline_job} and {current_job} run on different \
+             machines, so a divergence between them is not evidence about the \
+             oracle release"
+        );
+
+        // The oracle prefix is the one variable a twin is *supposed* to differ
+        // in — that is what makes it the twin.
+        let strip_the_oracle = |block: &str| -> BTreeMap<String, String> {
+            let mut environment: BTreeMap<String, String> = job_level_env_in(block);
+            for name in ORACLE_PREFIX_VARS {
+                environment.remove(name);
+            }
+            environment
+        };
+        assert_eq!(
+            strip_the_oracle(&baseline),
+            strip_the_oracle(&current),
+            "{workflow}'s {baseline_job} and {current_job} compile under \
+             different job-level environments. RUSTFLAGS decides which kernels \
+             are built, so a pair that disagrees on it is comparing two \
+             backends and calling the difference an upstream release."
+        );
+    }
+    assert!(
+        compared > 0,
+        "no whole-suite leg pair was compared — every pair now names suites, \
+         or the command scanner has stopped matching, and either way this gate \
+         is asserting nothing"
+    );
+}
+
+#[test]
+fn a_twin_is_recognised_by_its_name_and_a_baseline_by_the_absence_of_one() {
+    if !repository_tree_is_readable() {
+        eprintln!("SKIP: repository tree not readable; see the sibling test.");
+        return;
+    }
+    let pairs: Vec<(String, String, String)> = oracle_leg_pairs();
+    // The conventions that already exist, pinned so a rename reaches this file
+    // instead of quietly emptying the pair set.
+    for (workflow, baseline, current) in [
+        ("ci.yml", BASELINE_LEG_JOB, CURRENT_LEG_JOB),
+        (
+            "full-c-parity.yml",
+            FULL_PARITY_LEG_PAIRS[0].0,
+            FULL_PARITY_LEG_PAIRS[0].1,
+        ),
+    ] {
+        assert!(
+            pairs.iter().any(|(other_file, base, twin)| {
+                other_file == workflow && base == baseline && twin == current
+            }),
+            "{workflow}'s {baseline}/{current} pair was not discovered; \
+             found {pairs:?}"
+        );
+    }
+    // A baseline is never also a twin: `full-c-parity-x86` does not end in the
+    // suffix, and reading it as one would look for `full-c-parity` and fail.
+    for (_, baseline, _) in &pairs {
+        assert!(
+            !baseline.ends_with(CURRENT_ORACLE_SUFFIX),
+            "{baseline} was read as a baseline and it is a twin"
+        );
+    }
+}
+
+#[test]
+fn a_second_cargo_test_does_not_swallow_the_first() {
+    // Two invocations in one step are two commands. Reading the first as
+    // everything up to the end of the script would make any pair whose steps
+    // are ordered differently look unequal, and any twin that appends a run
+    // look like it changed the first.
+    let two: &str = "    - run: |\n\
+                     \x20         cargo test --tests\n\
+                     \x20         cargo test --release --lib\n";
+    assert_eq!(
+        cargo_test_commands_in(two),
+        BTreeSet::from([
+            "cargo test --tests".to_string(),
+            "cargo test --release --lib".to_string(),
+        ])
+    );
+    // A folded block is one command, so its continuation lines are arguments
+    // rather than commands of their own — the spelling `ci.yml` uses for the
+    // long `--test` lists on both tool legs.
+    let folded: &str = "    - run: >\n\
+                        \x20         cargo test -p libjpeg-turbo-rs-capi\n\
+                        \x20         --test capi_jpeglib_encode\n";
+    assert_eq!(
+        cargo_test_commands_in(folded),
+        BTreeSet::from([
+            "cargo test -p libjpeg-turbo-rs-capi --test capi_jpeglib_encode".to_string()
+        ])
+    );
+    // A backslash continuation is one command in either block style.
+    let continued: &str = "    - run: |\n\
+                           \x20         cargo test --tests \\\n\
+                           \x20           --no-fail-fast\n";
+    assert_eq!(
+        cargo_test_commands_in(continued),
+        BTreeSet::from(["cargo test --tests --no-fail-fast".to_string()])
+    );
+    // A pipeline ends the invocation: the `tee` belongs to the shell, and a
+    // twin that adds one is running the same tests.
+    let piped: &str = "    - run: cargo test --tests 2>&1 | tee /tmp/log\n";
+    assert_eq!(
+        cargo_test_commands_in(piped),
+        BTreeSet::from(["cargo test --tests".to_string()])
+    );
+    // Prose about a run is not a run — these workflows discuss their own
+    // commands in comments constantly.
+    let commented: &str = "    # the twin runs cargo test --tests too\n\
+                           \x20   - run: cargo test --tests\n";
+    assert_eq!(
+        cargo_test_commands_in(commented),
+        BTreeSet::from(["cargo test --tests".to_string()])
+    );
+}
+
+#[test]
+fn a_step_level_env_is_not_the_jobs_env() {
+    // The shape this distinction exists for: a job-level RUSTFLAGS compiles
+    // every step, while the same key under a step compiles one. A comparison
+    // that merged them would call two legs equal when only one builds AVX2.
+    let job_level: &str = "    runs-on: ubuntu-24.04\n\
+                           \x20   env:\n\
+                           \x20     RUSTFLAGS: \"-C target-feature=+avx2\"\n\
+                           \x20   steps:\n\
+                           \x20     - run: cargo test --tests\n\
+                           \x20       env:\n\
+                           \x20         LIBJPEG_TURBO_PREFIX: /opt/libjpeg-turbo\n";
+    assert_eq!(
+        job_level_env_in(job_level),
+        BTreeMap::from([(
+            "RUSTFLAGS".to_string(),
+            "-C target-feature=+avx2".to_string()
+        )])
+    );
+    assert_eq!(runs_on_in(job_level).as_deref(), Some("ubuntu-24.04"));
+    // A commented-out runner is not the runner.
+    assert_eq!(
+        runs_on_in("    # runs-on: macos-latest\n    runs-on: ubuntu-24.04\n").as_deref(),
+        Some("ubuntu-24.04")
+    );
+}
+
 /// The `set(VERSION x.y.z)` line of the pinned submodule's top-level
 /// `CMakeLists.txt` — upstream's own statement of which release the tree is.
 fn submodule_version(cmake: &Path) -> String {
