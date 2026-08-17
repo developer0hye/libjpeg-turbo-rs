@@ -639,6 +639,99 @@ jobs:
           LIBJPEG_TURBO_PREFIX: /opt/libjpeg-turbo
         timeout-minutes: 30
 
+      # The C-ABI crate's oracle suites, at the current-parity oracle.
+      #
+      # `cargo test --tests` above is the root crate, so without these steps
+      # this leg measured the root differential matrix and nothing of the
+      # classic-`jpeg_*` / TurboJPEG shim — the half of this repository whose
+      # whole contract is "what stock libjpeg does", and therefore the half
+      # with the most to say about a new upstream release.
+      #
+      # Which suites belong here is not a judgement call maintained in prose:
+      # `tests/oracle_version_pins.rs` reads each baseline-leg suite's own
+      # source for a C-oracle marker and fails if one of them is missing from
+      # this job. The baseline leg's remaining capi steps — the span-overflow
+      # guards, the error-code and message-rendering gates, the crate's unit
+      # tests, the ELF symbol-version leg — compare against constants, our own
+      # generated files, or the pinned headers, so a second run at another
+      # upstream release would measure the same thing twice.
+      - name: C-ABI TurboJPEG and stock-tool oracles (3.2.0)
+        run: >
+          cargo test -p libjpeg-turbo-rs-capi
+          --test capi_jpeglib_encode
+          --test capi_classic_lifecycle_pathological
+          --test capi_compress_precision
+          --test norealloc_all_entry_points
+          --test yuv_four_component_c_parity
+          --test yuv_plane_index_c_parity -- --nocapture
+        env:
+          # Exclusive, as on every other oracle step: a suite that cannot find
+          # its tool under this prefix fails instead of falling back to some
+          # other djpeg and reporting a 3.2.0 result it did not measure.
+          LIBJPEG_TURBO_PREFIX: /opt/libjpeg-turbo
+
+      # The classic-ABI trace suites compile a C oracle and compare traces line
+      # by line, and they need the v8 ABI the shim claims. Upstream's official
+      # deb ships JPEG_LIB_VERSION 62, so the install above cannot serve them
+      # however current it is; only a WITH_JPEG8=1 build of the sources can.
+      #
+      # The baseline leg builds the *submodule* for this role — 3.1.90, the
+      # beta1 of the current line, per docs/oracle_versions.tsv, which is the
+      # release each row's version is declared in. Bumping that submodule is a
+      # separate change with its own drift audit, because it moves every
+      # `j*.c:NNN` citation in this repository at the same time. Building 3.2.0
+      # beside it moves the trace comparison to current upstream stable without
+      # touching a single citation.
+      - name: Build libjpeg-turbo 3.2.0 at the v8 ABI
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake nasm
+          git clone --depth 1 --branch 3.2.0 \
+            https://github.com/libjpeg-turbo/libjpeg-turbo.git /tmp/ljt320src
+          # A tag is a moveable name. Assert the tree agrees with the pin, so
+          # this oracle cannot be relabelled from outside the repository.
+          grep -Eq '^set\(VERSION 3\.2\.0\)$' /tmp/ljt320src/CMakeLists.txt
+          cmake -S /tmp/ljt320src -B /tmp/ljt320v8/build \
+            -DCMAKE_BUILD_TYPE=Release -DWITH_JPEG8=1 \
+            -DCMAKE_INSTALL_PREFIX=/tmp/ljt320v8/prefix
+          cmake --build /tmp/ljt320v8/build -j"$(nproc)"
+          cmake --install /tmp/ljt320v8/build
+          grep -Eq '^#define[[:space:]]+JPEG_LIB_VERSION[[:space:]]+80$' \
+            /tmp/ljt320v8/prefix/include/jconfig.h
+        timeout-minutes: 20
+
+      - name: Classic C-ABI state, create and precision traces (3.2.0)
+        run: >
+          cargo test -p libjpeg-turbo-rs-capi
+          --test capi_create_abi_guards
+          --test capi_classic_compress_precision
+          --test capi_consume_input_states
+          --test capi_preload_resume
+          --test capi_classic_lifecycle_state
+          --test capi_classic_source_mgr
+          --test capi_resync_suspend -- --nocapture
+        env:
+          LIBJPEG_TURBO_PREFIX: /tmp/ljt320v8/prefix
+
+      - name: Classic destination ownership + stdio I/O parity (3.2.0)
+        env:
+          LIBJPEG_TURBO_REFERENCE_DIR: /tmp/ljt320v8/prefix
+        run: |
+          set -o pipefail
+          cargo test -p libjpeg-turbo-rs-capi \
+            --test capi_classic_dest_ownership -- --nocapture 2>&1 | tee p4108-320.log
+          # Same fail-closed rule as the baseline leg: a missing reference build
+          # drops the differential half of every case silently.
+          if grep -q '^SKIP' p4108-320.log; then
+            echo "P4-108 canaries skipped on the 3.2.0 leg; the reference build is required here" >&2
+            grep '^SKIP' p4108-320.log >&2
+            exit 1
+          fi
+          grep -q 'dev_full_available=1' p4108-320.log || {
+            echo "expected /dev/full to be exercised on ubuntu-latest" >&2
+            exit 1
+          }
+
   test-cross-platform:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

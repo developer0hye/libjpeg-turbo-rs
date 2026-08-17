@@ -2425,7 +2425,7 @@ subsampling/scaling/grayscale, invalid null/zero/out-of-bounds/after-read calls,
 returned x/width/output_width, component geometry, and subsequent row bytes.
 The 12-bit initialization/order portion remains in P4-98.
 
-**Extended 2026-08-17 by the [P4-130](#p4-130-c-parity-oracle-is-pinned-to-3141-upstream-stable-is-320--partial-the-320-leg-the-version-manifest-the-currency-job-and-the-delta-triage-landed-2026-08-17-the-classic-abi-submodule-oracle-and-the-four-gaps-the-triage-filed-remain)
+**Extended 2026-08-17 by the [P4-130](#p4-130-c-parity-oracle-is-pinned-to-3141-upstream-stable-is-320--partial-both-tool-legs-now-cover-the-c-abi-oracle-suites-the-submodule-bump-and-the-four-filed-gaps-remain)
 3.2 delta triage.** 3.2.0 note 3 hardened this entry point, and the delta is
 exactly one condition: 3.2.0 `src/jdapistd.c:203` reads
 `if (cinfo->master->lossless || cinfo->raw_data_out)` where 3.1.90 reads
@@ -5118,7 +5118,7 @@ prevent, and it undermines any claim that the shipped surface is audited.
 
 **Status (2026-08-09): closed.** Landed in #486; `crates/libjpeg-turbo-rs-capi/build.rs` now routes the 16 `jpeg_capi_test_*` accessors to a `LIBJPEGTURBORS_PRIVATE_1.0` node via an exact-name list, and `tests/soname.rs` asserts no `jpeg_capi_test_*` symbol carries `LIBJPEG_8.0`.
 
-## P4-130. C-Parity Oracle Is Pinned to 3.1.4.1; Upstream Stable Is 3.2.0 — **PARTIAL: the 3.2.0 leg, the version manifest, the currency job and the delta triage landed 2026-08-17; the classic-ABI submodule oracle and the four gaps the triage filed remain**
+## P4-130. C-Parity Oracle Is Pinned to 3.1.4.1; Upstream Stable Is 3.2.0 — **PARTIAL: both tool legs now cover the C-ABI oracle suites; the submodule bump and the four filed gaps remain**
 
 **GitHub:** [#461](https://github.com/developer0hye/libjpeg-turbo-rs/issues/461) — under the [#470](https://github.com/developer0hye/libjpeg-turbo-rs/issues/470) umbrella.
 
@@ -5185,9 +5185,56 @@ It is sequenced after the Stage A safety items because re-baselining oracles
 while the classic-ABI error and state contracts are still in flux would mix two
 sources of diff into one signal.
 
-**Status (2026-08-17): partial.** Criteria 1, 3 and 4 are delivered and
-criterion 2's triage is complete; what remains is the *work* the triage filed,
-plus one oracle the original write-up did not know about.
+**Status (2026-08-18): partial.** Criteria 1, 3 and 4 are delivered — criterion
+1 over the root matrix on 2026-08-17 and over the C-ABI crate's oracle suites
+on 2026-08-18 — and criterion 2's triage is complete. What remains is the
+*work* the triage filed, plus the submodule bump.
+
+*Criterion 1, the C-ABI half (2026-08-18).* The 3.2.0 leg first covered the
+root differential matrix only, because `cargo test --tests` selects the root
+crate: the classic-`jpeg_*` and TurboJPEG shim — the half of this repository
+whose whole contract is "what stock libjpeg does" — was still measured against
+3.1.4.1 alone. It no longer is. Fourteen C-ABI suites now run on both legs:
+
+- six against the 3.2.0 deb (`capi_jpeglib_encode`,
+  `capi_classic_lifecycle_pathological`, `capi_compress_precision`,
+  `norealloc_all_entry_points`, `yuv_four_component_c_parity`,
+  `yuv_plane_index_c_parity`);
+- eight against a **new** `trace-current` oracle — 3.2.0 built from source with
+  `WITH_JPEG8=1` at `/tmp/ljt320v8/prefix`, because the classic-ABI trace
+  suites compare compiled-oracle traces line by line at the v8 ABI and
+  upstream's deb ships `JPEG_LIB_VERSION 62`. Building 3.2.0 beside the
+  submodule moves that comparison to current stable **without** touching a
+  single `j*.c:NNN` citation, which is what keeps the submodule bump a separate
+  change.
+
+Which suites belong there is decided mechanically, not in prose:
+`every_oracle_backed_capi_suite_on_the_baseline_leg_also_runs_on_the_current_leg`
+reads each baseline-leg suite's own source for a C-oracle marker
+(`LIBJPEG_TURBO_PREFIX`, `build_classic_oracle`, a stock tool name, …) and
+fails if one of them runs on the baseline leg alone. Classifying from the
+suite's source rather than from a hand-kept list is what stops the pair from
+drifting: a suite that *gains* a C comparison is reclassified by the commit
+that gives it one. The classifier is pinned in both directions by
+`the_oracle_classifier_separates_c_comparisons_from_self_contained_suites`, and
+`a_job_block_stops_at_the_next_job` pins the parse — `test-integration` is a
+prefix of `test-integration-current-oracle`, and a block that ran on into the
+next job would compare a set with itself and never fail.
+
+The remaining capi steps stay on the baseline leg alone on purpose: the
+span-overflow guards, the error-code and message-rendering gates, the crate's
+unit tests and the ELF symbol-version leg compare against constants, our own
+generated files, or the pinned headers, so a second run at another upstream
+release measures the same thing twice.
+
+Measured before landing on macOS aarch64, against locally built 3.2.0 prefixes
+(default and `WITH_JPEG8=1`): the three new steps are **14 suite sections, 77
+passed, 0 failed**. The one skip is `stdio_dev_full` — `/dev/full` does not
+exist on macOS; on the Ubuntu runner it is exercised, and the step fails closed
+on any skip line exactly as its baseline twin does. The oracle was verified
+mandatory rather than assumed: with `LIBJPEG_TURBO_PREFIX` pointed at a
+non-existent path, `capi_classic_lifecycle_state` fails with
+`no stock *v8* libjpeg development install found` rather than passing.
 
 *Criterion 1 — two legs.* `ci.yml`'s `test-integration-current-oracle`
 ("Integration Tests (oracle 3.2.0)") installs the official 3.2.0 deb, asserts
@@ -5215,11 +5262,15 @@ split and `tests/oracle_version_pins.rs` cross-checks that row against the
 submodule's own `CMakeLists.txt`, so it cannot drift again.
 
 *Criterion 3 — the manifest.* `docs/oracle_versions.tsv` names the release each
-oracle role runs against and why. The gate holds it in both directions: a
-workflow pin with no row fails, and a declared leg no workflow installs fails —
-because criterion 1 asks for a second *running* leg, not a documented
-intention. `docs/FEATURE_PARITY.md` now states what each leg proves instead of
-naming 3.1.4.1 as if it were current.
+oracle role runs against and why — four rows since the C-ABI half landed, the
+new one being `trace-current`. The gate holds it in both directions: a workflow
+pin with no row fails, and a declared leg no workflow installs fails — because
+criterion 1 asks for a second *running* leg, not a documented intention. For
+`trace-current` "installs" is narrowed to a `--branch` source clone, since the
+deb that satisfies `tool-current` is the same version and would otherwise back
+a v8-ABI row it cannot serve; `the_official_deb_does_not_back_a_v8_abi_row`
+pins that distinction. `docs/FEATURE_PARITY.md` now states what each leg proves
+instead of naming 3.1.4.1 as if it were current.
 
 *Criterion 4 — the policy, as a job.* `scripts/check_oracle_currency.sh`
 compares the manifest's `tool-current` row against upstream's latest stable
@@ -5251,14 +5302,11 @@ was filed with:
 **What remains.**
 
 1. The four filed gaps (P4-171..P4-174) are triaged, not fixed.
-2. The 3.2.0 leg covers the **root** differential matrix. The C-ABI crate's
-   oracle steps still run against the 3.1.4.1 tools and the 3.1.90 submodule;
-   extending the current-parity leg over them is the natural next milestone.
-3. `references/libjpeg-turbo` stays at 3.1.90. Bumping it to 3.2.0 moves every
+2. `references/libjpeg-turbo` stays at 3.1.90. Bumping it to 3.2.0 moves every
    `j*.c:NNN` citation in this repository and re-baselines the classic-ABI
    trace oracles at the same time, which is its own change with its own
    drift audit — not a line in this one.
-4. Retiring the 3.1.4.1 leg is deliberately **not** scheduled: it is the
+3. Retiring the 3.1.4.1 leg is deliberately **not** scheduled: it is the
    behaviour-regression half of the pair, and it retires only when its
    expectations are known to hold on the newer leg.
 
@@ -8253,7 +8301,7 @@ change with its own oracle traces.
 
 ## P4-171. 8-Bit Lossy JPEG Cannot Be Decompressed to 12-Bit Output (3.2 beta1 note 8) — **OPEN**
 
-**GitHub:** [#561](https://github.com/developer0hye/libjpeg-turbo-rs/issues/561) — filed 2026-08-17 by the [P4-130](#p4-130-c-parity-oracle-is-pinned-to-3141-upstream-stable-is-320--partial-the-320-leg-the-version-manifest-the-currency-job-and-the-delta-triage-landed-2026-08-17-the-classic-abi-submodule-oracle-and-the-four-gaps-the-triage-filed-remain) 3.2 delta triage.
+**GitHub:** [#561](https://github.com/developer0hye/libjpeg-turbo-rs/issues/561) — filed 2026-08-17 by the [P4-130](#p4-130-c-parity-oracle-is-pinned-to-3141-upstream-stable-is-320--partial-both-tool-legs-now-cover-the-c-abi-oracle-suites-the-submodule-bump-and-the-four-filed-gaps-remain) 3.2 delta triage.
 
 **Motivation.** 3.2 beta1 note 8 added a capability, not a fix: an 8-bit-per-sample
 *lossy* JPEG can now be decompressed to a 12-bit-per-sample output image, to
@@ -8434,6 +8482,16 @@ decode-sequence budget enforcement — cited in `docs/LAST_MILE.md`'s live-gate
 row as "the 3-test `capi_classic_decode_budget` suite" — compiles on every pull
 request and executes on none.
 
+**A second unnamed suite (2026-08-18).** Pairing the two tool legs for P4-130
+required enumerating which capi suites compare against C, and that enumeration
+found `capi_yuv_gray` in the same state: `grep -rn "capi_yuv_gray"
+.github/workflows/` returns nothing, so P4-165's 10-test GRAY-YUV suite — the
+one that closed a heap **write** out of bounds in `tj3EncodeYUV8`, and whose
+oracle test compares against real TurboJPEG — has also never run in CI. Two
+suites, found by two unrelated pieces of work, is the argument for criterion 3:
+the fix is the enumeration, not the two names. Neither is fixed here; P4-130's
+pairing gate compares the two *legs* and cannot see a suite that is on neither.
+
 This is the third instance of one defect class. P4-61 recorded it first (a test
 filter that matched nothing), `capi_classic_error_codes` was caught the same way
 ("it compiled on every PR and executed on none, which is precisely how it
@@ -8443,8 +8501,9 @@ warn about it in prose. Prose has now failed to prevent it twice.
 
 **Acceptance criteria.**
 
-1. `capi_classic_decode_budget` is named in a CI step, with the
-   `LIBJPEG_TURBO_PREFIX` its oracle needs so it fails rather than soft-skips.
+1. `capi_classic_decode_budget` and `capi_yuv_gray` are named in a CI step,
+   each with the `LIBJPEG_TURBO_PREFIX` its oracle needs so it fails rather
+   than soft-skips.
 2. It passes there, or the failure it surfaces is filed.
 3. A mechanism, not another comment: an enumeration test comparing
    `crates/libjpeg-turbo-rs-capi/tests/*.rs` against the suites named in

@@ -19,11 +19,22 @@
 #                  that hid behind the bump would be indistinguishable from a
 #                  pass.
 #   tool-current   current upstream stable, and therefore the parity target.
+#   trace-current  current upstream stable at the *v8 ABI*, built from source.
+#                  A separate row because the packaged release cannot play this
+#                  part: upstream's deb ships JPEG_LIB_VERSION 62, and the
+#                  classic-ABI trace suites compare against the v8 ABI the shim
+#                  claims. `tests/oracle_version_pins.rs` therefore requires a
+#                  `--branch` clone site for this row, not merely a version
+#                  that appears somewhere.
 #   submodule      references/libjpeg-turbo. Not a tool pin: it is built in CI
-#                  as the classic-ABI trace oracle (`/tmp/ljt8/prefix`, v8 ABI)
-#                  and it is the source every `j*.c:NNN` citation quotes.
+#                  as the *baseline* classic-ABI trace oracle
+#                  (`/tmp/ljt8/prefix`, v8 ABI) and it is the source every
+#                  `j*.c:NNN` citation quotes. It is one release line ahead of
+#                  `tool-baseline` and one behind `trace-current`, which is the
+#                  split this file exists to keep visible.
 #
 # role	version	provisioned_as	released	purpose
 tool-baseline	3.1.4.1	libjpeg-turbo-official deb / source build at /opt/libjpeg-turbo	2026-03-27	Behaviour-regression leg: djpeg/cjpeg/jpegtran + libturbojpeg for the differential suites, at the release the current expectations were written against.
-tool-current	3.2.0	libjpeg-turbo-official deb at /opt/libjpeg-turbo	2026-06-30	Current-parity leg: the same differential suites against current upstream stable, selected explicitly through LIBJPEG_TURBO_PREFIX rather than PATH order.
+tool-current	3.2.0	libjpeg-turbo-official deb at /opt/libjpeg-turbo	2026-06-30	Current-parity leg: the same differential suites against current upstream stable, selected explicitly through LIBJPEG_TURBO_PREFIX rather than PATH order. Covers the root matrix and the C-ABI crate's TurboJPEG and stock-tool suites.
+trace-current	3.2.0	source clone built with WITH_JPEG8=1 at /tmp/ljt320v8/prefix	2026-06-30	Current-parity leg for the classic-ABI trace suites, which compile a C oracle and compare traces line by line at the v8 ABI. Built from source because the deb above is JPEG_LIB_VERSION 62.
 submodule	3.1.90	references/libjpeg-turbo (git submodule, tag 3.1.90 = 3.2 beta1)	2026-03-27	Classic-ABI trace oracle built with WITH_JPEG8=1, and the source tree the C citations quote. Already on the 3.2 line, which is why the tool pins and the citations disagreed unnoticed.

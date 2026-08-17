@@ -40,16 +40,75 @@ const SUBMODULE_CMAKE: &str = "references/libjpeg-turbo/CMakeLists.txt";
 
 /// Roles a manifest row may declare. A typo becomes a failure rather than an
 /// unnoticed row nothing checks.
-const KNOWN_ROLES: [&str; 3] = ["tool-baseline", "tool-current", "submodule"];
+const KNOWN_ROLES: [&str; 4] = [
+    "tool-baseline",
+    "tool-current",
+    "trace-current",
+    "submodule",
+];
 
-/// Roles provisioned by a workflow pin (as opposed to by a git submodule).
-const PROVISIONED_ROLES: [&str; 2] = ["tool-baseline", "tool-current"];
+/// How a row's version has to appear in a workflow before the row counts as
+/// backed by a leg that runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SiteShape {
+    /// Any provisioning site will do — upstream's official deb, a source
+    /// clone, whatever the role's own step chooses.
+    AnyProvisioning,
+    /// A source clone specifically. Upstream's official deb ships
+    /// `JPEG_LIB_VERSION 62`, so no deb can back a v8-ABI oracle however
+    /// current its version is; only a `WITH_JPEG8=1` build of the sources can.
+    /// Without this distinction the deb installed for `tool-current` would
+    /// satisfy a `trace-current` row of the same version, and deleting the
+    /// build step would leave the manifest still claiming the leg.
+    SourceClone,
+}
+
+/// Roles provisioned by a workflow pin (as opposed to by a git submodule),
+/// with the site shape each one requires.
+const PROVISIONED_ROLES: [(&str, SiteShape); 3] = [
+    ("tool-baseline", SiteShape::AnyProvisioning),
+    ("tool-current", SiteShape::AnyProvisioning),
+    ("trace-current", SiteShape::SourceClone),
+];
 
 /// Dotted-numeric tokens in a workflow whose first component is this are
 /// libjpeg-turbo versions. The 3.x line is the only major upstream ships, and
 /// the only dotted tokens in these files today are libjpeg-turbo's 13 pins plus
 /// two crate/tool versions (`0.8.0`, `0.36.5`) that this filter excludes.
 const ORACLE_MAJOR: &str = "3";
+
+/// The workflow carrying both tool legs.
+const CI_WORKFLOW: &str = ".github/workflows/ci.yml";
+
+/// The `tool-baseline` leg (3.1.4.1) and the `tool-current` leg (3.2.0).
+const BASELINE_LEG_JOB: &str = "test-integration";
+const CURRENT_LEG_JOB: &str = "test-integration-current-oracle";
+
+/// A `cargo test` invocation carrying this selects the C-ABI crate.
+const CAPI_PACKAGE: &str = "-p libjpeg-turbo-rs-capi";
+const CAPI_TEST_DIR: &str = "crates/libjpeg-turbo-rs-capi/tests";
+
+/// Source markers that mean "what this suite asserts depends on the C
+/// libjpeg-turbo it ran against": the environment variables that name an
+/// oracle prefix, the helpers that compile and run one, and the stock tools a
+/// suite shells out to.
+///
+/// Classifying from each suite's own source, rather than from a list kept
+/// here, is what stops the pairing gate below from rotting: a suite that
+/// *gains* a C comparison is reclassified by the same commit that gives it
+/// one, with nothing to remember to update.
+const ORACLE_MARKERS: [&str; 10] = [
+    "LIBJPEG_TURBO_PREFIX",
+    "LIBJPEG_TURBO_REFERENCE_DIR",
+    "build_oracle",
+    "build_classic_oracle",
+    "run_oracle",
+    "find_turbojpeg_dev",
+    "find_libjpeg_dev",
+    "\"cjpeg\"",
+    "\"djpeg\"",
+    "\"jpegtran\"",
+];
 
 /// One manifest row.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -111,10 +170,31 @@ fn workflow_files() -> Vec<PathBuf> {
     files
 }
 
+/// Which workflow lines a version scan counts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SiteFilter {
+    /// Every line, including comments and step titles. Loose on purpose: a
+    /// stale version named in prose is drift worth catching.
+    AnyMention,
+    /// Only lines that install or build an oracle.
+    Provisioning,
+    /// Only lines that clone a source tree at a tag.
+    SourceClone,
+}
+
+impl SiteFilter {
+    fn accepts(self, line: &str) -> bool {
+        match self {
+            SiteFilter::AnyMention => true,
+            SiteFilter::Provisioning => is_provisioning_line(line),
+            SiteFilter::SourceClone => is_source_clone_line(line),
+        }
+    }
+}
+
 /// Every dotted-numeric token on the 3.x line, keyed by version, with the
-/// `file:line` sites that carry it. `provisioning_only` restricts the scan to
-/// lines that actually install or build an oracle.
-fn version_sites_in_workflows(provisioning_only: bool) -> BTreeMap<String, Vec<String>> {
+/// `file:line` sites that carry it, restricted to the lines `filter` accepts.
+fn version_sites_in_workflows(filter: SiteFilter) -> BTreeMap<String, Vec<String>> {
     let mut pins: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for path in workflow_files() {
         let Ok(text) = std::fs::read_to_string(&path) else {
@@ -125,7 +205,7 @@ fn version_sites_in_workflows(provisioning_only: bool) -> BTreeMap<String, Vec<S
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
         for (index, line) in text.lines().enumerate() {
-            if provisioning_only && !is_provisioning_line(line) {
+            if !filter.accepts(line) {
                 continue;
             }
             for token in dotted_numeric_tokens(line) {
@@ -159,6 +239,14 @@ fn is_provisioning_line(line: &str) -> bool {
     trimmed.contains("VERSION=")
         || trimmed.contains("--branch ")
         || trimmed.contains("libjpeg-turbo-official")
+}
+
+/// Does this line clone an upstream source tree at a tag?
+///
+/// The narrow half of [`is_provisioning_line`], for the roles a packaged
+/// release cannot serve — see [`SiteShape::SourceClone`].
+fn is_source_clone_line(line: &str) -> bool {
+    is_provisioning_line(line) && line.contains("--branch ")
 }
 
 /// Maximal runs of digits and `.` that contain at least one `.`, with any
@@ -200,7 +288,7 @@ fn every_workflow_version_pin_is_declared_in_the_manifest() {
     let declared: BTreeSet<String> = manifest_rows().into_iter().map(|row| row.version).collect();
     // Loose on purpose: a stale version named in a comment or a step title is
     // exactly the kind of drift this direction exists to catch.
-    let pinned: BTreeMap<String, Vec<String>> = version_sites_in_workflows(false);
+    let pinned: BTreeMap<String, Vec<String>> = version_sites_in_workflows(SiteFilter::AnyMention);
 
     assert!(
         !pinned.is_empty(),
@@ -233,12 +321,37 @@ fn every_declared_tool_version_is_actually_provisioned() {
 
     // Strict: only lines that install or build an oracle count. A comment
     // naming the version is not a leg.
-    let provisioned: BTreeMap<String, Vec<String>> = version_sites_in_workflows(true);
+    let provisioned: BTreeMap<String, Vec<String>> =
+        version_sites_in_workflows(SiteFilter::Provisioning);
+    let cloned: BTreeMap<String, Vec<String>> = version_sites_in_workflows(SiteFilter::SourceClone);
+
     let unused: Vec<String> = manifest_rows()
         .into_iter()
-        .filter(|row| PROVISIONED_ROLES.contains(&row.role.as_str()))
-        .filter(|row| !provisioned.contains_key(&row.version))
-        .map(|row| format!("  {} {} ({})", row.role, row.version, row.provisioned_as))
+        .filter_map(|row| {
+            let shape: SiteShape = PROVISIONED_ROLES
+                .iter()
+                .find(|(role, _)| *role == row.role)
+                .map(|(_, shape)| *shape)?;
+            let sites: &BTreeMap<String, Vec<String>> = match shape {
+                SiteShape::AnyProvisioning => &provisioned,
+                SiteShape::SourceClone => &cloned,
+            };
+            if sites.contains_key(&row.version) {
+                return None;
+            }
+            Some(format!(
+                "  {} {} ({}) — needs {}",
+                row.role,
+                row.version,
+                row.provisioned_as,
+                match shape {
+                    SiteShape::AnyProvisioning => "a step that installs or builds it",
+                    SiteShape::SourceClone =>
+                        "a `--branch <version>` source clone; upstream's deb is \
+                         JPEG_LIB_VERSION 62 and cannot serve a v8-ABI oracle",
+                }
+            ))
+        })
         .collect();
 
     assert!(
@@ -276,6 +389,24 @@ fn a_version_named_in_a_comment_is_not_a_provisioning_site() {
 }
 
 #[test]
+fn the_official_deb_does_not_back_a_v8_abi_row() {
+    // `trace-current` asks for a source build because upstream's packaged
+    // release is JPEG_LIB_VERSION 62. Both shapes below install the same
+    // release, so without this distinction the deb would satisfy the row and
+    // the v8 build could be deleted with the manifest still claiming it.
+    assert!(is_source_clone_line(
+        "          git clone --depth 1 --branch 3.2.0 \\"
+    ));
+    assert!(!is_source_clone_line("          VERSION=3.2.0"));
+    assert!(!is_source_clone_line(
+        "            \"https://github.com/libjpeg-turbo/libjpeg-turbo/releases/download/${VERSION}/libjpeg-turbo-official_${VERSION}_${ARCH}.deb\""
+    ));
+    assert!(!is_source_clone_line(
+        "# built from --branch 3.2.0 in the current-parity leg"
+    ));
+}
+
+#[test]
 fn the_submodule_row_matches_the_checked_out_submodule() {
     if !repository_tree_is_readable() {
         eprintln!("SKIP: repository tree not readable; see the sibling test.");
@@ -309,6 +440,193 @@ fn the_submodule_row_matches_the_checked_out_submodule() {
          classic-ABI trace suites *and* the source every `j*.c:NNN` citation \
          quotes, so a stale row here mislabels both.",
         declared[0].version
+    );
+}
+
+// ---------------------------------------------------------------------------
+// P4-130 criterion 1, the C-ABI half: both tool legs run the same oracle
+// suites.
+//
+// `cargo test --tests` selects the root crate, so the current-parity leg
+// measured the root differential matrix and none of the classic-`jpeg_*` /
+// TurboJPEG shim — the half of this repository whose entire contract is "what
+// stock libjpeg does". The C-ABI crate's suites are selected by name (see the
+// P4-61 notes in ci.yml), which is what let the two legs diverge silently: a
+// step added to one leg is invisible to the other.
+// ---------------------------------------------------------------------------
+
+fn ci_workflow_text() -> String {
+    let path: PathBuf = repo_root().join(CI_WORKFLOW);
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("{} must be readable: {e}", path.display()))
+}
+
+/// The lines of one job in `ci.yml`: from its `  <name>:` header to the next
+/// header at the same indent.
+fn job_block(text: &str, job: &str) -> String {
+    let header: String = format!("  {job}:");
+    let mut block: String = String::new();
+    let mut inside: bool = false;
+    for line in text.lines() {
+        if !inside {
+            inside = line.trim_end() == header;
+            continue;
+        }
+        // Job headers are the only content at exactly two spaces of indent.
+        let starts_a_new_job: bool = line.starts_with("  ")
+            && !line.starts_with("   ")
+            && !line.trim_start().starts_with('#')
+            && line.trim_end().ends_with(':');
+        if starts_a_new_job {
+            break;
+        }
+        block.push_str(line);
+        block.push('\n');
+    }
+    assert!(
+        inside,
+        "no job named {job:?} in {CI_WORKFLOW} — this gate pairs two named \
+         jobs, so a rename has to reach it rather than silently leaving it \
+         comparing nothing"
+    );
+    block
+}
+
+/// The C-ABI test binaries a job selects with `--test`.
+///
+/// Only `cargo test` invocations that name the C-ABI package count, so the
+/// root-crate suites a job also runs (the serial timing step, for one) are not
+/// mistaken for capi coverage. Comment lines are dropped first: this workflow
+/// discusses suites by name in prose, and a mention is not a run — the same
+/// distinction [`is_provisioning_line`] draws for version pins.
+fn capi_suites_selected_by(job_block: &str) -> BTreeSet<String> {
+    let code: String = job_block
+        .lines()
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .collect::<Vec<&str>>()
+        .join(" ");
+    let mut suites: BTreeSet<String> = BTreeSet::new();
+    // Each chunk holds one invocation's arguments; a following invocation's
+    // `--test` flags land in the next chunk, not this one.
+    for invocation in code.split("cargo test").skip(1) {
+        if !invocation.contains(CAPI_PACKAGE) {
+            continue;
+        }
+        let mut tokens = invocation.split_whitespace();
+        while let Some(token) = tokens.next() {
+            if token == "--test" {
+                if let Some(suite) = tokens.next() {
+                    suites.insert(suite.to_string());
+                }
+            }
+        }
+    }
+    suites
+}
+
+/// Does this C-ABI suite compare against a C libjpeg-turbo, and therefore
+/// answer differently depending on which release it ran against?
+fn suite_consumes_a_c_oracle(suite: &str) -> bool {
+    let path: PathBuf = repo_root().join(CAPI_TEST_DIR).join(format!("{suite}.rs"));
+    let source: String = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+        panic!(
+            "{} is named by {CI_WORKFLOW} but could not be read: {e}",
+            path.display()
+        )
+    });
+    ORACLE_MARKERS.iter().any(|marker| source.contains(marker))
+}
+
+#[test]
+fn a_job_block_stops_at_the_next_job() {
+    if !repository_tree_is_readable() {
+        eprintln!("SKIP: repository tree not readable; see the sibling test.");
+        return;
+    }
+    // `test-integration` is a prefix of `test-integration-current-oracle`. If
+    // the block for the first ran on into the second, the pairing gate would
+    // compare a superset with its own subset and could never fail.
+    let baseline: String = job_block(&ci_workflow_text(), BASELINE_LEG_JOB);
+    assert!(
+        !baseline.contains(CURRENT_LEG_JOB),
+        "the {BASELINE_LEG_JOB} block swallowed {CURRENT_LEG_JOB}"
+    );
+}
+
+#[test]
+fn the_oracle_classifier_separates_c_comparisons_from_self_contained_suites() {
+    if !repository_tree_is_readable() {
+        eprintln!("SKIP: repository tree not readable; see the sibling test.");
+        return;
+    }
+    // Both directions pinned from suites that exist today, because the pairing
+    // gate is only as strong as this classifier: an over-broad marker makes it
+    // demand duplicate runs that measure nothing twice, and a missing one lets
+    // a real C comparison stay on the baseline leg alone.
+    for suite in [
+        "capi_classic_lifecycle_state", // compiles a classic oracle
+        "capi_classic_dest_ownership",  // LIBJPEG_TURBO_REFERENCE_DIR
+        "capi_jpeglib_encode",          // shells out to stock cjpeg/djpeg
+        "norealloc_all_entry_points",   // compares against real TurboJPEG
+    ] {
+        assert!(
+            suite_consumes_a_c_oracle(suite),
+            "{suite} compares against a C libjpeg-turbo but was classified as \
+             self-contained, so the current-parity leg would never be asked to \
+             run it"
+        );
+    }
+    for suite in [
+        "capi_span_overflow_guards", // arithmetic on our own spans
+        "capi_output_message",       // our error manager's rendering
+        "capi_max_memory_budget",    // our budget accounting
+        "capi_symbol_versions",      // our generated version script and ELF
+    ] {
+        assert!(
+            !suite_consumes_a_c_oracle(suite),
+            "{suite} was classified as an oracle comparison; running it a \
+             second time at another upstream release measures the same thing \
+             twice and costs a leg's wall clock"
+        );
+    }
+}
+
+#[test]
+fn every_oracle_backed_capi_suite_on_the_baseline_leg_also_runs_on_the_current_leg() {
+    if !repository_tree_is_readable() {
+        eprintln!("SKIP: repository tree not readable; see the sibling test.");
+        return;
+    }
+    let ci: String = ci_workflow_text();
+    let baseline: BTreeSet<String> = capi_suites_selected_by(&job_block(&ci, BASELINE_LEG_JOB));
+    let current: BTreeSet<String> = capi_suites_selected_by(&job_block(&ci, CURRENT_LEG_JOB));
+
+    assert!(
+        !baseline.is_empty(),
+        "no `cargo test {CAPI_PACKAGE} --test ...` invocation found in the \
+         {BASELINE_LEG_JOB} job — the scanner has stopped matching, so this \
+         gate would pass no matter which leg runs what"
+    );
+
+    let missing: Vec<&String> = baseline
+        .iter()
+        .filter(|suite| suite_consumes_a_c_oracle(suite))
+        .filter(|suite| !current.contains(*suite))
+        .collect();
+
+    assert!(
+        missing.is_empty(),
+        "the {BASELINE_LEG_JOB} leg compares these C-ABI suites against a C \
+         libjpeg-turbo, but the {CURRENT_LEG_JOB} leg does not run them:\n{}\n\n\
+         Each one asserts what stock libjpeg does, so its answer is only as \
+         current as the release it ran against. Add it to the current-parity \
+         leg with the oracle prefix it needs (docs/oracle_versions.tsv names \
+         which install serves which role), or drop it from the baseline leg.",
+        missing
+            .iter()
+            .map(|suite| format!("  {suite}"))
+            .collect::<Vec<String>>()
+            .join("\n")
     );
 }
 
