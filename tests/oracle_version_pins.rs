@@ -568,46 +568,6 @@ const STEP_KEYS: [&str; 9] = [
     "timeout-minutes:",
 ];
 
-/// The shell scripts a job block runs, one entry per `run:` step.
-///
-/// Comment lines are dropped first: these workflows discuss suites by name in
-/// prose, and a mention is not a run — the same distinction
-/// [`is_provisioning_line`] draws for version pins.
-fn shell_scripts_in(job_block: &str) -> Vec<String> {
-    let mut scripts: Vec<String> = Vec::new();
-    let mut current: Option<String> = None;
-    for line in job_block.lines() {
-        let trimmed: &str = line.trim();
-        if trimmed.starts_with('#') {
-            continue;
-        }
-        let starts_a_step: Option<&str> = ["- run:", "run:"]
-            .iter()
-            .find(|key| trimmed.starts_with(**key))
-            .copied();
-        if let Some(key) = starts_a_step {
-            if let Some(script) = current.take() {
-                scripts.push(script);
-            }
-            let rest: &str = trimmed[key.len()..].trim().trim_start_matches('|').trim();
-            current = Some(rest.to_string());
-            continue;
-        }
-        if STEP_KEYS.iter().any(|key| trimmed.starts_with(key)) {
-            if let Some(script) = current.take() {
-                scripts.push(script);
-            }
-            continue;
-        }
-        if let Some(script) = current.as_mut() {
-            script.push(' ');
-            script.push_str(trimmed);
-        }
-    }
-    scripts.extend(current);
-    scripts
-}
-
 /// Harness arguments that do **not** change which tests execute. Anything else
 /// after `--` is either a filter or something this scanner does not model, and
 /// the difference has to be visible: `--ignored`, `--include-ignored` and
@@ -731,38 +691,73 @@ fn suites_selected_by(
     accepts_invocation: fn(&str) -> bool,
 ) -> BTreeMap<String, Selection> {
     let mut suites: BTreeMap<String, Selection> = BTreeMap::new();
-    for script in shell_scripts_in(job_block) {
-        // Each chunk holds one invocation's arguments; a following
-        // invocation's `--test` flags land in the next chunk, not this one.
-        for invocation in script.split("cargo test").skip(1) {
-            if !accepts_invocation(invocation) {
+    for arguments in cargo_test_argument_lists_in(job_block) {
+        let invocation: String = arguments.join(" ");
+        if !accepts_invocation(&invocation) {
+            continue;
+        }
+        let mut selected: Vec<String> = Vec::new();
+        let mut selection: Selection = Selection::All;
+        let mut tokens = arguments.iter().map(String::as_str);
+        while let Some(token) = tokens.next() {
+            if token == "--test" {
+                if let Some(suite) = tokens.next() {
+                    selected.push(suite.to_string());
+                }
                 continue;
             }
-            let mut selected: Vec<String> = Vec::new();
-            let mut selection: Selection = Selection::All;
-            let mut tokens = invocation.split_whitespace();
-            while let Some(token) = tokens.next() {
-                if token == "--test" {
-                    if let Some(suite) = tokens.next() {
-                        selected.push(suite.to_string());
-                    }
-                    continue;
-                }
-                if token == "--" {
-                    selection = selection_after_the_double_dash(tokens.by_ref());
-                    break;
-                }
+            if token == "--" {
+                selection = selection_after_the_double_dash(tokens.by_ref());
+                break;
             }
-            for suite in selected {
-                let merged: Selection = match suites.remove(&suite) {
-                    Some(existing) => existing.merge(selection.clone()),
-                    None => selection.clone(),
-                };
-                suites.insert(suite, merged);
-            }
+        }
+        for suite in selected {
+            let merged: Selection = match suites.remove(&suite) {
+                Some(existing) => existing.merge(selection.clone()),
+                None => selection.clone(),
+            };
+            suites.insert(suite, merged);
         }
     }
     suites
+}
+
+/// The arguments of every `cargo test` a job runs, one list per invocation.
+///
+/// Read in *command position* and bounded where the shell takes the line back,
+/// which is two fixes over the substring split this replaced. A review's
+/// mutation found the first: `echo cargo test --test c_croptest` was read as a
+/// selection, so a twin whose real command had been replaced by a diagnostic
+/// still satisfied the pairing gates. The second is quieter — a chunk split on
+/// the next `cargo test` carried the following invocation's `-p` into this
+/// one's arguments, which is how a root-crate run could be read as somebody
+/// else's coverage.
+fn cargo_test_argument_lists_in(job_block: &str) -> Vec<Vec<String>> {
+    let mut invocations: Vec<Vec<String>> = Vec::new();
+    for step in steps_in(job_block) {
+        for line in logical_lines(&step.script) {
+            let tokens: Vec<&str> = line.split_whitespace().collect();
+            for (_, at) in cargo_invocations_in(&tokens) {
+                if cargo_subcommand_after(&tokens, at) != Some("test") {
+                    continue;
+                }
+                let mut end: usize = tokens.len();
+                for (index, token) in tokens.iter().enumerate().skip(at + 1) {
+                    if hands_off_to_another_command(token) || token.contains(['>', '<']) {
+                        end = index;
+                        break;
+                    }
+                }
+                invocations.push(
+                    tokens[at + 1..end]
+                        .iter()
+                        .map(|token| token.to_string())
+                        .collect(),
+                );
+            }
+        }
+    }
+    invocations
 }
 
 /// The C-ABI test binaries a job selects.
@@ -1131,6 +1126,15 @@ fn every_full_c_parity_leg_verifies_the_prefix_it_measures() {
     }
 }
 
+/// A job block around a fragment of steps, for the fixtures below.
+///
+/// The scanners read from a job's `steps:` key — deliberately, since a matrix
+/// entry is a `- ` line too — so a bare list of steps parses as no steps at
+/// all, and a fixture without this wrapper would assert about an empty job.
+fn job_around(steps: &str) -> String {
+    format!("    runs-on: ubuntu-latest\n    steps:\n{steps}")
+}
+
 #[test]
 fn the_suite_selector_tells_the_root_crate_from_the_c_abi_crate() {
     // The two pairing gates read different crates out of the same workflows,
@@ -1139,13 +1143,13 @@ fn the_suite_selector_tells_the_root_crate_from_the_c_abi_crate() {
     let block: &str = "      - run: cargo test --features full-c-parity --test c_croptest\n\
                        \x20     - run: cargo test -p libjpeg-turbo-rs-capi --test capi_jpeglib_encode\n";
     assert_eq!(
-        root_suites_selected_by(block)
+        root_suites_selected_by(&job_around(block))
             .into_keys()
             .collect::<Vec<String>>(),
         vec!["c_croptest".to_string()]
     );
     assert_eq!(
-        capi_suites_selected_by(block)
+        capi_suites_selected_by(&job_around(block))
             .into_keys()
             .collect::<Vec<String>>(),
         vec!["capi_jpeglib_encode".to_string()]
@@ -1164,7 +1168,7 @@ fn a_step_named_after_a_test_is_not_a_libtest_filter() {
                        \x20       timeout-minutes: 10\n\
                        \x20     - name: c_tjcomptest_full\n\
                        \x20       run: cargo test --features full-c-parity --test c_tjcomptest\n";
-    let selected: BTreeMap<String, Selection> = root_suites_selected_by(block);
+    let selected: BTreeMap<String, Selection> = root_suites_selected_by(&job_around(block));
     assert_eq!(
         selected.get("c_tjdecomptest"),
         Some(&Selection::Filters(BTreeSet::from([
@@ -1188,7 +1192,7 @@ fn a_harness_flag_is_not_a_filter_and_a_redirect_ends_the_invocation() {
     // exactly this way.
     let block: &str = "      - run: cargo test -p libjpeg-turbo-rs-capi --test capi_classic_dest_ownership -- --nocapture 2>&1 | tee p4108.log\n";
     assert_eq!(
-        capi_suites_selected_by(block).get("capi_classic_dest_ownership"),
+        capi_suites_selected_by(&job_around(block)).get("capi_classic_dest_ownership"),
         Some(&Selection::All)
     );
 }
@@ -1201,13 +1205,13 @@ fn an_argument_this_scanner_cannot_read_fails_the_comparison_closed() {
     // argument must not vouch for it.
     let ignored: &str = "      - run: cargo test --test c_croptest -- --ignored\n";
     assert!(matches!(
-        root_suites_selected_by(ignored).get("c_croptest"),
+        root_suites_selected_by(&job_around(ignored)).get("c_croptest"),
         Some(Selection::Unrecognised(_))
     ));
 
     let quoted: &str = "      - run: cargo test --test c_croptest -- 'c_croptest_full'\n";
     assert!(matches!(
-        root_suites_selected_by(quoted).get("c_croptest"),
+        root_suites_selected_by(&job_around(quoted)).get("c_croptest"),
         Some(Selection::Unrecognised(_))
     ));
 
@@ -1240,7 +1244,7 @@ fn running_a_suite_twice_in_one_leg_selects_the_union() {
     let block: &str = "      - run: cargo test --test c_croptest -- c_croptest_full\n\
                        \x20     - run: cargo test --test c_croptest\n";
     assert_eq!(
-        root_suites_selected_by(block).get("c_croptest"),
+        root_suites_selected_by(&job_around(block)).get("c_croptest"),
         Some(&Selection::All)
     );
 }
@@ -1255,13 +1259,13 @@ fn a_value_taking_harness_flag_does_not_look_like_a_filter() {
     let neutral: &str =
         "      - run: cargo test --test c_croptest -- --test-threads 1 --color=always\n";
     assert_eq!(
-        root_suites_selected_by(neutral).get("c_croptest"),
+        root_suites_selected_by(&job_around(neutral)).get("c_croptest"),
         Some(&Selection::All)
     );
 
     let skipping: &str = "      - run: cargo test --test c_croptest -- --skip c_croptest_full\n";
     assert!(matches!(
-        root_suites_selected_by(skipping).get("c_croptest"),
+        root_suites_selected_by(&job_around(skipping)).get("c_croptest"),
         Some(Selection::Unrecognised(_))
     ));
 }
@@ -2976,26 +2980,38 @@ fn each_leg_pair_provisions_the_two_releases_its_roles_name() {
     }
 }
 
-/// Oracle-backed suites a baseline leg runs that its twin does not, recorded
-/// rather than fixed here.
+/// `cargo test` runs that name no suite and no package — the root crate's
+/// whole integration matrix, `cargo test --tests`.
 ///
-/// Found by generalising the pairing comparison over both crates: the named
-/// C-ABI gate reads `test-integration`'s capi steps only, so its **root**
-/// selections had never been compared, and its serial timing step selects a
-/// suite that cross-checks a restart bomb's dimensions against C `djpeg`.
-/// Pairing it is not a line in this change — the step runs with
-/// `--include-ignored --test-threads=1` for reasons about contention, not
-/// about oracles, so the twin needs a step of its own — so it is filed as
-/// P4-178 and recorded here, where the same both-ways check as
-/// `UNPAIRED_ORACLE_JOBS` keeps it from going stale.
-const SUITES_NOT_YET_ON_THE_CURRENT_LEG: [(&str, &str, &str, &str); 1] = [(
-    "ci.yml",
-    "test-integration",
-    "hard_case_x_byte_and_restart",
-    "P4-178: rides in the serial timing step, whose `--include-ignored` \
-     selection this scanner reads as unmodelled; its `restart_bomb_4096_\
-     dimensions_match_djpeg` cross-check answers at 3.1.4.1 alone.",
-)];
+/// Kept apart from the rest because a pair's two legs must run *this* one
+/// identically whatever else they do. It is the root differential matrix, it
+/// is what makes a leg a measurement at all, and it is the run a
+/// selection-compared pair would otherwise never have compared: a review's
+/// mutation replaced the current leg's with `echo cargo test --tests` and the
+/// C-ABI selections alone still matched.
+fn whole_root_crate_runs_in(job_block: &str) -> BTreeSet<TestRun> {
+    test_runs_in(job_block)
+        .into_iter()
+        .filter(|run| !run.command.contains("--test ") && !run.command.contains(PACKAGE_SELECTOR))
+        .collect()
+}
+
+/// Does this pair run one identical whole-root-crate command on both legs?
+///
+/// If it does, every root suite's *default* tests execute on both legs at
+/// their own oracle, whether or not either leg names the suite. That is the
+/// difference between "the twin does not name this suite" and "the twin does
+/// not run it" — and reading the first as the second reported
+/// `hard_case_x_byte_and_restart` as measured at one release when both legs
+/// run it under `cargo test --tests`. What such a shared run does *not* cover
+/// is a selection that widens past the default set: `--include-ignored` adds
+/// tests the twin never runs. In this repository those are the serial timing
+/// assertions, which is why the widening is recorded rather than required —
+/// a 60 s liveness bound does not answer differently at another upstream
+/// release.
+fn a_shared_whole_root_run_covers_both_legs(baseline: &str, current: &str) -> bool {
+    !whole_root_crate_runs_in(baseline).is_disjoint(&whole_root_crate_runs_in(current))
+}
 
 /// How a baseline leg's named suites compare against its twin's:
 /// `(oracle-backed suites the baseline selects, those the twin does not cover)`.
@@ -3009,6 +3025,7 @@ const SUITES_NOT_YET_ON_THE_CURRENT_LEG: [(&str, &str, &str, &str); 1] = [(
 fn compare_oracle_suites(baseline: &str, current: &str, workflow: &str) -> (usize, Vec<String>) {
     let mut selected: usize = 0;
     let mut missing: Vec<String> = Vec::new();
+    let shared_root_run: bool = a_shared_whole_root_run_covers_both_legs(baseline, current);
     for (test_dir, select) in [
         (
             ROOT_TEST_DIR,
@@ -3023,10 +3040,10 @@ fn compare_oracle_suites(baseline: &str, current: &str, workflow: &str) -> (usiz
                 continue;
             }
             selected += 1;
-            let recorded: bool = SUITES_NOT_YET_ON_THE_CURRENT_LEG
-                .iter()
-                .any(|(file, _, recorded_suite, _)| *file == workflow && *recorded_suite == suite);
-            if recorded {
+            // A shared `cargo test --tests` runs every root suite's default
+            // tests on both legs; it says nothing about the C-ABI crate, whose
+            // suites are only ever selected by name.
+            if test_dir == ROOT_TEST_DIR && shared_root_run {
                 continue;
             }
             match have.get(&suite) {
@@ -3073,6 +3090,23 @@ fn every_leg_pair_is_compared_and_a_twin_runs_what_its_baseline_runs() {
             "{workflow}'s {baseline_job} and {current_job} run on different \
              machines, so a divergence between them is not evidence about the \
              oracle release"
+        );
+
+        // Whatever else a pair does, the root crate's whole integration matrix
+        // must run identically on both legs. Asserted before the branch,
+        // because a leg that also names suites takes the selection path and
+        // would otherwise never have this run compared at all.
+        let wanted_root: BTreeSet<TestRun> = whole_root_crate_runs_in(&baseline);
+        let have_root: BTreeSet<TestRun> = whole_root_crate_runs_in(&current);
+        let missing_root: Vec<&TestRun> = wanted_root.difference(&have_root).collect();
+        assert!(
+            missing_root.is_empty(),
+            "{workflow}'s {current_job} does not run the whole-root-crate \
+             command {baseline_job} runs, or does not run it the same way: \
+             {missing_root:#?} is missing.\n\n\
+             That command is the root differential matrix. A leg that has \
+             stopped running it, or runs it under a different RUSTFLAGS, is \
+             not the same measurement at another release."
         );
 
         // A leg that names oracle-backed suites with `--test` is compared by
@@ -3284,44 +3318,73 @@ fn a_step_level_env_overrides_the_jobs_for_that_step() {
 }
 
 #[test]
-fn the_recorded_unpaired_suites_are_really_unpaired_and_really_oracle_backed() {
-    if !repository_tree_is_readable() {
-        eprintln!("SKIP: repository tree not readable; see the sibling test.");
-        return;
-    }
-    let jobs: Vec<(String, String, String)> = every_job();
-    for (workflow, baseline_job, suite, reason) in SUITES_NOT_YET_ON_THE_CURRENT_LEG {
-        let block_of = |wanted: &str| -> String {
-            jobs.iter()
-                .find(|(file, job, _)| file == workflow && job == wanted)
-                .map(|(_, _, block)| block.clone())
-                .unwrap_or_else(|| panic!("{workflow} has no {wanted} job"))
-        };
-        let baseline: String = block_of(baseline_job);
-        assert!(
-            root_suites_selected_by(&baseline).contains_key(suite)
-                || capi_suites_selected_by(&baseline).contains_key(suite),
-            "{workflow}'s {baseline_job} does not run {suite}, so the exception \
-             recorded for it covers nothing"
-        );
-        assert!(
-            suite_consumes_a_c_oracle_in(ROOT_TEST_DIR, suite, workflow),
-            "{suite} does not compare against a C libjpeg-turbo, so it needs no \
-             second leg and needs no exception"
-        );
-        let twin: String = block_of(&format!("{baseline_job}{CURRENT_ORACLE_SUFFIX}"));
-        assert!(
-            !root_suites_selected_by(&twin).contains_key(suite)
-                && !capi_suites_selected_by(&twin).contains_key(suite),
-            "{workflow}'s {baseline_job}{CURRENT_ORACLE_SUFFIX} now runs {suite}, \
-             so the exception is stale — delete the row, which is what closes \
-             the gap it records"
-        );
-        assert!(
-            !reason.trim().is_empty(),
-            "{suite} is excepted with no reason"
-        );
-    }
+fn an_echoed_suite_selection_selects_nothing() {
+    // The named-suite path reads selections through the same command-position
+    // scanner as the command path. Before it did, a twin whose real
+    // `cargo test --test c_croptest` had been replaced by a diagnostic still
+    // satisfied the pairing gates — the second half of a review finding whose
+    // first half was the whole-crate command.
+    assert!(root_suites_selected_by(&job_around(
+        "      - run: echo cargo test --test c_croptest\n"
+    ))
+    .is_empty());
+    assert_eq!(
+        root_suites_selected_by(&job_around("      - run: cargo test --test c_croptest\n"))
+            .get("c_croptest"),
+        Some(&Selection::All)
+    );
+    // A following invocation's package selector is not this one's: bounding
+    // each invocation at the shell separator is what keeps a root-crate run
+    // from reading as somebody else's coverage.
+    let two: &str = "      - run: |\n\
+                     \x20         cargo test --test c_croptest\n\
+                     \x20         cargo test -p libjpeg-turbo-rs-capi --test capi_jpeglib_encode\n";
+    assert_eq!(
+        root_suites_selected_by(&job_around(two))
+            .into_keys()
+            .collect::<Vec<String>>(),
+        vec!["c_croptest".to_string()]
+    );
+}
+
+#[test]
+fn a_shared_whole_root_run_is_what_covers_a_suite_neither_leg_names() {
+    // `test-integration` names `hard_case_x_byte_and_restart` in its serial
+    // timing step and its twin does not — but both legs run `cargo test
+    // --tests`, so the suite's default tests, including its `djpeg`
+    // cross-check, execute at both releases. Reading "the twin does not name
+    // it" as "the twin does not run it" reported a gap that was not there.
+    let baseline: &str = "    runs-on: ubuntu-latest\n\
+                          \x20   steps:\n\
+                          \x20     - run: cargo test --tests\n\
+                          \x20     - run: cargo test --release --test hard_case_x_byte_and_restart\n";
+    let twin: &str = "    runs-on: ubuntu-latest\n\
+                      \x20   steps:\n\
+                      \x20     - run: cargo test --tests\n";
+    assert!(a_shared_whole_root_run_covers_both_legs(baseline, twin));
+    // The credit is exactly as wide as the shared command. A twin that stops
+    // running it — or runs it under different flags — loses it, which is what
+    // makes the whole-root-crate rule and this credit the same fact seen twice.
+    let echoed: &str = "    runs-on: ubuntu-latest\n\
+                        \x20   steps:\n\
+                        \x20     - run: echo cargo test --tests\n";
+    assert!(!a_shared_whole_root_run_covers_both_legs(baseline, echoed));
+    let reflagged: &str = "    runs-on: ubuntu-latest\n\
+                           \x20   env:\n\
+                           \x20     RUSTFLAGS: \"-C target-feature=+avx2\"\n\
+                           \x20   steps:\n\
+                           \x20     - run: cargo test --tests\n";
+    assert!(!a_shared_whole_root_run_covers_both_legs(
+        baseline, reflagged
+    ));
+    // It never credits the C-ABI crate: `cargo test --tests` is the root
+    // crate's matrix, and a capi suite is only ever selected by name.
+    assert!(
+        whole_root_crate_runs_in(
+            "    runs-on: ubuntu-latest\n    steps:\n      - run: cargo test -p libjpeg-turbo-rs-capi --lib\n"
+        )
+        .is_empty()
+    );
 }
 
 #[test]
