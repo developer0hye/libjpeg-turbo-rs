@@ -397,6 +397,13 @@ drop-in non-goal live in
 replacement-tier framing and its readiness status live in
 [`docs/LAST_MILE.md`](docs/LAST_MILE.md).
 
+Tagged releases attach prebuilt bundles of those shims — libraries, headers,
+`.pc` files and CMake config for x86_64/aarch64 Linux and macOS, with a
+`SHA256SUMS` manifest. There is no Windows bundle and no signature yet.
+[`docs/RELEASE_ARTIFACTS.md`](docs/RELEASE_ARTIFACTS.md) covers what ships,
+how to verify and install it, and what is still missing. Downloading a bundle
+does not change the tiers above.
+
 ## Contributing
 
 Development workflow, the pre-commit gate, and the local sanitizer

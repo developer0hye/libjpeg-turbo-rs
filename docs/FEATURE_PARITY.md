@@ -471,7 +471,7 @@ named explicitly rather than implied complete:
 - **Session-reset APIs**: `Encoder::reset_colorspace()` (`jpeg_default_colorspace`), `Encoder::reset_quant_tables(force_baseline)` (`jpeg_default_qtables`).
 - **Restart resync hook**: `RestartResyncStrategy` trait + `Decoder::set_resync_strategy()` with `ResyncAction {Continue, Skip, Abort}` — replaces the internal-only implementation of `jpeg_resync_to_restart`.
 - **JPEG-in-RAW thumbnail**: `extract_embedded_jpeg()` walks TIFF IFDs (LE/BE, bounds-checked) to extract embedded JPEG thumbnails from ARW/CR2-style files.
-- **C ABI shim crate** (`crates/libjpeg-turbo-rs-capi`, cdylib + staticlib): exports TJ3, 21 legacy TJ aliases, and a broad classic `jpeg_*` surface with v8 SONAME/pkg-config packaging. Symbol/layout and selected downstream paths are verified; this is not a blanket classic behavioral-parity claim (P4-84..P4-114).
+- **C ABI shim crate** (`crates/libjpeg-turbo-rs-capi`, cdylib + staticlib): exports TJ3, 21 legacy TJ aliases, and a broad classic `jpeg_*` surface with v8 SONAME/pkg-config packaging. Symbol/layout and selected downstream paths are verified; this is not a blanket classic behavioral-parity claim (P4-84..P4-114). Since 2026-08-18 a tagged release also attaches prebuilt bundles of that packaging — x86_64/aarch64 Linux and macOS, checksummed, staged by `scripts/install_capi.sh` (P4-131, still PARTIAL: no Windows bundle and no signature; see [RELEASE_ARTIFACTS.md](RELEASE_ARTIFACTS.md)).
 
 ## Second-Batch Reconciliation (parallel follow-up workers)
 
