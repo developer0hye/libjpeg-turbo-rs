@@ -5287,10 +5287,25 @@ A third round found the cost of that parse. An exact-token comparison for
 match it replaced had handled by accident. The token is now read past the shell
 punctuation that can precede a command word, `--cargo-test-arg` still being a
 flag that names cargo rather than an invocation of it; that shape is red
-against the real workflow too. Three rounds, three findings of one shape: the
-*rule* held each time and the *scanner* could not see the case, which is the
-argument for pinning every helper against the spelling that would make it lie
-rather than trusting a gate because it is green.
+against the real workflow too.
+
+A fourth round found the mirror — *false failures*, the direction that costs a
+valid CI change rather than a silent hole. Stripping punctuation off every
+token promoted an argument to a command, so `echo "cargo test --tests"` read as
+a test run, and `CARGO=/usr/bin/cargo cargo build` read as one too; while a
+wrapper closing right after a deny-listed subcommand left `build)` and `fmt"`,
+which match no deny-list entry. Tokens are now read in *command* position only
+— after separators, after the keywords these workflows wrap commands in
+(`test-corpus` runs `if ! cargo run …`), and past an environment prefix — and a
+word is trimmed of its closers before its openers, since stripping only openers
+turns `"cargo fmt"` into an empty subcommand that is in no deny list.
+
+Four rounds, four findings, two of each polarity, and every one of them in the
+*scanner* rather than the rule: two shapes it could not see, two it saw where
+there was nothing. That is the argument for pinning each helper against the
+spelling that would make it lie rather than trusting a gate because it is
+green — and for keeping both polarities in the pins, since a gate that cannot
+be wrong in the second direction is usually one that has stopped matching.
 
 `test-cross-encode` now builds 3.1.4.1 from source at `/tmp/ljt3141/prefix` and
 selects it with `LIBJPEG_TURBO_PREFIX`, the same shape the aarch64 full-parity

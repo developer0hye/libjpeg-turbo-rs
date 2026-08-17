@@ -2020,13 +2020,62 @@ const CARGO_SUBCOMMANDS_WITHOUT_AN_ORACLE: [&str; 12] = [
 /// an exact-token comparison sees none of them — the regression a review found
 /// in the first parsed version of [`reaches_the_oracle`], which the substring
 /// match it replaced had handled by accident. Taking the tail after the last
-/// piece of shell punctuation reads all of them, and leaves `--cargo-test-arg`
-/// alone, which is a flag naming cargo rather than an invocation of it.
-fn shell_command_word(token: &str) -> &str {
-    match token.rfind(['"', '\'', '(', '$', '`', ';', '&', '|', '{', '=']) {
-        Some(at) => &token[at + 1..],
-        None => token,
+/// piece of opening punctuation reads all of them, and leaves
+/// `--cargo-test-arg` alone, which is a flag naming cargo rather than an
+/// invocation of it.
+fn shell_word(token: &str) -> &str {
+    // Closers first, then the tail after the last opener. Both directions are
+    // needed and the order matters: the subcommand in `out=$(cargo build)` is
+    // `build`, and in a quoted `"cargo fmt"` it is `fmt` — strip only openers
+    // and the second reads as the empty string, which is in no deny list and
+    // would make a formatting step demand an oracle.
+    let body: &str = token.trim_end_matches([')', '"', '\'', ';', '`', '}']);
+    match body.rfind(['"', '\'', '(', '$', '`', ';', '&', '|', '{', '=']) {
+        Some(at) => &body[at + 1..],
+        None => body,
     }
+}
+
+/// `NAME=value` with no command substitution in it — an environment prefix
+/// rather than a command, so the command word is still ahead.
+fn is_environment_prefix(token: &str) -> bool {
+    let Some((name, value)) = token.split_once('=') else {
+        return false;
+    };
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
+        && !name.starts_with(|c: char| c.is_ascii_digit())
+        && !value.contains("$(")
+        && !value.contains('`')
+}
+
+/// Words after which the next token is a command again: separators, and the
+/// shell keywords these workflows wrap commands in — `if ! cargo run …` is how
+/// `test-corpus` invokes the corpus comparison.
+fn hands_off_to_another_command(token: &str) -> bool {
+    matches!(
+        shell_word(token),
+        "if" | "!"
+            | "then"
+            | "elif"
+            | "else"
+            | "do"
+            | "while"
+            | "until"
+            | "sudo"
+            | "env"
+            | "time"
+            | "exec"
+            | "xargs"
+            | "&&"
+            | "||"
+            | "|"
+            | ""
+    ) || token.ends_with(';')
+        || token.ends_with('|')
+        || token.ends_with("&&")
 }
 
 /// Does this step run cargo in a way that can reach the C oracle?
@@ -2034,26 +2083,33 @@ fn shell_command_word(token: &str) -> &str {
 /// Parsed rather than matched as a substring: `cargo +nightly test`,
 /// `cargo test` and `/usr/bin/cargo test` are one shape with three spellings,
 /// and the toolchain qualifier sits between the two words a substring match
-/// would look for.
+/// would look for. Only tokens in *command* position are read, so
+/// `echo "cargo test"` reports what it is — a step printing a string — and
+/// `CARGO=/usr/bin/cargo cargo build` is read as the `build` it runs.
 fn reaches_the_oracle(script: &str) -> bool {
     let tokens: Vec<&str> = script.split_whitespace().collect();
-    tokens
-        .iter()
-        .enumerate()
-        .filter(|(_, token)| {
-            let word: &str = shell_command_word(token);
-            word == "cargo" || word.ends_with("/cargo")
-        })
-        .any(|(at, _)| {
-            let subcommand: Option<&&str> = tokens[at + 1..]
+    let mut command_position: bool = true;
+    for (at, token) in tokens.iter().enumerate() {
+        if command_position && is_environment_prefix(token) {
+            continue;
+        }
+        let word: &str = shell_word(token);
+        let is_cargo: bool = command_position && (word == "cargo" || word.ends_with("/cargo"));
+        if is_cargo {
+            let subcommand: Option<&str> = tokens[at + 1..]
                 .iter()
-                .find(|token| !token.starts_with('+') && !token.starts_with('-'));
+                .map(|argument| shell_word(argument))
+                .find(|argument| !argument.starts_with('+') && !argument.starts_with('-'));
             match subcommand {
                 // `cargo` alone prints help; nothing runs.
-                None => false,
-                Some(name) => !CARGO_SUBCOMMANDS_WITHOUT_AN_ORACLE.contains(name),
+                None => {}
+                Some(name) if CARGO_SUBCOMMANDS_WITHOUT_AN_ORACLE.contains(&name) => {}
+                Some(_) => return true,
             }
-        })
+        }
+        command_position = hands_off_to_another_command(token);
+    }
+    false
 }
 
 #[test]
@@ -2355,6 +2411,9 @@ fn a_toolchain_qualifier_does_not_hide_a_cargo_test() {
         "out=$(cargo test --tests)",
         "set -o pipefail; cargo test --tests | tee log",
         "/usr/local/bin/cargo test --tests",
+        // `test-corpus` wraps its example in a conditional, so the command
+        // word is two keywords in.
+        "if ! cargo run --release --example corpus_test > corpus-test.tsv 2>&1; then",
     ] {
         assert!(
             reaches_the_oracle(script),
@@ -2372,6 +2431,15 @@ fn a_toolchain_qualifier_does_not_hide_a_cargo_test() {
         // A flag that merely names cargo is not an invocation of it — the
         // shape `mutants-in-diff` writes over and over.
         "cargo install cargo-mutants --locked --cargo-test-arg --test",
+        // The mirror of the round above, and the one that costs a *false
+        // failure* rather than a false green: a step that prints the command
+        // is not running it, an environment prefix is not a command, and a
+        // wrapper closing right after a deny-listed subcommand still names
+        // that subcommand.
+        "echo \"cargo test --tests\"",
+        "CARGO=/usr/bin/cargo cargo build --release",
+        "out=$(cargo build)",
+        "\"cargo fmt\"",
     ] {
         assert!(
             !reaches_the_oracle(script),
