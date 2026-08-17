@@ -19,8 +19,42 @@ use std::sync::atomic::{AtomicU64, Ordering};
 // C tool discovery
 // ===========================================================================
 
-/// Generic C tool discovery: checks /opt/homebrew/bin/ first, then `which`.
+/// Generic C tool discovery.
+///
+/// `LIBJPEG_TURBO_PREFIX` names the C install to compare against, exactly as it
+/// does for the C-ABI crate's oracle helpers: when it is set, the tool is taken
+/// from `<prefix>/bin` and from nowhere else. Otherwise discovery is the
+/// historical `/opt/homebrew/bin` then `which` order.
+///
+/// The variable is what lets the P4-130 dual-oracle matrix run the same suites
+/// against two libjpeg-turbo releases and *know* which one answered. PATH alone
+/// cannot express it — `/opt/homebrew/bin` is read first, so on macOS the
+/// homebrew build wins regardless of PATH.
 pub fn c_tool_path(name: &str) -> Option<PathBuf> {
+    c_tool_path_under(
+        name,
+        std::env::var_os("LIBJPEG_TURBO_PREFIX")
+            .map(PathBuf::from)
+            .as_deref(),
+    )
+}
+
+/// [`c_tool_path`] with the oracle prefix passed in rather than read from the
+/// environment.
+///
+/// `cargo` runs `#[test]`s as parallel threads of one process, so a test that
+/// set `LIBJPEG_TURBO_PREFIX` to exercise the override would race every other
+/// test in the binary. Taking the prefix as an argument makes both branches
+/// deterministically reachable.
+///
+/// An explicit prefix is **exclusive**: if the tool is not under it, the answer
+/// is `None`. Falling back would let a leg that claims to measure one release
+/// silently measure another and report green.
+pub fn c_tool_path_under(name: &str, oracle_prefix: Option<&Path>) -> Option<PathBuf> {
+    if let Some(prefix) = oracle_prefix {
+        let pinned: PathBuf = prefix.join("bin").join(name);
+        return pinned.exists().then_some(pinned);
+    }
     let homebrew: PathBuf = PathBuf::from(format!("/opt/homebrew/bin/{}", name));
     if homebrew.exists() {
         return Some(homebrew);
@@ -161,6 +195,40 @@ impl Drop for TempFile {
             return;
         }
         std::fs::remove_file(&self.path).ok();
+    }
+}
+
+/// RAII temp directory that auto-deletes on drop.
+///
+/// Shares [`TempFile`]'s pid + counter naming, so two suites running in
+/// parallel — or two `cargo test` processes on the same machine — cannot
+/// collide on one directory.
+pub struct TempDir {
+    path: PathBuf,
+}
+
+impl TempDir {
+    /// Create (and `mkdir -p`) a new temp directory with the given name suffix.
+    pub fn new(name: &str) -> Self {
+        let path: PathBuf = temp_path(name);
+        std::fs::create_dir_all(&path)
+            .unwrap_or_else(|e| panic!("Failed to create temp dir {:?}: {:?}", path, e));
+        Self { path }
+    }
+
+    /// Get the path to this temp directory.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        if std::env::var_os("KEEP_LJT_TEST_OUTPUT").is_some() {
+            eprintln!("keeping test output: {}", self.path.display());
+            return;
+        }
+        std::fs::remove_dir_all(&self.path).ok();
     }
 }
 
