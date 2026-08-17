@@ -2425,7 +2425,7 @@ subsampling/scaling/grayscale, invalid null/zero/out-of-bounds/after-read calls,
 returned x/width/output_width, component geometry, and subsequent row bytes.
 The 12-bit initialization/order portion remains in P4-98.
 
-**Extended 2026-08-17 by the [P4-130](#p4-130-c-parity-oracle-is-pinned-to-3141-upstream-stable-is-320--partial-both-tool-legs-now-cover-the-c-abi-oracle-suites-the-submodule-bump-and-the-four-filed-gaps-remain)
+**Extended 2026-08-17 by the [P4-130](#p4-130-c-parity-oracle-is-pinned-to-3141-upstream-stable-is-320--partial-both-tool-legs-now-cover-the-c-abi-oracle-suites-and-the-exhaustive-matrices-four-baseline-only-workflows-the-submodule-bump-and-the-four-filed-gaps-remain)
 3.2 delta triage.** 3.2.0 note 3 hardened this entry point, and the delta is
 exactly one condition: 3.2.0 `src/jdapistd.c:203` reads
 `if (cinfo->master->lossless || cinfo->raw_data_out)` where 3.1.90 reads
@@ -5118,7 +5118,7 @@ prevent, and it undermines any claim that the shipped surface is audited.
 
 **Status (2026-08-09): closed.** Landed in #486; `crates/libjpeg-turbo-rs-capi/build.rs` now routes the 16 `jpeg_capi_test_*` accessors to a `LIBJPEGTURBORS_PRIVATE_1.0` node via an exact-name list, and `tests/soname.rs` asserts no `jpeg_capi_test_*` symbol carries `LIBJPEG_8.0`.
 
-## P4-130. C-Parity Oracle Is Pinned to 3.1.4.1; Upstream Stable Is 3.2.0 — **PARTIAL: both tool legs now cover the C-ABI oracle suites; the submodule bump and the four filed gaps remain**
+## P4-130. C-Parity Oracle Is Pinned to 3.1.4.1; Upstream Stable Is 3.2.0 — **PARTIAL: both tool legs now cover the C-ABI oracle suites and the exhaustive matrices; four baseline-only workflows, the submodule bump and the four filed gaps remain**
 
 **GitHub:** [#461](https://github.com/developer0hye/libjpeg-turbo-rs/issues/461) — under the [#470](https://github.com/developer0hye/libjpeg-turbo-rs/issues/470) umbrella.
 
@@ -5186,9 +5186,69 @@ while the classic-ABI error and state contracts are still in flux would mix two
 sources of diff into one signal.
 
 **Status (2026-08-18): partial.** Criteria 1, 3 and 4 are delivered — criterion
-1 over the root matrix on 2026-08-17 and over the C-ABI crate's oracle suites
-on 2026-08-18 — and criterion 2's triage is complete. What remains is the
-*work* the triage filed, plus the submodule bump.
+1 over the root matrix on 2026-08-17, over the C-ABI crate's oracle suites on
+2026-08-18, and over the exhaustive `full-c-parity` matrices the same day — and
+criterion 2's triage is complete. What remains is the *work* the triage filed,
+the four workflows still measuring one release, and the submodule bump.
+
+*Criterion 1, the exhaustive matrices (2026-08-18).* The widest differential
+surface in this repository is not in `ci.yml` at all. The `full-c-parity`
+feature gates 12,230 transform cases, a 10,880-cell crop grid and the tj
+comp/decomp matrices behind `full-c-parity.yml`, which runs weekly — and
+`cargo test --tests` does not build them, so neither leg of the pair above ever
+touched them. They now run on both, per architecture: `full-c-parity-x86` /
+`full-c-parity-x86-current-oracle` and `full-c-parity-arm64` /
+`full-c-parity-arm64-current-oracle`. Per architecture rather than once,
+because every case here compares *our SIMD backend's* bytes against C's, so
+x86_64 and aarch64 are two measurements and not two runs of one.
+
+*The aarch64 legs had no pin at all.* They ran `brew install jpeg-turbo`, which
+has no per-version formula: the release those matrices proved parity with was
+whatever homebrew shipped that week, named nowhere in this repository. It
+happened to be 3.1.4.1 on 2026-08-18, so the results were read as a baseline
+measurement by luck. The week homebrew moves to 3.2.0, the matrices would have
+re-baselined *silently* — the single global bump criterion 1 forbids, arriving
+without a commit to review. Both aarch64 legs now build from source at a pinned
+tag (`/tmp/ljt3141/prefix`, `/tmp/ljt320/prefix`); upstream ships no macOS
+package, which is why the deb that serves the x86_64 current leg cannot serve
+this one.
+
+Three gates hold the shape, all written before the workflow was touched and all
+red first:
+
+- `each_full_c_parity_leg_provisions_the_release_its_role_names` reads the
+  version out of `docs/oracle_versions.tsv` by role and requires the matching
+  leg to install exactly it. An unpinned install provisions *nothing* the
+  scanner can see, so this is what makes the `brew install` shape
+  unrepresentable rather than merely discouraged.
+- `every_full_c_parity_leg_names_the_oracle_prefix_it_measures` — installing a
+  release is not measuring it. `helpers::c_tool_path` reads `/opt/homebrew/bin`
+  before PATH, which is exactly how the false green inside #569 happened, so
+  each leg must name `LIBJPEG_TURBO_PREFIX`.
+- `every_oracle_backed_full_parity_suite_on_the_baseline_leg_also_runs_on_the_current_leg`
+  is the capi pairing gate's twin over root-crate suites, run once per
+  architecture pair. It classifies from each suite's own source, so a matrix
+  that *gains* a C comparison is reclassified by the commit that gives it one.
+
+The helpers those rest on are pinned too: `the_suite_selector_tells_the_root_crate_from_the_c_abi_crate`
+(an invocation naming no package is the root crate; one naming any package is
+somebody else's coverage, and confusing them would look up a capi suite under
+`tests/` and panic), `the_oracle_classifier_reads_root_crate_suites_too` in
+both directions, and `a_job_block_stops_at_the_next_job` extended to the new
+pairs — every full-parity leg name is a prefix of its own current-oracle twin,
+so the block-parse trap that gate exists for is waiting once per architecture.
+
+Measured on macOS aarch64 against locally built prefixes at both releases:
+**15 tests, 0 failed on each leg**, with printed tallies summing to **19,439
+compared cases** (crop 5,504; tjdecomp 1,689; tjtran 12,246 — `c_tjcomptest`
+prints no tally). The two legs' tallies are identical, including the
+pre-existing exclusions (5,440 crop cells for unimplemented colour
+quantization, 36 tjdecomp cases for a subsampling with no Rust equivalent), so
+the matrices are already at parity with 3.2.0 and this leg is what keeps that
+true. The source-built 3.1.4.1 prefix reproduces the homebrew leg's numbers
+exactly, so replacing `brew install` changes what that leg *names*, not what it
+measures. The oracle is mandatory rather than assumed: pointed at a
+non-existent prefix under `CI=1`, `c_croptest` fails 5/5 instead of skipping.
 
 *Criterion 1, the C-ABI half (2026-08-18).* The 3.2.0 leg first covered the
 root differential matrix only, because `cargo test --tests` selects the root
@@ -5323,11 +5383,30 @@ was filed with:
 **What remains.**
 
 1. The four filed gaps (P4-171..P4-174) are triaged, not fixed.
-2. `references/libjpeg-turbo` stays at 3.1.90. Bumping it to 3.2.0 moves every
+2. **Four workflows still measure one release**, and the inventory is written
+   out here rather than left to the next reader's grep:
+   - `cross-arch.yml` — three jobs (linux-aarch64 NEON, linux-x86_64 AVX2,
+     AVX2-disabled build), each running the root `cargo test --tests` matrix
+     against the 3.1.4.1 deb;
+   - `fuzz-smoke.yml` — the three differential fuzz targets
+     (`fuzz_decode_diff_c`, `fuzz_encode_diff_c`, `fuzz_transform_diff_c`)
+     take the 3.1.4.1 deb, and the reproduction instructions they emit name it
+     too;
+   - `ci.yml`'s `test-corpus` — a 3.1.4.1 source build at `/usr/local`;
+   - `ci.yml`'s `test-cross-encode` — `brew install jpeg-turbo`, the **same
+     unpinned shape** the aarch64 full-parity legs just lost. It is the only
+     remaining oracle in this repository whose release is named nowhere, and it
+     runs on every pull request.
+
+   The gates added on 2026-08-18 read `full-c-parity.yml` by name, so none of
+   these four is covered by them; extending the pin-and-name rule to every
+   oracle-provisioning job, rather than to a list of workflows, is the natural
+   next milestone.
+3. `references/libjpeg-turbo` stays at 3.1.90. Bumping it to 3.2.0 moves every
    `j*.c:NNN` citation in this repository and re-baselines the classic-ABI
    trace oracles at the same time, which is its own change with its own
    drift audit — not a line in this one.
-3. Retiring the 3.1.4.1 leg is deliberately **not** scheduled: it is the
+4. Retiring the 3.1.4.1 leg is deliberately **not** scheduled: it is the
    behaviour-regression half of the pair, and it retires only when its
    expectations are known to hold on the newer leg.
 
@@ -8322,7 +8401,7 @@ change with its own oracle traces.
 
 ## P4-171. 8-Bit Lossy JPEG Cannot Be Decompressed to 12-Bit Output (3.2 beta1 note 8) — **OPEN**
 
-**GitHub:** [#561](https://github.com/developer0hye/libjpeg-turbo-rs/issues/561) — filed 2026-08-17 by the [P4-130](#p4-130-c-parity-oracle-is-pinned-to-3141-upstream-stable-is-320--partial-both-tool-legs-now-cover-the-c-abi-oracle-suites-the-submodule-bump-and-the-four-filed-gaps-remain) 3.2 delta triage.
+**GitHub:** [#561](https://github.com/developer0hye/libjpeg-turbo-rs/issues/561) — filed 2026-08-17 by the [P4-130](#p4-130-c-parity-oracle-is-pinned-to-3141-upstream-stable-is-320--partial-both-tool-legs-now-cover-the-c-abi-oracle-suites-and-the-exhaustive-matrices-four-baseline-only-workflows-the-submodule-bump-and-the-four-filed-gaps-remain) 3.2 delta triage.
 
 **Motivation.** 3.2 beta1 note 8 added a capability, not a fix: an 8-bit-per-sample
 *lossy* JPEG can now be decompressed to a 12-bit-per-sample output image, to

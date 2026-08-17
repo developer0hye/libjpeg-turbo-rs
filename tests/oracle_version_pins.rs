@@ -97,9 +97,31 @@ const CI_WORKFLOW: &str = ".github/workflows/ci.yml";
 const BASELINE_LEG_JOB: &str = "test-integration";
 const CURRENT_LEG_JOB: &str = "test-integration-current-oracle";
 
+/// The workflow carrying the exhaustive matrices: the 12,230-case transform
+/// cross-product, the crop grid, and the tj comp/decomp matrices. They run
+/// weekly rather than per pull request, which is why the release they measure
+/// is easy to leave behind — nothing red ever points at them.
+const FULL_PARITY_WORKFLOW: &str = ".github/workflows/full-c-parity.yml";
+
+/// `(baseline leg, current-parity leg)`, one pair per host architecture the
+/// exhaustive matrices run on. The pairing gate below reads the pairs rather
+/// than a single job name because these matrices compare *our SIMD output*
+/// against C's, so x86_64 and aarch64 are different measurements, not two runs
+/// of the same one.
+const FULL_PARITY_LEG_PAIRS: [(&str, &str); 2] = [
+    ("full-c-parity-x86", "full-c-parity-x86-current-oracle"),
+    ("full-c-parity-arm64", "full-c-parity-arm64-current-oracle"),
+];
+
 /// A `cargo test` invocation carrying this selects the C-ABI crate.
 const CAPI_PACKAGE: &str = "-p libjpeg-turbo-rs-capi";
 const CAPI_TEST_DIR: &str = "crates/libjpeg-turbo-rs-capi/tests";
+
+/// A `cargo test` invocation carrying this selects *some* package explicitly,
+/// so an invocation without it runs the workspace default member — the root
+/// crate, whose integration suites live in [`ROOT_TEST_DIR`].
+const PACKAGE_SELECTOR: &str = "-p ";
+const ROOT_TEST_DIR: &str = "tests";
 
 /// Source markers that mean "what this suite asserts depends on the C
 /// libjpeg-turbo it ran against": the environment variables that name an
@@ -486,15 +508,15 @@ fn the_submodule_row_matches_the_checked_out_submodule() {
 // step added to one leg is invisible to the other.
 // ---------------------------------------------------------------------------
 
-fn ci_workflow_text() -> String {
-    let path: PathBuf = repo_root().join(CI_WORKFLOW);
+fn workflow_text(workflow: &str) -> String {
+    let path: PathBuf = repo_root().join(workflow);
     std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("{} must be readable: {e}", path.display()))
 }
 
-/// The lines of one job in `ci.yml`: from its `  <name>:` header to the next
+/// The lines of one job in a workflow: from its `  <name>:` header to the next
 /// header at the same indent.
-fn job_block(text: &str, job: &str) -> String {
+fn job_block(text: &str, job: &str, workflow: &str) -> String {
     let header: String = format!("  {job}:");
     let mut block: String = String::new();
     let mut inside: bool = false;
@@ -516,21 +538,21 @@ fn job_block(text: &str, job: &str) -> String {
     }
     assert!(
         inside,
-        "no job named {job:?} in {CI_WORKFLOW} — this gate pairs two named \
-         jobs, so a rename has to reach it rather than silently leaving it \
-         comparing nothing"
+        "no job named {job:?} in {workflow} — this gate pairs named jobs, so a \
+         rename has to reach it rather than silently leaving it comparing \
+         nothing"
     );
     block
 }
 
-/// The C-ABI test binaries a job selects with `--test`.
+/// The test binaries a job selects with `--test`, restricted to the `cargo
+/// test` invocations `accepts_invocation` recognises as belonging to one
+/// crate.
 ///
-/// Only `cargo test` invocations that name the C-ABI package count, so the
-/// root-crate suites a job also runs (the serial timing step, for one) are not
-/// mistaken for capi coverage. Comment lines are dropped first: this workflow
-/// discusses suites by name in prose, and a mention is not a run — the same
-/// distinction [`is_provisioning_line`] draws for version pins.
-fn capi_suites_selected_by(job_block: &str) -> BTreeSet<String> {
+/// Comment lines are dropped first: these workflows discuss suites by name in
+/// prose, and a mention is not a run — the same distinction
+/// [`is_provisioning_line`] draws for version pins.
+fn suites_selected_by(job_block: &str, accepts_invocation: fn(&str) -> bool) -> BTreeSet<String> {
     let code: String = job_block
         .lines()
         .filter(|line| !line.trim_start().starts_with('#'))
@@ -540,7 +562,7 @@ fn capi_suites_selected_by(job_block: &str) -> BTreeSet<String> {
     // Each chunk holds one invocation's arguments; a following invocation's
     // `--test` flags land in the next chunk, not this one.
     for invocation in code.split("cargo test").skip(1) {
-        if !invocation.contains(CAPI_PACKAGE) {
+        if !accepts_invocation(invocation) {
             continue;
         }
         let mut tokens = invocation.split_whitespace();
@@ -555,13 +577,38 @@ fn capi_suites_selected_by(job_block: &str) -> BTreeSet<String> {
     suites
 }
 
-/// Does this C-ABI suite compare against a C libjpeg-turbo, and therefore
-/// answer differently depending on which release it ran against?
-fn suite_consumes_a_c_oracle(suite: &str) -> bool {
-    let path: PathBuf = repo_root().join(CAPI_TEST_DIR).join(format!("{suite}.rs"));
+/// The C-ABI test binaries a job selects.
+///
+/// Only invocations that name the C-ABI package count, so the root-crate
+/// suites a job also runs (the serial timing step, for one) are not mistaken
+/// for capi coverage.
+fn capi_suites_selected_by(job_block: &str) -> BTreeSet<String> {
+    suites_selected_by(job_block, |invocation| invocation.contains(CAPI_PACKAGE))
+}
+
+/// The root-crate test binaries a job selects.
+///
+/// An invocation that names no package runs the workspace default member,
+/// which is the root crate; one that names any package is somebody else's
+/// coverage and must not be counted here, or a capi suite would be looked up
+/// in the root `tests/` directory and the lookup would panic.
+fn root_suites_selected_by(job_block: &str) -> BTreeSet<String> {
+    suites_selected_by(job_block, |invocation| {
+        !invocation.contains(PACKAGE_SELECTOR)
+    })
+}
+
+/// Does this suite compare against a C libjpeg-turbo, and therefore answer
+/// differently depending on which release it ran against?
+///
+/// `test_dir` is where the suite's source lives — the root crate's `tests/`
+/// or the C-ABI crate's. The classification rule is the same for both: read
+/// the suite's own source, never a list kept here.
+fn suite_consumes_a_c_oracle_in(test_dir: &str, suite: &str, workflow: &str) -> bool {
+    let path: PathBuf = repo_root().join(test_dir).join(format!("{suite}.rs"));
     let source: String = std::fs::read_to_string(&path).unwrap_or_else(|e| {
         panic!(
-            "{} is named by {CI_WORKFLOW} but could not be read: {e}",
+            "{} is named by {workflow} but could not be read: {e}",
             path.display()
         )
     });
@@ -577,11 +624,22 @@ fn a_job_block_stops_at_the_next_job() {
     // `test-integration` is a prefix of `test-integration-current-oracle`. If
     // the block for the first ran on into the second, the pairing gate would
     // compare a superset with its own subset and could never fail.
-    let baseline: String = job_block(&ci_workflow_text(), BASELINE_LEG_JOB);
+    let baseline: String = job_block(&workflow_text(CI_WORKFLOW), BASELINE_LEG_JOB, CI_WORKFLOW);
     assert!(
         !baseline.contains(CURRENT_LEG_JOB),
         "the {BASELINE_LEG_JOB} block swallowed {CURRENT_LEG_JOB}"
     );
+
+    // Every full-parity leg name is a prefix of its own current-oracle twin,
+    // so the same trap is waiting once per architecture.
+    let full_parity: String = workflow_text(FULL_PARITY_WORKFLOW);
+    for (baseline_job, current_job) in FULL_PARITY_LEG_PAIRS {
+        let block: String = job_block(&full_parity, baseline_job, FULL_PARITY_WORKFLOW);
+        assert!(
+            !block.contains(current_job),
+            "the {baseline_job} block swallowed {current_job}"
+        );
+    }
 }
 
 #[test]
@@ -601,7 +659,7 @@ fn the_oracle_classifier_separates_c_comparisons_from_self_contained_suites() {
         "norealloc_all_entry_points",   // compares against real TurboJPEG
     ] {
         assert!(
-            suite_consumes_a_c_oracle(suite),
+            suite_consumes_a_c_oracle_in(CAPI_TEST_DIR, suite, CI_WORKFLOW),
             "{suite} compares against a C libjpeg-turbo but was classified as \
              self-contained, so the current-parity leg would never be asked to \
              run it"
@@ -614,7 +672,7 @@ fn the_oracle_classifier_separates_c_comparisons_from_self_contained_suites() {
         "capi_symbol_versions",      // our generated version script and ELF
     ] {
         assert!(
-            !suite_consumes_a_c_oracle(suite),
+            !suite_consumes_a_c_oracle_in(CAPI_TEST_DIR, suite, CI_WORKFLOW),
             "{suite} was classified as an oracle comparison; running it a \
              second time at another upstream release measures the same thing \
              twice and costs a leg's wall clock"
@@ -628,9 +686,11 @@ fn every_oracle_backed_capi_suite_on_the_baseline_leg_also_runs_on_the_current_l
         eprintln!("SKIP: repository tree not readable; see the sibling test.");
         return;
     }
-    let ci: String = ci_workflow_text();
-    let baseline: BTreeSet<String> = capi_suites_selected_by(&job_block(&ci, BASELINE_LEG_JOB));
-    let current: BTreeSet<String> = capi_suites_selected_by(&job_block(&ci, CURRENT_LEG_JOB));
+    let ci: String = workflow_text(CI_WORKFLOW);
+    let baseline: BTreeSet<String> =
+        capi_suites_selected_by(&job_block(&ci, BASELINE_LEG_JOB, CI_WORKFLOW));
+    let current: BTreeSet<String> =
+        capi_suites_selected_by(&job_block(&ci, CURRENT_LEG_JOB, CI_WORKFLOW));
 
     assert!(
         !baseline.is_empty(),
@@ -641,7 +701,7 @@ fn every_oracle_backed_capi_suite_on_the_baseline_leg_also_runs_on_the_current_l
 
     let missing: Vec<&String> = baseline
         .iter()
-        .filter(|suite| suite_consumes_a_c_oracle(suite))
+        .filter(|suite| suite_consumes_a_c_oracle_in(CAPI_TEST_DIR, suite, CI_WORKFLOW))
         .filter(|suite| !current.contains(*suite))
         .collect();
 
@@ -659,6 +719,200 @@ fn every_oracle_backed_capi_suite_on_the_baseline_leg_also_runs_on_the_current_l
             .collect::<Vec<String>>()
             .join("\n")
     );
+}
+
+// ---------------------------------------------------------------------------
+// P4-130 criterion 1, the exhaustive-matrix half: the weekly Full C Parity
+// legs run on both oracles too.
+//
+// `ci.yml`'s pair covers what a pull request runs. The largest differential
+// surface in this repository is not there: the `full-c-parity` feature gates
+// 12,230 transform cases, a 10,880-cell crop grid and the tj comp/decomp
+// matrices behind a weekly workflow, and every one of those cases is a
+// byte-comparison against a C tool. A matrix that big proving parity with a
+// superseded release is the same gap this item was filed for, one workflow
+// over.
+// ---------------------------------------------------------------------------
+
+/// The manifest version for one role, for gates that compare a workflow
+/// against what the manifest says that leg is supposed to be.
+fn declared_version(rows: &[Declared], role: &str) -> String {
+    rows.iter()
+        .find(|row| row.role == role)
+        .map(|row| row.version.clone())
+        .unwrap_or_else(|| panic!("{MANIFEST} declares no {role:?} row"))
+}
+
+/// The oracle versions a job block actually installs or builds, as opposed to
+/// mentions. Empty means the job takes whatever the host happens to offer.
+fn provisioned_versions_in(job_block: &str) -> BTreeSet<String> {
+    let mut versions: BTreeSet<String> = BTreeSet::new();
+    for line in job_block.lines().filter(|line| is_provisioning_line(line)) {
+        for token in dotted_numeric_tokens(line) {
+            if token.split('.').next() == Some(ORACLE_MAJOR) {
+                versions.insert(token);
+            }
+        }
+    }
+    versions
+}
+
+#[test]
+fn each_full_c_parity_leg_provisions_the_release_its_role_names() {
+    if !repository_tree_is_readable() {
+        eprintln!("SKIP: repository tree not readable; see the sibling test.");
+        return;
+    }
+    let rows: Vec<Declared> = manifest_rows();
+    let baseline_version: String = declared_version(&rows, "tool-baseline");
+    let current_version: String = declared_version(&rows, "tool-current");
+    let text: String = workflow_text(FULL_PARITY_WORKFLOW);
+
+    for (baseline_job, current_job) in FULL_PARITY_LEG_PAIRS {
+        for (job, role, expected) in [
+            (baseline_job, "tool-baseline", &baseline_version),
+            (current_job, "tool-current", &current_version),
+        ] {
+            let provisioned: BTreeSet<String> =
+                provisioned_versions_in(&job_block(&text, job, FULL_PARITY_WORKFLOW));
+            assert!(
+                provisioned.contains(expected),
+                "{FULL_PARITY_WORKFLOW}'s {job} leg plays the {role} role, so \
+                 it must install libjpeg-turbo {expected}; it provisions {}.\n\n\
+                 A leg that installs no version at all — `brew install \
+                 jpeg-turbo`, an apt package, whatever is already on the \
+                 runner — answers against a release nothing in this repository \
+                 names, and the answer changes under you when the packager \
+                 moves. That is the drift {MANIFEST} exists to make \
+                 unrepresentable.",
+                if provisioned.is_empty() {
+                    "nothing".to_string()
+                } else {
+                    provisioned.into_iter().collect::<Vec<String>>().join(", ")
+                }
+            );
+        }
+    }
+}
+
+#[test]
+fn every_full_c_parity_leg_names_the_oracle_prefix_it_measures() {
+    if !repository_tree_is_readable() {
+        eprintln!("SKIP: repository tree not readable; see the sibling test.");
+        return;
+    }
+    // Installing the right release is not the same as measuring it.
+    // `helpers::c_tool_path` reads `/opt/homebrew/bin` before PATH and falls
+    // through to `which`, so a leg that does not name its prefix can install
+    // 3.2.0 and still compare against whatever else is on the runner — the
+    // false green #569 found inside its own change.
+    let text: String = workflow_text(FULL_PARITY_WORKFLOW);
+    for (baseline_job, current_job) in FULL_PARITY_LEG_PAIRS {
+        for job in [baseline_job, current_job] {
+            let block: String = job_block(&text, job, FULL_PARITY_WORKFLOW);
+            assert!(
+                block.contains("LIBJPEG_TURBO_PREFIX"),
+                "{FULL_PARITY_WORKFLOW}'s {job} leg never names \
+                 LIBJPEG_TURBO_PREFIX, so which install it measures is decided \
+                 by lookup order rather than by the job"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_suite_selector_tells_the_root_crate_from_the_c_abi_crate() {
+    // The two pairing gates read different crates out of the same workflows,
+    // and a selector that confused them would look up a capi suite under
+    // `tests/` and panic, or silently drop a root suite and pass vacuously.
+    let block: &str = "      - run: cargo test --features full-c-parity --test c_croptest\n\
+                       \x20     - run: cargo test -p libjpeg-turbo-rs-capi --test capi_jpeglib_encode\n";
+    assert_eq!(
+        root_suites_selected_by(block),
+        BTreeSet::from(["c_croptest".to_string()])
+    );
+    assert_eq!(
+        capi_suites_selected_by(block),
+        BTreeSet::from(["capi_jpeglib_encode".to_string()])
+    );
+}
+
+#[test]
+fn the_oracle_classifier_reads_root_crate_suites_too() {
+    if !repository_tree_is_readable() {
+        eprintln!("SKIP: repository tree not readable; see the sibling test.");
+        return;
+    }
+    // Same both-directions pin as the capi classifier, against root-crate
+    // suites: every exhaustive matrix shells out to a stock tool, and a suite
+    // that computes buffer sizes does not.
+    for suite in [
+        "c_tjdecomptest",
+        "c_tjcomptest",
+        "c_tjtrantest",
+        "c_croptest",
+    ] {
+        assert!(
+            suite_consumes_a_c_oracle_in(ROOT_TEST_DIR, suite, FULL_PARITY_WORKFLOW),
+            "{suite} compares its output against a stock C tool but was \
+             classified as self-contained, so the current-parity leg would \
+             never be asked to run it"
+        );
+    }
+    for suite in ["bufsize", "common_types"] {
+        assert!(
+            !suite_consumes_a_c_oracle_in(ROOT_TEST_DIR, suite, FULL_PARITY_WORKFLOW),
+            "{suite} was classified as an oracle comparison; running it a \
+             second time at another upstream release measures the same thing \
+             twice"
+        );
+    }
+}
+
+#[test]
+fn every_oracle_backed_full_parity_suite_on_the_baseline_leg_also_runs_on_the_current_leg() {
+    if !repository_tree_is_readable() {
+        eprintln!("SKIP: repository tree not readable; see the sibling test.");
+        return;
+    }
+    let text: String = workflow_text(FULL_PARITY_WORKFLOW);
+
+    for (baseline_job, current_job) in FULL_PARITY_LEG_PAIRS {
+        let baseline: BTreeSet<String> =
+            root_suites_selected_by(&job_block(&text, baseline_job, FULL_PARITY_WORKFLOW));
+        let current: BTreeSet<String> =
+            root_suites_selected_by(&job_block(&text, current_job, FULL_PARITY_WORKFLOW));
+
+        assert!(
+            !baseline.is_empty(),
+            "no `cargo test --test ...` invocation found in {baseline_job} — \
+             the scanner has stopped matching, so this gate would pass no \
+             matter which leg runs what"
+        );
+
+        let missing: Vec<&String> = baseline
+            .iter()
+            .filter(|suite| {
+                suite_consumes_a_c_oracle_in(ROOT_TEST_DIR, suite, FULL_PARITY_WORKFLOW)
+            })
+            .filter(|suite| !current.contains(*suite))
+            .collect();
+
+        assert!(
+            missing.is_empty(),
+            "{baseline_job} compares these matrices against a C \
+             libjpeg-turbo, but {current_job} does not run them:\n{}\n\n\
+             These are the exhaustive matrices — the widest differential \
+             surface in this repository — so a release they have never been \
+             measured against is precisely the unmeasured delta P4-130 was \
+             filed for.",
+            missing
+                .iter()
+                .map(|suite| format!("  {suite}"))
+                .collect::<Vec<String>>()
+                .join("\n")
+        );
+    }
 }
 
 /// The `set(VERSION x.y.z)` line of the pinned submodule's top-level
