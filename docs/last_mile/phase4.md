@@ -5328,7 +5328,7 @@ P4-81 step is now one of the steps the rule reads. A sixth round found three
 more shapes — an escaped quote inside an inline assignment, folded scalars and
 heredocs, and substitution syntax inside single quotes — and none of them is in
 `.github/workflows`, so they are filed as
-**[P4-177](#p4-177-the-workflow-scanner-does-not-model-heredocs-folded-scalars-or-quoted-substitution-syntax--open)**
+**[P4-177](#p4-177-the-workflow-scanner-does-not-model-heredocs-folded-scalars-or-quoted-substitution-syntax--partial-folded-scalars-are-modelled-heredocs-and-quoteescape-state-remain)**
 rather than fixed here. The gate fails closed, so what they cost is precision,
 not coverage; and this file's own history is the argument for giving the
 scanner its own change and its own review rather than a seventh pass inside
@@ -5635,22 +5635,67 @@ three differential targets are three entries of one matrix job and
 `mutants-in-diff` was left out of the count as "correctly pinned" (a different
 property, as this entry notes above).
 
-`a_whole_suite_leg_and_its_twin_differ_only_in_the_oracle` is the second half,
-because naming a twin is not running one. It applies to the pairs whose legs
-run whole crates — the ones the two suite-level pairing gates cannot speak
-about, since those compare `--test` selections and these name no suites — and
-requires the same `cargo test` commands, the same `runs-on`, and the same
-job-level environment apart from the oracle prefix. RUSTFLAGS is why it reads
-the environment at all: a twin that dropped `-C target-feature=+avx2` would
-compile a different backend, and the pair would report a codegen difference as
-an upstream one.
+`every_leg_pair_is_compared_and_a_twin_runs_what_its_baseline_runs` is the
+second half, because naming a twin is not running one. Every discovered pair
+goes down exactly one of two comparisons and neither branch may empty: a leg
+that selects at least one **oracle-backed suite** by name is compared by
+*selection*, since `test-integration` deliberately keeps its self-contained
+suites off its twin; a leg that selects none runs whole crates, and then the
+`cargo test` command — with the environment it runs under and the runner it
+runs on — is the only thing there is to compare.
 
-Mechanism-validated in ten directions rather than by passing: dropping the
-twin's RUSTFLAGS, moving it to another runner, narrowing its command, pointing
-it at 3.1.4.1, renaming it so the pair dissolves, and renaming its baseline out
-from under it each turn the intended gate red; so do deleting a remainder row
-while its leg stays single, keeping one after the leg is paired, and naming a
-job that does not exist or that installs no oracle.
+*Three review rounds, all of them on the gate again.* The first draft was
+green through each of the substitutions it existed to catch, and a codex round
+found all three:
+
+- **An echo is not a run.** The command scanner was a substring split on
+  `cargo test`, so replacing a twin's real command with `echo cargo test
+  --tests` left the echoed text standing in for the invocation the pair
+  requires — 45 gates green over a leg executing nothing. It now shares
+  `cargo_invocations_in` with the "measured" rule's `runs_cargo_in`: command
+  position, `+toolchain` qualifiers, wrappers, environment prefixes and
+  substitutions, one implementation rather than two.
+- **A step's environment overrides its job's.** The comparison read job-level
+  `env:` only, so a twin could set `RUSTFLAGS: -C target-feature=-avx2` on its
+  `cargo test` step and compile the opposite backend with the gate green — the
+  step-versus-job scope error this entry already records once, in the "measured"
+  rule. Commands and environments now travel together as a `TestRun`, the
+  environment being each step's *effective* one, job overlaid by step, minus
+  the oracle prefix a twin is supposed to differ in.
+- **A pair that starts naming suites escaped both comparisons.** The
+  whole-suite branch simply skipped a pair that named any suite, on the
+  assumption that a suite-level gate would take it — and those gates read
+  `ci.yml` and `full-c-parity.yml` by name, so a cross-arch leg narrowed to
+  `--test <something>` was compared by nothing. Every pair is now compared, the
+  branch is chosen by whether *oracle-backed* suites are named (narrowing to a
+  self-contained suite is the same escape one step further on), and the two
+  branch counters must both stay non-zero.
+
+Generalising that third fix over both crates found a real gap rather than a
+gate bug: `test-integration`'s **root** selections had never been compared by
+anything, and its serial timing step selects `hard_case_x_byte_and_restart`,
+whose `restart_bomb_4096_dimensions_match_djpeg` is a C cross-check answering
+at 3.1.4.1 alone. It is filed as
+**[P4-178](#p4-178-ciymls-serial-timing-step-carries-a-c-cross-check-that-runs-on-the-baseline-leg-alone--open)**
+and recorded in `SUITES_NOT_YET_ON_THE_CURRENT_LEG`, whose both-ways check
+fails if the row outlives the gap. Fixing it here would mean changing the
+serial step's mechanism, which belongs to P4-147/P4-152, not to this entry.
+
+Mechanism-validated in thirteen directions rather than by passing: on the
+workflow side, dropping the twin's job-level RUSTFLAGS, overriding RUSTFLAGS on
+its test step, replacing its command with an `echo`, narrowing either leg to a
+single suite (oracle-backed or not), moving the twin to another runner,
+pointing it at 3.1.4.1, renaming it so the pair dissolves, and renaming its
+baseline out from under it each turn the intended gate red; on the inventory
+side, so do deleting a remainder row while its leg stays single, keeping one
+after the leg is paired, and naming a job that does not exist or that installs
+no oracle.
+
+The scanner work also discharges criterion 1 of
+**[P4-177](#p4-177-the-workflow-scanner-does-not-model-heredocs-folded-scalars-or-quoted-substitution-syntax--partial-folded-scalars-are-modelled-heredocs-and-quoteescape-state-remain)**,
+which that item was holding open: comparing two legs' commands is impossible
+while a folded `>` block reads as one command per physical line, because every
+argument past the first drops out of the comparison.
 
 **What remains.**
 
@@ -9050,7 +9095,7 @@ it touches all five workflows rather than the one step under review. Bundling
 it into that change would have mixed a supply-chain change into a coverage
 change.
 
-## P4-177. The Workflow Scanner Does Not Model Heredocs, Folded Scalars or Quoted Substitution Syntax — **OPEN**
+## P4-177. The Workflow Scanner Does Not Model Heredocs, Folded Scalars or Quoted Substitution Syntax — **PARTIAL: folded scalars are modelled; heredocs and quote/escape state remain**
 
 **GitHub:** [#572](https://github.com/developer0hye/libjpeg-turbo-rs/issues/572) — filed 2026-08-18 from the sixth codex round on the
 [P4-130](#p4-130-c-parity-oracle-is-pinned-to-3141-upstream-stable-is-320--partial-every-oracle-provisioning-job-is-now-pinned-checked-and-measured-the-legs-still-on-one-release-the-submodule-bump-and-the-four-filed-gaps-remain)
@@ -9100,3 +9145,76 @@ blocks a legitimate change.
 history is the argument for not fixing them inline: each of the five rounds
 that preceded this one bought its next finding, so a further pass at the
 scanner belongs in a change whose subject *is* the scanner, with its own review.
+
+**Status (2026-08-18): partial — criterion 1 delivered.** The cross-arch
+pairing work did not set out to touch this item, but it could not avoid half of
+criterion 2: comparing two legs' `cargo test` commands means reading a folded
+`>` block as the one command it is, or every argument past its first line drops
+out of the comparison — which is where a twin's selection would differ if it
+did. `steps_in` now keeps the scalar style and joins `>` with spaces and `|`
+with newlines, pinned by
+`a_folded_block_is_one_command_and_a_literal_block_is_many` using `ci.yml`'s
+real shape in both directions (a folded `--test` list stays one command; a
+literal `set -o pipefail` + `cargo test` stays two). Criterion 2's heredoc
+half, criterion 3 (quote and escape state, including the escaped `"` inside an
+inline assignment) and criterion 4's remaining both-direction pins are
+untouched.
+
+## P4-178. `ci.yml`'s Serial Timing Step Carries a C Cross-Check That Runs on the Baseline Leg Alone — **OPEN**
+
+**GitHub:** [#574](https://github.com/developer0hye/libjpeg-turbo-rs/issues/574) — found 2026-08-18 while generalising
+[P4-130](#p4-130-c-parity-oracle-is-pinned-to-3141-upstream-stable-is-320--partial-every-oracle-provisioning-job-is-now-pinned-checked-and-measured-the-legs-still-on-one-release-the-submodule-bump-and-the-four-filed-gaps-remain)'s
+pairing comparison over both crates.
+
+**Motivation.** `every_oracle_backed_capi_suite_on_the_baseline_leg_also_runs_on_the_current_leg`
+reads `test-integration`'s **capi** invocations, and
+`every_oracle_backed_full_parity_suite_…` reads `full-c-parity.yml`. Nothing
+read `test-integration`'s **root-crate** selections — and it has one:
+
+```yaml
+- name: Timing ratios, serial (P4-147, P4-152)
+  run: >
+    cargo test --release
+    --test worker_b8_restart_bomb
+    --test worker_b8_progressive_bomb
+    --test hard_case_x_byte_and_restart --
+    --include-ignored --test-threads=1
+```
+
+`hard_case_x_byte_and_restart` is not only timing.
+`restart_bomb_4096_dimensions_match_djpeg` builds a 4096² restart bomb with C
+`cjpeg` and asserts our decode's geometry against C `djpeg`'s PGM header — a
+differential comparison whose answer depends on the release it ran against, and
+one that has only ever run at 3.1.4.1. The two sibling suites in that step are
+self-contained, so this is one suite, not three.
+
+Two things kept it invisible, and both are the P4-61 class:
+
+1. The step is *named* for its timing purpose, so nothing about it invites the
+   question "which oracle does this compare against?".
+2. Its libtest selection is `--include-ignored --test-threads=1`, which the
+   pairing scanner reads as **unmodelled** and therefore fails closed. So even
+   the generalised comparison cannot express "the twin covers this", which is
+   why the entry is recorded rather than fixed: satisfying it needs a step of
+   its own on the current leg, not a line added to an existing one.
+
+**Acceptance criteria.**
+
+1. `hard_case_x_byte_and_restart`'s C cross-check runs on the current-parity
+   leg as well as the baseline, at the release `tool-current` names.
+2. The step that carries it there selects it in a shape the pairing scanner can
+   read, so the pair is compared rather than excepted — or the scanner learns
+   `--include-ignored`, and the exception is deleted either way.
+3. `SUITES_NOT_YET_ON_THE_CURRENT_LEG` in `tests/oracle_version_pins.rs` loses
+   its row. The both-ways check on that constant already fails if the row
+   outlives the gap, so this criterion is mechanical.
+4. The split inside the suite is stated where the next reader meets it: the
+   timing assertions belong in the serial step for contention reasons, the C
+   cross-check belongs on both oracle legs, and those are different reasons.
+
+**Why deferred.** The serial step exists so that no timing ratio is taken while
+sibling binaries compete for the same cores (P4-147/P4-152). Adding an oracle
+dimension to it is a change to *that* item's mechanism, and running the whole
+suite a second time serially costs the current leg a wall-clock budget it does
+not have today. The honest fix is probably to split the C cross-check out of
+the timing suite, which is a test-layout change with its own review.
