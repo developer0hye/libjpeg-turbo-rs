@@ -5221,27 +5221,52 @@ red first:
   leg to install exactly it. An unpinned install provisions *nothing* the
   scanner can see, so this is what makes the `brew install` shape
   unrepresentable rather than merely discouraged.
-- `every_full_c_parity_leg_names_the_oracle_prefix_it_measures` — installing a
+- `every_full_c_parity_leg_verifies_the_prefix_it_measures` — installing a
   release is not measuring it. `helpers::c_tool_path` reads `/opt/homebrew/bin`
-  before PATH, which is exactly how the false green inside #569 happened, so
-  each leg must name `LIBJPEG_TURBO_PREFIX`.
+  before PATH, which is exactly how the false green inside #569 happened. So
+  the gate parses the `LIBJPEG_TURBO_PREFIX` *assignment* (a mention in a
+  comment selects nothing) and requires the leg to run `-version` on **that
+  prefix's** `djpeg` and to check it against the release its role declares —
+  the false-green shape being one install verified while another is measured.
 - `every_oracle_backed_full_parity_suite_on_the_baseline_leg_also_runs_on_the_current_leg`
   is the capi pairing gate's twin over root-crate suites, run once per
   architecture pair. It classifies from each suite's own source, so a matrix
-  that *gains* a C comparison is reclassified by the commit that gives it one.
+  that *gains* a C comparison is reclassified by the commit that gives it one,
+  and it compares **libtest filters** and not merely binary names: a filter
+  that selects one test, or after a typo none, leaves the legs measuring
+  different things while a name-only comparison stays green — P4-61's finding,
+  twice over. Both pairing gates now do this.
 
-The helpers those rest on are pinned too: `the_suite_selector_tells_the_root_crate_from_the_c_abi_crate`
+The helpers those rest on are pinned too, each against the shape that would
+make it lie: `the_suite_selector_tells_the_root_crate_from_the_c_abi_crate`
 (an invocation naming no package is the root crate; one naming any package is
 somebody else's coverage, and confusing them would look up a capi suite under
-`tests/` and panic), `the_oracle_classifier_reads_root_crate_suites_too` in
-both directions, and `a_job_block_stops_at_the_next_job` extended to the new
-pairs — every full-parity leg name is a prefix of its own current-oracle twin,
-so the block-parse trap that gate exists for is waiting once per architecture.
+`tests/` and panic), `a_step_named_after_a_test_is_not_a_libtest_filter`
+(every step in this workflow is *named* after the matrix it runs, so without a
+step-key boundary the next step's name reads as another filter on the previous
+invocation), `a_harness_flag_is_not_a_filter_and_a_redirect_ends_the_invocation`
+(`--nocapture` selects nothing; `2>&1 | tee` is the shell taking the line
+back), `a_narrower_filter_on_the_current_leg_does_not_count_as_covering_the_baseline`,
+`a_commented_out_prefix_assignment_selects_no_oracle`,
+`the_oracle_classifier_reads_root_crate_suites_too` in both directions, and
+`a_job_block_stops_at_the_next_job` extended to the new pairs — every
+full-parity leg name is a prefix of its own current-oracle twin, so the
+block-parse trap that gate exists for is waiting once per architecture.
 
-Measured on macOS aarch64 against locally built prefixes at both releases:
-**15 tests, 0 failed on each leg**, with printed tallies summing to **19,439
-compared cases** (crop 5,504; tjdecomp 1,689; tjtran 12,246 — `c_tjcomptest`
-prints no tally). The two legs' tallies are identical, including the
+The filter comparison and the prefix parse are both **round-2 work**: the first
+draft compared binary names and grepped for the variable, and a codex review
+pointed out that each would stay green through exactly the substitution it was
+written to catch.
+
+Measured on macOS aarch64 against locally built prefixes at both releases,
+running the four binaries unfiltered: **15 tests, 0 failed on each leg**, with
+printed tallies summing to **19,439 compared cases** (crop 5,504; tjdecomp
+1,689; tjtran 12,246 — `c_tjcomptest` prints no tally). A CI leg runs 13 of
+those 15, because the `c_tjdecomptest` step keeps the pre-existing
+`-- c_tjdecomptest_full` filter and leaves that binary's two quick tiers to the
+per-pull-request matrix, which runs them without the feature. Both legs carry
+the same filter, and since 2026-08-18 the pairing gate compares filters rather
+than binary names, so they cannot drift apart. The two legs' tallies are identical, including the
 pre-existing exclusions (5,440 crop cells for unimplemented colour
 quantization, 36 tjdecomp cases for a subsampling with no Rust equivalent), so
 the matrices are already at parity with 3.2.0 and this leg is what keeps that

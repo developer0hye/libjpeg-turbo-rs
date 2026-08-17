@@ -545,32 +545,130 @@ fn job_block(text: &str, job: &str, workflow: &str) -> String {
     block
 }
 
-/// The test binaries a job selects with `--test`, restricted to the `cargo
-/// test` invocations `accepts_invocation` recognises as belonging to one
-/// crate.
+/// YAML keys that end a step's `run:` script. A `run:` block is shell until
+/// one of these appears; without the boundary, a following `- name:` would be
+/// read as more shell, and a step *named* after a test — every step in
+/// `full-c-parity.yml` is — would be indistinguishable from a libtest filter
+/// selecting it.
+const STEP_KEYS: [&str; 9] = [
+    "- name:",
+    "- run:",
+    "- uses:",
+    "run:",
+    "env:",
+    "with:",
+    "if:",
+    "id:",
+    "timeout-minutes:",
+];
+
+/// The shell scripts a job block runs, one entry per `run:` step.
 ///
 /// Comment lines are dropped first: these workflows discuss suites by name in
 /// prose, and a mention is not a run — the same distinction
 /// [`is_provisioning_line`] draws for version pins.
-fn suites_selected_by(job_block: &str, accepts_invocation: fn(&str) -> bool) -> BTreeSet<String> {
-    let code: String = job_block
-        .lines()
-        .filter(|line| !line.trim_start().starts_with('#'))
-        .collect::<Vec<&str>>()
-        .join(" ");
-    let mut suites: BTreeSet<String> = BTreeSet::new();
-    // Each chunk holds one invocation's arguments; a following invocation's
-    // `--test` flags land in the next chunk, not this one.
-    for invocation in code.split("cargo test").skip(1) {
-        if !accepts_invocation(invocation) {
+fn shell_scripts_in(job_block: &str) -> Vec<String> {
+    let mut scripts: Vec<String> = Vec::new();
+    let mut current: Option<String> = None;
+    for line in job_block.lines() {
+        let trimmed: &str = line.trim();
+        if trimmed.starts_with('#') {
             continue;
         }
-        let mut tokens = invocation.split_whitespace();
-        while let Some(token) = tokens.next() {
-            if token == "--test" {
-                if let Some(suite) = tokens.next() {
-                    suites.insert(suite.to_string());
+        let starts_a_step: Option<&str> = ["- run:", "run:"]
+            .iter()
+            .find(|key| trimmed.starts_with(**key))
+            .copied();
+        if let Some(key) = starts_a_step {
+            if let Some(script) = current.take() {
+                scripts.push(script);
+            }
+            let rest: &str = trimmed[key.len()..].trim().trim_start_matches('|').trim();
+            current = Some(rest.to_string());
+            continue;
+        }
+        if STEP_KEYS.iter().any(|key| trimmed.starts_with(key)) {
+            if let Some(script) = current.take() {
+                scripts.push(script);
+            }
+            continue;
+        }
+        if let Some(script) = current.as_mut() {
+            script.push(' ');
+            script.push_str(trimmed);
+        }
+    }
+    scripts.extend(current);
+    scripts
+}
+
+/// Is this token a libtest *filter* — a positional argument that narrows which
+/// tests run — rather than a harness flag or the start of shell plumbing?
+///
+/// `--nocapture` is a flag and changes nothing about which tests execute;
+/// `2>&1`, `|`, `&&` and friends end the `cargo test` invocation entirely.
+/// Only a bare test-name token selects a subset, which is the thing two legs
+/// have to agree about.
+fn is_libtest_filter(token: &str) -> Option<bool> {
+    if token.starts_with('-') {
+        return Some(false); // a flag: keep scanning
+    }
+    let plausible: bool = token
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ':')
+        && token.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_');
+    if plausible {
+        Some(true)
+    } else {
+        None // shell plumbing: this invocation is over
+    }
+}
+
+/// The test binaries a job selects with `--test`, each mapped to the libtest
+/// filters the same invocation narrows it with, restricted to the `cargo test`
+/// invocations `accepts_invocation` recognises as belonging to one crate.
+fn suites_selected_by(
+    job_block: &str,
+    accepts_invocation: fn(&str) -> bool,
+) -> BTreeMap<String, BTreeSet<String>> {
+    let mut suites: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for script in shell_scripts_in(job_block) {
+        // Each chunk holds one invocation's arguments; a following
+        // invocation's `--test` flags land in the next chunk, not this one.
+        for invocation in script.split("cargo test").skip(1) {
+            if !accepts_invocation(invocation) {
+                continue;
+            }
+            let mut selected: Vec<String> = Vec::new();
+            let mut filters: BTreeSet<String> = BTreeSet::new();
+            let mut tokens = invocation.split_whitespace();
+            while let Some(token) = tokens.next() {
+                if token == "--test" {
+                    if let Some(suite) = tokens.next() {
+                        selected.push(suite.to_string());
+                    }
+                    continue;
                 }
+                if token == "--" {
+                    // Everything the harness itself sees, until the shell
+                    // takes the line back.
+                    for arg in tokens.by_ref() {
+                        match is_libtest_filter(arg) {
+                            Some(true) => {
+                                filters.insert(arg.to_string());
+                            }
+                            Some(false) => continue,
+                            None => break,
+                        }
+                    }
+                    break;
+                }
+            }
+            for suite in selected {
+                suites
+                    .entry(suite)
+                    .or_default()
+                    .extend(filters.iter().cloned());
             }
         }
     }
@@ -582,7 +680,7 @@ fn suites_selected_by(job_block: &str, accepts_invocation: fn(&str) -> bool) -> 
 /// Only invocations that name the C-ABI package count, so the root-crate
 /// suites a job also runs (the serial timing step, for one) are not mistaken
 /// for capi coverage.
-fn capi_suites_selected_by(job_block: &str) -> BTreeSet<String> {
+fn capi_suites_selected_by(job_block: &str) -> BTreeMap<String, BTreeSet<String>> {
     suites_selected_by(job_block, |invocation| invocation.contains(CAPI_PACKAGE))
 }
 
@@ -592,10 +690,23 @@ fn capi_suites_selected_by(job_block: &str) -> BTreeSet<String> {
 /// which is the root crate; one that names any package is somebody else's
 /// coverage and must not be counted here, or a capi suite would be looked up
 /// in the root `tests/` directory and the lookup would panic.
-fn root_suites_selected_by(job_block: &str) -> BTreeSet<String> {
+fn root_suites_selected_by(job_block: &str) -> BTreeMap<String, BTreeSet<String>> {
     suites_selected_by(job_block, |invocation| {
         !invocation.contains(PACKAGE_SELECTOR)
     })
+}
+
+/// Does the current leg's run of a suite cover what the baseline leg's run of
+/// it selects?
+///
+/// Naming the same binary is not enough. A filter that selects one test — or
+/// one that has been mistyped, and therefore selects none — leaves the two
+/// legs measuring different things while a name-only comparison stays green;
+/// that vacuous shape is P4-61's whole finding, and it happened in this
+/// repository twice.
+fn current_run_covers_baseline(baseline: &BTreeSet<String>, current: &BTreeSet<String>) -> bool {
+    // No filter means the whole binary, which covers any subset of it.
+    current.is_empty() || (!baseline.is_empty() && baseline.is_subset(current))
 }
 
 /// Does this suite compare against a C libjpeg-turbo, and therefore answer
@@ -687,9 +798,9 @@ fn every_oracle_backed_capi_suite_on_the_baseline_leg_also_runs_on_the_current_l
         return;
     }
     let ci: String = workflow_text(CI_WORKFLOW);
-    let baseline: BTreeSet<String> =
+    let baseline: BTreeMap<String, BTreeSet<String>> =
         capi_suites_selected_by(&job_block(&ci, BASELINE_LEG_JOB, CI_WORKFLOW));
-    let current: BTreeSet<String> =
+    let current: BTreeMap<String, BTreeSet<String>> =
         capi_suites_selected_by(&job_block(&ci, CURRENT_LEG_JOB, CI_WORKFLOW));
 
     assert!(
@@ -699,25 +810,27 @@ fn every_oracle_backed_capi_suite_on_the_baseline_leg_also_runs_on_the_current_l
          gate would pass no matter which leg runs what"
     );
 
-    let missing: Vec<&String> = baseline
+    let missing: Vec<String> = baseline
         .iter()
-        .filter(|suite| suite_consumes_a_c_oracle_in(CAPI_TEST_DIR, suite, CI_WORKFLOW))
-        .filter(|suite| !current.contains(*suite))
+        .filter(|(suite, _)| suite_consumes_a_c_oracle_in(CAPI_TEST_DIR, suite, CI_WORKFLOW))
+        .filter(|(suite, filters)| {
+            current
+                .get(*suite)
+                .is_none_or(|run| !current_run_covers_baseline(filters, run))
+        })
+        .map(|(suite, _)| format!("  {suite}"))
         .collect();
 
     assert!(
         missing.is_empty(),
         "the {BASELINE_LEG_JOB} leg compares these C-ABI suites against a C \
-         libjpeg-turbo, but the {CURRENT_LEG_JOB} leg does not run them:\n{}\n\n\
+         libjpeg-turbo, but the {CURRENT_LEG_JOB} leg does not run them — or \
+         runs them under a narrower libtest filter:\n{}\n\n\
          Each one asserts what stock libjpeg does, so its answer is only as \
          current as the release it ran against. Add it to the current-parity \
          leg with the oracle prefix it needs (docs/oracle_versions.tsv names \
          which install serves which role), or drop it from the baseline leg.",
-        missing
-            .iter()
-            .map(|suite| format!("  {suite}"))
-            .collect::<Vec<String>>()
-            .join("\n")
+        missing.join("\n")
     );
 }
 
@@ -795,26 +908,80 @@ fn each_full_c_parity_leg_provisions_the_release_its_role_names() {
     }
 }
 
+/// The path a job assigns to `LIBJPEG_TURBO_PREFIX`, which is what actually
+/// selects the oracle. Comments are dropped: a prose mention of the variable
+/// selects nothing.
+fn oracle_prefix_assigned_by(job_block: &str) -> Option<String> {
+    let mut assigned: Option<String> = None;
+    for line in job_block.lines() {
+        let trimmed: &str = line.trim();
+        if trimmed.starts_with('#') {
+            continue;
+        }
+        let Some(rest) = trimmed.strip_prefix("LIBJPEG_TURBO_PREFIX:") else {
+            continue;
+        };
+        let value: String = rest.trim().trim_matches(['"', '\'']).to_string();
+        assert!(
+            assigned.is_none(),
+            "two LIBJPEG_TURBO_PREFIX assignments in one job — which one \
+             selects the oracle depends on YAML scoping, so this gate cannot \
+             say what the leg measures"
+        );
+        assigned = Some(value);
+    }
+    assigned
+}
+
 #[test]
-fn every_full_c_parity_leg_names_the_oracle_prefix_it_measures() {
+fn every_full_c_parity_leg_verifies_the_prefix_it_measures() {
     if !repository_tree_is_readable() {
         eprintln!("SKIP: repository tree not readable; see the sibling test.");
         return;
     }
     // Installing the right release is not the same as measuring it.
     // `helpers::c_tool_path` reads `/opt/homebrew/bin` before PATH and falls
-    // through to `which`, so a leg that does not name its prefix can install
-    // 3.2.0 and still compare against whatever else is on the runner — the
-    // false green #569 found inside its own change.
+    // through to `which`, so a leg can install 3.2.0, verify 3.2.0, and still
+    // compare against whatever else is on the runner — the false green #569
+    // found inside its own change. So the gate is not "the variable appears
+    // somewhere": the assigned path has to be the path whose `djpeg` the leg
+    // checks, against the version its role declares.
+    let rows: Vec<Declared> = manifest_rows();
     let text: String = workflow_text(FULL_PARITY_WORKFLOW);
     for (baseline_job, current_job) in FULL_PARITY_LEG_PAIRS {
-        for job in [baseline_job, current_job] {
+        for (job, role) in [
+            (baseline_job, "tool-baseline"),
+            (current_job, "tool-current"),
+        ] {
             let block: String = job_block(&text, job, FULL_PARITY_WORKFLOW);
+            let prefix: String = oracle_prefix_assigned_by(&block).unwrap_or_else(|| {
+                panic!(
+                    "{FULL_PARITY_WORKFLOW}'s {job} leg assigns no \
+                     LIBJPEG_TURBO_PREFIX, so which install it measures is \
+                     decided by lookup order rather than by the job"
+                )
+            });
+            let version: String = declared_version(&rows, role);
+            let checks_that_prefix: bool = block
+                .lines()
+                .filter(|line| !line.trim_start().starts_with('#'))
+                .any(|line| {
+                    line.contains(&format!("{prefix}/bin/djpeg")) && line.contains("-version")
+                });
             assert!(
-                block.contains("LIBJPEG_TURBO_PREFIX"),
-                "{FULL_PARITY_WORKFLOW}'s {job} leg never names \
-                 LIBJPEG_TURBO_PREFIX, so which install it measures is decided \
-                 by lookup order rather than by the job"
+                checks_that_prefix,
+                "{job} measures {prefix} but never runs {prefix}/bin/djpeg \
+                 -version, so nothing ties the install it verified to the \
+                 install the tests resolve"
+            );
+            let checks_the_version: bool = block
+                .lines()
+                .filter(|line| !line.trim_start().starts_with('#'))
+                .any(|line| line.contains(&format!("version {version}")));
+            assert!(
+                checks_the_version,
+                "{job} plays the {role} role but never checks that its oracle \
+                 reports version {version}"
             );
         }
     }
@@ -828,12 +995,84 @@ fn the_suite_selector_tells_the_root_crate_from_the_c_abi_crate() {
     let block: &str = "      - run: cargo test --features full-c-parity --test c_croptest\n\
                        \x20     - run: cargo test -p libjpeg-turbo-rs-capi --test capi_jpeglib_encode\n";
     assert_eq!(
-        root_suites_selected_by(block),
-        BTreeSet::from(["c_croptest".to_string()])
+        root_suites_selected_by(block)
+            .into_keys()
+            .collect::<Vec<String>>(),
+        vec!["c_croptest".to_string()]
     );
     assert_eq!(
-        capi_suites_selected_by(block),
-        BTreeSet::from(["capi_jpeglib_encode".to_string()])
+        capi_suites_selected_by(block)
+            .into_keys()
+            .collect::<Vec<String>>(),
+        vec!["capi_jpeglib_encode".to_string()]
+    );
+}
+
+#[test]
+fn a_step_named_after_a_test_is_not_a_libtest_filter() {
+    // Every step in full-c-parity.yml is *named* after the matrix it runs, and
+    // the scanner joins a step's shell lines together. Without the step-key
+    // boundary the next step's name reads as another filter on the previous
+    // invocation, and two legs whose filters actually differ would compare
+    // equal.
+    let block: &str = "      - name: c_tjdecomptest_full\n\
+                       \x20       run: cargo test --features full-c-parity --test c_tjdecomptest -- c_tjdecomptest_full\n\
+                       \x20       timeout-minutes: 10\n\
+                       \x20     - name: c_tjcomptest_full\n\
+                       \x20       run: cargo test --features full-c-parity --test c_tjcomptest\n";
+    let selected: BTreeMap<String, BTreeSet<String>> = root_suites_selected_by(block);
+    assert_eq!(
+        selected.get("c_tjdecomptest"),
+        Some(&BTreeSet::from(["c_tjdecomptest_full".to_string()])),
+        "the filter this step really passes, and nothing the next step is named"
+    );
+    assert_eq!(
+        selected.get("c_tjcomptest"),
+        Some(&BTreeSet::new()),
+        "an unfiltered invocation runs the whole binary"
+    );
+}
+
+#[test]
+fn a_harness_flag_is_not_a_filter_and_a_redirect_ends_the_invocation() {
+    // `-- --nocapture` changes nothing about which tests run, so requiring the
+    // two legs to match on it would demand agreement about output formatting.
+    // `2>&1 | tee …` is the shell taking the line back, and every token after
+    // it belongs to a pipeline, not to libtest — the P4-108 step is written
+    // exactly this way.
+    let block: &str = "      - run: cargo test -p libjpeg-turbo-rs-capi --test capi_classic_dest_ownership -- --nocapture 2>&1 | tee p4108.log\n";
+    assert_eq!(
+        capi_suites_selected_by(block).get("capi_classic_dest_ownership"),
+        Some(&BTreeSet::new())
+    );
+}
+
+#[test]
+fn a_narrower_filter_on_the_current_leg_does_not_count_as_covering_the_baseline() {
+    // The pairing gates' load-bearing comparison. Naming the same binary while
+    // selecting fewer of its tests — or, after a typo, none of them — is the
+    // vacuous-green shape P4-61 documents, and a name-only comparison cannot
+    // see it.
+    let full: BTreeSet<String> = BTreeSet::from(["c_tjdecomptest_full".to_string()]);
+    let typo: BTreeSet<String> = BTreeSet::from(["c_tjdecomptest_fll".to_string()]);
+    let everything: BTreeSet<String> = BTreeSet::new();
+
+    assert!(current_run_covers_baseline(&full, &full));
+    assert!(current_run_covers_baseline(&full, &everything));
+    assert!(!current_run_covers_baseline(&full, &typo));
+    assert!(!current_run_covers_baseline(&everything, &full));
+}
+
+#[test]
+fn a_commented_out_prefix_assignment_selects_no_oracle() {
+    // The prefix gate used to be a substring check, which a comment satisfied.
+    assert_eq!(
+        oracle_prefix_assigned_by("      # LIBJPEG_TURBO_PREFIX: /opt/libjpeg-turbo\n"),
+        None
+    );
+    assert_eq!(
+        oracle_prefix_assigned_by("    env:\n      LIBJPEG_TURBO_PREFIX: /tmp/ljt320/prefix\n"),
+        Some("/tmp/ljt320/prefix".to_string())
     );
 }
 
@@ -878,9 +1117,9 @@ fn every_oracle_backed_full_parity_suite_on_the_baseline_leg_also_runs_on_the_cu
     let text: String = workflow_text(FULL_PARITY_WORKFLOW);
 
     for (baseline_job, current_job) in FULL_PARITY_LEG_PAIRS {
-        let baseline: BTreeSet<String> =
+        let baseline: BTreeMap<String, BTreeSet<String>> =
             root_suites_selected_by(&job_block(&text, baseline_job, FULL_PARITY_WORKFLOW));
-        let current: BTreeSet<String> =
+        let current: BTreeMap<String, BTreeSet<String>> =
             root_suites_selected_by(&job_block(&text, current_job, FULL_PARITY_WORKFLOW));
 
         assert!(
@@ -890,27 +1129,30 @@ fn every_oracle_backed_full_parity_suite_on_the_baseline_leg_also_runs_on_the_cu
              matter which leg runs what"
         );
 
-        let missing: Vec<&String> = baseline
+        let missing: Vec<String> = baseline
             .iter()
-            .filter(|suite| {
+            .filter(|(suite, _)| {
                 suite_consumes_a_c_oracle_in(ROOT_TEST_DIR, suite, FULL_PARITY_WORKFLOW)
             })
-            .filter(|suite| !current.contains(*suite))
+            .filter_map(|(suite, filters)| match current.get(suite) {
+                None => Some(format!("  {suite} — not run at all")),
+                Some(run) if !current_run_covers_baseline(filters, run) => Some(format!(
+                    "  {suite} — run under filters {run:?}, which do not cover \
+                     the baseline leg's {filters:?}"
+                )),
+                Some(_) => None,
+            })
             .collect();
 
         assert!(
             missing.is_empty(),
             "{baseline_job} compares these matrices against a C \
-             libjpeg-turbo, but {current_job} does not run them:\n{}\n\n\
+             libjpeg-turbo, but {current_job} does not:\n{}\n\n\
              These are the exhaustive matrices — the widest differential \
              surface in this repository — so a release they have never been \
              measured against is precisely the unmeasured delta P4-130 was \
              filed for.",
-            missing
-                .iter()
-                .map(|suite| format!("  {suite}"))
-                .collect::<Vec<String>>()
-                .join("\n")
+            missing.join("\n")
         );
     }
 }
