@@ -606,6 +606,12 @@ jobs:
           curl -fL -o /tmp/ljt320.deb \
             "https://github.com/libjpeg-turbo/libjpeg-turbo/releases/download/${VERSION}/libjpeg-turbo-official_${VERSION}_${ARCH}.deb"
           sudo apt-get install -y /tmp/ljt320.deb
+          # LIBJPEG_TURBO_PREFIX is what *selects* the oracle; PATH is here so
+          # that anything not going through the test helpers — a shell script, a
+          # future call site — reaches the same install rather than nothing.
+          # It cannot reintroduce ambiguity: 3.2.0 is the only libjpeg-turbo on
+          # this runner, so PATH and the prefix cannot disagree about a version.
+          echo "/opt/libjpeg-turbo/bin" >> $GITHUB_PATH
       # The version this leg is named for has to be the version it runs. A deb
       # that installed something else, or a prefix that resolved elsewhere,
       # would otherwise produce a green "3.2.0" leg measuring 3.1.4.1.

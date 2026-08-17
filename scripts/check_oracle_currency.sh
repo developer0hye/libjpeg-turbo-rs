@@ -50,7 +50,19 @@ if ! response="$(curl "${curl_args[@]}" "$UPSTREAM_API")"; then
     exit 1
 fi
 
-latest="$(printf '%s' "$response" | grep -m1 '"tag_name"' | cut -d'"' -f4)"
+# awk rather than `grep -m1 | cut`: a matcher that stops early closes the pipe
+# while printf is still writing the response, and SIGPIPE under `set -o
+# pipefail` fails the whole script. That is exactly what happened on the first
+# CI run of this job — it read the version correctly and then died of the
+# broken pipe. awk consumes the entire stream and keeps only the first match.
+latest="$(printf '%s' "$response" | awk '
+    !found && match($0, /"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"/) {
+        field = substr($0, RSTART, RLENGTH)
+        sub(/^"tag_name"[[:space:]]*:[[:space:]]*"/, "", field)
+        sub(/"$/, "", field)
+        print field
+        found = 1
+    }')"
 if [ -z "$latest" ]; then
     echo "error: no tag_name in the releases API response — the response shape changed" >&2
     exit 1

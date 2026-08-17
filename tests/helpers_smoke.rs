@@ -90,28 +90,38 @@ fn an_explicit_oracle_prefix_selects_that_install() {
 
 #[test]
 fn an_explicit_oracle_prefix_does_not_fall_back() {
-    // The prefix exists but holds no `djpeg`. Falling through to homebrew or
-    // PATH here is what would let the 3.2.0 leg silently measure 3.1.4.1.
+    // The prefix exists but holds no tool. Falling through to homebrew or PATH
+    // here is what would let the 3.2.0 leg silently measure 3.1.4.1.
     let prefix: helpers::TempDir = helpers::TempDir::new("oracle_prefix_exclusive");
     std::fs::create_dir_all(prefix.path().join("bin")).expect("create the prefix bin dir");
-
-    // Non-vacuous only if the fallback would otherwise have found a djpeg;
-    // CI provisions one, so require the precondition there.
-    let fallback: Option<std::path::PathBuf> = helpers::c_tool_path_under("djpeg", None);
-    if helpers::is_ci() {
-        assert!(
-            fallback.is_some(),
-            "CI provisions libjpeg-turbo, so the unpinned lookup must find djpeg \
-             — without that this test asserts nothing"
-        );
-    }
 
     assert_eq!(
         helpers::c_tool_path_under("djpeg", Some(prefix.path())),
         None,
         "an explicit prefix is exclusive: with no djpeg under it the answer is \
-         None, never the {fallback:?} the fallback would have chosen"
+         None, whatever else the machine has"
     );
+
+    // `djpeg` alone would leave the assertion above indistinguishable from
+    // "this host has no djpeg at all" — which is the true state of the 3.2.0
+    // leg's runner, since that job names its oracle by prefix and deliberately
+    // keeps it off PATH. An earlier version of this test demanded an unpinned
+    // djpeg on CI and failed there for exactly that reason. `sh` is on PATH on
+    // every unix host, so the exclusivity is provable without assuming
+    // anything about how a particular leg provisions its oracle.
+    #[cfg(unix)]
+    {
+        assert!(
+            helpers::c_tool_path_under("sh", None).is_some(),
+            "`which sh` must resolve on a unix host"
+        );
+        assert_eq!(
+            helpers::c_tool_path_under("sh", Some(prefix.path())),
+            None,
+            "the unpinned lookup finds `sh`, so a pinned lookup that also \
+             found it would be falling back"
+        );
+    }
 }
 
 #[test]
