@@ -5281,6 +5281,17 @@ unlisted one that does not costs a line here the first time it appears in an
 oracle-installing job. Verified against the reproduction: pointing the macOS
 leg at `cargo +nightly test` with no prefix is red.
 
+A third round found the cost of that parse. An exact-token comparison for
+`cargo` no longer recognised `"cargo test"` in a quoted YAML scalar or
+`out=$(cargo test …)` in a command substitution — both of which the substring
+match it replaced had handled by accident. The token is now read past the shell
+punctuation that can precede a command word, `--cargo-test-arg` still being a
+flag that names cargo rather than an invocation of it; that shape is red
+against the real workflow too. Three rounds, three findings of one shape: the
+*rule* held each time and the *scanner* could not see the case, which is the
+argument for pinning every helper against the spelling that would make it lie
+rather than trusting a gate because it is green.
+
 `test-cross-encode` now builds 3.1.4.1 from source at `/tmp/ljt3141/prefix` and
 selects it with `LIBJPEG_TURBO_PREFIX`, the same shape the aarch64 full-parity
 baseline leg took. It is the same measurement under a name: homebrew's formula

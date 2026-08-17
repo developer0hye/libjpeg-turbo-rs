@@ -2013,6 +2013,22 @@ const CARGO_SUBCOMMANDS_WITHOUT_AN_ORACLE: [&str; 12] = [
     "tree", "update",
 ];
 
+/// The command word inside a shell token, with the syntax that can precede it
+/// removed.
+///
+/// `"cargo`, `$(cargo` and `out=$(cargo` are all the shell running cargo, and
+/// an exact-token comparison sees none of them — the regression a review found
+/// in the first parsed version of [`reaches_the_oracle`], which the substring
+/// match it replaced had handled by accident. Taking the tail after the last
+/// piece of shell punctuation reads all of them, and leaves `--cargo-test-arg`
+/// alone, which is a flag naming cargo rather than an invocation of it.
+fn shell_command_word(token: &str) -> &str {
+    match token.rfind(['"', '\'', '(', '$', '`', ';', '&', '|', '{', '=']) {
+        Some(at) => &token[at + 1..],
+        None => token,
+    }
+}
+
 /// Does this step run cargo in a way that can reach the C oracle?
 ///
 /// Parsed rather than matched as a substring: `cargo +nightly test`,
@@ -2024,7 +2040,10 @@ fn reaches_the_oracle(script: &str) -> bool {
     tokens
         .iter()
         .enumerate()
-        .filter(|(_, token)| **token == "cargo" || token.ends_with("/cargo"))
+        .filter(|(_, token)| {
+            let word: &str = shell_command_word(token);
+            word == "cargo" || word.ends_with("/cargo")
+        })
         .any(|(at, _)| {
             let subcommand: Option<&&str> = tokens[at + 1..]
                 .iter()
@@ -2328,6 +2347,14 @@ fn a_toolchain_qualifier_does_not_hide_a_cargo_test() {
         // reaching the oracle, so the first unknown one asks the question here
         // rather than passing silently.
         "cargo xtask verify-everything",
+        // The shell spellings. A quoted YAML scalar and a command
+        // substitution are still the shell running cargo, and the parsed
+        // version regressed on both where the substring match had handled
+        // them by accident — the review round that added these cases.
+        "\"cargo test --tests\"",
+        "out=$(cargo test --tests)",
+        "set -o pipefail; cargo test --tests | tee log",
+        "/usr/local/bin/cargo test --tests",
     ] {
         assert!(
             reaches_the_oracle(script),
@@ -2342,6 +2369,9 @@ fn a_toolchain_qualifier_does_not_hide_a_cargo_test() {
         "cargo fmt --check",
         // A flag is not the subcommand, and a bare `cargo` runs nothing.
         "cargo --version",
+        // A flag that merely names cargo is not an invocation of it — the
+        // shape `mutants-in-diff` writes over and over.
+        "cargo install cargo-mutants --locked --cargo-test-arg --test",
     ] {
         assert!(
             !reaches_the_oracle(script),
