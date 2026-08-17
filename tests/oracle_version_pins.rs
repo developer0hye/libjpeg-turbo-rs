@@ -1405,6 +1405,644 @@ fn every_oracle_backed_full_parity_suite_on_the_baseline_leg_also_runs_on_the_cu
     }
 }
 
+// ---------------------------------------------------------------------------
+// P4-130 criterion 1, generalised: the pin-and-name rule holds for every job
+// that installs an oracle, in every workflow.
+//
+// Every gate above names the workflow it reads — `ci.yml`'s two legs,
+// `full-c-parity.yml`'s four. That is how `test-cross-encode` still ran
+// `brew install jpeg-turbo` the day after the aarch64 full-parity legs lost
+// exactly that shape: homebrew has no per-version formula for jpeg-turbo, so
+// the release that leg measures is whatever the packager shipped that week,
+// named nowhere in this repository and free to move without a commit to
+// review. Eight legs across three workflows were in the same position, and a
+// gate keyed to a list of workflow files cannot see one of them.
+//
+// So this half is keyed to *jobs*, enumerated by reading every workflow. Three
+// requirements, each the general form of one the full-parity legs already
+// meet:
+//
+// * **pinned** — an install names the release it installs. A package manager's
+//   own name for the package does not name a release, so that shape is
+//   rejected rather than discouraged. A shape this scanner cannot read fails
+//   closed for the same reason.
+// * **checked** — the job *asserts* that release. Running `djpeg -version` and
+//   printing the output is what five of these legs did, and it fails nothing.
+// * **measured** — the tests resolve to the install the job checked. On a
+//   macOS runner that requires `LIBJPEG_TURBO_PREFIX`: `helpers::c_tool_path`
+//   reads `/opt/homebrew/bin` before PATH, so a PATH entry does not select an
+//   oracle there. That is the false green #569 found inside its own change.
+// ---------------------------------------------------------------------------
+
+/// Package managers whose install names a *package*, leaving the release to
+/// the packager.
+const PACKAGE_MANAGER_INSTALLS: [&str; 6] = [
+    "brew install",
+    "apt-get install",
+    "apt install",
+    "dnf install",
+    "yum install",
+    "port install",
+];
+
+/// Commands that fetch a tree or an archive. A fetch that names upstream but
+/// matches none of the pinned shapes is unreadable, not absent.
+const FETCH_COMMANDS: [&str; 3] = ["curl ", "wget ", "git clone"];
+
+/// This repository's own crate names, which contain upstream's as a prefix.
+/// Stripped before asking whether a line names upstream, so `cargo publish -p
+/// libjpeg-turbo-rs-capi` is not read as provisioning a C oracle.
+const OUR_CRATE_NAME: &str = "libjpeg-turbo-rs";
+
+/// How a line provisions a C libjpeg-turbo, if it does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OracleInstall {
+    /// Pinned by a release the line names: upstream's
+    /// `libjpeg-turbo-official_<version>` package, or a `--branch <tag>` clone.
+    /// Which release is read at job scope by [`provisioned_versions_in`],
+    /// because these workflows put the version in a `VERSION=` assignment one
+    /// line above the URL that interpolates it.
+    Pinned,
+    /// Built from `references/libjpeg-turbo`, a git submodule — pinned by
+    /// commit rather than by a version token, and cross-checked against the
+    /// manifest by [`the_submodule_row_matches_the_checked_out_submodule`].
+    Submodule,
+    /// Installed under a name whose release the packager chooses.
+    Unpinned,
+    /// Names upstream and fetches something, in a shape this scanner cannot
+    /// resolve to a release.
+    Unreadable,
+}
+
+/// Shell lines with backslash continuations joined, so a command split across
+/// lines is classified as the one command it is.
+///
+/// `ci.yml` splits both provisioning shapes: `curl -fL -o /tmp/ljt.deb \` puts
+/// the URL carrying `libjpeg-turbo-official` on the next line, and
+/// `git clone --depth 1 --branch 3.2.0 \` puts the repository on the next.
+/// Read line by line, the half naming upstream and the half naming the release
+/// are different lines and neither is an install.
+fn logical_lines(block: &str) -> Vec<String> {
+    let mut joined: Vec<String> = Vec::new();
+    let mut pending: Option<String> = None;
+    for line in block.lines() {
+        let trimmed: &str = line.trim();
+        let continues: bool = trimmed.ends_with('\\');
+        let body: &str = trimmed.strip_suffix('\\').unwrap_or(trimmed).trim_end();
+        match pending.as_mut() {
+            Some(current) => {
+                current.push(' ');
+                current.push_str(body);
+            }
+            None => pending = Some(body.to_string()),
+        }
+        if !continues {
+            joined.extend(pending.take());
+        }
+    }
+    joined.extend(pending);
+    joined
+}
+
+fn oracle_install_on(line: &str) -> Option<OracleInstall> {
+    let trimmed: &str = line.trim_start();
+    // Documentation about an install is not one — the distinction
+    // [`is_provisioning_line`] already draws, and `fuzz-smoke.yml` needs it:
+    // the reproduction instructions it prints on failure name the deb, the
+    // release and the PATH entry in full.
+    if trimmed.starts_with('#') || trimmed.contains("echo ") {
+        return None;
+    }
+    if trimmed.contains("cmake -S references/libjpeg-turbo") {
+        return Some(OracleInstall::Submodule);
+    }
+    let without_our_crate: String = trimmed.replace(OUR_CRATE_NAME, "");
+    if !without_our_crate.contains("jpeg-turbo") && !without_our_crate.contains("libjpeg") {
+        return None;
+    }
+    // Upstream's own release assets: the official package carries the release
+    // in its filename, a `--branch` clone in its tag.
+    if without_our_crate.contains("libjpeg-turbo-official")
+        || without_our_crate.contains("--branch ")
+    {
+        return Some(OracleInstall::Pinned);
+    }
+    if PACKAGE_MANAGER_INSTALLS
+        .iter()
+        .any(|command| without_our_crate.contains(command))
+    {
+        return Some(OracleInstall::Unpinned);
+    }
+    if FETCH_COMMANDS
+        .iter()
+        .any(|command| without_our_crate.contains(command))
+    {
+        return Some(OracleInstall::Unreadable);
+    }
+    None
+}
+
+/// Every job in a workflow, in file order.
+///
+/// Only the mapping under the top-level `jobs:` key: `on:` carries two-space
+/// keys of its own (`push:`, `schedule:`, `workflow_dispatch:`), and reading
+/// those as jobs would ask [`job_block`] for a block that is not one.
+///
+/// Checked once against a real YAML parser while this gate was written: the
+/// scanner's list is identical to PyYAML's for all 41 jobs in the nine
+/// workflows, name for name. The standing protection is the sibling test —
+/// a workflow this returns nothing for is a workflow every gate here passes
+/// vacuously.
+fn job_names_in(text: &str) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    let mut inside_jobs: bool = false;
+    for line in text.lines() {
+        if line.trim().is_empty() || line.trim_start().starts_with('#') {
+            continue;
+        }
+        if !line.starts_with(' ') {
+            inside_jobs = line.trim_end() == "jobs:";
+            continue;
+        }
+        if !inside_jobs {
+            continue;
+        }
+        let is_job_header: bool =
+            line.starts_with("  ") && !line.starts_with("   ") && line.trim_end().ends_with(':');
+        if is_job_header {
+            names.push(line.trim().trim_end_matches(':').to_string());
+        }
+    }
+    names
+}
+
+/// `(workflow file name, job name, job block)` for every job in the repository.
+fn every_job() -> Vec<(String, String, String)> {
+    let mut jobs: Vec<(String, String, String)> = Vec::new();
+    for path in workflow_files() {
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let workflow: String = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        for job in job_names_in(&text) {
+            let block: String = job_block(&text, &job, &workflow);
+            jobs.push((workflow.clone(), job, block));
+        }
+    }
+    jobs
+}
+
+/// How this job installs a C oracle, over all of its lines.
+fn oracle_installs_in(block: &str) -> Vec<(OracleInstall, String)> {
+    logical_lines(block)
+        .into_iter()
+        .filter_map(|line| oracle_install_on(&line).map(|kind| (kind, line)))
+        .collect()
+}
+
+/// Does this line assert that a release really is the one installed?
+///
+/// Two spellings, because the two things a job can check are the built tool
+/// and the tree it was built from: `djpeg -version` prints `version 3.2.0`,
+/// while upstream's `CMakeLists.txt` states `set(VERSION 3.2.0)` and the grep
+/// that reads it escapes the dots. Both are assertions in the sense
+/// [`is_assertion_over_output`] means — a grep whose failure stops the step.
+fn asserts_release(line: &str, version: &str) -> bool {
+    let escaped: String = version.replace('.', "\\.");
+    is_assertion_over_output(line, &format!("version {version}"))
+        || is_assertion_over_output(line, &format!("VERSION {escaped}"))
+}
+
+/// The prefixes whose `djpeg` a job runs `-version` on.
+///
+/// An absolute path, because a bare `djpeg -version` is answered by PATH and
+/// says nothing about the install the job made — the shape `test-integration`
+/// carried while reading as a version check.
+fn djpeg_prefixes_checked_in(block: &str) -> BTreeSet<String> {
+    let mut prefixes: BTreeSet<String> = BTreeSet::new();
+    for line in block.lines() {
+        let trimmed: &str = line.trim_start();
+        if trimmed.starts_with('#') || !trimmed.contains("-version") {
+            continue;
+        }
+        let Some(at) = trimmed.find("/bin/djpeg") else {
+            continue;
+        };
+        let head: &str = &trimmed[..at];
+        let start: usize = head
+            .rfind([' ', '"', '\'', '\t', '('])
+            .map(|index| index + 1)
+            .unwrap_or(0);
+        let prefix: &str = &head[start..];
+        if prefix.starts_with('/') {
+            prefixes.insert(prefix.to_string());
+        }
+    }
+    prefixes
+}
+
+/// The prefixes a job prepends to PATH, read from its `$GITHUB_PATH` writes.
+fn path_entry_prefixes_in(block: &str) -> BTreeSet<String> {
+    let mut prefixes: BTreeSet<String> = BTreeSet::new();
+    for line in block.lines() {
+        let trimmed: &str = line.trim_start();
+        if trimmed.starts_with('#') || !trimmed.contains("GITHUB_PATH") {
+            continue;
+        }
+        let mut quoted = trimmed.split('"');
+        let _before: Option<&str> = quoted.next();
+        let Some(entry) = quoted.next() else {
+            continue;
+        };
+        if let Some(prefix) = entry.strip_suffix("/bin") {
+            if prefix.starts_with('/') {
+                prefixes.insert(prefix.to_string());
+            }
+        }
+    }
+    prefixes
+}
+
+/// Does this job run on macOS, where a PATH entry does not select the oracle?
+///
+/// Reads the whole block rather than `runs-on:` alone: `test-cross-encode`
+/// runs on `${{ matrix.os }}` and names macOS only in its matrix.
+fn job_runs_on_macos(block: &str) -> bool {
+    block
+        .lines()
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .any(|line| line.contains("macos"))
+}
+
+#[test]
+fn every_oracle_install_in_every_workflow_names_the_release_it_installs() {
+    if !repository_tree_is_readable() {
+        eprintln!("SKIP: repository tree not readable; see the sibling test.");
+        return;
+    }
+    let mut offenders: Vec<String> = Vec::new();
+    for (workflow, job, block) in every_job() {
+        for (kind, line) in oracle_installs_in(&block) {
+            let complaint: &str = match kind {
+                OracleInstall::Unpinned => {
+                    "installs a C libjpeg-turbo by package name, so the release \
+                     it measures is the packager's choice and changes without a \
+                     commit here"
+                }
+                OracleInstall::Unreadable => {
+                    "fetches a C libjpeg-turbo in a shape this gate cannot \
+                     resolve to a release; failing closed, because an \
+                     unreadable pin and no pin are the same thing to a reader"
+                }
+                OracleInstall::Pinned | OracleInstall::Submodule => continue,
+            };
+            offenders.push(format!("  {workflow} / {job} — {complaint}\n      {line}"));
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "every oracle install must name the release it installs:\n{}\n\n\
+         Pin it the way the other legs are pinned — upstream's \
+         `libjpeg-turbo-official_<version>` package, or a `--branch <tag>` \
+         source build — and declare the release in {MANIFEST}. An oracle whose \
+         release is named nowhere re-baselines every expectation it backs the \
+         week the packager moves, which is the single global bump P4-130's \
+         first criterion forbids, arriving without a commit to review.",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn every_job_that_installs_an_oracle_asserts_the_release_it_installed() {
+    if !repository_tree_is_readable() {
+        eprintln!("SKIP: repository tree not readable; see the sibling test.");
+        return;
+    }
+    let declared: BTreeSet<String> = manifest_rows().into_iter().map(|row| row.version).collect();
+    let mut offenders: Vec<String> = Vec::new();
+    for (workflow, job, block) in every_job() {
+        let installs_a_release: bool = oracle_installs_in(&block)
+            .iter()
+            .any(|(kind, _)| *kind == OracleInstall::Pinned);
+        if !installs_a_release {
+            continue;
+        }
+        let versions: BTreeSet<String> = provisioned_versions_in(&block);
+        assert!(
+            !versions.is_empty(),
+            "{workflow} / {job} installs an upstream release asset but names no \
+             version this gate can read"
+        );
+        for version in versions {
+            assert!(
+                declared.contains(&version),
+                "{workflow} / {job} installs libjpeg-turbo {version}, which \
+                 {MANIFEST} does not declare"
+            );
+            if !block.lines().any(|line| asserts_release(line, &version)) {
+                offenders.push(format!("  {workflow} / {job} — installs {version}"));
+            }
+        }
+    }
+    // Every offender, not the first: these legs are spread over three
+    // workflows, and a gate that names one per run turns one review into as
+    // many rounds as there are legs.
+    assert!(
+        offenders.is_empty(),
+        "these jobs install a release they never *assert*:\n{}\n\n\
+         Printing `djpeg -version` fails nothing, so a deb that installed \
+         something else, a tag moved to another release, or a runner image \
+         carrying its own libjpeg would run the whole leg under a release it \
+         is not measuring — and report green. The other legs check it with \
+         `<prefix>/bin/djpeg -version 2>&1 | grep -q \"version <release>\"`.",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn every_job_that_installs_an_oracle_measures_the_install_it_checked() {
+    if !repository_tree_is_readable() {
+        eprintln!("SKIP: repository tree not readable; see the sibling test.");
+        return;
+    }
+    let mut offenders: Vec<String> = Vec::new();
+    for (workflow, job, block) in every_job() {
+        let installs_a_release: bool = oracle_installs_in(&block)
+            .iter()
+            .any(|(kind, _)| *kind == OracleInstall::Pinned);
+        if !installs_a_release {
+            continue;
+        }
+        let checked: BTreeSet<String> = djpeg_prefixes_checked_in(&block);
+        if checked.is_empty() {
+            offenders.push(format!(
+                "  {workflow} / {job} — runs no `<prefix>/bin/djpeg -version` \
+                 at all, so nothing ties the release it installed to a place \
+                 on disk; a bare `djpeg` is answered by PATH and can be any \
+                 djpeg on the runner"
+            ));
+            continue;
+        }
+        let assignments: PrefixAssignments = oracle_prefixes_assigned_by(&block);
+        let mut selected: BTreeSet<String> = assignments
+            .job_level
+            .into_iter()
+            .chain(assignments.step_level)
+            .collect();
+        let on_macos: bool = job_runs_on_macos(&block);
+        if !on_macos {
+            selected.extend(path_entry_prefixes_in(&block));
+        }
+        if !checked.iter().any(|prefix| selected.contains(prefix)) {
+            offenders.push(format!(
+                "  {workflow} / {job} — checks {checked:?}, resolves its C \
+                 tools from {selected:?}{}",
+                if on_macos {
+                    " (a macOS runner, where a PATH entry selects nothing: \
+                     `helpers::c_tool_path` reads /opt/homebrew/bin first, so \
+                     only LIBJPEG_TURBO_PREFIX names an oracle there)"
+                } else {
+                    ""
+                }
+            ));
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "these jobs verify one install and measure another, or verify none:\n{}\n\n\
+         Installing the right release is not measuring it. The leg has to run \
+         `-version` on the *installed path* and select that same prefix for \
+         its tests — through LIBJPEG_TURBO_PREFIX, or through PATH where \
+         lookup order can express it.",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn an_unpinned_package_manager_install_is_an_oracle_install() {
+    // The shape this half of the gate exists for. Both spellings: homebrew's
+    // formula and a distribution package, neither of which names a release.
+    for line in [
+        "            install: brew install jpeg-turbo",
+        "          sudo apt-get install -y libjpeg-turbo-progs",
+        "          brew install libjpeg-turbo",
+    ] {
+        assert_eq!(
+            oracle_install_on(line),
+            Some(OracleInstall::Unpinned),
+            "{line:?} installs a C oracle under a name the packager controls"
+        );
+    }
+}
+
+#[test]
+fn installing_a_pinned_asset_is_not_an_unpinned_install() {
+    // The pinned shapes must not be swept up by the package-manager rule —
+    // upstream's deb *is* installed with `apt-get install`, by file path.
+    for line in [
+        "          sudo apt-get install -y /tmp/ljt.deb",
+        "            \"https://github.com/libjpeg-turbo/libjpeg-turbo/releases/download/\
+         ${VERSION}/libjpeg-turbo-official_${VERSION}_${ARCH}.deb\"",
+        "          git clone --depth 1 --branch 3.1.4.1 \
+         https://github.com/libjpeg-turbo/libjpeg-turbo.git /tmp/ljt",
+    ] {
+        assert_ne!(
+            oracle_install_on(line),
+            Some(OracleInstall::Unpinned),
+            "{line:?} names the release it installs"
+        );
+    }
+    // Tooling installs are not oracle installs, however they are spelled.
+    for line in [
+        "          command -v cmake >/dev/null || brew install cmake",
+        "          sudo apt-get install -y cmake nasm",
+        "        run: cargo publish -p libjpeg-turbo-rs-capi",
+    ] {
+        assert_eq!(
+            oracle_install_on(line),
+            None,
+            "{line:?} installs no C libjpeg-turbo"
+        );
+    }
+}
+
+#[test]
+fn a_documented_install_is_not_an_install() {
+    // `fuzz-smoke.yml` prints reproduction instructions on failure: the deb
+    // URL, the release, the PATH entry. Read as actions they would satisfy
+    // this gate from inside an error message, and `full-c-parity.yml`'s
+    // comments discuss `brew install jpeg-turbo` by name in order to explain
+    // why it is gone.
+    for line in [
+        "  # jpeg-turbo, so `brew install jpeg-turbo` is an oracle whose release is",
+        "                echo \"  VERSION=3.1.4.1\"",
+        "                echo \"  Install libjpeg-turbo 3.1.4.1 C tools and put \
+         /opt/libjpeg-turbo/bin first on PATH.\"",
+        "          echo \"/opt/libjpeg-turbo/bin\" >> $GITHUB_PATH",
+        "      - name: Install libjpeg-turbo 3.2.0 from official release",
+    ] {
+        assert_eq!(
+            oracle_install_on(line),
+            None,
+            "{line:?} describes an install rather than performing one"
+        );
+    }
+}
+
+#[test]
+fn a_clone_with_no_tag_is_unreadable_rather_than_absent() {
+    // A clone of the default branch is the worst pin of all: it moves every
+    // time upstream commits. Reporting it as "no install here" would let it
+    // pass; reporting it as unreadable fails the gate and asks for a tag.
+    assert_eq!(
+        oracle_install_on(
+            "          git clone https://github.com/libjpeg-turbo/libjpeg-turbo.git /tmp/ljt"
+        ),
+        Some(OracleInstall::Unreadable)
+    );
+    assert_eq!(
+        oracle_install_on(
+            "          git clone --depth 1 --branch 3.2.0 \
+             https://github.com/libjpeg-turbo/libjpeg-turbo.git /tmp/ljt320src"
+        ),
+        Some(OracleInstall::Pinned)
+    );
+}
+
+#[test]
+fn a_submodule_build_is_pinned_by_commit_rather_than_by_a_version_token() {
+    assert_eq!(
+        oracle_install_on("          cmake -S references/libjpeg-turbo -B /tmp/ljt8/build \\"),
+        Some(OracleInstall::Submodule),
+        "the submodule is pinned by commit; its release is cross-checked \
+         against the manifest from the checked-out tree"
+    );
+    // Reading a file out of the submodule is not building it.
+    assert_eq!(
+        oracle_install_on("            references/libjpeg-turbo/testimages/testorig.jpg \\"),
+        None
+    );
+}
+
+#[test]
+fn a_continued_command_is_classified_as_the_one_command_it_is() {
+    // Both provisioning shapes in `ci.yml` are split across lines, and each
+    // half alone is invisible: the first names no release, the second no
+    // command.
+    let split_clone: &str = "          git clone --depth 1 --branch 3.2.0 \\\n\
+                             \x20           https://github.com/libjpeg-turbo/libjpeg-turbo.git \
+                             /tmp/ljt320src";
+    let joined: Vec<String> = logical_lines(split_clone);
+    assert_eq!(joined.len(), 1, "a continuation is one command: {joined:?}");
+    assert_eq!(oracle_install_on(&joined[0]), Some(OracleInstall::Pinned));
+
+    let split_curl: &str = "          curl -fL -o /tmp/ljt.deb \\\n\
+                            \x20           \"https://github.com/libjpeg-turbo/libjpeg-turbo/\
+                            releases/download/${VERSION}/libjpeg-turbo-official_${VERSION}_\
+                            ${ARCH}.deb\"";
+    let joined: Vec<String> = logical_lines(split_curl);
+    assert_eq!(joined.len(), 1);
+    assert_eq!(oracle_install_on(&joined[0]), Some(OracleInstall::Pinned));
+}
+
+#[test]
+fn printing_the_release_is_not_asserting_it() {
+    // The shape five of these legs carried: an absolute-path `-version` call
+    // whose output nothing reads.
+    assert!(!asserts_release(
+        "          /opt/libjpeg-turbo/bin/djpeg -version",
+        "3.1.4.1"
+    ));
+    assert!(asserts_release(
+        "          /opt/libjpeg-turbo/bin/djpeg -version 2>&1 | grep -q \"version 3.1.4.1\"",
+        "3.1.4.1"
+    ));
+    // The source-tree spelling, for a leg that checks the tag it cloned rather
+    // than the tool it built.
+    assert!(asserts_release(
+        "          grep -Eq '^set\\(VERSION 3\\.2\\.0\\)$' /tmp/ljt320src/CMakeLists.txt",
+        "3.2.0"
+    ));
+    // …and a check on the wrong release is not a check on this one.
+    assert!(!asserts_release(
+        "          /opt/libjpeg-turbo/bin/djpeg -version 2>&1 | grep -q \"version 3.2.0\"",
+        "3.1.4.1"
+    ));
+}
+
+#[test]
+fn a_bare_tool_name_does_not_check_an_install() {
+    // `test-integration` ran `djpeg -version` after exporting PATH. It reads
+    // as a version check and names no install: which djpeg answered is decided
+    // by lookup order, which is the ambiguity this item is about.
+    assert!(djpeg_prefixes_checked_in("          djpeg -version").is_empty());
+    assert_eq!(
+        djpeg_prefixes_checked_in(
+            "          /tmp/ljt3141/prefix/bin/djpeg -version 2>&1 | tee /tmp/oracle-version.txt"
+        ),
+        BTreeSet::from(["/tmp/ljt3141/prefix".to_string()])
+    );
+}
+
+#[test]
+fn a_path_entry_selects_an_oracle_everywhere_except_macos() {
+    let linux_leg: &str = "    runs-on: ubuntu-latest\n\
+                           \x20         echo \"/opt/libjpeg-turbo/bin\" >> $GITHUB_PATH\n";
+    assert!(!job_runs_on_macos(linux_leg));
+    assert_eq!(
+        path_entry_prefixes_in(linux_leg),
+        BTreeSet::from(["/opt/libjpeg-turbo".to_string()])
+    );
+    // The matrix spelling: `runs-on: ${{ matrix.os }}` names macOS nowhere but
+    // in the matrix, and that is the leg where PATH does not select.
+    let macos_leg: &str = "    runs-on: ${{ matrix.os }}\n\
+                           \x20         - os: macos-latest  # aarch64\n";
+    assert!(job_runs_on_macos(macos_leg));
+    // A comment recalling that some other leg runs on macOS must not make this
+    // one a macOS leg, or the rule would be applied where it does not hold.
+    assert!(!job_runs_on_macos(
+        "    runs-on: ubuntu-latest\n      # matches the macos leg's oracle\n"
+    ));
+}
+
+#[test]
+fn the_job_scanner_reads_jobs_and_not_trigger_keys() {
+    if !repository_tree_is_readable() {
+        eprintln!("SKIP: repository tree not readable; see the sibling test.");
+        return;
+    }
+    let text: String = workflow_text(CI_WORKFLOW);
+    let jobs: Vec<String> = job_names_in(&text);
+    for expected in [BASELINE_LEG_JOB, CURRENT_LEG_JOB, "test-cross-encode"] {
+        assert!(
+            jobs.iter().any(|job| job == expected),
+            "{CI_WORKFLOW} has a {expected} job, but the scanner found {jobs:?}"
+        );
+    }
+    // `on:` carries two-space keys of its own; reading them as jobs would ask
+    // `job_block` for a block that is not one.
+    for trigger in ["push", "pull_request", "schedule", "workflow_dispatch"] {
+        assert!(
+            !jobs.iter().any(|job| job == trigger),
+            "{trigger:?} is a trigger, not a job"
+        );
+    }
+    // Every workflow in the repository parses, and the enumeration is not
+    // silently empty for one of them — an empty list passes every gate above.
+    for path in workflow_files() {
+        let text: String = std::fs::read_to_string(&path).expect("workflow must be readable");
+        assert!(
+            !job_names_in(&text).is_empty(),
+            "no jobs found in {} — the scanner has stopped matching, and a \
+             workflow it cannot read is a workflow these gates do not check",
+            path.display()
+        );
+    }
+}
+
 /// The `set(VERSION x.y.z)` line of the pinned submodule's top-level
 /// `CMakeLists.txt` — upstream's own statement of which release the tree is.
 fn submodule_version(cmake: &Path) -> String {

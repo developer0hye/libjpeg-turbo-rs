@@ -65,6 +65,13 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y /tmp/ljt.deb
           echo "/opt/libjpeg-turbo/bin" >> $GITHUB_PATH
+      # The release has to be asserted, not printed: a mutant that survives
+      # only because the oracle was a different libjpeg reports as MISSED for
+      # the same wrong reason a missing oracle does.
+      - name: Verify the oracle really is 3.1.4.1
+        run: |
+          /opt/libjpeg-turbo/bin/djpeg -version 2>&1 | tee /tmp/oracle-version.txt
+          grep -q "version 3.1.4.1" /tmp/oracle-version.txt
       - name: Build the diff against the base branch
         run: |
           git diff "origin/${{ github.base_ref || 'main' }}"...HEAD > /tmp/pr.diff
@@ -320,12 +327,18 @@ jobs:
             "https://github.com/libjpeg-turbo/libjpeg-turbo/releases/download/${VERSION}/libjpeg-turbo-official_${VERSION}_${ARCH}.deb"
           sudo apt-get install -y /tmp/ljt.deb
           echo "/opt/libjpeg-turbo/bin" >> $GITHUB_PATH
-      - name: Verify C tools on PATH (expect libjpeg-turbo 3.x)
+      # By absolute path and asserted, not by PATH and printed. The old shape
+      # ran `djpeg -version` after prepending the install to PATH: which djpeg
+      # answered was decided by lookup order, and the output was read by
+      # nobody, so this leg would have run green against any 3.x on the runner
+      # — including the one the *other* leg is supposed to be the only place
+      # for.
+      - name: Verify the oracle really is 3.1.4.1
         run: |
-          export PATH="/opt/libjpeg-turbo/bin:$PATH"
-          djpeg -version
-          cjpeg -version
-          jpegtran -version
+          /opt/libjpeg-turbo/bin/djpeg -version 2>&1 | tee /tmp/oracle-version.txt
+          grep -q "version 3.1.4.1" /tmp/oracle-version.txt
+          /opt/libjpeg-turbo/bin/cjpeg -version 2>&1 | grep -q "version 3.1.4.1"
+          /opt/libjpeg-turbo/bin/jpegtran -version 2>&1 | grep -q "version 3.1.4.1"
       - run: cargo test --tests
         timeout-minutes: 30
       # P4-82/P4-83 live in the non-default C-ABI workspace member, so the
@@ -845,20 +858,50 @@ jobs:
     name: C Interop (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     needs: [test-integration]
+    env:
+      # Not PATH. `helpers::c_tool_path` reads /opt/homebrew/bin *before* PATH,
+      # so on this runner a PATH entry does not select an oracle — whatever
+      # homebrew happens to have installed wins. The prefix is exclusive, which
+      # is what makes this leg measure the build below and nothing else (#569).
+      LIBJPEG_TURBO_PREFIX: /tmp/ljt3141/prefix
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: macos-latest  # aarch64
-            install: brew install jpeg-turbo
     steps:
       - uses: actions/checkout@v7
         with:
           submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Install libjpeg-turbo tools
-        run: ${{ matrix.install }}
+      # Built from a pinned tag, not `brew install jpeg-turbo`. Homebrew has no
+      # per-version formula, so that install measured whatever the packager
+      # shipped that week — a release named nowhere in this repository, free to
+      # move without a commit to review, on the one leg that runs for every
+      # pull request. It was 3.1.4.1 while these expectations were written, so
+      # this is the same measurement under a name; the aarch64 Full C Parity
+      # legs lost the identical shape for the identical reason (P4-130).
+      - name: Build libjpeg-turbo 3.1.4.1 from source
+        run: |
+          # No NASM: this is an arm64 host, where upstream's SIMD is NEON
+          # intrinsics compiled by the C compiler.
+          command -v cmake >/dev/null || brew install cmake
+          git clone --depth 1 --branch 3.1.4.1 https://github.com/libjpeg-turbo/libjpeg-turbo.git /tmp/ljt3141/src
+          cmake -S /tmp/ljt3141/src -B /tmp/ljt3141/build -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/tmp/ljt3141/prefix
+          cmake --build /tmp/ljt3141/build -j$(sysctl -n hw.ncpu)
+          cmake --install /tmp/ljt3141/build
+          # PATH so that anything not going through the test helpers reaches
+          # the same install; LIBJPEG_TURBO_PREFIX above is what selects it.
+          echo "/tmp/ljt3141/prefix/bin" >> $GITHUB_PATH
+        timeout-minutes: 20
+      - name: Verify the oracle really is 3.1.4.1
+        run: |
+          /tmp/ljt3141/prefix/bin/djpeg -version 2>&1 | tee /tmp/oracle-version.txt
+          grep -q "version 3.1.4.1" /tmp/oracle-version.txt
+          /tmp/ljt3141/prefix/bin/cjpeg -version 2>&1 | grep -q "version 3.1.4.1"
+          /tmp/ljt3141/prefix/bin/jpegtran -version 2>&1 | grep -q "version 3.1.4.1"
       # Full test run, deliberately unfiltered (issue #377, P4-61). The old
       # `cargo test "cross_encode|cross_check" --tests` matched nothing:
       # libtest's positional filter is a substring match against test NAMES
@@ -867,8 +910,8 @@ jobs:
       # c_xval_decode_bgr_444 — so the job built every test binary and ran
       # zero tests. Even the corrected multi-filter form
       # (`-- cross_encode cross_check`) selects only 8 tests by name.
-      # This job's unique coverage is the C-tool environment: aarch64 +
-      # Homebrew jpeg-turbo 3.x, the only such leg in CI. The former
+      # This job's unique coverage is the C-tool environment: aarch64 macOS
+      # against a real 3.x toolchain, the only such leg in CI. The former
       # ubuntu-latest leg is gone: with apt's 2.1.x tools the suite cannot
       # run (tests feed SOF3/12-bit streams to djpeg unconditionally), and
       # installing the official 3.1.4.1 deb would make it an exact duplicate
@@ -894,6 +937,15 @@ jobs:
           cmake --build /tmp/ljt/build -j$(nproc)
           sudo cmake --install /tmp/ljt/build
           echo "/usr/local/bin" >> $GITHUB_PATH
+      # A tag is a moveable name and /usr/local is a shared prefix, so the
+      # release this corpus is compared against is asserted rather than assumed
+      # (P4-130).
+      - name: Verify the oracle really is 3.1.4.1
+        run: |
+          /usr/local/bin/djpeg -version 2>&1 | tee /tmp/oracle-version.txt
+          grep -q "version 3.1.4.1" /tmp/oracle-version.txt
+          /usr/local/bin/cjpeg -version 2>&1 | grep -q "version 3.1.4.1"
+          /usr/local/bin/jpegtran -version 2>&1 | grep -q "version 3.1.4.1"
       - name: Generate corpus
         run: cargo run --release --example generate_corpus
         timeout-minutes: 15
