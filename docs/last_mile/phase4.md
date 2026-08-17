@@ -2425,6 +2425,16 @@ subsampling/scaling/grayscale, invalid null/zero/out-of-bounds/after-read calls,
 returned x/width/output_width, component geometry, and subsequent row bytes.
 The 12-bit initialization/order portion remains in P4-98.
 
+**Extended 2026-08-17 by the [P4-130](#p4-130-c-parity-oracle-is-pinned-to-3141-upstream-stable-is-320--partial-the-320-leg-the-version-manifest-the-currency-job-and-the-delta-triage-landed-2026-08-17-the-classic-abi-submodule-oracle-and-the-four-gaps-the-triage-filed-remain)
+3.2 delta triage.** 3.2.0 note 3 hardened this entry point, and the delta is
+exactly one condition: 3.2.0 `src/jdapistd.c:203` reads
+`if (cinfo->master->lossless || cinfo->raw_data_out)` where 3.1.90 reads
+`if (cinfo->master->lossless)`. `jpeg_crop_scanline()` has never worked with
+raw-data output; before 3.2.0 it simply did not say so, and the combination of
+buffered-image mode and raw-data output could reach freed memory when a plane
+was cropped to one sample. So the harness above must also assert
+`JERR_NOTIMPL` for `raw_data_out`, not merely the aligned-crop geometry.
+
 ## P4-104. Classic Decompressor State Constants, Transitions, and Finish Lifecycle Diverge — **CLOSED 2026-08-14**
 
 **Motivation.** Filed 2026-08-02 after P4-13's harness was found to assert the
@@ -5108,7 +5118,7 @@ prevent, and it undermines any claim that the shipped surface is audited.
 
 **Status (2026-08-09): closed.** Landed in #486; `crates/libjpeg-turbo-rs-capi/build.rs` now routes the 16 `jpeg_capi_test_*` accessors to a `LIBJPEGTURBORS_PRIVATE_1.0` node via an exact-name list, and `tests/soname.rs` asserts no `jpeg_capi_test_*` symbol carries `LIBJPEG_8.0`.
 
-## P4-130. C-Parity Oracle Is Pinned to 3.1.4.1; Upstream Stable Is 3.2.0 — **OPEN**
+## P4-130. C-Parity Oracle Is Pinned to 3.1.4.1; Upstream Stable Is 3.2.0 — **PARTIAL: the 3.2.0 leg, the version manifest, the currency job and the delta triage landed 2026-08-17; the classic-ABI submodule oracle and the four gaps the triage filed remain**
 
 **GitHub:** [#461](https://github.com/developer0hye/libjpeg-turbo-rs/issues/461) — under the [#470](https://github.com/developer0hye/libjpeg-turbo-rs/issues/470) umbrella.
 
@@ -5174,6 +5184,83 @@ release and the gates it backs are genuine. This is currency, not correctness.
 It is sequenced after the Stage A safety items because re-baselining oracles
 while the classic-ABI error and state contracts are still in flux would mix two
 sources of diff into one signal.
+
+**Status (2026-08-17): partial.** Criteria 1, 3 and 4 are delivered and
+criterion 2's triage is complete; what remains is the *work* the triage filed,
+plus one oracle the original write-up did not know about.
+
+*Criterion 1 — two legs.* `ci.yml`'s `test-integration-current-oracle`
+("Integration Tests (oracle 3.2.0)") installs the official 3.2.0 deb, asserts
+`djpeg`/`cjpeg`/`jpegtran` all report `version 3.2.0` before running anything,
+and runs the same `cargo test --tests` command as the 3.1.4.1 leg. The oracle
+is named by `LIBJPEG_TURBO_PREFIX`, not by PATH order, because
+`tests/helpers::c_tool_path` reads `/opt/homebrew/bin` first and would
+otherwise let a leg labelled 3.2.0 measure something else and report green; the
+prefix is exclusive, so a missing tool under it is an error rather than a quiet
+fallback. Measured before landing against a locally built 3.2.0 on macOS
+aarch64, `cargo test --tests --no-fail-fast` with `LIBJPEG_TURBO_PREFIX` at that
+build: **223 suite sections, 2351 passed, 0 failed, 4 ignored** — the root
+differential matrix is already at parity with 3.2.0, which is the result the leg
+now keeps true. The same command with the variable unset (homebrew 3.1.4.1) is
+green on this branch too, so the second leg adds coverage rather than replacing
+it.
+
+*The oracle the write-up missed.* Writing the manifest surfaced that this
+repository was **already running two upstream versions, undocumented**:
+`references/libjpeg-turbo` is pinned at **3.1.90 (3.2 beta1)**, not 3.1.4.1, so
+the classic-ABI trace oracles built from it (`/tmp/ljt8/prefix`, `WITH_JPEG8=1`)
+and every `j*.c:NNN` citation in this repository already quote the 3.2 line
+while the tool oracles quote 3.1.4.1. `docs/oracle_versions.tsv` records the
+split and `tests/oracle_version_pins.rs` cross-checks that row against the
+submodule's own `CMakeLists.txt`, so it cannot drift again.
+
+*Criterion 3 — the manifest.* `docs/oracle_versions.tsv` names the release each
+oracle role runs against and why. The gate holds it in both directions: a
+workflow pin with no row fails, and a declared leg no workflow installs fails —
+because criterion 1 asks for a second *running* leg, not a documented
+intention. `docs/FEATURE_PARITY.md` now states what each leg proves instead of
+naming 3.1.4.1 as if it were current.
+
+*Criterion 4 — the policy, as a job.* `scripts/check_oracle_currency.sh`
+compares the manifest's `tool-current` row against upstream's latest stable
+release and fails when they differ; `.github/workflows/upstream-currency.yml`
+runs it weekly, on demand, and on any pull request touching the manifest or the
+script. This is the mechanical form of the policy `FEATURE_PARITY.md` had
+already written down: the failure mode has nothing a test can see — 3.1.4.1
+never went red — so only something that watches upstream can report it.
+
+*Criterion 2 — the triage.* Every 3.2 delta, from the 3.2.0 and 3.1.90
+(3.2 beta1) release notes read in full rather than from the summary this item
+was filed with:
+
+| # | 3.2 change | Disposition |
+| --- | --- | --- |
+| beta1-2 | Per-instance SIMD dispatch replaces thread-local storage | **Tracked — [P4-132](#p4-132-classic-c-abi-per-cinfo-state-is-thread-affine-p4-16-option-a--open).** Upstream removing TLS from its libjpeg API is that item's central evidence. |
+| beta1-6 | RISC-V Vector (RVV) SIMD | **Tracked — [P4-134](#p4-134-no-risc-v-rvv-simd-backend--upstream-32-ships-one--open)**, and it expires [P4-60](#p4-60-scalar-kernels-are-25x-slower-than-cs-scalar-kernels--open)'s premise that riscv64 was scalar-vs-scalar. |
+| beta1-8 | 8-bit lossy JPEG decompressed to 12-bit output | **New — [P4-171](#p4-171-8-bit-lossy-jpeg-cannot-be-decompressed-to-12-bit-output-32-beta1-note-8--open).** Measured: `src/api/precision.rs:865` refuses any stream whose precision is not 12, so we reject where 3.2 decodes. |
+| beta1-10 | TurboJPEG: `TJCS_DEFAULT`, repeated `tj3GetICCProfile`, ICC from a compression instance, 4:1:0 and 2:4 subsampling | **Split.** 4:1:0 and 2:4 are implemented (`TJSAMP_410`/`TJSAMP_24`) and covered by the subsampling matrices; the ICC and `TJCS_DEFAULT` additions are **new — [P4-172](#p4-172-turbojpeg-32-icc-and-tjcs_default-additions-are-unimplemented-32-beta1-note-10--open)**. |
+| beta1-4, beta1-12, 3.2.0-4 | jpegtran `-crop` expansion honouring `-trim`/`-perfect`; new `-roll`; the `-crop`/`-trim` overflow fix and its flatten/reflect error | **New — [P4-173](#p4-173-jpegtran-32-crop-expansion--roll-and-the-flattenreflect-refusal-are-unported--open).** These are `transupp.c` semantics our transform API mirrors, so "it is app code" does not exempt us. |
+| beta1-9, 3.2.0-2 | 8/16-bit PNG in cjpeg/djpeg and `tj3LoadImage*`/`tj3SaveImage*`, ICC transfer, PNG-writer hardening | **New — [P4-174](#p4-174-png-interchange-parity-for-tj3loadimagetj3saveimage-is-narrower-than-32--open).** PNG exists here behind a cargo feature; the 3.2 additions (16-bit, ICC transfer under `TJPARAM_SAVEMARKERS`, reversible upscaling of non-standard precisions) are not implemented. |
+| 3.2.0-3 | `jpeg_crop_scanline()` errors when buffered-image mode and raw-data output are both enabled | **Tracked — [P4-103](#p4-103-jpeg_crop_scanline-does-not-implement-imcu-aligned-c-semantics--open).** The delta is exactly one condition: 3.2.0 `src/jdapistd.c:203` reads `if (cinfo->master->lossless \|\| cinfo->raw_data_out)` where 3.1.90 reads `if (cinfo->master->lossless)`. Recorded in P4-103 as an acceptance line. |
+| beta1-1, beta1-5 | GAS Neon implementation removed; MIPS DSPr2 SIMD removed | **Non-goal.** We have neither an assembler Neon path (ours is `core::arch` intrinsics) nor a MIPS backend, so there is nothing to follow. |
+| beta1-3 | `WITH_PROFILE` throughput reporting | **Non-goal.** An upstream build-time diagnostic with no ABI or output surface; our measurement lives in `experiments/`. |
+| beta1-7 | TurboJPEG Java API moved to its own repository | **Non-goal.** No Java binding is in scope here. |
+| beta1-11 | `-nooverwrite` in cjpeg/djpeg/jpegtran | **Non-goal.** Pure CLI file handling in upstream's application code; we ship a library and link *stock* tools against it, so the option is upstream's to implement and ours to inherit. |
+| 3.2.0-1 | Arm64EC Windows build regression fixed | **Non-goal.** An upstream build-system fix with no behavioural surface. |
+
+**What remains.**
+
+1. The four filed gaps (P4-171..P4-174) are triaged, not fixed.
+2. The 3.2.0 leg covers the **root** differential matrix. The C-ABI crate's
+   oracle steps still run against the 3.1.4.1 tools and the 3.1.90 submodule;
+   extending the current-parity leg over them is the natural next milestone.
+3. `references/libjpeg-turbo` stays at 3.1.90. Bumping it to 3.2.0 moves every
+   `j*.c:NNN` citation in this repository and re-baselines the classic-ABI
+   trace oracles at the same time, which is its own change with its own
+   drift audit — not a line in this one.
+4. Retiring the 3.1.4.1 leg is deliberately **not** scheduled: it is the
+   behaviour-regression half of the pair, and it retires only when its
+   expectations are known to hold on the newer leg.
 
 ## P4-131. No Native Binary Distribution — Releases Ship crates.io and npm Only — **OPEN**
 
@@ -8163,3 +8250,207 @@ passes. That combination is how a release-only divergence stays invisible.
 the crop harness work that surfaced it (different crate, different subsystem).
 Diagnosing a release-only divergence in the classic source manager needs its own
 change with its own oracle traces.
+
+## P4-171. 8-Bit Lossy JPEG Cannot Be Decompressed to 12-Bit Output (3.2 beta1 note 8) — **OPEN**
+
+**GitHub:** [#561](https://github.com/developer0hye/libjpeg-turbo-rs/issues/561) — filed 2026-08-17 by the [P4-130](#p4-130-c-parity-oracle-is-pinned-to-3141-upstream-stable-is-320--partial-the-320-leg-the-version-manifest-the-currency-job-and-the-delta-triage-landed-2026-08-17-the-classic-abi-submodule-oracle-and-the-four-gaps-the-triage-filed-remain) 3.2 delta triage.
+
+**Motivation.** 3.2 beta1 note 8 added a capability, not a fix: an 8-bit-per-sample
+*lossy* JPEG can now be decompressed to a 12-bit-per-sample output image, to
+give shadow recovery in underexposed images somewhere to put the extra range.
+Upstream exposes it two ways — `cinfo->data_precision = 12` after
+`jpeg_read_header()` in the libjpeg API, and `tj3Decompress12()` after
+`tj3DecompressHeader()` in TurboJPEG.
+
+Neither works here. `src/api/precision.rs:865-870` refuses any stream whose SOF
+precision is not 12:
+
+```rust
+if frame.precision != 12 {
+    return Err(JpegError::Unsupported(format!(
+        "decompress_12bit requires precision=12, got {}", frame.precision)));
+}
+```
+
+`tj3Decompress12` (`crates/libjpeg-turbo-rs-capi/src/precision.rs:409`) calls
+straight through to it, so a consumer following the 3.2 documentation gets
+`-1` and an error string where upstream returns a 12-bit image. The classic
+side is unmeasured: `data_precision` is a public ABI field a caller can simply
+assign, and what our `jpeg_start_decompress` does with a value the header did
+not put there is not covered by [P4-154](#p4-154-classic-jpeg_write_scanlines--jpeg_start_compress-ignore-data_precision-entirely--closed-2026-08-13)'s compression-side matrix.
+
+The failure direction is the safe one — we refuse where upstream accepts, not
+the reverse — so this is a feature gap rather than a defect.
+
+**Acceptance criteria.**
+
+1. A differential test decompresses the same 8-bit lossy JPEG through
+   `tj3Decompress12()` on the shim and on stock 3.2.0, and the 12-bit outputs
+   match. Byte-exact if upstream's upscale is exactly `<< 4`-shaped; the test
+   states the measured relationship rather than choosing a tolerance first.
+2. The classic route (`cinfo->data_precision = 12` after `jpeg_read_header()`)
+   is covered by the same comparison, including the error upstream raises when
+   the assignment is made at a state that does not allow it.
+3. If the capability is declined rather than implemented, the refusal matches
+   upstream's error code and message rather than our current
+   `JpegError::Unsupported` prose — a consumer must be able to tell "not
+   supported" from "malformed".
+4. `docs/C_API_REFERENCE.md`'s `tj3Decompress12` row states which source
+   precisions it accepts.
+
+**Why deferred.** It is new upstream capability rather than a divergence in
+existing behaviour, and it needs the 12-bit output pipeline to accept an 8-bit
+front end — a decode-path change, not a shim wiring change.
+
+## P4-172. TurboJPEG 3.2 ICC and `TJCS_DEFAULT` Additions Are Unimplemented (3.2 beta1 note 10) — **OPEN**
+
+**GitHub:** [#562](https://github.com/developer0hye/libjpeg-turbo-rs/issues/562) — filed 2026-08-17 by the P4-130 3.2 delta triage.
+
+**Motivation.** 3.2 beta1 note 10 lists four TurboJPEG additions. Two are
+already here — 4:1:0 and 2:4 subsampling exist as `TJSAMP_410` / `TJSAMP_24`
+and run in the subsampling matrices — and two are not:
+
+- **`tj3GetICCProfile()` repeatability and compression instances.** Upstream 3.2
+  allows the call to be repeated, and allows it against a *compression*
+  instance (including a profile `tj3LoadImage*()` extracted from a PNG).
+  Ours (`crates/libjpeg-turbo-rs-capi/src/tj3.rs:477`) serves whatever
+  `inst.inner.icc_profile()` holds, which is populated by `decompress()`; the
+  repeated-call and compression-instance behaviours are untested in either
+  direction, so this entry is "unverified", not "known broken".
+- **`TJCS_DEFAULT`.** A new `TJPARAM_COLORSPACE` value that resets the JPEG
+  colorspace to the default. No occurrence of the name exists in this
+  repository, so a caller passing it hits our unknown-value path.
+
+`TJPARAM_SAVEMARKERS` itself is **not** part of this gap, and an earlier draft
+of this entry wrongly said it was: `src/api/tj3.rs:303` accepts levels 0-4 and
+`:841` wires 2 to all markers and 4 to ICC-only extraction from the JPEG. What
+note 9 adds on top is the *PNG* side of that transfer, which is tracked with
+the PNG work in P4-174 — a marker level with no PNG to transfer to or from has
+no observable behaviour to compare.
+
+**Acceptance criteria.**
+
+1. `TJCS_DEFAULT` is accepted by `tj3Set(TJPARAM_COLORSPACE)` with upstream's
+   semantics, cross-checked against stock 3.2.0 for at least the "set, then
+   reset to default" sequence on a colour and a grayscale source.
+2. `tj3GetICCProfile()` called twice returns the same profile both times, and
+   called on a compression instance returns the profile associated with it —
+   each compared against stock 3.2.0 rather than against our own previous
+   output.
+3. Whatever is declined is declined the way upstream declines an unsupported
+   parameter value, not by silently accepting it. The P4-39 / P4-150 silent-
+   substitute shape is the failure mode to avoid.
+
+**Why deferred.** Small but genuinely new API surface, and the ICC half is
+entangled with P4-174's PNG interchange work — the compression-instance profile
+upstream describes is the one `tj3LoadImage*()` extracts from a PNG.
+
+## P4-173. jpegtran 3.2 Crop Expansion, `-roll`, and the Flatten/Reflect Refusal Are Unported — **OPEN**
+
+**GitHub:** [#563](https://github.com/developer0hye/libjpeg-turbo-rs/issues/563) — filed 2026-08-17 by the P4-130 3.2 delta triage.
+
+**Motivation.** Three 3.2 changes move `transupp.c`, which is the code our
+transform API mirrors:
+
+- **beta1 note 4** — jpegtran now honours `-trim` and `-perfect` when `-crop`
+  *expands* the image. With `-trim`, partial iMCUs from the source are
+  discarded in the expanded image (the previous behaviour); without it they are
+  left in place, which is the new default; with `-perfect`, expansion fails
+  outright if the source has any partial iMCU. The stated purpose is reversible
+  composition with `-drop`.
+- **3.2.0 note 4** — a buffer overrun and segfault, plus an infinite loop, when
+  `-crop` + `-trim` expand the width of an image narrower than one iMCU under
+  the "flatten" and "reflect" extensions. 3.2 now raises an error for that
+  geometry instead.
+- **beta1 note 12** — a new `-roll` transform (lossless shift with wraparound).
+
+None of these behaviours exist here. "It is application code, not library code"
+does not exempt them: this repository implements the transform semantics
+directly, and `tests/c_tjtrantest.rs` / `tests/cross_check_transform_*.rs`
+compare against jpegtran's output, so upstream's new default *is* the oracle
+those suites will meet the moment the 3.2.0 tools become their oracle.
+
+**Acceptance criteria.**
+
+1. Expansion semantics: for a source with partial iMCUs, our transform matches
+   3.2.0 `jpegtran` byte-exactly for `-crop` expansion with `-trim`, without
+   `-trim`, and with `-perfect` (including the refusal).
+2. The narrower-than-one-iMCU flatten/reflect geometry raises an error rather
+   than looping or overrunning, matching 3.2.0.
+3. `-roll` is implemented with a byte-exact comparison against 3.2.0
+   `jpegtran -roll`, or recorded as a scoped non-goal with the reason.
+4. The transform cross-checks state which oracle version defines their
+   expectations, since the default changed between 3.1 and 3.2.
+
+**Why deferred.** It needs the 3.2.0 tools as the transform oracle, which is
+exactly what P4-130's second leg introduces; sequencing it after that leg is
+what keeps the diff readable.
+
+## P4-174. PNG Interchange Parity for `tj3LoadImage*`/`tj3SaveImage*` Is Narrower Than 3.2 — **OPEN**
+
+**GitHub:** [#564](https://github.com/developer0hye/libjpeg-turbo-rs/issues/564) — filed 2026-08-17 by the P4-130 3.2 delta triage.
+
+**Motivation.** 3.2 beta1 note 9 makes PNG a first-class interchange format for
+cjpeg, djpeg, `tj3LoadImage*()` and `tj3SaveImage*()`: 8- and 16-bit-per-channel
+images, ICC profile transfer in both directions when `TJPARAM_SAVEMARKERS` is 2
+or 4, a `-noicc` opt-out, and a documented *reversible* upscale of 2-7 and 9-15
+bit precisions to 8- and 16-bit PNG so a non-standard-precision lossless JPEG
+round-trips losslessly. 3.2.0 note 2 then hardened that writer against
+out-of-range sample values for precisions other than 8 and 16.
+
+We have PNG, but narrower: `crates/libjpeg-turbo-rs-capi/src/imageio.rs:212`
+detects the signature and reports "PNG support not enabled in this build"
+unless the `png` cargo feature is on, and neither the ICC transfer, the 16-bit
+path, nor the reversible non-standard-precision upscale is implemented. The
+feature gate itself is a parity question: upstream's `tj3LoadImage*()` either
+supports PNG or does not, and a consumer cannot see a cargo feature.
+
+**Acceptance criteria.**
+
+1. `tj3LoadImage*()` / `tj3SaveImage*()` round-trip 8- and 16-bit PNG against
+   stock 3.2.0, pixel-exact.
+2. ICC transfer under `TJPARAM_SAVEMARKERS` 2 and 4 matches upstream in both
+   directions, including the profile being absent when the parameter is 0.
+3. A lossless JPEG with a non-standard precision (2-7, 9-15) round-trips
+   JPEG → PNG → JPEG losslessly, as upstream's reversible upscale promises.
+4. Out-of-range samples at a precision other than 8 or 16 are refused rather
+   than overrunning the rescale array (3.2.0 note 2's hardening).
+5. A recorded decision on the `png` cargo feature: default-on, or documented as
+   a build-configuration divergence a consumer of the C ABI can discover.
+
+**Why deferred.** It is the largest of the four 3.2 gaps and the least
+load-bearing for the replacement gate — PNG interchange is a convenience
+surface around the codec, not the codec.
+
+## P4-175. `capi_classic_decode_budget` Is Never Named by a Workflow, So It Has Never Run in CI — **OPEN**
+
+**GitHub:** [#565](https://github.com/developer0hye/libjpeg-turbo-rs/issues/565) — found 2026-08-17 while auditing which oracle each gate uses for P4-130.
+
+**Motivation.** Integration suites in the C-ABI crate run only when a workflow
+names them: `cargo test --lib` selects the default workspace member, and the
+Integration Tests job's `cargo test --tests` is the root crate. `grep -rn
+"capi_classic_decode_budget" .github/workflows/` returns nothing, so P4-14's
+decode-sequence budget enforcement — cited in `docs/LAST_MILE.md`'s live-gate
+row as "the 3-test `capi_classic_decode_budget` suite" — compiles on every pull
+request and executes on none.
+
+This is the third instance of one defect class. P4-61 recorded it first (a test
+filter that matched nothing), `capi_classic_error_codes` was caught the same way
+("it compiled on every PR and executed on none, which is precisely how it
+reported '18 codes verified' through the entire period when all 18 rendered as
+'bogus message code'"), and the comments around the named steps in `ci.yml`
+warn about it in prose. Prose has now failed to prevent it twice.
+
+**Acceptance criteria.**
+
+1. `capi_classic_decode_budget` is named in a CI step, with the
+   `LIBJPEG_TURBO_PREFIX` its oracle needs so it fails rather than soft-skips.
+2. It passes there, or the failure it surfaces is filed.
+3. A mechanism, not another comment: an enumeration test comparing
+   `crates/libjpeg-turbo-rs-capi/tests/*.rs` against the suites named in
+   `.github/workflows/*.yml`, with an explicit opt-out list for suites that are
+   deliberately local-only. Criterion 3 is the valuable half.
+
+**Why deferred.** Unrelated to the oracle-currency work that found it, and
+criterion 3 is a gate of its own — it needs the opt-out list triaged across
+every capi suite, not just this one.

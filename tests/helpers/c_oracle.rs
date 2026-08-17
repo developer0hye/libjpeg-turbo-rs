@@ -34,11 +34,20 @@ struct LibjpegDevInstall {
     lib_dir: PathBuf,
 }
 
-fn find_libjpeg_dev() -> Option<LibjpegDevInstall> {
-    let mut prefixes: Vec<PathBuf> = Vec::new();
+/// Prefixes to search for a development install, most specific first.
+///
+/// An explicit `LIBJPEG_TURBO_PREFIX` is **exclusive**, matching the rule the
+/// C-ABI crate's helpers already apply and the rule `helpers::c_tool_path`
+/// applies to the command-line tools. Falling through would defeat the reason
+/// the variable exists: a leg that names 3.2.0 and finds only the tools there
+/// would compile its C oracles against whatever `/usr` happens to ship — on
+/// Ubuntu, 2.1.x — and report the result as a 3.2.0 comparison (P4-130).
+/// Failing closed turns a mis-provisioned prefix into an error instead.
+fn dev_prefixes() -> Vec<PathBuf> {
     if let Ok(prefix) = std::env::var("LIBJPEG_TURBO_PREFIX") {
-        prefixes.push(PathBuf::from(prefix));
+        return vec![PathBuf::from(prefix)];
     }
+    let mut prefixes: Vec<PathBuf> = Vec::new();
     if let Ok(prefix) = std::env::var("CONDA_PREFIX") {
         prefixes.push(PathBuf::from(prefix));
     }
@@ -53,8 +62,11 @@ fn find_libjpeg_dev() -> Option<LibjpegDevInstall> {
         .iter()
         .map(PathBuf::from),
     );
+    prefixes
+}
 
-    for prefix in prefixes {
+fn find_libjpeg_dev() -> Option<LibjpegDevInstall> {
+    for prefix in dev_prefixes() {
         let include_dir: PathBuf = prefix.join("include");
         if !include_dir.join("jpeglib.h").exists() {
             continue;
@@ -215,26 +227,7 @@ fn build_libjpeg_oracle(stem: &str) -> Option<PathBuf> {
 /// packages (e.g. `libjpeg-turbo-progs`) ship neither, and some prefixes
 /// carry one library but not the other.
 fn find_turbojpeg_dev() -> Option<LibjpegDevInstall> {
-    let mut prefixes: Vec<PathBuf> = Vec::new();
-    if let Ok(prefix) = std::env::var("LIBJPEG_TURBO_PREFIX") {
-        prefixes.push(PathBuf::from(prefix));
-    }
-    if let Ok(prefix) = std::env::var("CONDA_PREFIX") {
-        prefixes.push(PathBuf::from(prefix));
-    }
-    prefixes.extend(
-        [
-            "/opt/libjpeg-turbo",
-            "/opt/homebrew/opt/jpeg-turbo",
-            "/opt/homebrew",
-            "/usr/local",
-            "/usr",
-        ]
-        .iter()
-        .map(PathBuf::from),
-    );
-
-    for prefix in prefixes {
+    for prefix in dev_prefixes() {
         let include_dir: PathBuf = prefix.join("include");
         if !include_dir.join("turbojpeg.h").exists() {
             continue;

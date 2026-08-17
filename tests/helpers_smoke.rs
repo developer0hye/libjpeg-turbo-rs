@@ -59,6 +59,88 @@ fn helpers_require_c_tool_macro_skips_locally() {
     unreachable!("require_c_tool! must have returned via SKIP path");
 }
 
+// ---------------------------------------------------------------------------
+// Oracle-prefix selection (P4-130)
+//
+// The dual-oracle matrix runs the same differential suites against two
+// libjpeg-turbo releases, so a leg has to be able to *say* which install it
+// means. PATH order cannot say it: `c_tool_path` reads `/opt/homebrew/bin`
+// before PATH, so on macOS the homebrew build wins whatever the caller put in
+// front of it, and on Linux a missing tool falls through to any other djpeg on
+// the system. Either way a leg labelled "3.2.0" can quietly compare against
+// something else and report green — the exact failure mode P4-130's acceptance
+// criteria forbid, since a divergence papered over that way is
+// indistinguishable from a pass.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn an_explicit_oracle_prefix_selects_that_install() {
+    let prefix: helpers::TempDir = helpers::TempDir::new("oracle_prefix_selects");
+    let bin: std::path::PathBuf = prefix.path().join("bin");
+    std::fs::create_dir_all(&bin).expect("create the prefix bin dir");
+    let pinned: std::path::PathBuf = bin.join("djpeg");
+    std::fs::write(&pinned, b"#!/bin/sh\nexit 0\n").expect("write the stand-in tool");
+
+    assert_eq!(
+        helpers::c_tool_path_under("djpeg", Some(prefix.path())).as_deref(),
+        Some(pinned.as_path()),
+        "an explicit prefix must win over /opt/homebrew/bin and PATH"
+    );
+}
+
+#[test]
+fn an_explicit_oracle_prefix_does_not_fall_back() {
+    // The prefix exists but holds no tool. Falling through to homebrew or PATH
+    // here is what would let the 3.2.0 leg silently measure 3.1.4.1.
+    let prefix: helpers::TempDir = helpers::TempDir::new("oracle_prefix_exclusive");
+    std::fs::create_dir_all(prefix.path().join("bin")).expect("create the prefix bin dir");
+
+    assert_eq!(
+        helpers::c_tool_path_under("djpeg", Some(prefix.path())),
+        None,
+        "an explicit prefix is exclusive: with no djpeg under it the answer is \
+         None, whatever else the machine has"
+    );
+
+    // `djpeg` alone would leave the assertion above indistinguishable from
+    // "this host has no djpeg at all" — which is the true state of the 3.2.0
+    // leg's runner, since that job names its oracle by prefix and deliberately
+    // keeps it off PATH. An earlier version of this test demanded an unpinned
+    // djpeg on CI and failed there for exactly that reason. `sh` is on PATH on
+    // every unix host, so the exclusivity is provable without assuming
+    // anything about how a particular leg provisions its oracle.
+    #[cfg(unix)]
+    {
+        assert!(
+            helpers::c_tool_path_under("sh", None).is_some(),
+            "`which sh` must resolve on a unix host"
+        );
+        assert_eq!(
+            helpers::c_tool_path_under("sh", Some(prefix.path())),
+            None,
+            "the unpinned lookup finds `sh`, so a pinned lookup that also \
+             found it would be falling back"
+        );
+    }
+}
+
+#[test]
+fn c_tool_path_resolves_through_the_environment_prefix() {
+    // The wiring between the env var and the resolution rule, which is what a
+    // CI leg relies on when it names its oracle with LIBJPEG_TURBO_PREFIX and
+    // nothing else. With the variable unset this also asserts the historical
+    // homebrew → PATH order is untouched, which is what every existing suite
+    // depends on.
+    let from_env: Option<std::path::PathBuf> =
+        std::env::var_os("LIBJPEG_TURBO_PREFIX").map(std::path::PathBuf::from);
+    assert_eq!(
+        helpers::djpeg_path(),
+        helpers::c_tool_path_under("djpeg", from_env.as_deref()),
+        "c_tool_path must resolve exactly as c_tool_path_under does with \
+         LIBJPEG_TURBO_PREFIX={from_env:?}"
+    );
+}
+
 #[test]
 fn helpers_temp_file_lifecycle() {
     let tf = helpers::TempFile::new("smoke_test.txt");

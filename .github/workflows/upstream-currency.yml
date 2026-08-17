@@ -1,0 +1,42 @@
+# P4-130 criterion 4: the upstream-release tracking policy, as a job rather
+# than a promise.
+#
+# The gap this closes has no failure mode a test can see: 3.2.0 shipped
+# 2026-06-30, every oracle pin still said 3.1.4.1, and nothing was red — the
+# gates kept proving parity with a real supported release that had simply
+# stopped being the current one. It took an external review two months later to
+# notice. A weekly job that fails the day upstream moves is the smallest thing
+# that would have said so on its own.
+#
+# Deliberately not part of CI: it depends on the network and on upstream's
+# release cadence, neither of which should be able to redden a pull request
+# that has nothing to do with either. The pull_request trigger is path-scoped
+# to the manifest and the script, so it runs exactly when someone is editing
+# the thing it checks.
+name: Upstream currency
+
+on:
+  schedule:
+    # Mondays, after the weekly full C-parity matrix at 06:00.
+    - cron: "30 6 * * 1"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "docs/oracle_versions.tsv"
+      - "scripts/check_oracle_currency.sh"
+      - ".github/workflows/upstream-currency.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  oracle-currency:
+    name: Oracle vs upstream latest release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Compare the current-parity oracle against upstream's latest stable
+        run: bash scripts/check_oracle_currency.sh
+        env:
+          # Only raises the API rate limit; the endpoint is public.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

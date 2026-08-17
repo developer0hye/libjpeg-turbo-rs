@@ -2,7 +2,9 @@
 //! lifecycle, trace-compared verbatim against stock libjpeg.
 //!
 //! The upstream contracts under test (`jdapimin.c` / `jcapimin.c`, measured
-//! by `examples/classic_lifecycle_state_oracle.c` against stock 3.1.4.1):
+//! by `examples/classic_lifecycle_state_oracle.c` against stock libjpeg —
+//! 3.1.4.1 locally, and in CI the pinned 3.1.90 submodule build the step
+//! points `LIBJPEG_TURBO_PREFIX` at; see `docs/oracle_versions.tsv`):
 //!
 //! * a direct `jpeg_read_header` leaves `DSTATE_READY` (202), matching the
 //!   consume-driven path;

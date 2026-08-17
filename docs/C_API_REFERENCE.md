@@ -77,7 +77,7 @@
 | C Function | Description | Rust | Status |
 |---|---|---|---|
 | `tj3SetICCProfile(handle, buf, size)` | Set ICC for encoding | `TjHandle::set_icc_profile()` / `Encoder::icc_profile()` | ✅ |
-| `tj3GetICCProfile(handle, &buf, &size)` | Get ICC after decode | `TjHandle::icc_profile()` populated by `decompress()` + symmetric with `Image.icc_profile()` | ✅ |
+| `tj3GetICCProfile(handle, &buf, &size)` | Get ICC after decode | `TjHandle::icc_profile()` populated by `decompress()` + symmetric with `Image.icc_profile()` — upstream 3.2 also allows repeated calls and retrieval from a *compression* instance, neither verified here (P4-172) | 🔶 |
 
 ### Compression (8-bit)
 
@@ -120,7 +120,7 @@
 | C Function | Description | Rust | Status |
 |---|---|---|---|
 | `tj3Decompress8(handle, jpeg, size, dst, pitch, pf)` | Decompress JPEG to 8-bit pixels | `decompress()`, `decompress_to()`, `decompress_into()` (caller buffer, #354) | ✅ |
-| `tj3Decompress12(handle, jpeg, size, dst, pitch, pf)` | Decompress to 12-bit | `TjHandle::decompress_12bit()` / `decompress_12bit()` | ✅ |
+| `tj3Decompress12(handle, jpeg, size, dst, pitch, pf)` | Decompress to 12-bit | `TjHandle::decompress_12bit()` / `decompress_12bit()` — **12-bit sources only**: upstream 3.2 also decompresses an 8-bit lossy JPEG to 12-bit output, which we refuse (P4-171) | 🔶 |
 | `tj3Decompress16(handle, jpeg, size, dst, pitch, pf)` | Decompress to 16-bit | `TjHandle::decompress_16bit()` / `decompress_16bit()` | ✅ |
 
 ### Decompression to YUV

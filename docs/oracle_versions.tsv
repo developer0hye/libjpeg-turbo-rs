@@ -1,0 +1,29 @@
+# P4-130 — which upstream libjpeg-turbo release each C oracle runs against.
+#
+# Every differential gate in this repository is only as current as the C
+# library it compares against. Upstream shipped 3.2.0 on 2026-06-30 and it took
+# two months for anyone to notice that all thirteen oracle pins still said
+# 3.1.4.1 — because the version lived in thirteen shell fragments across five
+# workflow files and nowhere else. This file is the single place that answers
+# "which release does a green gate prove parity with?".
+#
+# `tests/oracle_version_pins.rs` enforces it in both directions: a workflow pin
+# with no row here fails, and a row here that no workflow installs fails.
+# `scripts/check_oracle_currency.sh` asks the remaining question — whether
+# upstream has moved past `tool-current` — on a weekly schedule.
+#
+# Roles:
+#   tool-baseline  the release the existing expectations were written against.
+#                  Kept as its own leg on purpose: bumping it in place would
+#                  re-baseline every expectation at once, and any divergence
+#                  that hid behind the bump would be indistinguishable from a
+#                  pass.
+#   tool-current   current upstream stable, and therefore the parity target.
+#   submodule      references/libjpeg-turbo. Not a tool pin: it is built in CI
+#                  as the classic-ABI trace oracle (`/tmp/ljt8/prefix`, v8 ABI)
+#                  and it is the source every `j*.c:NNN` citation quotes.
+#
+# role	version	provisioned_as	released	purpose
+tool-baseline	3.1.4.1	libjpeg-turbo-official deb / source build at /opt/libjpeg-turbo	2026-03-27	Behaviour-regression leg: djpeg/cjpeg/jpegtran + libturbojpeg for the differential suites, at the release the current expectations were written against.
+tool-current	3.2.0	libjpeg-turbo-official deb at /opt/libjpeg-turbo	2026-06-30	Current-parity leg: the same differential suites against current upstream stable, selected explicitly through LIBJPEG_TURBO_PREFIX rather than PATH order.
+submodule	3.1.90	references/libjpeg-turbo (git submodule, tag 3.1.90 = 3.2 beta1)	2026-03-27	Classic-ABI trace oracle built with WITH_JPEG8=1, and the source tree the C citations quote. Already on the 3.2 line, which is why the tool pins and the citations disagreed unnoticed.
