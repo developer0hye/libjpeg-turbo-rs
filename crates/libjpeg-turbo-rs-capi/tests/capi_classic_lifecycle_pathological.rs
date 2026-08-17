@@ -126,7 +126,39 @@ fn is_ci() -> bool {
         .unwrap_or(false)
 }
 
+/// Locate a C libjpeg-turbo tool for this suite's oracle comparisons.
+///
+/// `LIBJPEG_TURBO_PREFIX` is **exclusive**: when it is set, a tool that is not
+/// under it is absent rather than a reason to fall back. The search order
+/// below reads `/opt/homebrew/bin` before `/opt/libjpeg-turbo/bin`, so without
+/// that rule a CI step labelled with one upstream release measures whatever
+/// else the host happens to have and reports green — which is the exact
+/// failure P4-130's two legs exist to make impossible.
+///
+/// This mirrors `tests/helpers::c_tool_path`, which this suite cannot call
+/// because it does not include that module.
 fn find_c_tool(name: &str) -> Option<PathBuf> {
+    find_c_tool_under(
+        name,
+        std::env::var_os("LIBJPEG_TURBO_PREFIX")
+            .map(PathBuf::from)
+            .as_deref(),
+    )
+}
+
+/// [`find_c_tool`] with the oracle prefix passed in rather than read from the
+/// environment.
+///
+/// `cargo` runs `#[test]`s as parallel threads of one process, so a test that
+/// set `LIBJPEG_TURBO_PREFIX` to exercise the override would race every other
+/// test in this binary. Taking it as an argument makes both branches
+/// deterministically reachable.
+fn find_c_tool_under(name: &str, oracle_prefix: Option<&Path>) -> Option<PathBuf> {
+    if let Some(prefix) = oracle_prefix {
+        let pinned: PathBuf = prefix.join("bin").join(name);
+        return pinned.is_file().then_some(pinned);
+    }
+
     for directory in [
         "/opt/homebrew/bin",
         "/usr/local/bin",
@@ -146,14 +178,51 @@ fn find_c_tool(name: &str) -> Option<PathBuf> {
     })
 }
 
+/// An explicit oracle prefix names the install, and nothing else answers for
+/// it.
+///
+/// Driven through [`find_c_tool_under`] with a prefix built here, so the rule
+/// is asserted on every platform rather than only where a second
+/// libjpeg-turbo happens to be installed.
+#[test]
+fn an_explicit_oracle_prefix_is_exclusive() {
+    let root: PathBuf = std::env::temp_dir().join(format!(
+        "ljt_pathological_prefix_{}_{}",
+        std::process::id(),
+        "exclusive"
+    ));
+    let bin: PathBuf = root.join("bin");
+    std::fs::create_dir_all(&bin).expect("create the fake oracle prefix");
+
+    // Absent under the prefix means absent, even where the host has one.
+    assert_eq!(
+        find_c_tool_under("djpeg", Some(&root)),
+        None,
+        "a tool missing under an explicit LIBJPEG_TURBO_PREFIX must be \
+         reported missing; falling back is how a leg measures one release \
+         while claiming another"
+    );
+
+    // Present under the prefix wins over every default directory.
+    let pinned: PathBuf = bin.join("djpeg");
+    std::fs::write(&pinned, b"#!/bin/sh\nexit 0\n").expect("write the pinned tool");
+    assert_eq!(find_c_tool_under("djpeg", Some(&root)), Some(pinned));
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
 fn require_c_tool(name: &str, test_name: &str) -> Option<PathBuf> {
     if let Some(path) = find_c_tool(name) {
         return Some(path);
     }
+    let where_looked: String = match std::env::var_os("LIBJPEG_TURBO_PREFIX") {
+        Some(prefix) => format!("under LIBJPEG_TURBO_PREFIX={prefix:?}, which is exclusive"),
+        None => "on PATH".to_string(),
+    };
     if is_ci() {
-        panic!("{test_name}: required C oracle `{name}` was not found on PATH");
+        panic!("{test_name}: required C oracle `{name}` was not found {where_looked}");
     }
-    eprintln!("SKIP {test_name}: required C oracle `{name}` was not found on PATH");
+    eprintln!("SKIP {test_name}: required C oracle `{name}` was not found {where_looked}");
     None
 }
 
