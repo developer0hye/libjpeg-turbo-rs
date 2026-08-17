@@ -112,8 +112,9 @@ fn workflow_files() -> Vec<PathBuf> {
 }
 
 /// Every dotted-numeric token on the 3.x line, keyed by version, with the
-/// `file:line` sites that pin it.
-fn version_pins_in_workflows() -> BTreeMap<String, Vec<String>> {
+/// `file:line` sites that carry it. `provisioning_only` restricts the scan to
+/// lines that actually install or build an oracle.
+fn version_sites_in_workflows(provisioning_only: bool) -> BTreeMap<String, Vec<String>> {
     let mut pins: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for path in workflow_files() {
         let Ok(text) = std::fs::read_to_string(&path) else {
@@ -124,6 +125,9 @@ fn version_pins_in_workflows() -> BTreeMap<String, Vec<String>> {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
         for (index, line) in text.lines().enumerate() {
+            if provisioning_only && !is_provisioning_line(line) {
+                continue;
+            }
             for token in dotted_numeric_tokens(line) {
                 if token.split('.').next() == Some(ORACLE_MAJOR) {
                     pins.entry(token)
@@ -134,6 +138,27 @@ fn version_pins_in_workflows() -> BTreeMap<String, Vec<String>> {
         }
     }
     pins
+}
+
+/// Does this line *install or build* an oracle, as opposed to merely naming a
+/// version?
+///
+/// The distinction is the whole strength of the "a declared leg really runs"
+/// direction. Counting every line that contains a version string would let a
+/// comment satisfy it — and the comments in `upstream-currency.yml` alone name
+/// both declared versions, so the 3.2.0 job could be deleted with the gate
+/// still green. Only three shapes provision: a `VERSION=` assignment, a
+/// `--branch` clone, and upstream's `libjpeg-turbo-official` package name.
+/// A YAML comment and an `echo`'d instruction are documentation about a pin,
+/// not a pin.
+fn is_provisioning_line(line: &str) -> bool {
+    let trimmed: &str = line.trim_start();
+    if trimmed.starts_with('#') || trimmed.contains("echo ") {
+        return false;
+    }
+    trimmed.contains("VERSION=")
+        || trimmed.contains("--branch ")
+        || trimmed.contains("libjpeg-turbo-official")
 }
 
 /// Maximal runs of digits and `.` that contain at least one `.`, with any
@@ -173,7 +198,9 @@ fn every_workflow_version_pin_is_declared_in_the_manifest() {
     }
 
     let declared: BTreeSet<String> = manifest_rows().into_iter().map(|row| row.version).collect();
-    let pinned: BTreeMap<String, Vec<String>> = version_pins_in_workflows();
+    // Loose on purpose: a stale version named in a comment or a step title is
+    // exactly the kind of drift this direction exists to catch.
+    let pinned: BTreeMap<String, Vec<String>> = version_sites_in_workflows(false);
 
     assert!(
         !pinned.is_empty(),
@@ -204,11 +231,13 @@ fn every_declared_tool_version_is_actually_provisioned() {
         return;
     }
 
-    let pinned: BTreeMap<String, Vec<String>> = version_pins_in_workflows();
+    // Strict: only lines that install or build an oracle count. A comment
+    // naming the version is not a leg.
+    let provisioned: BTreeMap<String, Vec<String>> = version_sites_in_workflows(true);
     let unused: Vec<String> = manifest_rows()
         .into_iter()
         .filter(|row| PROVISIONED_ROLES.contains(&row.role.as_str()))
-        .filter(|row| !pinned.contains_key(&row.version))
+        .filter(|row| !provisioned.contains_key(&row.version))
         .map(|row| format!("  {} {} ({})", row.role, row.version, row.provisioned_as))
         .collect();
 
@@ -220,6 +249,30 @@ fn every_declared_tool_version_is_actually_provisioned() {
          divergence it would have caught is indistinguishable from a pass.",
         unused.join("\n")
     );
+}
+
+#[test]
+fn a_version_named_in_a_comment_is_not_a_provisioning_site() {
+    // The classifier this rests on, pinned directly: the "declared leg really
+    // runs" direction is only as strong as its ability to tell an install from
+    // a mention, and every line below appears in these workflows today.
+    assert!(is_provisioning_line("          VERSION=3.2.0"));
+    assert!(is_provisioning_line(
+        "          git clone --depth 1 --branch 3.1.4.1 https://github.com/libjpeg-turbo/libjpeg-turbo.git /tmp/ljt"
+    ));
+    assert!(is_provisioning_line(
+        "            \"https://github.com/libjpeg-turbo/libjpeg-turbo/releases/download/${VERSION}/libjpeg-turbo-official_${VERSION}_${ARCH}.deb\""
+    ));
+
+    assert!(!is_provisioning_line(
+        "# 3.2.0 shipped 2026-06-30 and every oracle pin still said 3.1.4.1"
+    ));
+    assert!(!is_provisioning_line(
+        "      - name: Build libjpeg-turbo 3.1.4.1 from source"
+    ));
+    assert!(!is_provisioning_line(
+        "                echo \"  VERSION=3.1.4.1\""
+    ));
 }
 
 #[test]

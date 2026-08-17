@@ -8318,9 +8318,12 @@ and run in the subsampling matrices — and two are not:
   colorspace to the default. No occurrence of the name exists in this
   repository, so a caller passing it hits our unknown-value path.
 
-`TJPARAM_SAVEMARKERS` values 2 and 4 gate the PNG ICC transfer in note 9 and are
-likewise absent; that half is tracked with the PNG work in P4-174, since a
-marker parameter with nothing to transfer to has no observable behaviour.
+`TJPARAM_SAVEMARKERS` itself is **not** part of this gap, and an earlier draft
+of this entry wrongly said it was: `src/api/tj3.rs:303` accepts levels 0-4 and
+`:841` wires 2 to all markers and 4 to ICC-only extraction from the JPEG. What
+note 9 adds on top is the *PNG* side of that transfer, which is tracked with
+the PNG work in P4-174 — a marker level with no PNG to transfer to or from has
+no observable behaviour to compare.
 
 **Acceptance criteria.**
 

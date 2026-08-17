@@ -609,12 +609,25 @@ jobs:
       # The version this leg is named for has to be the version it runs. A deb
       # that installed something else, or a prefix that resolved elsewhere,
       # would otherwise produce a green "3.2.0" leg measuring 3.1.4.1.
+      #
+      # The headers and libraries are checked too, not just the tools: some
+      # suites compile a C oracle rather than shelling out to djpeg, and the
+      # prefix is exclusive for those as well (helpers::c_oracle::dev_prefixes).
+      # A prefix holding tools but no development files fails the run — which
+      # is the point, since the alternative was compiling against /usr's 2.1.x
+      # and calling the result a 3.2.0 comparison.
       - name: Verify the oracle really is 3.2.0
         run: |
           /opt/libjpeg-turbo/bin/djpeg -version 2>&1 | tee /tmp/oracle-version.txt
           grep -q "version 3.2.0" /tmp/oracle-version.txt
           /opt/libjpeg-turbo/bin/cjpeg -version 2>&1 | grep -q "version 3.2.0"
           /opt/libjpeg-turbo/bin/jpegtran -version 2>&1 | grep -q "version 3.2.0"
+          test -f /opt/libjpeg-turbo/include/jpeglib.h
+          test -f /opt/libjpeg-turbo/include/turbojpeg.h
+          ls /opt/libjpeg-turbo/lib64/libjpeg.* /opt/libjpeg-turbo/lib/libjpeg.* \
+             2>/dev/null | grep -q .
+          ls /opt/libjpeg-turbo/lib64/libturbojpeg.* /opt/libjpeg-turbo/lib/libturbojpeg.* \
+             2>/dev/null | grep -q .
       - run: cargo test --tests
         env:
           LIBJPEG_TURBO_PREFIX: /opt/libjpeg-turbo
