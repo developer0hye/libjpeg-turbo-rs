@@ -5267,6 +5267,20 @@ read the step indent off the first `- ` line in the job, which in a matrix job
 is a matrix entry, so every step merged into one — a job-scope union arriving
 through the parser rather than the rule.
 
+A second review round found the same class once more, in *which steps get
+asked*. "Does this step run the tests?" was a substring search for
+`cargo test`, `cargo run`, `cargo mutants` and `fuzz run` — and
+`cargo +nightly test` contains none of them while running the whole suite, a
+spelling these workflows already use. A step the predicate misses is a step the
+gate never asks about, so the answer is not another substring: the cargo
+invocation is parsed, the optional `+toolchain` skipped, and the subcommand
+compared against a **deny** list of the ones that cannot reach an oracle
+(`build`, `clippy`, `install`, `fmt`, …). The directions are not symmetric —
+an unlisted subcommand that *does* reach the oracle is a silent hole, while an
+unlisted one that does not costs a line here the first time it appears in an
+oracle-installing job. Verified against the reproduction: pointing the macOS
+leg at `cargo +nightly test` with no prefix is red.
+
 `test-cross-encode` now builds 3.1.4.1 from source at `/tmp/ljt3141/prefix` and
 selects it with `LIBJPEG_TURBO_PREFIX`, the same shape the aarch64 full-parity
 baseline leg took. It is the same measurement under a name: homebrew's formula

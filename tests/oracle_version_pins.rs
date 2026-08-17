@@ -1940,9 +1940,7 @@ fn every_job_that_installs_an_oracle_measures_the_install_it_checked() {
         let on_macos: bool = job_runs_on_macos(&block);
         let path_prefixes: BTreeSet<String> = path_entry_prefixes_in(&block);
         for (index, step) in steps_in(&block).into_iter().enumerate() {
-            let consumes_an_oracle: bool = TEST_INVOCATIONS
-                .iter()
-                .any(|command| step.script.contains(command));
+            let consumes_an_oracle: bool = reaches_the_oracle(&step.script);
             // A step's own assignment wins over the job's for that step alone,
             // which is the whole reason this is read per step.
             let effective: BTreeSet<String> = if !step.prefixes.is_empty() {
@@ -1999,10 +1997,45 @@ fn every_job_that_installs_an_oracle_measures_the_install_it_checked() {
     );
 }
 
-/// Cargo invocations that reach the C oracle: the test binaries, the corpus
-/// example, the mutation run whose oracle decides whether a mutant is caught,
-/// and the differential fuzz targets that subprocess `djpeg`/`cjpeg`.
-const TEST_INVOCATIONS: [&str; 4] = ["cargo test", "cargo run", "cargo mutants", "fuzz run"];
+/// Cargo subcommands that cannot reach a C oracle, so a step running only
+/// these needs no prefix.
+///
+/// A *deny* list rather than an allow list, because the failure directions are
+/// not symmetric: an unlisted subcommand that does reach the oracle would be a
+/// step this gate never asks about, while an unlisted one that does not costs
+/// a line here the first time it appears in an oracle-installing job. The
+/// first draft listed the invocations that *do* consume — `cargo test`,
+/// `cargo run`, `cargo mutants`, `fuzz run` — as substrings, and a review
+/// pointed out that `cargo +nightly test` matches none of them while running
+/// the whole suite, a spelling these workflows already use.
+const CARGO_SUBCOMMANDS_WITHOUT_AN_ORACLE: [&str; 12] = [
+    "build", "check", "clippy", "deny", "doc", "fmt", "install", "metadata", "package", "publish",
+    "tree", "update",
+];
+
+/// Does this step run cargo in a way that can reach the C oracle?
+///
+/// Parsed rather than matched as a substring: `cargo +nightly test`,
+/// `cargo test` and `/usr/bin/cargo test` are one shape with three spellings,
+/// and the toolchain qualifier sits between the two words a substring match
+/// would look for.
+fn reaches_the_oracle(script: &str) -> bool {
+    let tokens: Vec<&str> = script.split_whitespace().collect();
+    tokens
+        .iter()
+        .enumerate()
+        .filter(|(_, token)| **token == "cargo" || token.ends_with("/cargo"))
+        .any(|(at, _)| {
+            let subcommand: Option<&&str> = tokens[at + 1..]
+                .iter()
+                .find(|token| !token.starts_with('+') && !token.starts_with('-'));
+            match subcommand {
+                // `cargo` alone prints help; nothing runs.
+                None => false,
+                Some(name) => !CARGO_SUBCOMMANDS_WITHOUT_AN_ORACLE.contains(name),
+            }
+        })
+}
 
 #[test]
 fn an_unpinned_package_manager_install_is_an_oracle_install() {
@@ -2277,33 +2310,42 @@ fn a_matrix_entry_is_not_the_first_step() {
 }
 
 #[test]
-fn every_cargo_invocation_that_reaches_the_oracle_is_recognised() {
-    // A step this list does not match is a step the gate never asks about, so
-    // an unchecked oracle would ride in under a spelling nobody added here.
-    // These are the four shapes the workflows use today.
+fn a_toolchain_qualifier_does_not_hide_a_cargo_test() {
+    // A step this predicate misses is a step the gate never asks about, so an
+    // unchecked oracle rides in under a spelling nobody thought of. The first
+    // draft matched `"cargo test"` as a substring; `cargo +nightly test` runs
+    // the same suite and contains neither that string nor any other in the
+    // list, and these workflows already write nightly invocations that way.
     for script in [
         "cargo test --tests",
+        "cargo +nightly test --tests",
+        "cargo +1.87 test -p libjpeg-turbo-rs-capi --test capi_x",
         "cargo run --release --example corpus_test -- --corpus-dir tests/corpus/",
         "cargo mutants --in-diff /tmp/pr.diff",
         "cargo +nightly fuzz run --target x86_64-unknown-linux-gnu \"${FUZZ_TARGET}\"",
+        "cargo +nightly fuzz cmin --target x86_64-unknown-linux-gnu \"${FUZZ_TARGET}\"",
+        // Failing closed: a subcommand nobody has classified is treated as
+        // reaching the oracle, so the first unknown one asks the question here
+        // rather than passing silently.
+        "cargo xtask verify-everything",
     ] {
         assert!(
-            TEST_INVOCATIONS
-                .iter()
-                .any(|command| script.contains(command)),
-            "{script:?} reaches the C oracle and no entry recognises it"
+            reaches_the_oracle(script),
+            "{script:?} can reach the C oracle"
         );
     }
-    // …and a step that only installs does not.
     for script in [
         "sudo apt-get install -y /tmp/ljt.deb",
         "cargo build --release",
+        "cargo install cargo-mutants --locked",
+        "cargo +nightly clippy --workspace -- -D warnings",
+        "cargo fmt --check",
+        // A flag is not the subcommand, and a bare `cargo` runs nothing.
+        "cargo --version",
     ] {
         assert!(
-            !TEST_INVOCATIONS
-                .iter()
-                .any(|command| script.contains(command)),
-            "{script:?} runs no tests"
+            !reaches_the_oracle(script),
+            "{script:?} cannot reach the C oracle"
         );
     }
 }
