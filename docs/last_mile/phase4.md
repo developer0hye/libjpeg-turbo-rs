@@ -5198,9 +5198,12 @@ is named by `LIBJPEG_TURBO_PREFIX`, not by PATH order, because
 otherwise let a leg labelled 3.2.0 measure something else and report green; the
 prefix is exclusive, so a missing tool under it is an error rather than a quiet
 fallback. Measured before landing against a locally built 3.2.0 on macOS
-aarch64: **222 suite sections, 2346 passed, 0 failed, 4 ignored** — the root
-differential matrix is already at parity with 3.2.0, which is the result the
-leg now keeps true.
+aarch64, `cargo test --tests --no-fail-fast` with `LIBJPEG_TURBO_PREFIX` at that
+build: **223 suite sections, 2351 passed, 0 failed, 4 ignored** — the root
+differential matrix is already at parity with 3.2.0, which is the result the leg
+now keeps true. The same command with the variable unset (homebrew 3.1.4.1) is
+green on this branch too, so the second leg adds coverage rather than replacing
+it.
 
 *The oracle the write-up missed.* Writing the manifest surfaced that this
 repository was **already running two upstream versions, undocumented**:

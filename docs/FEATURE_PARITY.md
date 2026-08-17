@@ -485,7 +485,7 @@ named explicitly rather than implied complete:
   | Role | Version | What it backs |
   | --- | --- | --- |
   | `tool-baseline` | **3.1.4.1** (2026-03-27) | The behaviour-regression leg: `Integration Tests`, plus the cross-arch, fuzz-smoke and full-C-parity workflows. The release the expectations in this document were written against. |
-  | `tool-current` | **3.2.0** (2026-06-30) | The current-parity leg: `Integration Tests (oracle 3.2.0)` runs the same root `cargo test --tests` matrix against current upstream stable, selected by `LIBJPEG_TURBO_PREFIX` rather than PATH order. Measured green at 222 suite sections / 2346 tests before it landed. |
+  | `tool-current` | **3.2.0** (2026-06-30) | The current-parity leg: `Integration Tests (oracle 3.2.0)` runs the same root `cargo test --tests` matrix against current upstream stable, selected by `LIBJPEG_TURBO_PREFIX` rather than PATH order. Measured green at 223 suite sections / 2351 tests before it landed (macOS aarch64). |
   | `submodule` | **3.1.90** = 3.2 beta1 (2026-03-27) | `references/libjpeg-turbo`: built with `WITH_JPEG8=1` as the classic-ABI trace oracle (`/tmp/ljt8/prefix`), and the source every `j*.c:NNN` citation in this repository quotes. |
 
   So a ✅ backed by a *tool* oracle now means "matches 3.1.4.1 **and** 3.2.0" for anything the root differential matrix covers, and "matches 3.1.4.1" for the C-ABI crate's oracle steps, which still run at the baseline. A ✅ backed by a *source citation* has always meant 3.1.90. That split existed before it was written down — it is what the P4-130 triage found first. `tests/oracle_version_pins.rs` fails if a workflow pins a version this table does not declare, or declares a leg no workflow installs.
