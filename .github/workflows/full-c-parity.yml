@@ -1,9 +1,11 @@
 name: Full C Parity
 
 # The exhaustive differential matrices: 12,230 transform cases, a 10,880-cell
-# crop grid, and the tj comp/decomp matrices, every one of them a byte
-# comparison against a stock C tool. They are the widest differential surface
-# in this repository and they run weekly rather than per pull request.
+# crop grid (5,440 of them compared — the rest need the colour quantization
+# this port does not implement, and each suite tallies its own exclusions), and
+# the tj comp/decomp matrices. Every compared case is a byte comparison against
+# a stock C tool. They are the widest differential surface in this repository
+# and they run weekly rather than per pull request.
 #
 # Each architecture runs them twice, against two upstream releases (P4-130):
 #

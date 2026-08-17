@@ -2425,7 +2425,7 @@ subsampling/scaling/grayscale, invalid null/zero/out-of-bounds/after-read calls,
 returned x/width/output_width, component geometry, and subsequent row bytes.
 The 12-bit initialization/order portion remains in P4-98.
 
-**Extended 2026-08-17 by the [P4-130](#p4-130-c-parity-oracle-is-pinned-to-3141-upstream-stable-is-320--partial-both-tool-legs-now-cover-the-c-abi-oracle-suites-and-the-exhaustive-matrices-four-baseline-only-workflows-the-submodule-bump-and-the-four-filed-gaps-remain)
+**Extended 2026-08-17 by the [P4-130](#p4-130-c-parity-oracle-is-pinned-to-3141-upstream-stable-is-320--partial-both-tool-legs-now-cover-the-c-abi-oracle-suites-and-the-exhaustive-matrices-the-legs-still-on-one-release-the-submodule-bump-and-the-four-filed-gaps-remain)
 3.2 delta triage.** 3.2.0 note 3 hardened this entry point, and the delta is
 exactly one condition: 3.2.0 `src/jdapistd.c:203` reads
 `if (cinfo->master->lossless || cinfo->raw_data_out)` where 3.1.90 reads
@@ -5118,7 +5118,7 @@ prevent, and it undermines any claim that the shipped surface is audited.
 
 **Status (2026-08-09): closed.** Landed in #486; `crates/libjpeg-turbo-rs-capi/build.rs` now routes the 16 `jpeg_capi_test_*` accessors to a `LIBJPEGTURBORS_PRIVATE_1.0` node via an exact-name list, and `tests/soname.rs` asserts no `jpeg_capi_test_*` symbol carries `LIBJPEG_8.0`.
 
-## P4-130. C-Parity Oracle Is Pinned to 3.1.4.1; Upstream Stable Is 3.2.0 — **PARTIAL: both tool legs now cover the C-ABI oracle suites and the exhaustive matrices; four baseline-only workflows, the submodule bump and the four filed gaps remain**
+## P4-130. C-Parity Oracle Is Pinned to 3.1.4.1; Upstream Stable Is 3.2.0 — **PARTIAL: both tool legs now cover the C-ABI oracle suites and the exhaustive matrices; the legs still on one release, the submodule bump and the four filed gaps remain**
 
 **GitHub:** [#461](https://github.com/developer0hye/libjpeg-turbo-rs/issues/461) — under the [#470](https://github.com/developer0hye/libjpeg-turbo-rs/issues/470) umbrella.
 
@@ -5224,18 +5224,25 @@ red first:
 - `every_full_c_parity_leg_verifies_the_prefix_it_measures` — installing a
   release is not measuring it. `helpers::c_tool_path` reads `/opt/homebrew/bin`
   before PATH, which is exactly how the false green inside #569 happened. So
-  the gate parses the `LIBJPEG_TURBO_PREFIX` *assignment* (a mention in a
-  comment selects nothing) and requires the leg to run `-version` on **that
-  prefix's** `djpeg` and to check it against the release its role declares —
-  the false-green shape being one install verified while another is measured.
+  the gate parses the `LIBJPEG_TURBO_PREFIX` assignment **at job level** — a
+  mention in a comment selects nothing, and a step-level assignment selects the
+  oracle for that step alone, which is the shape where a leg verifies one
+  install and measures another — and requires the leg to run `-version` on
+  **that prefix's** `djpeg` and to *assert* over the output that it reports the
+  release the leg's role declares. `echo "version 3.2.0"` satisfies a substring
+  search and checks nothing, so the assertion has to be one.
 - `every_oracle_backed_full_parity_suite_on_the_baseline_leg_also_runs_on_the_current_leg`
   is the capi pairing gate's twin over root-crate suites, run once per
   architecture pair. It classifies from each suite's own source, so a matrix
   that *gains* a C comparison is reclassified by the commit that gives it one,
-  and it compares **libtest filters** and not merely binary names: a filter
-  that selects one test, or after a typo none, leaves the legs measuring
-  different things while a name-only comparison stays green — P4-61's finding,
-  twice over. Both pairing gates now do this.
+  and it compares **what each invocation selects** and not merely binary names:
+  a filter that selects one test, or after a typo none, leaves the legs
+  measuring different things while a name-only comparison stays green —
+  P4-61's finding, twice over. Both pairing gates now do this, over a
+  three-valued selection (the whole binary / these filters / *unreadable*) that
+  fails closed: `-- --ignored` and a shell-quoted filter both change which
+  tests run, and reading either as "no filter" would have turned an unparsed
+  argument into a claim of full coverage.
 
 The helpers those rest on are pinned too, each against the shape that would
 make it lie: `the_suite_selector_tells_the_root_crate_from_the_c_abi_crate`
@@ -5246,17 +5253,27 @@ somebody else's coverage, and confusing them would look up a capi suite under
 step-key boundary the next step's name reads as another filter on the previous
 invocation), `a_harness_flag_is_not_a_filter_and_a_redirect_ends_the_invocation`
 (`--nocapture` selects nothing; `2>&1 | tee` is the shell taking the line
-back), `a_narrower_filter_on_the_current_leg_does_not_count_as_covering_the_baseline`,
-`a_commented_out_prefix_assignment_selects_no_oracle`,
+back), `an_argument_this_scanner_cannot_read_fails_the_comparison_closed`,
+`a_narrower_selection_on_the_current_leg_does_not_cover_the_baseline`,
+`running_a_suite_twice_in_one_leg_selects_the_union` (an unfiltered run absorbs
+a filtered one, or a leg running both would compare equal to one running only
+the filter), `only_a_job_level_prefix_assignment_selects_the_oracle_for_a_whole_leg`,
+`an_echoed_version_string_is_not_a_version_check`,
 `the_oracle_classifier_reads_root_crate_suites_too` in both directions, and
 `a_job_block_stops_at_the_next_job` extended to the new pairs — every
 full-parity leg name is a prefix of its own current-oracle twin, so the
 block-parse trap that gate exists for is waiting once per architecture.
 
-The filter comparison and the prefix parse are both **round-2 work**: the first
-draft compared binary names and grepped for the variable, and a codex review
-pointed out that each would stay green through exactly the substitution it was
-written to catch.
+The selection comparison and the prefix parse are both **later-round work**,
+and the sequence is the interesting part: the first draft compared binary names
+and grepped for the variable; a codex review pointed out that each would stay
+green through exactly the substitution it was written to catch; the second
+draft carried filters and parsed the assignment, and a second review found four
+more shapes that still passed — an unmodelled `--ignored`, a quoted filter, a
+step-scoped assignment, and an `echo` standing in for the version check. Three
+rounds, and every hole was in the *gate*, not in the workflow. That is the
+argument for pinning each helper against the shape that would make it lie,
+rather than trusting a gate because it is green.
 
 Measured on macOS aarch64 against locally built prefixes at both releases,
 running the four binaries unfiltered: **15 tests, 0 failed on each leg**, with
@@ -5408,8 +5425,9 @@ was filed with:
 **What remains.**
 
 1. The four filed gaps (P4-171..P4-174) are triaged, not fixed.
-2. **Four workflows still measure one release**, and the inventory is written
-   out here rather than left to the next reader's grep:
+2. **Eight legs across three workflows still measure one release** — matrix
+   entries counted one apiece — and the inventory is written out here rather
+   than left to the next reader's grep:
    - `cross-arch.yml` — three jobs (linux-aarch64 NEON, linux-x86_64 AVX2,
      AVX2-disabled build), each running the root `cargo test --tests` matrix
      against the 3.1.4.1 deb;
@@ -5424,7 +5442,7 @@ was filed with:
      runs on every pull request.
 
    The gates added on 2026-08-18 read `full-c-parity.yml` by name, so none of
-   these four is covered by them; extending the pin-and-name rule to every
+   these is covered by them; extending the pin-and-name rule to every
    oracle-provisioning job, rather than to a list of workflows, is the natural
    next milestone.
 3. `references/libjpeg-turbo` stays at 3.1.90. Bumping it to 3.2.0 moves every
@@ -8426,7 +8444,7 @@ change with its own oracle traces.
 
 ## P4-171. 8-Bit Lossy JPEG Cannot Be Decompressed to 12-Bit Output (3.2 beta1 note 8) — **OPEN**
 
-**GitHub:** [#561](https://github.com/developer0hye/libjpeg-turbo-rs/issues/561) — filed 2026-08-17 by the [P4-130](#p4-130-c-parity-oracle-is-pinned-to-3141-upstream-stable-is-320--partial-both-tool-legs-now-cover-the-c-abi-oracle-suites-and-the-exhaustive-matrices-four-baseline-only-workflows-the-submodule-bump-and-the-four-filed-gaps-remain) 3.2 delta triage.
+**GitHub:** [#561](https://github.com/developer0hye/libjpeg-turbo-rs/issues/561) — filed 2026-08-17 by the [P4-130](#p4-130-c-parity-oracle-is-pinned-to-3141-upstream-stable-is-320--partial-both-tool-legs-now-cover-the-c-abi-oracle-suites-and-the-exhaustive-matrices-the-legs-still-on-one-release-the-submodule-bump-and-the-four-filed-gaps-remain) 3.2 delta triage.
 
 **Motivation.** 3.2 beta1 note 8 added a capability, not a fix: an 8-bit-per-sample
 *lossy* JPEG can now be decompressed to a 12-bit-per-sample output image, to
@@ -8646,21 +8664,24 @@ every capi suite, not just this one.
 **Motivation.** Every C libjpeg-turbo oracle here is fetched by a name upstream
 can repoint, and nothing checks what arrived:
 
-- **seven** deb downloads —
+- **eight** deb downloads —
   `curl -fL .../releases/download/${VERSION}/libjpeg-turbo-official_${VERSION}_${ARCH}.deb`,
   installed with no digest: `ci.yml:64,320,616`, `cross-arch.yml:30,61,97`,
-  `fuzz-smoke.yml:95`. (`fuzz-smoke.yml:201` prints the same command as
-  reproduction instructions and does not fetch.)
-- **three** source clones — `full-c-parity.yml:25` and `ci.yml:888` at
-  `--branch 3.1.4.1`, and `ci.yml:698` at `--branch 3.2.0` for the
-  `trace-current` v8-ABI oracle;
+  `fuzz-smoke.yml:95`, `full-c-parity.yml:97`. (`fuzz-smoke.yml:201` prints the
+  same command as reproduction instructions and does not fetch.)
+- **five** source clones — `full-c-parity.yml:56,150` and `ci.yml:892` at
+  `--branch 3.1.4.1`, and `full-c-parity.yml:189` and `ci.yml:702` at
+  `--branch 3.2.0`, the last of them for the `trace-current` v8-ABI oracle;
 - `references/libjpeg-turbo` is the exception. A submodule is pinned by commit,
   which is why it is not part of this gap.
 
 The `trace-current` step greps `set(VERSION 3.2.0)` from the cloned tree, so a
-tag repointed at a *different release* fails there. That is the only case
-covered. A tag repointed at a modified tree of the same version, or a replaced
-release asset, is indistinguishable from the real thing — and these oracles are
+tag repointed at a *different release* fails there; since 2026-08-17 the
+`tool-current` leg and, since 2026-08-18, all four `Full C Parity` legs check
+their installed tools' `-version` output the same way. Every one of those
+checks answers the same question — *is this the release it claims to be* — and
+none answers the integrity one. A tag repointed at a modified tree of the same
+version, or a replaced release asset, is indistinguishable from the real thing — and these oracles are
 what every differential gate in this repository compares against, so a
 substituted oracle does not fail: it silently redefines "correct".
 
