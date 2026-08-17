@@ -1,5 +1,36 @@
 name: Full C Parity
 
+# The exhaustive differential matrices: 12,230 transform cases, a 10,880-cell
+# crop grid (5,440 of them compared — the rest need the colour quantization
+# this port does not implement, and each suite tallies its own exclusions), and
+# the tj comp/decomp matrices. Every compared case is a byte comparison against
+# a stock C tool. They are the widest differential surface in this repository
+# and they run weekly rather than per pull request.
+#
+# Each architecture runs them twice, against two upstream releases (P4-130):
+#
+#   * the *baseline* leg at the release the current expectations were written
+#     against, so a regression in our own output is still visible as one;
+#   * the *current-parity* leg at current upstream stable, so a delta between
+#     the two releases is measured rather than assumed.
+#
+# One bumped pin instead of two legs is not the same thing: it re-baselines
+# every expectation at once, and a divergence it papered over would be
+# indistinguishable from a pass.
+#
+# Both legs are pinned *and* named. Pinned, because `brew install jpeg-turbo`
+# — what the aarch64 legs used until 2026-08-18 — measures whatever the
+# packager ships that week, so the release a green matrix proved parity with
+# changed under us with nothing to read. Named, because installing a release is
+# not the same as measuring it: `tests/helpers::c_tool_path` reads
+# /opt/homebrew/bin before PATH, so LIBJPEG_TURBO_PREFIX is what actually
+# selects the oracle, and it is exclusive — a tool missing under it is an error
+# rather than a quiet fallback to some other djpeg on the box.
+#
+# Versions live in docs/oracle_versions.tsv. `tests/oracle_version_pins.rs`
+# fails if a leg here installs a release the manifest does not declare, if a
+# leg does not name its prefix, or if a matrix runs on the baseline leg alone.
+
 on:
   schedule:
     - cron: '0 6 * * 1'  # Weekly Monday 6:00 UTC
@@ -10,9 +41,11 @@ env:
 
 jobs:
   full-c-parity-x86:
-    name: Full C Parity (x86_64)
+    name: Full C Parity (x86_64, oracle 3.1.4.1)
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    env:
+      LIBJPEG_TURBO_PREFIX: /usr/local
     steps:
       - uses: actions/checkout@v7
         with:
@@ -27,6 +60,12 @@ jobs:
           cmake --build /tmp/ljt/build -j$(nproc)
           sudo cmake --install /tmp/ljt/build
           echo "/usr/local/bin" >> $GITHUB_PATH
+      - name: Verify the oracle really is 3.1.4.1
+        run: |
+          /usr/local/bin/djpeg -version 2>&1 | tee /tmp/oracle-version.txt
+          grep -q "version 3.1.4.1" /tmp/oracle-version.txt
+          /usr/local/bin/cjpeg -version 2>&1 | grep -q "version 3.1.4.1"
+          /usr/local/bin/jpegtran -version 2>&1 | grep -q "version 3.1.4.1"
       - name: c_tjdecomptest_full
         run: cargo test --features full-c-parity --test c_tjdecomptest -- c_tjdecomptest_full
         timeout-minutes: 10
@@ -40,18 +79,126 @@ jobs:
         run: cargo test --features full-c-parity --test c_croptest
         timeout-minutes: 10
 
-  full-c-parity-arm64:
-    name: Full C Parity (aarch64)
-    runs-on: macos-latest
+  full-c-parity-x86-current-oracle:
+    name: Full C Parity (x86_64, oracle 3.2.0)
+    runs-on: ubuntu-latest
     timeout-minutes: 60
+    env:
+      LIBJPEG_TURBO_PREFIX: /opt/libjpeg-turbo
     steps:
       - uses: actions/checkout@v7
         with:
           submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Install libjpeg-turbo via Homebrew
-        run: brew install jpeg-turbo
+      - name: Install libjpeg-turbo 3.2.0 from official release
+        run: |
+          ARCH=$(dpkg --print-architecture)
+          VERSION=3.2.0
+          curl -fL -o /tmp/ljt320.deb \
+            "https://github.com/libjpeg-turbo/libjpeg-turbo/releases/download/${VERSION}/libjpeg-turbo-official_${VERSION}_${ARCH}.deb"
+          sudo apt-get install -y /tmp/ljt320.deb
+          # LIBJPEG_TURBO_PREFIX selects the oracle; PATH is here so that
+          # anything not going through the test helpers reaches the same
+          # install rather than nothing. It cannot reintroduce ambiguity: 3.2.0
+          # is the only libjpeg-turbo on this runner.
+          echo "/opt/libjpeg-turbo/bin" >> $GITHUB_PATH
+      - name: Verify the oracle really is 3.2.0
+        run: |
+          /opt/libjpeg-turbo/bin/djpeg -version 2>&1 | tee /tmp/oracle-version.txt
+          grep -q "version 3.2.0" /tmp/oracle-version.txt
+          /opt/libjpeg-turbo/bin/cjpeg -version 2>&1 | grep -q "version 3.2.0"
+          /opt/libjpeg-turbo/bin/jpegtran -version 2>&1 | grep -q "version 3.2.0"
+      - name: c_tjdecomptest_full
+        run: cargo test --features full-c-parity --test c_tjdecomptest -- c_tjdecomptest_full
+        timeout-minutes: 10
+      - name: c_tjcomptest_full
+        run: cargo test --features full-c-parity --test c_tjcomptest
+        timeout-minutes: 10
+      - name: c_tjtrantest_full
+        run: cargo test --features full-c-parity --test c_tjtrantest
+        timeout-minutes: 10
+      - name: c_croptest_full
+        run: cargo test --features full-c-parity --test c_croptest
+        timeout-minutes: 10
+
+  # The aarch64 pair. These are separate measurements, not repeats of the
+  # x86_64 ones: every case here compares *our NEON output* against C's, so a
+  # divergence that only one SIMD backend has is only visible on its own
+  # architecture.
+  #
+  # Both legs build from source. Homebrew has no per-version formula for
+  # jpeg-turbo, so `brew install jpeg-turbo` is an oracle whose release is
+  # decided by the packager's release schedule — it happened to be 3.1.4.1
+  # while the matrices were read as a 3.1.4.1 result, and would have become a
+  # silent re-baseline the week that changed.
+  full-c-parity-arm64:
+    name: Full C Parity (aarch64, oracle 3.1.4.1)
+    runs-on: macos-latest
+    timeout-minutes: 60
+    env:
+      LIBJPEG_TURBO_PREFIX: /tmp/ljt3141/prefix
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build libjpeg-turbo 3.1.4.1 from source
+        run: |
+          # No NASM: this is an arm64 host, where upstream's SIMD is NEON
+          # intrinsics compiled by the C compiler.
+          command -v cmake >/dev/null || brew install cmake
+          git clone --depth 1 --branch 3.1.4.1 https://github.com/libjpeg-turbo/libjpeg-turbo.git /tmp/ljt3141/src
+          cmake -S /tmp/ljt3141/src -B /tmp/ljt3141/build -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/tmp/ljt3141/prefix
+          cmake --build /tmp/ljt3141/build -j$(sysctl -n hw.ncpu)
+          cmake --install /tmp/ljt3141/build
+      - name: Verify the oracle really is 3.1.4.1
+        run: |
+          /tmp/ljt3141/prefix/bin/djpeg -version 2>&1 | tee /tmp/oracle-version.txt
+          grep -q "version 3.1.4.1" /tmp/oracle-version.txt
+          /tmp/ljt3141/prefix/bin/cjpeg -version 2>&1 | grep -q "version 3.1.4.1"
+          /tmp/ljt3141/prefix/bin/jpegtran -version 2>&1 | grep -q "version 3.1.4.1"
+      - name: c_tjdecomptest_full
+        run: cargo test --features full-c-parity --test c_tjdecomptest -- c_tjdecomptest_full
+        timeout-minutes: 10
+      - name: c_tjcomptest_full
+        run: cargo test --features full-c-parity --test c_tjcomptest
+        timeout-minutes: 10
+      - name: c_tjtrantest_full
+        run: cargo test --features full-c-parity --test c_tjtrantest
+        timeout-minutes: 10
+      - name: c_croptest_full
+        run: cargo test --features full-c-parity --test c_croptest
+        timeout-minutes: 10
+
+  full-c-parity-arm64-current-oracle:
+    name: Full C Parity (aarch64, oracle 3.2.0)
+    runs-on: macos-latest
+    timeout-minutes: 60
+    env:
+      LIBJPEG_TURBO_PREFIX: /tmp/ljt320/prefix
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build libjpeg-turbo 3.2.0 from source
+        run: |
+          command -v cmake >/dev/null || brew install cmake
+          git clone --depth 1 --branch 3.2.0 https://github.com/libjpeg-turbo/libjpeg-turbo.git /tmp/ljt320/src
+          cmake -S /tmp/ljt320/src -B /tmp/ljt320/build -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/tmp/ljt320/prefix
+          cmake --build /tmp/ljt320/build -j$(sysctl -n hw.ncpu)
+          cmake --install /tmp/ljt320/build
+      - name: Verify the oracle really is 3.2.0
+        run: |
+          /tmp/ljt320/prefix/bin/djpeg -version 2>&1 | tee /tmp/oracle-version.txt
+          grep -q "version 3.2.0" /tmp/oracle-version.txt
+          /tmp/ljt320/prefix/bin/cjpeg -version 2>&1 | grep -q "version 3.2.0"
+          /tmp/ljt320/prefix/bin/jpegtran -version 2>&1 | grep -q "version 3.2.0"
       - name: c_tjdecomptest_full
         run: cargo test --features full-c-parity --test c_tjdecomptest -- c_tjdecomptest_full
         timeout-minutes: 10

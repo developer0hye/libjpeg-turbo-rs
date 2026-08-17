@@ -107,7 +107,7 @@ Concretely:
 Two things changed since P4-16 measured this in 2026-05:
 
 - **Upstream moved off thread-local storage.** libjpeg-turbo 3.2 beta1 overhauled its SIMD dispatchers to initialise per instance rather than per thread, explicitly *"eliminating the need for thread-local storage in the libjpeg API library."* P4-16's comparison was written against the older upstream implementation; our TLS-keyed side tables are now a wider divergence than when the trade-off was accepted.
-- **The oracle CI runs against 3.1.4.1**, one minor behind, so nothing in this repository has measured 3.2's threading behaviour (see P4-130 / #461).
+- **Nothing here has measured 3.2's threading behaviour.** Since 2026-08-17 the oracle CI does run against 3.2.0 as well as 3.1.4.1 (P4-130 / #461), so the premise this bullet was written on — that every gate was one minor behind — no longer holds. The conclusion does: no differential suite on either leg exercises a `cinfo` crossing threads, so the release the oracle is at cannot settle this one.
 
 The migration remains a global map keyed by `cinfo` pointer, but a `Mutex<HashMap>` alone is not sufficient: a freed and reallocated `cinfo` can land at the same address and collide with a stale entry, so the private state needs a generation counter and a single release point. That requirement is recorded on **#463**, not here.
 
