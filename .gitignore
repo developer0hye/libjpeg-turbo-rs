@@ -25,3 +25,6 @@ fuzz/Cargo.lock
 # cargo-mutants run output (mutation-testing reports, regenerated on demand)
 /mutants.out/
 /mutants.out.old/
+
+# Python bytecode from the scripts/ helpers and their tests.
+__pycache__/

@@ -15,6 +15,21 @@ documentation lives in [README.md](README.md) and on
   `jpegtran` where a C contract exists — see `CLAUDE.md` for the full
   testing rules, and `docs/LAST_MILE.md` for the live release gate.
 
+## Issues worked on unattended
+
+`scripts/issue_loop.sh` can work through the open issues without supervision,
+one fresh agent per issue; `CLAUDE.md` documents how to run it. Two label
+conventions come out of that, and both are meant for humans to use:
+
+- **`autofix-skip`** — put it on an umbrella or tracker issue that closes only
+  when its children do, so no agent tries to "fix" the tracker itself.
+- **`autofix-blocked`** — the loop applies this after two attempts produce no
+  merged pull request, and an agent applies it itself when the issue needs a
+  human decision or hardware it does not have. Either way it means *read the
+  issue comments*; removing the label puts the issue back in the queue.
+
+Run reports land in `target/issue-loop-logs/` on the machine that ran the loop.
+
 ## Running sanitizers locally
 
 Requires a nightly toolchain (`rustup install nightly`) and the `rust-src` component:

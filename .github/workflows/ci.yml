@@ -125,6 +125,17 @@ jobs:
           -A clippy::too_many_arguments
           -A clippy::type_complexity
 
+  # The unattended issue loop drives development itself, so a syntax error or a
+  # broken transcript reader in it stalls work silently rather than failing a
+  # build. Both checks are seconds long.
+  scripts:
+    name: Scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: bash -n scripts/issue_loop.sh
+      - run: python3 -m unittest discover -s scripts/tests -p 'test_issue_loop_watch.py'
+
   # Proves each declared `rust-version` actually compiles (issue #390).
   # A single workspace-wide 1.87 check is impossible: the image-bridge
   # crate inherits image@0.25's rustc 1.88 floor, so it declares
