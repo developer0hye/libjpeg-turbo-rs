@@ -23,6 +23,13 @@
 //!   workflows install, so the classic-ABI trace oracles were already running
 //!   against a different release than the tool oracles.
 //!
+//! A second, independent dimension lives in the back half of this file: the
+//! two tool legs have to run the *same* C-ABI oracle suites. Versions being
+//! declared says nothing about which suites actually meet them, and the C-ABI
+//! crate's suites are selected by name — so a suite added to one leg is
+//! invisible to the other. That gate, its classifier and the job-block parse
+//! it rests on are documented at their own banner below.
+//!
 //! Currency against *upstream* is a network question and cannot be asked here;
 //! `scripts/check_oracle_currency.sh` asks it on a schedule.
 //!
@@ -72,9 +79,15 @@ const PROVISIONED_ROLES: [(&str, SiteShape); 3] = [
 ];
 
 /// Dotted-numeric tokens in a workflow whose first component is this are
-/// libjpeg-turbo versions. The 3.x line is the only major upstream ships, and
-/// the only dotted tokens in these files today are libjpeg-turbo's 13 pins plus
-/// two crate/tool versions (`0.8.0`, `0.36.5`) that this filter excludes.
+/// libjpeg-turbo versions.
+///
+/// The invariant, rather than an inventory that goes stale as pins are added:
+/// upstream ships one major line, and no dotted token in these files that is
+/// *not* a libjpeg-turbo version has major 3. The others are toolchain and
+/// action versions (`1.87`, `1.88`, `1.90`, `24.04`, `0.36.5`, …), none of
+/// which collide. A future `3.x` of something else would have to be excluded
+/// here explicitly — which is the right failure, since it would otherwise be
+/// read as an undeclared oracle pin.
 const ORACLE_MAJOR: &str = "3";
 
 /// The workflow carrying both tool legs.

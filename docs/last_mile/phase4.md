@@ -5221,9 +5221,14 @@ that gives it one. The classifier is pinned in both directions by
 prefix of `test-integration-current-oracle`, and a block that ran on into the
 next job would compare a set with itself and never fail.
 
-The remaining capi steps stay on the baseline leg alone on purpose: the
-span-overflow guards, the error-code and message-rendering gates, the crate's
-unit tests and the ELF symbol-version leg compare against constants, our own
+Everything self-contained stays on the baseline leg alone on purpose: the four
+capi steps duplicated nowhere on the new leg — the span-overflow guards, the
+error-code and message-rendering gates, the crate's unit tests, the ELF
+symbol-version leg — plus the seven self-contained suites riding inside the
+mixed steps (`capi_input_complete_contract`, `capi_suspended_body_cap`,
+`norealloc_buffer_capacity`, `yuv_packed_length_overflow`,
+`yuv_four_component_guard`, `yuv_decompress_planes_component_guard`,
+`yuv_validate_before_decode`). All of them compare against constants, our own
 generated files, or the pinned headers, so a second run at another upstream
 release measures the same thing twice.
 
@@ -8520,7 +8525,7 @@ warn about it in prose. Prose has now failed to prevent it twice.
 1. `capi_classic_decode_budget` and `capi_yuv_gray` are named in a CI step,
    each with the `LIBJPEG_TURBO_PREFIX` its oracle needs so it fails rather
    than soft-skips.
-2. It passes there, or the failure it surfaces is filed.
+2. Each passes there, or the failure it surfaces is filed.
 3. A mechanism, not another comment: an enumeration test comparing
    `crates/libjpeg-turbo-rs-capi/tests/*.rs` against the suites named in
    `.github/workflows/*.yml`, with an explicit opt-out list for suites that are
@@ -8537,11 +8542,14 @@ every capi suite, not just this one.
 **Motivation.** Every C libjpeg-turbo oracle here is fetched by a name upstream
 can repoint, and nothing checks what arrived:
 
-- the official deb, in five workflows —
+- **seven** deb downloads —
   `curl -fL .../releases/download/${VERSION}/libjpeg-turbo-official_${VERSION}_${ARCH}.deb`,
-  installed with no digest;
-- the source clones — `--branch 3.1.4.1` for the corpus job and `--branch
-  3.2.0` for the `trace-current` v8-ABI oracle;
+  installed with no digest: `ci.yml:64,320,616`, `cross-arch.yml:30,61,97`,
+  `fuzz-smoke.yml:95`. (`fuzz-smoke.yml:201` prints the same command as
+  reproduction instructions and does not fetch.)
+- **three** source clones — `full-c-parity.yml:25` and `ci.yml:888` at
+  `--branch 3.1.4.1`, and `ci.yml:698` at `--branch 3.2.0` for the
+  `trace-current` v8-ABI oracle;
 - `references/libjpeg-turbo` is the exception. A submodule is pinned by commit,
   which is why it is not part of this gap.
 

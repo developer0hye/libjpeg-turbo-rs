@@ -659,10 +659,14 @@ jobs:
       # Which suites belong here is not a judgement call maintained in prose:
       # `tests/oracle_version_pins.rs` reads each baseline-leg suite's own
       # source for a C-oracle marker and fails if one of them is missing from
-      # this job. The baseline leg's remaining capi steps — the span-overflow
-      # guards, the error-code and message-rendering gates, the crate's unit
-      # tests, the ELF symbol-version leg — compare against constants, our own
-      # generated files, or the pinned headers, so a second run at another
+      # this job. What stays behind is everything self-contained: the four capi
+      # steps duplicated nowhere here — the span-overflow guards, the
+      # error-code and message-rendering gates, the crate's unit tests, the ELF
+      # symbol-version leg — plus the self-contained suites riding inside the
+      # mixed steps above (capi_input_complete_contract, capi_suspended_body_cap,
+      # norealloc_buffer_capacity, yuv_packed_length_overflow and the three
+      # yuv_*_guard/validate suites). All of them compare against constants, our
+      # own generated files, or the pinned headers, so a second run at another
       # upstream release would measure the same thing twice.
       - name: C-ABI TurboJPEG and stock-tool oracles (3.2.0)
         run: >
