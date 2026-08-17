@@ -207,7 +207,11 @@ enum Entry {
     /// A symlink, recorded by its literal target so a dereferenced copy of the
     /// library — three times the bytes and no SONAME chain — cannot pass.
     Symlink(String),
-    File(Vec<u8>),
+    /// A regular file with its permission bits. The mode is part of the
+    /// comparison because it is part of what is installed: a library re-staged
+    /// at `0644` is not executable-mapped the way `install -m 0755` leaves it,
+    /// and content-only equality would call that identical.
+    File { mode: u32, bytes: Vec<u8> },
 }
 
 /// Every path under `root`, relative to it, with its content or link target.
@@ -238,9 +242,13 @@ fn walk(root: &Path, dir: &Path, out: &mut BTreeMap<PathBuf, Entry>) {
         } else if meta.is_dir() {
             walk(root, &path, out);
         } else {
+            use std::os::unix::fs::PermissionsExt;
             out.insert(
                 relative,
-                Entry::File(std::fs::read(&path).expect("read file")),
+                Entry::File {
+                    mode: meta.permissions().mode() & 0o777,
+                    bytes: std::fs::read(&path).expect("read file"),
+                },
             );
         }
     }
@@ -301,6 +309,29 @@ fn release_bundle_carries_the_complete_installed_prefix() {
         assert!(
             resolved.is_file(),
             "{dev_path:?} → {resolved:?} is not a file"
+        );
+
+        // Existence is not enough. Staging races and truncated links both
+        // leave a *present* file at the end of a resolving chain, and every
+        // other check here — the script's own `-e` probe included — passes on
+        // a zero-length one. Assert it is actually a shared library.
+        let head: Vec<u8> = std::fs::read(&resolved).expect("read the staged library");
+        assert!(
+            head.len() > 4096,
+            "{resolved:?} is {} bytes — a truncated or empty library, not a \
+             shared object",
+            head.len()
+        );
+        let is_elf: bool = head.starts_with(b"\x7fELF");
+        // Mach-O 64-bit, little-endian (`MH_MAGIC_64` on disk) and the
+        // universal-binary wrapper `cafebabe`.
+        let is_macho: bool = head.starts_with(&[0xcf, 0xfa, 0xed, 0xfe])
+            || head.starts_with(&[0xca, 0xfe, 0xba, 0xbe]);
+        assert!(
+            is_elf || is_macho,
+            "{resolved:?} does not start with an ELF or Mach-O magic; first \
+             four bytes are {:02x?}",
+            &head[..4]
         );
     }
 
@@ -366,9 +397,17 @@ fn release_bundle_checksum_verifies_from_the_download_directory() {
         eprintln!("SKIP: {reason}");
         return;
     }
+    // Both probes assert the tool *ran*, not merely that it spawned: an
+    // `is_ok()` probe is true for any binary that starts, so a broken one
+    // would turn this into a silent skip.
     let checker: &str = if have("sha256sum") {
         "sha256sum"
-    } else if Command::new("shasum").arg("-v").output().is_ok() {
+    } else if Command::new("shasum")
+        .arg("-v")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+    {
         "shasum"
     } else {
         eprintln!("SKIP: neither sha256sum nor shasum is on PATH");
@@ -428,6 +467,68 @@ fn release_bundle_checksum_verifies_from_the_download_directory() {
         !rejected.status.success(),
         "a corrupted archive passed `{checker} -c`, so the manifest is not \
          bound to the bytes it ships with"
+    );
+}
+
+/// The release job passes `--target <triple>`, which the other tests here do
+/// not: they pin `CAPI_TARGET_DIR` at the host's `deps/` directory, so
+/// `install_capi.sh` never derives a target-qualified path and never builds.
+///
+/// Driving the full `--target … --build` path would mean a fresh release
+/// build per platform in every CI leg. What this pins instead is the part
+/// that can silently rot — that `--target` reaches the nested build at all.
+/// A script that dropped the flag would build and package the *host* library
+/// under a cross target's name, and no assertion about the bundle's shape
+/// would notice. Naming a triple no toolchain has makes the failure the
+/// evidence.
+#[test]
+fn package_capi_release_sh_threads_target_through_to_the_build() {
+    if let Some(reason) = unsupported_host() {
+        eprintln!("SKIP: {reason}");
+        return;
+    }
+    let root: PathBuf = workspace_root();
+    let out: tempfile::TempDir = tempfile::tempdir().expect("mkdir outdir");
+    const FAKE_TARGET: &str = "x86_64-unknown-nonesuch-elf";
+
+    let run = Command::new("bash")
+        .arg(root.join("scripts/package_capi_release.sh"))
+        .args(["--outdir", &out.path().to_string_lossy()])
+        .args(["--prefix", TEST_PREFIX])
+        .args(["--root", &root.to_string_lossy()])
+        .args(["--target", FAKE_TARGET])
+        // Deliberately no CAPI_TARGET_DIR: that is what forces install_capi.sh
+        // to derive the release directory from the target, exactly as the
+        // release job does.
+        .env_remove("CAPI_TARGET_DIR")
+        .output()
+        .expect("invoke package_capi_release.sh");
+
+    assert!(
+        !run.status.success(),
+        "packaging succeeded for target {FAKE_TARGET:?}, which no toolchain \
+         can build — so the target was not used to select what gets packaged"
+    );
+    let output: String = format!(
+        "{}{}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert!(
+        output.contains(FAKE_TARGET),
+        "the failure never mentions {FAKE_TARGET:?}, so `--target` did not \
+         reach the staging path and the release's cross-built legs would \
+         package the host library:\n{output}"
+    );
+    let leftovers: Vec<PathBuf> = std::fs::read_dir(out.path())
+        .expect("read outdir")
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "a failed packaging run left {leftovers:?} in the output directory; a \
+         release would attach it"
     );
 }
 
@@ -509,23 +610,32 @@ fn release_bundle_is_exactly_what_install_capi_sh_stages() {
                     path.display()
                 )
             }
-            (Entry::Symlink(_), Entry::File(_)) => {
+            (Entry::Symlink(_), Entry::File { .. }) => {
                 format!(
                     "  {}: a symlink in the bundle, a file in staging",
                     path.display()
                 )
             }
-            (Entry::File(_), Entry::Symlink(_)) => {
+            (Entry::File { .. }, Entry::Symlink(_)) => {
                 format!(
                     "  {}: a file in the bundle, a symlink in staging",
                     path.display()
                 )
             }
-            (Entry::File(a), Entry::File(b)) => format!(
-                "  {}: {} bytes in the bundle, {} bytes in staging",
+            (
+                Entry::File {
+                    mode: bundle_mode,
+                    bytes: bundle_bytes,
+                },
+                Entry::File {
+                    mode: staged_mode,
+                    bytes: staged_bytes,
+                },
+            ) => format!(
+                "  {}: {} bytes mode {bundle_mode:o} in the bundle, {} bytes mode {staged_mode:o} in staging",
                 path.display(),
-                a.len(),
-                b.len()
+                bundle_bytes.len(),
+                staged_bytes.len()
             ),
         })
         .collect();

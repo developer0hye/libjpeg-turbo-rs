@@ -12,7 +12,7 @@ is about delivery, not about whether the thing delivered fits.
 | --- | --- |
 | crates.io | `libjpeg-turbo-rs`, `libjpeg-turbo-rs-capi`, `libjpeg-turbo-rs-image` |
 | npm | `libjpeg-turbo-rs-wasm` |
-| GitHub release | native bundles, one per platform, plus `SHA256SUMS` |
+| GitHub release | native bundles, one per target, each with its own `.sha256`, plus one `SHA256SUMS` covering all of them |
 
 The native bundles are new in P4-131. Before them the only way to get a
 `libjpeg.so.8` out of this project was to clone the repository, install a Rust
@@ -40,6 +40,7 @@ lib/libturbojpeg.so   → .so.0
 lib/pkgconfig/libjpeg.pc
 lib/pkgconfig/libturbojpeg.pc
 lib/cmake/JPEG/JPEGConfig.cmake
+share/doc/libjpeg-turbo-rs-capi/LICENSE-{MIT,APACHE}
 include/{jpeglib,jerror,jmorecfg,jconfig,turbojpeg}.h
 BUNDLE.txt
 ```
@@ -82,7 +83,8 @@ do it:
 PKG_CONFIG_PATH=<prefix>/lib/pkgconfig pkg-config --define-prefix --cflags --libs libjpeg
 ```
 
-Building the bundle yourself is the same one command the release runs:
+Building a bundle yourself runs the same script the release does, which adds
+only `--target <triple>` for its cross-built legs:
 
 ```bash
 scripts/package_capi_release.sh --outdir dist --build
@@ -137,16 +139,19 @@ it.
 `.github/workflows/release.yml`, on a `v*` tag:
 
 1. `changelog-check` — the tag must have a CHANGELOG section.
-2. `publish`, `publish-capi`, `publish-image` — crates.io.
-3. `publish-wasm` — npm.
-4. `native-artifacts` — the bundles, one job per target.
+2. `native-artifacts` — the bundles, one job per target.
+3. `publish`, `publish-capi`, `publish-image` — crates.io.
+4. `publish-wasm` — npm.
 5. `github-release` — creates the release from the CHANGELOG notes and
-   attaches the bundles with a merged `SHA256SUMS`.
+   attaches the bundles, their `.sha256` files and a merged `SHA256SUMS`.
 
-The release appears last, so a failed upload — registry or bundle — can never
+Both validations come before the first irreversible step: a registry upload
+cannot be withdrawn, so a bundle that fails to build fails ahead of it. The
+release itself appears last, so a failed upload — registry or bundle — can never
 leave a public release whose downloads are missing.
 
-`workflow_dispatch` runs step 4 alone: every publish job is gated on a tag
-ref, so a dispatch builds the bundles, uploads them as workflow artifacts, and
-publishes nothing. That is how to exercise the packaging matrix, including the
-cross-built `x86_64-apple-darwin` leg, before a tag makes the output public.
+`workflow_dispatch` runs step 2 alone: every publish job additionally requires
+`github.event_name == 'push'`, so a dispatch builds the bundles, uploads them as
+workflow artifacts, and publishes nothing — from any ref, including a tag. That
+is how to exercise the packaging matrix, including the cross-built
+`x86_64-apple-darwin` leg, before a tag makes the output public.

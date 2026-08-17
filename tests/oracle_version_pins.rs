@@ -1555,7 +1555,7 @@ fn oracle_install_on(line: &str) -> Option<OracleInstall> {
 /// those as jobs would ask [`job_block`] for a block that is not one.
 ///
 /// Checked once against a real YAML parser while this gate was written: the
-/// scanner's list is identical to PyYAML's for all 41 jobs in the nine
+/// scanner's list is identical to PyYAML's for all 42 jobs in the nine
 /// workflows, name for name. The standing protection is the sibling test —
 /// a workflow this returns nothing for is a workflow every gate here passes
 /// vacuously.

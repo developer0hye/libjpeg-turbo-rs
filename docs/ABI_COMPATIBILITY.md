@@ -51,6 +51,16 @@ Distro packagers should treat the missing version definitions as an open
 replacement gap until P4-81 closes. The reproducible binding evidence is in
 `experiments/opencv_downstream_2026-08-02.md`.
 
+**This is about the cdylib cargo emits, which is not what is installed.**
+`scripts/install_capi.sh` relinks the shipped Linux library from the crate's
+staticlib with a named version script, so the library in a release bundle
+*does* carry `LIBJPEG_8.0` — rustc's anonymous version tag is why the cdylib
+itself cannot (see P4-81 in `docs/last_mile/phase4.md`). What P4-81 still
+tracks is the downstream re-verification of that relinked library, which is
+blocked on P4-124. A packager installing the bundle is on the relinked path;
+a developer running `cargo build` and pointing `LD_LIBRARY_PATH` at
+`target/release` is on the unversioned one.
+
 ### Crate-private version node `LIBJPEGTURBORS_PRIVATE_1.0` (P4-129)
 
 `src/jpeglib.rs` defines 16 `jpeg_capi_test_*` accessors that the shim's own
@@ -328,9 +338,11 @@ a system `libjpeg.so.8` had to clone, install a Rust toolchain, build, and run
 `scripts/install_capi.sh` by hand.
 
 The bundle *is* that script's output — `scripts/package_capi_release.sh` runs
-it and archives the result unchanged, so what a packager downloads is the tree
-the downstream harnesses test (P4-124). Contents, verification and install
-steps are in [`RELEASE_ARTIFACTS.md`](RELEASE_ARTIFACTS.md).
+it and archives the result unchanged. That is the one staging path P4-124 needs
+before a packager's download can be the tree the downstream harnesses test;
+P4-124 is open, and those harnesses still stage the raw cargo cdylib. Contents,
+verification and install steps are in
+[`RELEASE_ARTIFACTS.md`](RELEASE_ARTIFACTS.md).
 
 **Downloading it does not make this a drop-in.** The convenience cuts against
 the tier table: a packager who builds from source reads it on the way past, and

@@ -4,20 +4,29 @@ on:
   push:
     # `v*`     — bumps the root crate; runs both crates.io and npm jobs.
     # `wasm-v*` — bumps only the WASM crate; the crates.io job is skipped
-    #            and only the npm publish runs. This lets the WASM
+    #            and of the publish jobs only npm runs. This lets the WASM
     #            bindings ship fresh fixes without forcing a no-op patch
     #            release of the root crate when no Rust code changed.
-    # `capi-v*` — bumps only the capi crate (C ABI shim). Only the
-    #            publish-capi job runs; the root-crate and WASM jobs
+    # `capi-v*` — bumps only the capi crate (C ABI shim). Of the publish
+    #            jobs only publish-capi runs; the root-crate and WASM jobs
     #            are skipped. Useful for shipping ABI-shim fixes
     #            (mozjpeg compat, install staging, symbol-inventory
     #            additions, etc.) without forcing a no-op root release.
+    # `native-artifacts` runs on `v*` and `capi-v*` — both ship the capi
+    #            crate the bundle contains — and is skipped on `wasm-v*`.
+    #            Only `v*` reaches `github-release`, so on a `capi-v*` tag
+    #            the bundles remain workflow artifacts rather than release
+    #            assets; P4-131 records that as remaining work.
     tags: ['v*', 'wasm-v*', 'capi-v*']
-  # P4-131: build the native bundles without publishing anything. Every
-  # publish job below is gated on a tag ref, so a dispatch runs the
-  # `native-artifacts` job alone and uploads its output as workflow
-  # artifacts — which is the only way to exercise the packaging matrix,
-  # including the cross-built legs, before a tag makes the result public.
+  # P4-131: build the native bundles without publishing anything, so the
+  # packaging matrix — including the cross-built legs — can be exercised
+  # before a tag makes the result public.
+  #
+  # Every publish job below additionally requires `github.event_name ==
+  # 'push'`. The tag-shape test alone would not be enough: `gh workflow run
+  # release.yml --ref v1.2.3` dispatches with `github.ref` still pointing at
+  # `refs/tags/v1.2.3`, so a dispatch could otherwise reach crates.io and
+  # npm. A dispatch publishes nothing from any ref.
   workflow_dispatch:
   # NOTE: no `release: published` trigger (codex P1). Entering via an
   # already-public Release would put the Release online BEFORE changelog
@@ -34,7 +43,7 @@ jobs:
   changelog-check:
     name: Validate CHANGELOG entry for tag
     runs-on: ubuntu-latest
-    if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
     steps:
       - uses: actions/checkout@v7
       - name: Require a CHANGELOG section for this version
@@ -57,12 +66,18 @@ jobs:
   publish:
     name: Publish libjpeg-turbo-rs to crates.io
     runs-on: ubuntu-latest
-    needs: changelog-check
+    needs: [changelog-check, native-artifacts]
     # Skip on WASM-only or capi-only tags — those don't bump the root
     # crate. `!cancelled()` (not `always()`) so operator cancellation
     # stops the run before the irreversible upload (codex P1). For `v*`
     # tags a failed changelog-check blocks every publish.
-    if: ${{ !cancelled() && !startsWith(github.ref, 'refs/tags/wasm-v') && !startsWith(github.ref, 'refs/tags/capi-v') && needs.changelog-check.result == 'success' }}
+    #
+    # `native-artifacts` is a prerequisite for the same reason changelog-check
+    # is: validation precedes publication. A crates.io upload cannot be taken
+    # back, so a bundle leg that fails after it would leave the version public
+    # with no release to attach binaries to — the partial-release state this
+    # sequencing exists to prevent (P4-131).
+    if: ${{ !cancelled() && github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/wasm-v') && !startsWith(github.ref, 'refs/tags/capi-v') && needs.changelog-check.result == 'success' && needs.native-artifacts.result == 'success' }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -111,13 +126,17 @@ jobs:
     # CHANGELOG section blocks this job too (`skipped` = capi-v* tag,
     # where no root section is expected).
     #
-    # The leading `refs/tags/` test is what keeps that tolerance from
-    # becoming an entry point: this job accepts `publish` as *skipped*,
-    # so on the P4-131 artifact dispatch — where every upstream job
-    # skips — it would otherwise have published to crates.io off a
-    # branch. It only ever means to run for a tag.
-    needs: [publish, changelog-check]
-    if: ${{ !cancelled() && startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref, 'refs/tags/wasm-v') && (needs.publish.result == 'success' || needs.publish.result == 'skipped') && needs.changelog-check.result != 'failure' }}
+    # The `push` test is what keeps that tolerance from becoming an entry
+    # point: this job accepts `publish` as *skipped*, so on a P4-131 artifact
+    # dispatch — where every upstream job skips — it would otherwise have
+    # published to crates.io. A tag *shape* test would not close it, since a
+    # dispatch can name a tag ref.
+    #
+    # `native-artifacts` runs on both tags this job serves, so `success` is
+    # required outright: the bundle must build before the upload nobody can
+    # undo (P4-131).
+    needs: [publish, changelog-check, native-artifacts]
+    if: ${{ !cancelled() && github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/wasm-v') && (needs.publish.result == 'success' || needs.publish.result == 'skipped') && needs.changelog-check.result != 'failure' && needs.native-artifacts.result == 'success' }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -168,7 +187,7 @@ jobs:
     # the root crate). Runs on `v*` tags; capi-v*/wasm-v* don't bump the
     # bridge.
     needs: [publish-capi, changelog-check]
-    if: ${{ !cancelled() && startsWith(github.ref, 'refs/tags/v') && !startsWith(github.ref, 'refs/tags/wasm-v') && !startsWith(github.ref, 'refs/tags/capi-v') && (needs.publish-capi.result == 'success') && needs.changelog-check.result == 'success' }}
+    if: ${{ !cancelled() && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && !startsWith(github.ref, 'refs/tags/wasm-v') && !startsWith(github.ref, 'refs/tags/capi-v') && (needs.publish-capi.result == 'success') && needs.changelog-check.result == 'success' }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -200,16 +219,20 @@ jobs:
   publish-wasm:
     name: Publish to npm
     runs-on: ubuntu-latest
-    needs: [publish, changelog-check]
+    needs: [publish, changelog-check, native-artifacts]
     # Run on `v*` (root crate published) and `wasm-v*` (publish job
     # was skipped intentionally). Skip on `capi-v*` — those are ABI
     # shim releases that don't bump the WASM bindings. Like
     # publish-capi, a FAILED changelog-check blocks this job, and
-    # `!cancelled()` honors operator cancellation. `refs/tags/` for the
-    # same reason as publish-capi: accepting a *skipped* `publish` is
-    # what lets a `wasm-v*` tag through, and without the ref test it
-    # would also let the P4-131 artifact dispatch publish to npm.
-    if: ${{ !cancelled() && startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref, 'refs/tags/capi-v') && (needs.publish.result == 'success' || needs.publish.result == 'skipped') && needs.changelog-check.result != 'failure' }}
+    # `!cancelled()` honors operator cancellation. `push` for the same
+    # reason as publish-capi: accepting a *skipped* `publish` is what lets
+    # a `wasm-v*` tag through, and without the event test it would also let
+    # the P4-131 artifact dispatch publish to npm.
+    #
+    # `native-artifacts` may be *skipped* here and only here: it does not run
+    # on `wasm-v*`, which ships no native library. On a `v*` tag it runs, so
+    # `skipped` cannot mask a bundle failure.
+    if: ${{ !cancelled() && github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/capi-v') && (needs.publish.result == 'success' || needs.publish.result == 'skipped') && needs.changelog-check.result != 'failure' && (needs.native-artifacts.result == 'success' || needs.native-artifacts.result == 'skipped') }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -278,19 +301,23 @@ jobs:
   # `package_capi_release.sh` stages nothing of its own — it calls that same
   # install script and archives what it produced, which is P4-131's third
   # criterion and P4-124's precondition: one staging path, so the bundle a
-  # packager downloads is the tree the downstream harnesses test.
-  # `crates/libjpeg-turbo-rs-capi/tests/release_bundle.rs` holds that
+  # packager downloads can be the tree the downstream harnesses test. (They
+  # do not test it yet — P4-124 is open and still stages the raw cargo
+  # cdylib. This makes that closable.)
+  # `crates/libjpeg-turbo-rs-capi/tests/release_bundle.rs` holds the
   # invariant by comparing an unpacked bundle against a direct install run,
-  # and runs on every pull request.
+  # and runs on every pull request via ci.yml's `capi-abi-checks`.
   #
-  # Not a publish job, so unlike the ones above it is safe on a dispatch —
-  # and that is how the matrix gets exercised before a tag makes the output
-  # public. Windows (DLL + import library) is still open; P4-131 stays
-  # PARTIAL until it lands.
+  # Runs FIRST, ahead of every publish job, because a crates.io or npm upload
+  # cannot be withdrawn: a bundle that fails to build must fail before the
+  # irreversible step, not after it. Not a publish job itself, so it is also
+  # the one job a dispatch may run. Skipped on `wasm-v*`, which ships no
+  # native library. Windows (DLL + import library) is still open; P4-131
+  # stays PARTIAL until it lands.
   native-artifacts:
     name: Native bundle (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
-    if: ${{ !cancelled() && (startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch') }}
+    if: ${{ !cancelled() && ((github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/wasm-v')) || github.event_name == 'workflow_dispatch') }}
     strategy:
       fail-fast: false
       matrix:
@@ -361,7 +388,7 @@ jobs:
     name: Create GitHub Release from CHANGELOG
     runs-on: ubuntu-latest
     needs: [changelog-check, publish, publish-capi, publish-image, publish-wasm, native-artifacts]
-    if: ${{ !cancelled() && startsWith(github.ref, 'refs/tags/v') && needs.changelog-check.result == 'success' && needs.publish.result == 'success' && needs.publish-capi.result == 'success' && needs.publish-image.result == 'success' && needs.publish-wasm.result == 'success' && needs.native-artifacts.result == 'success' }}
+    if: ${{ !cancelled() && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && needs.changelog-check.result == 'success' && needs.publish.result == 'success' && needs.publish-capi.result == 'success' && needs.publish-image.result == 'success' && needs.publish-wasm.result == 'success' && needs.native-artifacts.result == 'success' }}
     permissions:
       contents: write
     steps:
@@ -371,15 +398,22 @@ jobs:
           pattern: native-*
           path: dist
           merge-multiple: true
-      # One manifest for the whole release (P4-131 criterion 2). The
-      # per-bundle `.sha256` files are folded into it rather than attached
-      # alongside, so `sha256sum -c SHA256SUMS` verifies every download in
-      # one command and there is a single file to read.
+      # One manifest for the whole release (P4-131 criterion 2), attached
+      # *alongside* the per-bundle `.sha256` files rather than replacing them:
+      # `SHA256SUMS` verifies a complete download set in one command, and the
+      # per-bundle file is what someone who took a single tarball can use —
+      # which is also what that bundle's own BUNDLE.txt tells them to run.
+      #
+      # `set -euo pipefail` and `failglob` because GitHub's default shell is
+      # `bash -e` with no pipefail: an unmatched glob would otherwise pass the
+      # literal to `cat`, and `sort`'s exit 0 would mask the failure into an
+      # empty manifest.
       - name: Fold the per-bundle checksums into one manifest
         run: |
+          set -euo pipefail
+          shopt -s failglob
           cd dist
           cat ./*.tar.gz.sha256 | sort -k 2 > SHA256SUMS
-          rm -f ./*.tar.gz.sha256
           sha256sum -c SHA256SUMS
           cat SHA256SUMS
       - name: Create release with CHANGELOG notes
@@ -392,7 +426,7 @@ jobs:
           # for exactly the releases someone drafted by hand.
           if gh release view "$TAG" > /dev/null 2>&1; then
             echo "release for $TAG already exists (drafted manually?); leaving its notes alone and uploading the native bundles"
-            gh release upload "$TAG" --clobber dist/*.tar.gz dist/SHA256SUMS
+            gh release upload "$TAG" --clobber dist/*.tar.gz dist/*.tar.gz.sha256 dist/SHA256SUMS
             exit 0
           fi
           VERSION="${TAG#v}"
@@ -402,4 +436,4 @@ jobs:
             grab { print }
           ' CHANGELOG.md > /tmp/notes.md
           gh release create "$TAG" --verify-tag --title "$TAG" --notes-file /tmp/notes.md \
-            dist/*.tar.gz dist/SHA256SUMS
+            dist/*.tar.gz dist/*.tar.gz.sha256 dist/SHA256SUMS

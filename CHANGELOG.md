@@ -18,7 +18,8 @@ and `git log` between tags.
   manifest attached beside them. Replacing a system `libjpeg.so.8` no longer
   requires cloning the repository and installing a Rust toolchain. The bundle
   is `scripts/install_capi.sh`'s output archived unchanged — one staging path,
-  so what you download is the tree the downstream harnesses test. See
+  which is what P4-124 needs before the downstream harnesses can test the tree
+  you download; today they still stage the raw cargo cdylib. See
   [`docs/RELEASE_ARTIFACTS.md`](docs/RELEASE_ARTIFACTS.md) for verification and
   install steps, and for what is still missing: no Windows bundle, no
   signature or SBOM, and no first-party deb/rpm.

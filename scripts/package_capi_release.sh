@@ -8,12 +8,15 @@
 # by hand.
 #
 # **It stages nothing itself.** Every file in the archive comes from
-# `install_capi.sh`, which is the same path P4-124 requires the downstream
-# harnesses to test — one staging path, so the artifact a packager downloads
-# is the artifact the harnesses measure. The only file this script adds is
-# `BUNDLE.txt`, which describes the bundle. That invariant is enforced by
+# `install_capi.sh`; the only file this script adds is `BUNDLE.txt`, which
+# describes the bundle. That invariant is enforced by
 # `crates/libjpeg-turbo-rs-capi/tests/release_bundle.rs`, which compares the
 # unpacked archive against a direct `install_capi.sh` run entry by entry.
+#
+# It matters because `install_capi.sh` is the path P4-124 will point the
+# downstream harnesses at. Today they still stage the raw cargo cdylib, so
+# "what you download is what the harnesses test" is the goal this makes
+# reachable, not a property the repository has yet — P4-124 is open.
 #
 # Usage:
 #   scripts/package_capi_release.sh --outdir dist
@@ -75,25 +78,52 @@ if [[ -z "$TARGET" ]]; then
     [[ -n "$TARGET" ]] || { echo "could not resolve Cargo host target" >&2; exit 1; }
 fi
 
-VERSION="$(grep '^version' "$ROOT/crates/libjpeg-turbo-rs-capi/Cargo.toml" | head -1 | sed 's/.*"\(.*\)".*/\1/')"
+# `-m1` rather than `| head -1`: under `pipefail`, head closing the pipe can
+# leave grep at 141 and abort the script.
+VERSION="$(grep -m1 '^version' "$ROOT/crates/libjpeg-turbo-rs-capi/Cargo.toml" | sed 's/.*"\(.*\)".*/\1/')"
 [[ -n "$VERSION" ]] || { echo "could not read the capi crate version" >&2; exit 1; }
 
 BUNDLE="libjpeg-turbo-rs-capi-${VERSION}-${TARGET}"
 ARCHIVE="${BUNDLE}.tar.gz"
 
-# The SONAME the bundle carries. Recorded in BUNDLE.txt rather than assumed by
+# Resolve the output directory *before* the build, so a misspelled or
+# unwritable `--outdir` costs a shell error rather than a full release build.
+mkdir -p "$OUTDIR"
+OUTDIR="$(cd "$OUTDIR" && pwd)"
+
+# The names the bundle carries. Recorded in BUNDLE.txt rather than assumed by
 # the reader: `install_capi.sh` takes a `--soname` override, and a bundle whose
 # chain is not the v8 default must say so where a packager will look.
+#
+# TAR_IDENTITY forces uid/gid 0 into the archive. Without it the tarball
+# records the *build runner's* account, and GNU tar extracting as root honours
+# it — so the documented `sudo cp -a` install would leave `/usr/local/lib`
+# owned by whatever local user happens to hold uid 1001 on the target host,
+# who could then replace a library that root-run programs load.
 case "$(uname -s)" in
-    Linux*)  SONAME="libjpeg.so.8" ;;
-    Darwin*) SONAME="libjpeg.8.dylib" ;;
+    Linux*)
+        SONAME="libjpeg.so.8"
+        SONAME_DEV="libjpeg.so"
+        SONAME_TJ="libturbojpeg.so.0"
+        SONAME_TJ_DEV="libturbojpeg.so"
+        TAR_IDENTITY=(--owner=0 --group=0 --numeric-owner)
+        ;;
+    Darwin*)
+        SONAME="libjpeg.8.dylib"
+        SONAME_DEV="libjpeg.dylib"
+        SONAME_TJ="libturbojpeg.0.dylib"
+        SONAME_TJ_DEV="libturbojpeg.dylib"
+        # bsdtar spells it differently, and needs the *names* blanked too —
+        # it writes uname/gname and a GNU tar extraction resolves those first.
+        TAR_IDENTITY=(--uid 0 --gid 0 --uname "" --gname "")
+        ;;
     # Windows (DLL + import library) is still open under P4-131. Fail here
     # rather than emit a bundle whose shape nothing has verified.
     *) echo "unsupported platform for packaging: $(uname -s) (P4-131 tracks Windows)" >&2; exit 1 ;;
 esac
 
 STAGE="$(mktemp -d)"
-trap 'rm -rf "$STAGE"' EXIT
+trap 'rm -rf "$STAGE"' EXIT INT TERM
 
 INSTALL_ARGS=(--destdir "$STAGE/destdir" --prefix "$PREFIX" --root "$ROOT")
 [[ "$DO_BUILD" -eq 1 ]] && INSTALL_ARGS+=(--build)
@@ -107,11 +137,21 @@ mv "$STAGED" "$STAGE/$BUNDLE"
 # tarball that is missing the pieces a packager needs. The Rust suite asserts
 # far more than this; these are the cases that would otherwise ship silently
 # when a staging step degraded to a warning on the release runner.
+#
+# Both chains and both dev links, not just the libjpeg major: the dev link is
+# what `JPEGConfig.cmake` names as `JPEG_LIBRARY`, so a bundle missing it
+# resolves `find_package(JPEG)` to a path that does not exist, and the
+# libturbojpeg chain is half of what BUNDLE.txt advertises.
 REQUIRED=(
     "lib/${SONAME}"
+    "lib/${SONAME_DEV}"
+    "lib/${SONAME_TJ}"
+    "lib/${SONAME_TJ_DEV}"
     "lib/pkgconfig/libjpeg.pc"
     "lib/pkgconfig/libturbojpeg.pc"
     "lib/cmake/JPEG/JPEGConfig.cmake"
+    "share/doc/libjpeg-turbo-rs-capi/LICENSE-MIT"
+    "share/doc/libjpeg-turbo-rs-capi/LICENSE-APACHE"
     "include/jpeglib.h"
     "include/jerror.h"
     "include/jmorecfg.h"
@@ -148,6 +188,7 @@ scripts/package_capi_release.sh. Contents:
   lib/                 both SONAME chains (libjpeg and libturbojpeg)
   lib/pkgconfig/       libjpeg.pc, libturbojpeg.pc
   lib/cmake/JPEG/      JPEGConfig.cmake for find_package(JPEG)
+  share/doc/           LICENSE-MIT, LICENSE-APACHE
   include/             jpeglib.h, jerror.h, jmorecfg.h, jconfig.h, turbojpeg.h
 
 The prefix above is baked into the .pc and CMake files, which record absolute
@@ -156,21 +197,22 @@ either rewrite those paths or let pkg-config do it:
 
   PKG_CONFIG_PATH=<where>/lib/pkgconfig pkg-config --define-prefix --cflags libjpeg
 
-Verify the download before installing:
+Verify the download before installing. Both files are attached to a GitHub
+release: SHA256SUMS covers every bundle in it, the .sha256 covers this one.
 
   sha256sum -c ${ARCHIVE}.sha256      # macOS: shasum -a 256 -c
+
+Extract with --no-same-owner if you unpack as root; the archive is written
+0:0, but a tarball from elsewhere may not be.
 
 This library is not yet a general drop-in replacement for C libjpeg-turbo.
 Read docs/RELEASE_ARTIFACTS.md and docs/ABI_COMPATIBILITY.md — in particular
 the replacement tiers — before replacing a system libjpeg.
 EOF
 
-mkdir -p "$OUTDIR"
-OUTDIR="$(cd "$OUTDIR" && pwd)"
-
-# `tar` stores symlinks as symlinks by default in both GNU tar and bsdtar, so
-# the SONAME chain survives the round trip. Do not add --dereference.
-tar -czf "$OUTDIR/$ARCHIVE" -C "$STAGE" "$BUNDLE"
+# Symlinks stay symlinks in both GNU tar and bsdtar, so the SONAME chain
+# survives the round trip. Do not add --dereference.
+tar "${TAR_IDENTITY[@]}" -czf "$OUTDIR/$ARCHIVE" -C "$STAGE" "$BUNDLE"
 
 # `<hash>  <bare name>` so `sha256sum -c` works in the directory the archive
 # was downloaded into, not only where it was built.

@@ -5203,7 +5203,7 @@ measured was whatever homebrew shipped that week.
 
 So the rule moved off the list of workflow files and onto the **job**.
 `tests/oracle_version_pins.rs` enumerates every job in `.github/workflows`
-(41 today, in nine files; the enumeration was checked once against a real YAML
+(42 today, in nine files; the enumeration was checked once against a real YAML
 parser, name for name) and holds each one that provisions a C libjpeg-turbo to
 three things:
 
@@ -5632,19 +5632,19 @@ was filed with:
 **GitHub:** [#462](https://github.com/developer0hye/libjpeg-turbo-rs/issues/462) — under the [#470](https://github.com/developer0hye/libjpeg-turbo-rs/issues/470) umbrella.
 
 **Motivation.** Filed 2026-08-09 by the external drop-in readiness review.
-`.github/workflows/release.yml` has six jobs: `changelog-check`, `publish`
+`.github/workflows/release.yml` had six jobs: `changelog-check`, `publish`
 (crates.io), `publish-capi` (crates.io), `publish-image` (crates.io),
 `publish-wasm` (npm), and `github-release` (notes from CHANGELOG). **No job
-produces a native binary artifact.** A user who wants to replace their system
-`libjpeg.so.8` must clone the repository, install a Rust toolchain, build, and
+produced a native binary artifact.** A user who wanted to replace their system
+`libjpeg.so.8` had to clone the repository, install a Rust toolchain, build, and
 run `scripts/install_capi.sh` themselves.
 
-The install *layout* is not the gap — `scripts/install_capi.sh` already stages a
+The install *layout* was not the gap — `scripts/install_capi.sh` already stages a
 correct prefix: `lib/libjpeg.so.8*`, `lib/libturbojpeg.so.0*`,
 `lib/pkgconfig/libjpeg.pc`, `lib/pkgconfig/libturbojpeg.pc`,
 `lib/cmake/JPEG/JPEGConfig.cmake`, and `include/{jpeglib,jerror,jmorecfg,jconfig,turbojpeg}.h`.
-The gap is that nothing runs it in CI to produce a downloadable artifact, so
-the staged prefix is only ever built on a developer's machine.
+The gap was that nothing ran it in CI to produce a downloadable artifact, so
+the staged prefix was only ever built on a developer's machine.
 
 Upstream, by contrast, ships signed source tarballs plus official binary
 packages per platform, with published signature-verification instructions.
@@ -5683,21 +5683,43 @@ matrix job in `release.yml` build and attach
 `libjpeg-turbo-rs-capi-<version>-<target>.tar.gz` for
 `x86_64`/`aarch64-unknown-linux-gnu` and `x86_64`/`aarch64-apple-darwin` on
 every `v*` tag, and `github-release` folds the per-bundle sums into one
-`SHA256SUMS` and attaches it with them (criterion 2). The workflow also gained
-`workflow_dispatch`, which runs that job alone — every publish job is now
-additionally gated on a `refs/tags/` ref, because `publish-capi` and
-`publish-wasm` both accept a *skipped* upstream job and would otherwise have
-published to crates.io and npm off a branch dispatch.
+`SHA256SUMS` and attaches it with them (criterion 2). It runs *ahead* of every
+publish job, which now need it: a crates.io upload cannot be withdrawn, so a
+bundle that fails to build must fail before the irreversible step. The workflow
+also gained `workflow_dispatch`, which runs that job alone — every publish job
+is now additionally gated on `github.event_name == 'push'`, because
+`publish-capi` and `publish-wasm` both accept a *skipped* upstream job and
+would otherwise have published to crates.io and npm off a dispatch. A tag-shape
+test would not have closed that: `gh workflow run --ref v1.2.3` dispatches with
+`github.ref` still on the tag.
 
 *Criterion 3, mechanically.* The packaging script stages nothing: it calls
 `scripts/install_capi.sh` and archives its output, adding only a `BUNDLE.txt`.
 `crates/libjpeg-turbo-rs-capi/tests/release_bundle.rs`
 (`release_bundle_is_exactly_what_install_capi_sh_stages`) unpacks a bundle and
 compares it against a direct install run entry by entry — paths, symlink
-targets and file bytes — so a second staging path fails rather than diverges
-quietly. Its siblings assert the SONAME chains survive the archive as symlinks,
-that the `.pc` files carry the requested prefix, and that `sha256sum -c`
-accepts the archive and *rejects* a byte-flipped one.
+targets, permission bits and file bytes — so a second staging path fails rather
+than diverges quietly. Its siblings assert the SONAME chains survive the
+archive as symlinks resolving to a real ELF/Mach-O inside the bundle, that the
+`.pc` files carry the requested prefix, that `sha256sum -c` accepts the archive
+and *rejects* a byte-flipped one, and that `--target` reaches the nested build
+— the release's cross-built legs would otherwise package the host library under
+a cross target's name and every shape assertion would still pass.
+
+*Three defects the pre-merge review caught, recorded because each was invisible
+to the tests as first written.* (a) `install_capi.sh` relinked to a **fixed**
+`…​.versioned` path under `RELEASE_DIR`, so two concurrent installs against one
+target directory — which is what `cargo test` does the moment a second suite
+stages the prefix — had `ld` truncate each other's output, and every existence
+check still passed on the short result. It now links to a `mktemp` name and
+removes it on exit. (b) The archive recorded the build runner's uid/gid, and
+GNU tar extracting as root honours that: the documented `sudo cp -a` install
+would have left `/usr/local/lib` owned by whoever holds uid 1001 on the target
+host. It is now written `0:0` with blank user/group names. (c) MIT and
+Apache-2.0 both require the notice to travel with a binary redistribution, and
+nothing staged one — `install_capi.sh` now installs both texts to
+`share/doc/libjpeg-turbo-rs-capi/`, which is where upstream libjpeg-turbo puts
+its own, so every install gets them and not only the archive.
 
 *Where it runs.* `capi-abi-checks` in `ci.yml` gained a step naming
 `--test install_layout --test release_bundle`, so the gate runs on
@@ -5729,6 +5751,23 @@ warn-and-continue degradations can ship silently in a published bundle.
    already records it as a maintainer decision rather than a technical one, and
    an unattended session is not the place to make it. The tarballs do remove
    the technical obstacle — a packager now has everything `debian/rules` needs.
+4. **A `capi-v*` tag builds bundles and attaches them to nothing.**
+   `native-artifacts` runs there — that tag ships the very crate the bundle
+   contains — but `github-release` is `refs/tags/v`-only, so the four archives
+   expire as workflow artifacts. An ABI-shim release is exactly the one whose
+   consumers want a binary. Either `github-release` learns the `capi-v*` shape
+   or the bundle job stops running on it; `release.yml`'s `on:` comment points
+   here. Left as it is rather than decided unattended, because the first option
+   creates a release channel this project does not currently have and the
+   second removes a gate on an irreversible publish.
+5. **The archive name does not distinguish two releases carrying one capi
+   version.** The stem is the *capi* crate's version, and the bundle is
+   attached on *root* `v*` tags, so two root releases that do not bump the capi
+   crate produce identically named archives — with different bytes, since the
+   capi crate compiles against the root crate. `BUNDLE.txt` records the commit,
+   so an unpacked bundle is identifiable; a downloads directory holding both is
+   not. Fixing it means putting the release tag in the name, which changes the
+   name a packager scripts against, so it belongs with (4).
 
 ## P4-132. Classic C-ABI Per-`cinfo` State Is Thread-Affine (P4-16 Option A) — **OPEN**
 
@@ -8863,6 +8902,15 @@ oracle test compares against real TurboJPEG — has also never run in CI. Two
 suites, found by two unrelated pieces of work, is the argument for criterion 3:
 the fix is the enumeration, not the two names. Neither is fixed here; P4-130's
 pairing gate compares the two *legs* and cannot see a suite that is on neither.
+
+**A third, later the same day.** P4-131's release-bundle work found
+`install_layout` in the same state — `git log --all -G"install_layout" --
+.github/` returns only the commit that added the step. It is P2-8's own closing
+gate, so the install-layout assertion that closed that item had never run on a
+pull request in the repository's history. That one *is* fixed, in the commit
+that found it, because P4-131's own criterion depends on the staging path it
+guards. It does not weaken criterion 3: three suites found by three unrelated
+pieces of work is the same argument, one instance stronger.
 
 This is the third instance of one defect class. P4-61 recorded it first (a test
 filter that matched nothing), `capi_classic_error_codes` was caught the same way
