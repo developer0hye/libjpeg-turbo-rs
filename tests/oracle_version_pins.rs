@@ -23,12 +23,18 @@
 //!   workflows install, so the classic-ABI trace oracles were already running
 //!   against a different release than the tool oracles.
 //!
-//! A second, independent dimension lives in the back half of this file: the
-//! two tool legs have to run the *same* C-ABI oracle suites. Versions being
-//! declared says nothing about which suites actually meet them, and the C-ABI
-//! crate's suites are selected by name — so a suite added to one leg is
-//! invisible to the other. That gate, its classifier and the job-block parse
-//! it rests on are documented at their own banner below.
+//! Two further dimensions live in the back half of this file, each under its
+//! own banner:
+//!
+//! * **the two tool legs run the same oracle-backed suites** — declaring
+//!   versions says nothing about which suites actually meet them, and suites
+//!   are selected by name, so one added to one leg is invisible to the other.
+//!   One pairing gate per crate: the C-ABI crate's suites, and the root
+//!   crate's exhaustive `full-c-parity` matrices.
+//! * **every oracle-provisioning job is pinned, checked and measured** — read
+//!   from all the jobs in all the workflows rather than from a list of
+//!   workflow files, which is what let one leg keep an unpinned
+//!   `brew install jpeg-turbo` while the legs a gate happened to name lost it.
 //!
 //! Currency against *upstream* is a network question and cannot be asked here;
 //! `scripts/check_oracle_currency.sh` asks it on a schedule.
@@ -1616,32 +1622,172 @@ fn asserts_release(line: &str, version: &str) -> bool {
         || is_assertion_over_output(line, &format!("VERSION {escaped}"))
 }
 
-/// The prefixes whose `djpeg` a job runs `-version` on.
+/// The absolute path a `<prefix>/bin/djpeg -version` line invokes, and the
+/// file it tees the output into, if any.
 ///
 /// An absolute path, because a bare `djpeg -version` is answered by PATH and
 /// says nothing about the install the job made — the shape `test-integration`
 /// carried while reading as a version check.
-fn djpeg_prefixes_checked_in(block: &str) -> BTreeSet<String> {
-    let mut prefixes: BTreeSet<String> = BTreeSet::new();
-    for line in block.lines() {
-        let trimmed: &str = line.trim_start();
-        if trimmed.starts_with('#') || !trimmed.contains("-version") {
-            continue;
-        }
-        let Some(at) = trimmed.find("/bin/djpeg") else {
+fn djpeg_version_invocation(line: &str) -> Option<(String, Option<String>)> {
+    let trimmed: &str = line.trim_start();
+    if trimmed.starts_with('#') || !trimmed.contains("-version") {
+        return None;
+    }
+    let at: usize = trimmed.find("/bin/djpeg")?;
+    let head: &str = &trimmed[..at];
+    let start: usize = head
+        .rfind([' ', '"', '\'', '\t', '('])
+        .map(|index| index + 1)
+        .unwrap_or(0);
+    let prefix: &str = &head[start..];
+    if !prefix.starts_with('/') {
+        return None;
+    }
+    let teed: Option<String> = trimmed.split("tee ").nth(1).map(|rest| {
+        rest.split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .trim_matches(['"', '\''])
+            .to_string()
+    });
+    Some((prefix.to_string(), teed))
+}
+
+/// Which release each prefix in this job has been *checked* to be.
+///
+/// A prefix is checked at a release when the job both invokes that prefix's
+/// `djpeg -version` and asserts the release over the output — either on the
+/// one line, or through the file the invocation tees into. Loose pairing
+/// ("somewhere in the job a version is asserted, somewhere a prefix is run")
+/// is not enough once a job carries more than one oracle, and
+/// `test-integration` carries three.
+fn prefix_releases_checked_in(block: &str) -> BTreeMap<String, BTreeSet<String>> {
+    let mut checked: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let lines: Vec<&str> = block.lines().collect();
+    for line in &lines {
+        let Some((prefix, teed)) = djpeg_version_invocation(line) else {
             continue;
         };
-        let head: &str = &trimmed[..at];
-        let start: usize = head
-            .rfind([' ', '"', '\'', '\t', '('])
-            .map(|index| index + 1)
-            .unwrap_or(0);
-        let prefix: &str = &head[start..];
-        if prefix.starts_with('/') {
-            prefixes.insert(prefix.to_string());
+        for version in versions_asserted_over(line, teed.as_deref(), &lines) {
+            checked.entry(prefix.clone()).or_default().insert(version);
         }
     }
-    prefixes
+    checked
+}
+
+/// The releases asserted over one `djpeg -version` invocation's output.
+fn versions_asserted_over(line: &str, teed: Option<&str>, lines: &[&str]) -> BTreeSet<String> {
+    let mut versions: BTreeSet<String> = BTreeSet::new();
+    for candidate in dotted_numeric_tokens_in_job(lines) {
+        let on_this_line: bool = asserts_release(line, &candidate);
+        let through_the_file: bool = teed.is_some_and(|file| {
+            lines
+                .iter()
+                .any(|other| other.contains(file) && asserts_release(other, &candidate))
+        });
+        if on_this_line || through_the_file {
+            versions.insert(candidate);
+        }
+    }
+    versions
+}
+
+/// Every 3.x token a job names anywhere — the candidate releases its checks
+/// could be asserting.
+fn dotted_numeric_tokens_in_job(lines: &[&str]) -> BTreeSet<String> {
+    let mut tokens: BTreeSet<String> = BTreeSet::new();
+    for line in lines {
+        for token in dotted_numeric_tokens(line) {
+            if token.split('.').next() == Some(ORACLE_MAJOR) {
+                tokens.insert(token);
+            }
+        }
+    }
+    tokens
+}
+
+/// Environment variables that name an oracle prefix for the step they are set
+/// on. `LIBJPEG_TURBO_REFERENCE_DIR` is P4-108's spelling of the same thing.
+const ORACLE_PREFIX_VARS: [&str; 2] = ["LIBJPEG_TURBO_PREFIX", "LIBJPEG_TURBO_REFERENCE_DIR"];
+
+/// One step of a job: what it runs, and the oracle prefixes it names.
+#[derive(Debug, Default)]
+struct Step {
+    script: String,
+    prefixes: BTreeSet<String>,
+}
+
+/// The steps of a job, each with its own `env:` scope.
+///
+/// Per step rather than per job, because a step-level assignment overrides the
+/// job's for that step alone. A union over the job would report a leg green
+/// whenever *any* of its steps named the checked install, while another
+/// `cargo test` step resolved a different oracle — on macOS, homebrew's. That
+/// is #569's false green one step over, and it is what a job-scope union
+/// cannot see.
+fn steps_in(job_block: &str) -> Vec<Step> {
+    // From the `steps:` key, not from the first `- ` in the job: a matrix
+    // entry (`- os: macos-latest`) comes first and sits deeper, and taking its
+    // indent as the step indent merged every real step into one — which is a
+    // job-scope union again, arriving through the parser, on the matrix jobs
+    // where the macOS rule matters most.
+    let after_steps_key: Option<&str> = job_block
+        .find("\n    steps:")
+        .map(|at| &job_block[at + "\n    steps:".len()..]);
+    let Some(body) = after_steps_key else {
+        return Vec::new();
+    };
+    let step_indent: Option<usize> = body
+        .lines()
+        .find(|line| line.trim_start().starts_with("- ") && !line.trim_start().starts_with("- #"))
+        .map(|line| line.len() - line.trim_start().len());
+    let Some(step_indent) = step_indent else {
+        return Vec::new();
+    };
+    let mut steps: Vec<Step> = Vec::new();
+    let mut current: Option<Step> = None;
+    let mut in_run: bool = false;
+    for line in body.lines() {
+        let trimmed: &str = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let indent: usize = line.len() - line.trim_start().len();
+        if indent == step_indent && trimmed.starts_with("- ") {
+            steps.extend(current.take());
+            current = Some(Step::default());
+            in_run = false;
+        }
+        let Some(step) = current.as_mut() else {
+            continue;
+        };
+        for variable in ORACLE_PREFIX_VARS {
+            if let Some(rest) = trimmed.strip_prefix(&format!("{variable}:")) {
+                step.prefixes
+                    .insert(rest.trim().trim_matches(['"', '\'']).to_string());
+            }
+        }
+        let starts_run: Option<&str> = ["- run:", "run:"]
+            .iter()
+            .find(|key| trimmed.starts_with(**key))
+            .copied();
+        if let Some(key) = starts_run {
+            in_run = true;
+            step.script
+                .push_str(trimmed[key.len()..].trim().trim_start_matches(['|', '>']));
+            continue;
+        }
+        if STEP_KEYS.iter().any(|key| trimmed.starts_with(key)) {
+            in_run = false;
+            continue;
+        }
+        if in_run {
+            step.script.push(' ');
+            step.script.push_str(trimmed);
+        }
+    }
+    steps.extend(current);
+    steps
 }
 
 /// The prefixes a job prepends to PATH, read from its `$GITHUB_PATH` writes.
@@ -1736,13 +1882,17 @@ fn every_job_that_installs_an_oracle_asserts_the_release_it_installed() {
             "{workflow} / {job} installs an upstream release asset but names no \
              version this gate can read"
         );
+        let checked: BTreeMap<String, BTreeSet<String>> = prefix_releases_checked_in(&block);
         for version in versions {
             assert!(
                 declared.contains(&version),
                 "{workflow} / {job} installs libjpeg-turbo {version}, which \
                  {MANIFEST} does not declare"
             );
-            if !block.lines().any(|line| asserts_release(line, &version)) {
+            // Checked *at a prefix*, not merely somewhere in the job: a job
+            // carrying two oracles could otherwise satisfy both rows with one
+            // check on one of them.
+            if !checked.values().any(|releases| releases.contains(&version)) {
                 offenders.push(format!("  {workflow} / {job} — installs {version}"));
             }
         }
@@ -1776,7 +1926,7 @@ fn every_job_that_installs_an_oracle_measures_the_install_it_checked() {
         if !installs_a_release {
             continue;
         }
-        let checked: BTreeSet<String> = djpeg_prefixes_checked_in(&block);
+        let checked: BTreeMap<String, BTreeSet<String>> = prefix_releases_checked_in(&block);
         if checked.is_empty() {
             offenders.push(format!(
                 "  {workflow} / {job} — runs no `<prefix>/bin/djpeg -version` \
@@ -1786,40 +1936,73 @@ fn every_job_that_installs_an_oracle_measures_the_install_it_checked() {
             ));
             continue;
         }
-        let assignments: PrefixAssignments = oracle_prefixes_assigned_by(&block);
-        let mut selected: BTreeSet<String> = assignments
-            .job_level
-            .into_iter()
-            .chain(assignments.step_level)
-            .collect();
+        let job_level: Option<String> = oracle_prefixes_assigned_by(&block).job_level;
         let on_macos: bool = job_runs_on_macos(&block);
-        if !on_macos {
-            selected.extend(path_entry_prefixes_in(&block));
-        }
-        if !checked.iter().any(|prefix| selected.contains(prefix)) {
-            offenders.push(format!(
-                "  {workflow} / {job} — checks {checked:?}, resolves its C \
-                 tools from {selected:?}{}",
-                if on_macos {
-                    " (a macOS runner, where a PATH entry selects nothing: \
-                     `helpers::c_tool_path` reads /opt/homebrew/bin first, so \
-                     only LIBJPEG_TURBO_PREFIX names an oracle there)"
-                } else {
-                    ""
+        let path_prefixes: BTreeSet<String> = path_entry_prefixes_in(&block);
+        for (index, step) in steps_in(&block).into_iter().enumerate() {
+            let consumes_an_oracle: bool = TEST_INVOCATIONS
+                .iter()
+                .any(|command| step.script.contains(command));
+            // A step's own assignment wins over the job's for that step alone,
+            // which is the whole reason this is read per step.
+            let effective: BTreeSet<String> = if !step.prefixes.is_empty() {
+                step.prefixes
+            } else if let Some(prefix) = job_level.clone() {
+                BTreeSet::from([prefix])
+            } else {
+                BTreeSet::new()
+            };
+            for prefix in &effective {
+                if !checked.contains_key(prefix) {
+                    offenders.push(format!(
+                        "  {workflow} / {job} step {index} — selects {prefix}, \
+                         which this job never checks the release of; it checks \
+                         {:?}",
+                        checked.keys().collect::<Vec<&String>>()
+                    ));
                 }
-            ));
+            }
+            if consumes_an_oracle && effective.is_empty() {
+                // Nothing names an oracle for this step, so it takes whatever
+                // lookup order finds.
+                let resolvable: bool = !on_macos
+                    && path_prefixes
+                        .iter()
+                        .any(|prefix| checked.contains_key(prefix));
+                if !resolvable {
+                    offenders.push(format!(
+                        "  {workflow} / {job} step {index} — runs tests against \
+                         whatever lookup order finds{}",
+                        if on_macos {
+                            ", and this is a macOS runner, where \
+                             `helpers::c_tool_path` reads /opt/homebrew/bin \
+                             before PATH: only LIBJPEG_TURBO_PREFIX names an \
+                             oracle there"
+                        } else {
+                            ", and no prefix this job checked is on its PATH"
+                        }
+                    ));
+                }
+            }
         }
     }
     assert!(
         offenders.is_empty(),
-        "these jobs verify one install and measure another, or verify none:\n{}\n\n\
-         Installing the right release is not measuring it. The leg has to run \
-         `-version` on the *installed path* and select that same prefix for \
-         its tests — through LIBJPEG_TURBO_PREFIX, or through PATH where \
-         lookup order can express it.",
+        "these steps measure an oracle the job never checked:\n{}\n\n\
+         Installing the right release is not measuring it, and the scope that \
+         matters is the *step*: a job-level prefix is overridden by a \
+         step-level one for that step alone, so a leg can verify one install \
+         and run its tests against another. Give the step a \
+         LIBJPEG_TURBO_PREFIX the job checked, or — off macOS, where lookup \
+         order can express it — put that prefix's bin first on PATH.",
         offenders.join("\n")
     );
 }
+
+/// Cargo invocations that reach the C oracle: the test binaries, the corpus
+/// example, the mutation run whose oracle decides whether a mutant is caught,
+/// and the differential fuzz targets that subprocess `djpeg`/`cjpeg`.
+const TEST_INVOCATIONS: [&str; 4] = ["cargo test", "cargo run", "cargo mutants", "fuzz run"];
 
 #[test]
 fn an_unpinned_package_manager_install_is_an_oracle_install() {
@@ -1978,13 +2161,151 @@ fn a_bare_tool_name_does_not_check_an_install() {
     // `test-integration` ran `djpeg -version` after exporting PATH. It reads
     // as a version check and names no install: which djpeg answered is decided
     // by lookup order, which is the ambiguity this item is about.
-    assert!(djpeg_prefixes_checked_in("          djpeg -version").is_empty());
-    assert_eq!(
-        djpeg_prefixes_checked_in(
-            "          /tmp/ljt3141/prefix/bin/djpeg -version 2>&1 | tee /tmp/oracle-version.txt"
-        ),
-        BTreeSet::from(["/tmp/ljt3141/prefix".to_string()])
+    assert!(
+        prefix_releases_checked_in("          djpeg -version | grep -q \"version 3.1.4.1\"")
+            .is_empty()
     );
+    // The one-line spelling and the `tee`-then-`grep` spelling both check the
+    // prefix they name; the second is what the older legs carry.
+    assert_eq!(
+        prefix_releases_checked_in(
+            "          /tmp/ljt3141/prefix/bin/djpeg -version 2>&1 | grep -q \"version 3.1.4.1\""
+        ),
+        BTreeMap::from([(
+            "/tmp/ljt3141/prefix".to_string(),
+            BTreeSet::from(["3.1.4.1".to_string()])
+        )])
+    );
+    assert_eq!(
+        prefix_releases_checked_in(
+            "          /usr/local/bin/djpeg -version 2>&1 | tee /tmp/oracle-version.txt\n\
+             \x20         grep -q \"version 3.1.4.1\" /tmp/oracle-version.txt"
+        ),
+        BTreeMap::from([(
+            "/usr/local".to_string(),
+            BTreeSet::from(["3.1.4.1".to_string()])
+        )])
+    );
+}
+
+#[test]
+fn one_prefixs_check_does_not_vouch_for_another() {
+    // The shape a job-scope pairing accepts and this one must not: two oracles
+    // in one job, one release asserted. `test-integration` carries three
+    // prefixes, so "somewhere in this job a version is asserted" would let a
+    // second oracle ride in unchecked — the finding that turned this from a
+    // set of prefixes into a map.
+    let two_oracles: &str = "          /opt/libjpeg-turbo/bin/djpeg -version 2>&1 | \
+                             grep -q \"version 3.1.4.1\"\n\
+                             \x20         /tmp/ljt8/prefix/bin/djpeg -version";
+    let checked: BTreeMap<String, BTreeSet<String>> = prefix_releases_checked_in(two_oracles);
+    assert!(checked.contains_key("/opt/libjpeg-turbo"));
+    assert!(
+        !checked.contains_key("/tmp/ljt8/prefix"),
+        "the second prefix is run, not checked: {checked:?}"
+    );
+    // A `tee` file belongs to the invocation that wrote it. Asserting one
+    // release over one file does not check the *other* prefix, however
+    // adjacent the lines are.
+    let crossed: &str = "          /opt/libjpeg-turbo/bin/djpeg -version 2>&1 | tee /tmp/a.txt\n\
+                         \x20         /tmp/ljt8/prefix/bin/djpeg -version 2>&1 | tee /tmp/b.txt\n\
+                         \x20         grep -q \"version 3.1.4.1\" /tmp/a.txt";
+    let checked: BTreeMap<String, BTreeSet<String>> = prefix_releases_checked_in(crossed);
+    assert_eq!(
+        checked.keys().collect::<Vec<&String>>(),
+        vec!["/opt/libjpeg-turbo"],
+        "{checked:?}"
+    );
+}
+
+#[test]
+fn a_step_level_prefix_is_read_at_step_scope() {
+    // Why this is parsed per step at all: a job-level value and a step-level
+    // override read identically once indentation is gone, and the difference
+    // decides which oracle a `cargo test` step measures.
+    let job: &str = "\n    steps:\n\
+                     \x20     - name: Install\n\
+                     \x20       run: echo install\n\
+                     \x20     - name: Tests against the deb\n\
+                     \x20       run: cargo test --tests\n\
+                     \x20       env:\n\
+                     \x20         LIBJPEG_TURBO_PREFIX: /opt/libjpeg-turbo\n\
+                     \x20     - name: Traces against the v8 build\n\
+                     \x20       run: cargo test -p libjpeg-turbo-rs-capi --test capi_x\n\
+                     \x20       env:\n\
+                     \x20         LIBJPEG_TURBO_REFERENCE_DIR: /tmp/ljt8/prefix\n";
+    let steps: Vec<Step> = steps_in(job);
+    assert_eq!(steps.len(), 3, "{steps:?}");
+    assert!(steps[0].prefixes.is_empty());
+    assert!(!steps[0].script.contains("cargo test"));
+    assert_eq!(
+        steps[1].prefixes,
+        BTreeSet::from(["/opt/libjpeg-turbo".to_string()])
+    );
+    assert!(steps[1].script.contains("cargo test"));
+    // P4-108's spelling of the same idea names the oracle just as surely.
+    assert_eq!(
+        steps[2].prefixes,
+        BTreeSet::from(["/tmp/ljt8/prefix".to_string()])
+    );
+}
+
+#[test]
+fn a_matrix_entry_is_not_the_first_step() {
+    // `test-cross-encode` declares its runner in a matrix, and a matrix entry
+    // is a `- ` line that comes before `steps:` and sits deeper. Reading the
+    // step indent off the first `- ` in the job took *that* line, so no real
+    // step boundary matched and every step — with every prefix any of them
+    // set — merged into one. That is the job-scope union this parser exists to
+    // replace, arriving through the parser instead of the rule.
+    let job: &str = "    runs-on: ${{ matrix.os }}\n\
+                     \x20   strategy:\n\
+                     \x20     matrix:\n\
+                     \x20       include:\n\
+                     \x20         - os: macos-latest\n\
+                     \x20   steps:\n\
+                     \x20     - uses: actions/checkout@v7\n\
+                     \x20     - name: Tests\n\
+                     \x20       run: cargo test --tests\n";
+    let steps: Vec<Step> = steps_in(job);
+    assert_eq!(steps.len(), 2, "{steps:?}");
+    assert!(
+        !steps[0].script.contains("cargo test"),
+        "the checkout step runs no tests: {steps:?}"
+    );
+    assert!(steps[1].script.contains("cargo test"));
+}
+
+#[test]
+fn every_cargo_invocation_that_reaches_the_oracle_is_recognised() {
+    // A step this list does not match is a step the gate never asks about, so
+    // an unchecked oracle would ride in under a spelling nobody added here.
+    // These are the four shapes the workflows use today.
+    for script in [
+        "cargo test --tests",
+        "cargo run --release --example corpus_test -- --corpus-dir tests/corpus/",
+        "cargo mutants --in-diff /tmp/pr.diff",
+        "cargo +nightly fuzz run --target x86_64-unknown-linux-gnu \"${FUZZ_TARGET}\"",
+    ] {
+        assert!(
+            TEST_INVOCATIONS
+                .iter()
+                .any(|command| script.contains(command)),
+            "{script:?} reaches the C oracle and no entry recognises it"
+        );
+    }
+    // …and a step that only installs does not.
+    for script in [
+        "sudo apt-get install -y /tmp/ljt.deb",
+        "cargo build --release",
+    ] {
+        assert!(
+            !TEST_INVOCATIONS
+                .iter()
+                .any(|command| script.contains(command)),
+            "{script:?} runs no tests"
+        );
+    }
 }
 
 #[test]

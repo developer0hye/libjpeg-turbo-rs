@@ -67,7 +67,10 @@ jobs:
           echo "/opt/libjpeg-turbo/bin" >> $GITHUB_PATH
       # The release has to be asserted, not printed: a mutant that survives
       # only because the oracle was a different libjpeg reports as MISSED for
-      # the same wrong reason a missing oracle does.
+      # the same wrong reason a missing oracle does. Note what this check can
+      # and cannot do here — the job is `continue-on-error`, so a wrong oracle
+      # stops *this* job and still leaves CI green. It protects the mutation
+      # result's meaning, not the merge.
       - name: Verify the oracle really is 3.1.4.1
         run: |
           /opt/libjpeg-turbo/bin/djpeg -version 2>&1 | tee /tmp/oracle-version.txt
@@ -319,7 +322,7 @@ jobs:
           submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Install libjpeg-turbo 3.x from official release (matches macOS homebrew; apt ships 2.1.x lacking -lossless/-precision/SOF3)
+      - name: Install libjpeg-turbo 3.1.4.1 from official release (matches the macOS legs' pinned build; apt ships 2.1.x lacking -lossless/-precision/SOF3)
         run: |
           ARCH=$(dpkg --print-architecture)
           VERSION=3.1.4.1
@@ -437,6 +440,13 @@ jobs:
           cmake --install /tmp/ljt8/build
           grep -Eq '^#define[[:space:]]+JPEG_LIB_VERSION[[:space:]]+80$' \
             /tmp/ljt8/prefix/include/jconfig.h
+          # The ABI is not the release. This prefix is a *second* oracle in
+          # this job — the steps below point LIBJPEG_TURBO_PREFIX at it — so
+          # the release it serves is asserted here, exactly as the deb's is.
+          # docs/oracle_versions.tsv declares the submodule row as 3.1.90, and
+          # a submodule bump therefore has to come through this line rather
+          # than re-baselining the trace oracles silently (P4-130).
+          /tmp/ljt8/prefix/bin/djpeg -version 2>&1 | grep -q "version 3.1.90"
       # Ubuntu also provides /dev/full, so the fflush/ferror scenario runs for
       # real here instead of reporting itself unavailable as it does on macOS.
       # P4-104's transition work. Named for the same reason as the suites
@@ -729,6 +739,10 @@ jobs:
           cmake --install /tmp/ljt320v8/build
           grep -Eq '^#define[[:space:]]+JPEG_LIB_VERSION[[:space:]]+80$' \
             /tmp/ljt320v8/prefix/include/jconfig.h
+          # The tag check above reads the source tree; this reads the binary
+          # the trace suites actually compare against. Both, because a build
+          # that installed into a stale prefix passes the first and fails this.
+          /tmp/ljt320v8/prefix/bin/djpeg -version 2>&1 | grep -q "version 3.2.0"
         timeout-minutes: 20
 
       - name: Classic C-ABI state, create and precision traces (3.2.0)
@@ -911,7 +925,9 @@ jobs:
       # zero tests. Even the corrected multi-filter form
       # (`-- cross_encode cross_check`) selects only 8 tests by name.
       # This job's unique coverage is the C-tool environment: aarch64 macOS
-      # against a real 3.x toolchain, the only such leg in CI. The former
+      # against a real 3.x toolchain, and it is the only leg that runs the
+      # whole suite there — full-c-parity.yml's arm64 legs share the
+      # environment but run four selected matrices, weekly. The former
       # ubuntu-latest leg is gone: with apt's 2.1.x tools the suite cannot
       # run (tests feed SOF3/12-bit streams to djpeg unconditionally), and
       # installing the official 3.1.4.1 deb would make it an exact duplicate

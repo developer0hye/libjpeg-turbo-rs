@@ -1306,7 +1306,7 @@ The one non-obvious piece was the **scan script**. `jpeg_simple_progression` tak
 
 **Acceptance criteria.** Both `C Interop` legs report a non-zero test count; the job is validated by mechanism (a deliberately broken encoder byte-comparison must fail it) rather than by "it passed"; any aarch64 divergence the newly-live tests surface is filed before the filter fix merges.
 
-**Status (2026-07-28): closed.** The fix sketch above was itself falsified before merging: the corrected multi-filter form (`cargo test --tests -- cross_encode cross_check`) selects only **8 tests** on this workspace, because libtest filters match test *names*, and the tests inside `cross_check_*`/`cross_encode_*` files have names like `c_xval_decode_bgr_444` that contain neither substring. The job now runs the full unfiltered `cargo test --tests` on **macos-latest only** (timeout 15→30 min) — aarch64 + Homebrew jpeg-turbo 3.x, the one C-tool environment no other job covers. The former ubuntu leg is **removed**, not fixed: with apt's 2.1.x tools the unfiltered suite cannot run (codex review caught that e.g. `lossless_point_transform_matches_c_djpeg_exactly` feeds SOF3 to `djpeg` with no capability probe), and installing the official 3.1.4.1 deb would make the leg an exact environment+command duplicate of `Integration Tests` — the redundancy this entry's Impact paragraph already established. The "both legs non-zero" acceptance criterion is therefore satisfied in its intent (every remaining leg runs the full suite; no leg silently runs zero) rather than its letter. A comment in `ci.yml` pins the substring-vs-regex trap so a filter cannot quietly come back. **Mechanism-validated**, not validated-by-passing: with a deliberate encoder break (`FIX_0_299` 19595→20100 in `src/encode/color.rs`), `cargo test --test cross_check_encoder_binary` fails 3 of 4 byte-exact comparisons against `cjpeg`; reverted, green again. aarch64 + Homebrew first run: the full `--tests` suite was executed on a macOS aarch64 host with Homebrew jpeg-turbo before merging — no divergence surfaced, so nothing needed filing; the PR's own `C Interop (macos-latest)` leg is the first CI proof and must show a non-zero test count.
+**Status (2026-07-28): closed.** The fix sketch above was itself falsified before merging: the corrected multi-filter form (`cargo test --tests -- cross_encode cross_check`) selects only **8 tests** on this workspace, because libtest filters match test *names*, and the tests inside `cross_check_*`/`cross_encode_*` files have names like `c_xval_decode_bgr_444` that contain neither substring. The job now runs the full unfiltered `cargo test --tests` on **macos-latest only** (timeout 15→30 min) — aarch64 + Homebrew jpeg-turbo 3.x, the one C-tool environment no other job covers. The former ubuntu leg is **removed**, not fixed: with apt's 2.1.x tools the unfiltered suite cannot run (codex review caught that e.g. `lossless_point_transform_matches_c_djpeg_exactly` feeds SOF3 to `djpeg` with no capability probe), and installing the official 3.1.4.1 deb would make the leg an exact environment+command duplicate of `Integration Tests` — the redundancy this entry's Impact paragraph already established. The "both legs non-zero" acceptance criterion is therefore satisfied in its intent (every remaining leg runs the full suite; no leg silently runs zero) rather than its letter. A comment in `ci.yml` pins the substring-vs-regex trap so a filter cannot quietly come back. **Mechanism-validated**, not validated-by-passing: with a deliberate encoder break (`FIX_0_299` 19595→20100 in `src/encode/color.rs`), `cargo test --test cross_check_encoder_binary` fails 3 of 4 byte-exact comparisons against `cjpeg`; reverted, green again. aarch64 + Homebrew first run: the full `--tests` suite was executed on a macOS aarch64 host with Homebrew jpeg-turbo before merging — no divergence surfaced, so nothing needed filing; the PR's own `C Interop (macos-latest)` leg is the first CI proof and must show a non-zero test count. **Amended 2026-08-18 by [P4-130](#p4-130-c-parity-oracle-is-pinned-to-3141-upstream-stable-is-320--partial-every-oracle-provisioning-job-is-now-pinned-checked-and-measured-the-legs-still-on-one-release-the-submodule-bump-and-the-four-filed-gaps-remain):** the environment is still aarch64 macOS, but the oracle is no longer `brew install jpeg-turbo` — the leg builds 3.1.4.1 from source at `/tmp/ljt3141/prefix`, asserts it, and selects it with `LIBJPEG_TURBO_PREFIX`.
 
 ## P4-62. `cargo test --workspace` Does Not Build on windows-msvc — **CLOSED 2026-07-28**
 
@@ -5214,11 +5214,11 @@ three things:
   commit, and a fetch shape the scanner cannot read fails *closed* — a clone
   with no tag is the worst pin of all, and reporting it as "no install here"
   would let it pass.
-- **checked** — the job asserts that release. Five legs ran
-  `/opt/libjpeg-turbo/bin/djpeg -version` and read the output nowhere, which is
-  a print, not a check: a deb that installed something else, a tag repointed at
-  another release, or a runner image carrying its own libjpeg would each have
-  run the whole leg green under a release it was not measuring.
+- **checked** — the job asserts that release. Seven did not: five ran a
+  `djpeg -version` and read the output nowhere, which is a print, not a check,
+  and two ran no version step at all. A deb that installed something else, a
+  tag repointed at another release, or a runner image carrying its own libjpeg
+  would each have run the whole leg green under a release it was not measuring.
 - **measured** — the prefix it checked is the prefix its tests resolve.
   `test-integration` checked `djpeg -version` *by PATH*, which names no install
   at all. On a macOS runner a PATH entry does not even select an oracle:
@@ -5228,13 +5228,44 @@ three things:
 
 Written first and red on unmodified `main` in all three directions, naming
 **eight jobs**: `test-cross-encode` unpinned; `mutants-in-diff`,
-`test-integration`, `test-corpus`, the three `cross-arch.yml` jobs and
-`fuzz-smoke.yml`'s `fuzz` never asserting; and `mutants-in-diff`,
+`test-integration`, `test-corpus`, the three oracle-installing `cross-arch.yml`
+jobs and `fuzz-smoke.yml`'s `fuzz` never asserting; and `mutants-in-diff`,
 `test-integration` and `test-corpus` checking no install path at all. Two of
 those — `mutants-in-diff` and `test-integration` — are *not* in the inventory
 this item's remainder listed, because that inventory counted legs measuring one
 release and these were correctly pinned. Being pinned and being checked are
 different properties, and only the second survives a mis-provisioned runner.
+One of the eight is weaker than the rest by construction and says so in the
+workflow: `mutants-in-diff` is `continue-on-error`, so its assertion stops that
+job and leaves CI green. It protects the meaning of the mutation result — a
+mutant that survives because the oracle was a different libjpeg reads as MISSED
+for the wrong reason — not the merge.
+
+*The scope that matters is the step, not the job (codex round).* The first
+draft of the "measured" rule compared a job's *union* of prefix assignments
+against the prefixes it checked, and a review pointed out that the union is
+precisely the wrong shape: a step-level assignment overrides the job's for that
+step alone, so a leg could name the checked install on one step and run
+`cargo test` against another — `/opt/homebrew`, on macOS — with the gate green.
+The rule is now per step: each step's *effective* prefix (its own, else the
+job's) must be one the job checked, and a step that names none relies on lookup
+order, which is accepted only off macOS and only when a checked prefix is on
+PATH. Two things followed. First, checking became per prefix at a release
+(`prefix_releases_checked_in`) rather than "somewhere in this job a version is
+asserted", since `test-integration` carries three oracles and one check would
+otherwise vouch for all of them; a `tee` file belongs to the invocation that
+wrote it. Second, the two v8 source builds — `/tmp/ljt8/prefix` from the
+submodule and `/tmp/ljt320v8/prefix` from the 3.2.0 clone — now assert their
+own releases, which is also what makes a submodule bump come through a workflow
+line rather than re-baselining the classic-ABI trace oracles silently. Verified
+by removing each check in turn: dropping the 3.1.90 assertion turns the four
+steps that select that prefix red, dropping `test-cross-encode`'s job-level
+prefix turns its `cargo test` step red as a macOS lookup-order step, and
+pointing one `test-integration` step at `/opt/homebrew` turns exactly that step
+red. The step parser had the same bug in miniature and is pinned against it: it
+read the step indent off the first `- ` line in the job, which in a matrix job
+is a matrix entry, so every step merged into one — a job-scope union arriving
+through the parser rather than the rule.
 
 `test-cross-encode` now builds 3.1.4.1 from source at `/tmp/ljt3141/prefix` and
 selects it with `LIBJPEG_TURBO_PREFIX`, the same shape the aarch64 full-parity
@@ -8743,19 +8774,21 @@ can repoint, and nothing checks what arrived:
 
 - **eight** deb downloads —
   `curl -fL .../releases/download/${VERSION}/libjpeg-turbo-official_${VERSION}_${ARCH}.deb`,
-  installed with no digest: `ci.yml:64,320,616`, `cross-arch.yml:30,61,97`,
-  `fuzz-smoke.yml:95`, `full-c-parity.yml:97`. (`fuzz-smoke.yml:201` prints the
+  installed with no digest: `ci.yml:64,327,629`, `cross-arch.yml:30,67,109`,
+  `fuzz-smoke.yml:95`, `full-c-parity.yml:99`. (`fuzz-smoke.yml:206` prints the
   same command as reproduction instructions and does not fetch.)
-- **five** source clones — `full-c-parity.yml:56,150` and `ci.yml:892` at
-  `--branch 3.1.4.1`, and `full-c-parity.yml:189` and `ci.yml:702` at
-  `--branch 3.2.0`, the last of them for the `trace-current` v8-ABI oracle;
+- **six** source clones — `full-c-parity.yml:58,152` and `ci.yml:890,937` at
+  `--branch 3.1.4.1`, and `full-c-parity.yml:191` and `ci.yml:715` at
+  `--branch 3.2.0`, the last of them for the `trace-current` v8-ABI oracle.
+  `ci.yml:890` is `test-cross-encode`, which became a source clone on
+  2026-08-18 when P4-130 replaced its `brew install jpeg-turbo`;
 - `references/libjpeg-turbo` is the exception. A submodule is pinned by commit,
   which is why it is not part of this gap.
 
 The `trace-current` step greps `set(VERSION 3.2.0)` from the cloned tree, so a
 tag repointed at a *different release* fails there; since 2026-08-17 the
-`tool-current` leg and, since 2026-08-18, all four `Full C Parity` legs check
-their installed tools' `-version` output the same way. Every one of those
+`tool-current` leg, and since 2026-08-18 every job that provisions an oracle,
+checks its installed tools' `-version` output the same way. Every one of those
 checks answers the same question — *is this the release it claims to be* — and
 none answers the integrity one. A tag repointed at a modified tree of the same
 version, or a replaced release asset, is indistinguishable from the real thing — and these oracles are

@@ -22,7 +22,7 @@ jobs:
           submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Install libjpeg-turbo 3.x from official release (matches macOS homebrew)
+      - name: Install libjpeg-turbo 3.1.4.1 from official release (matches the macOS legs' pinned build)
         run: |
           ARCH=$(dpkg --print-architecture)
           VERSION=3.1.4.1
@@ -59,7 +59,7 @@ jobs:
           submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Install libjpeg-turbo 3.x from official release (matches macOS homebrew)
+      - name: Install libjpeg-turbo 3.1.4.1 from official release (matches the macOS legs' pinned build)
         run: |
           ARCH=$(dpkg --print-architecture)
           VERSION=3.1.4.1
@@ -101,7 +101,7 @@ jobs:
           submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Install libjpeg-turbo 3.x from official release (matches macOS homebrew)
+      - name: Install libjpeg-turbo 3.1.4.1 from official release (matches the macOS legs' pinned build)
         run: |
           ARCH=$(dpkg --print-architecture)
           VERSION=3.1.4.1
