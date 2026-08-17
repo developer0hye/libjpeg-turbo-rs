@@ -5300,12 +5300,30 @@ which match no deny-list entry. Tokens are now read in *command* position only
 word is trimmed of its closers before its openers, since stripping only openers
 turns `"cargo fmt"` into an empty subcommand that is in no deny list.
 
-Four rounds, four findings, two of each polarity, and every one of them in the
-*scanner* rather than the rule: two shapes it could not see, two it saw where
-there was nothing. That is the argument for pinning each helper against the
+A fifth round found what the command-position rule had *cost*, including one
+case live in `ci.yml`. The step reader joined a `run: |` block's lines with
+spaces, so a block was one long command: P4-81's step is `set -o pipefail`
+followed by `cargo test …`, and flattened it reads as a single command named
+`set` — invisible to a rule that only looks at command position. Scripts are
+now read per logical line, each of which starts a command. Three narrower
+misses came with it: a command substitution runs its contents wherever it
+appears (`echo "$(cargo test)"` runs the tests), a wrapper takes options of its
+own before the command it wraps (`sudo -E cargo test`, `env -u FOO cargo test`),
+and an inline assignment whose value contains a space is two tokens of which
+the second is not an assignment (`RUSTFLAGS="-C target-cpu=native" cargo test`).
+
+Five rounds, eight findings, both polarities, and every one of them in the
+*scanner* rather than the rule: shapes it could not see, and shapes it saw
+where there was nothing. Each fix bought its own next finding — the substring
+match handled quoting by accident, the parse that fixed toolchain qualifiers
+lost it, the command-position rule that fixed the false positives lost the
+multi-line block — which is the argument for pinning every helper against the
 spelling that would make it lie rather than trusting a gate because it is
-green — and for keeping both polarities in the pins, since a gate that cannot
+green, and for keeping *both* polarities in the pins, since a gate that cannot
 be wrong in the second direction is usually one that has stopped matching.
+Verified against the real workflows at the end of it: with the macOS leg's
+prefix removed, all six spellings of its test step are red, and the multi-line
+P4-81 step is now one of the steps the rule reads.
 
 `test-cross-encode` now builds 3.1.4.1 from source at `/tmp/ljt3141/prefix` and
 selects it with `LIBJPEG_TURBO_PREFIX`, the same shape the aarch64 full-parity

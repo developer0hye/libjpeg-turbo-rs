@@ -1782,7 +1782,12 @@ fn steps_in(job_block: &str) -> Vec<Step> {
             continue;
         }
         if in_run {
-            step.script.push(' ');
+            // Newline, not space. A `run: |` block is a sequence of commands,
+            // and flattening it into one line loses every boundary between
+            // them: `set -o pipefail` followed by `cargo test` would read as
+            // one command whose name is `set` — which is exactly the shape
+            // `ci.yml`'s P4-81 step has.
+            step.script.push('\n');
             step.script.push_str(trimmed);
         }
     }
@@ -2057,25 +2062,31 @@ fn is_environment_prefix(token: &str) -> bool {
 fn hands_off_to_another_command(token: &str) -> bool {
     matches!(
         shell_word(token),
-        "if" | "!"
-            | "then"
-            | "elif"
-            | "else"
-            | "do"
-            | "while"
-            | "until"
-            | "sudo"
-            | "env"
-            | "time"
-            | "exec"
-            | "xargs"
-            | "&&"
-            | "||"
-            | "|"
-            | ""
+        "if" | "!" | "then" | "elif" | "else" | "do" | "while" | "until" | "&&" | "||" | "|" | ""
     ) || token.ends_with(';')
         || token.ends_with('|')
         || token.ends_with("&&")
+}
+
+/// Commands that run another command, after taking options of their own.
+///
+/// `sudo -E cargo test` and `time -p cargo test` hand off like the keywords
+/// above, but not to the *next* token — their own flags come first, and
+/// `env -u FOO cargo test` even puts a bare word between them. So the command
+/// position stays open for the rest of the line rather than for one token,
+/// which over-approximates in the direction that fails closed.
+fn wraps_another_command(token: &str) -> bool {
+    matches!(
+        shell_word(token),
+        "sudo" | "env" | "time" | "exec" | "nohup" | "xargs" | "command" | "stdbuf"
+    )
+}
+
+/// Does this token leave a double quote open — the shape of an inline
+/// assignment whose value has a space in it, `RUSTFLAGS="-C target-cpu=native"`,
+/// which `split_whitespace` cuts in half?
+fn leaves_a_quote_open(token: &str) -> bool {
+    token.chars().filter(|c| *c == '"').count() % 2 == 1
 }
 
 /// Does this step run cargo in a way that can reach the C oracle?
@@ -2087,15 +2098,32 @@ fn hands_off_to_another_command(token: &str) -> bool {
 /// `echo "cargo test"` reports what it is — a step printing a string — and
 /// `CARGO=/usr/bin/cargo cargo build` is read as the `build` it runs.
 fn reaches_the_oracle(script: &str) -> bool {
-    let tokens: Vec<&str> = script.split_whitespace().collect();
+    // Per logical line: a `run: |` block is a sequence of commands, and every
+    // line starts one.
+    logical_lines(script).iter().any(|line| runs_cargo_in(line))
+}
+
+fn runs_cargo_in(line: &str) -> bool {
+    let tokens: Vec<&str> = line.split_whitespace().collect();
     let mut command_position: bool = true;
+    let mut inside_a_wrapper: bool = false;
+    let mut inside_a_quoted_value: bool = false;
     for (at, token) in tokens.iter().enumerate() {
+        if inside_a_quoted_value {
+            inside_a_quoted_value = !leaves_a_quote_open(token);
+            continue;
+        }
         if command_position && is_environment_prefix(token) {
+            inside_a_quoted_value = leaves_a_quote_open(token);
             continue;
         }
         let word: &str = shell_word(token);
-        let is_cargo: bool = command_position && (word == "cargo" || word.ends_with("/cargo"));
-        if is_cargo {
+        // A command substitution runs its contents wherever it appears, so
+        // `echo "$(cargo test)"` runs the tests however little the `echo`
+        // suggests it.
+        let substitutes: bool = token.contains("$(") || token.contains('`');
+        let eligible: bool = command_position || inside_a_wrapper || substitutes;
+        if eligible && (word == "cargo" || word.ends_with("/cargo")) {
             let subcommand: Option<&str> = tokens[at + 1..]
                 .iter()
                 .map(|argument| shell_word(argument))
@@ -2107,7 +2135,15 @@ fn reaches_the_oracle(script: &str) -> bool {
                 Some(_) => return true,
             }
         }
-        command_position = hands_off_to_another_command(token);
+        if hands_off_to_another_command(token) {
+            command_position = true;
+            inside_a_wrapper = false;
+        } else if wraps_another_command(token) {
+            command_position = true;
+            inside_a_wrapper = true;
+        } else if !inside_a_wrapper {
+            command_position = false;
+        }
     }
     false
 }
@@ -2414,6 +2450,20 @@ fn a_toolchain_qualifier_does_not_hide_a_cargo_test() {
         // `test-corpus` wraps its example in a conditional, so the command
         // word is two keywords in.
         "if ! cargo run --release --example corpus_test > corpus-test.tsv 2>&1; then",
+        // A `run: |` block is a sequence of commands and each line starts one.
+        // `ci.yml`'s P4-81 step is exactly this, and flattening the block into
+        // one line made it read as a single command named `set`.
+        "set -o pipefail\ncargo test -p libjpeg-turbo-rs-capi --test capi_symbol_versions",
+        // A command substitution runs wherever it appears, however little the
+        // command around it suggests it.
+        "echo \"$(cargo test --tests)\"",
+        // Wrappers take options of their own before the command they wrap.
+        "sudo -E cargo test --tests",
+        "time -p cargo test --tests",
+        "env -u RUSTFLAGS cargo test --tests",
+        // An inline assignment whose value has a space in it is two tokens,
+        // and the second is not an assignment.
+        "RUSTFLAGS=\"-C target-cpu=native\" cargo test --tests",
     ] {
         assert!(
             reaches_the_oracle(script),
