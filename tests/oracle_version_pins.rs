@@ -604,20 +604,24 @@ fn shell_scripts_in(job_block: &str) -> Vec<String> {
 
 /// Harness arguments that do **not** change which tests execute. Anything else
 /// after `--` is either a filter or something this scanner does not model, and
-/// the difference has to be visible: `--ignored` and `--include-ignored` change
-/// the selected set as surely as a positional filter does, so silently reading
-/// them as "no filter" would report the whole binary where a leg runs a
-/// different part of it.
-const COVERAGE_NEUTRAL_HARNESS_FLAGS: [&str; 8] = [
+/// the difference has to be visible: `--ignored`, `--include-ignored` and
+/// `--skip` change the selected set as surely as a positional filter does, so
+/// silently reading them as "no filter" would report the whole binary where a
+/// leg runs a different part of it.
+const COVERAGE_NEUTRAL_FLAGS: [&str; 5] = [
     "--nocapture",
     "--show-output",
     "--quiet",
     "-q",
-    "--test-threads",
-    "--color",
-    "--format",
     "--report-time",
 ];
+
+/// Coverage-neutral flags that take a value. The value is theirs, not a
+/// filter — `--test-threads 1` selects every test, and reading the `1` as
+/// unmodelled syntax would fail the pairing gate on two legs that run
+/// identical sets.
+const COVERAGE_NEUTRAL_FLAGS_WITH_VALUE: [&str; 4] =
+    ["--test-threads", "--color", "--format", "--logfile"];
 
 /// What one `cargo test` invocation selects out of a test binary.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -669,8 +673,20 @@ impl Selection {
 /// The libtest selection an invocation's post-`--` arguments describe.
 fn selection_after_the_double_dash<'a>(args: impl Iterator<Item = &'a str>) -> Selection {
     let mut filters: BTreeSet<String> = BTreeSet::new();
+    let mut expecting_a_flag_value: bool = false;
     for arg in args {
-        if COVERAGE_NEUTRAL_HARNESS_FLAGS.contains(&arg) {
+        if expecting_a_flag_value {
+            expecting_a_flag_value = false;
+            continue;
+        }
+        if COVERAGE_NEUTRAL_FLAGS.contains(&arg) {
+            continue;
+        }
+        // `--test-threads 1` and `--test-threads=1` are the same flag; the
+        // value belongs to it either way and is not a filter.
+        let flag_name: &str = arg.split('=').next().unwrap_or(arg);
+        if COVERAGE_NEUTRAL_FLAGS_WITH_VALUE.contains(&flag_name) {
+            expecting_a_flag_value = !arg.contains('=');
             continue;
         }
         if arg.starts_with('-') {
@@ -968,18 +984,22 @@ fn each_full_c_parity_leg_provisions_the_release_its_role_names() {
 /// their keys at four, and a job-level `env:` mapping's entries at six.
 const JOB_KEY_INDENT: usize = 4;
 
-/// The path a job assigns to `LIBJPEG_TURBO_PREFIX` **at job level**, which is
-/// what every step in that job inherits and therefore what actually selects the
-/// oracle for the `cargo test` steps.
+/// Every `LIBJPEG_TURBO_PREFIX` a job assigns, split by scope.
 ///
-/// Scope is the point, not the spelling. A comment mentioning the variable
-/// selects nothing, and an assignment inside one step's `env:` selects the
-/// oracle for that step alone — so a leg could verify a prefix in the step that
-/// names it and then run its matrices against whatever lookup order finds. Both
-/// shapes read identically once indentation is trimmed, which is why this
-/// reads indentation instead.
-fn oracle_prefix_assigned_by(job_block: &str) -> Option<String> {
-    let mut assigned: Option<String> = None;
+/// Scope is the point, not the spelling, and both directions matter. The
+/// job-level assignment is what every step inherits, so it is what selects the
+/// oracle for the `cargo test` steps. A *step-level* assignment overrides it
+/// for that one step — so a leg could verify one install in the step that names
+/// it and measure another in the steps that matter. Both read identically once
+/// indentation is trimmed, which is why this reads indentation.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct PrefixAssignments {
+    job_level: Option<String>,
+    step_level: Vec<String>,
+}
+
+fn oracle_prefixes_assigned_by(job_block: &str) -> PrefixAssignments {
+    let mut found: PrefixAssignments = PrefixAssignments::default();
     let mut inside_job_env: bool = false;
     for line in job_block.lines() {
         let trimmed: &str = line.trim();
@@ -991,36 +1011,48 @@ fn oracle_prefix_assigned_by(job_block: &str) -> Option<String> {
             inside_job_env = indent == JOB_KEY_INDENT && trimmed == "env:";
             continue;
         }
-        if !inside_job_env {
-            continue;
-        }
         let Some(rest) = trimmed.strip_prefix("LIBJPEG_TURBO_PREFIX:") else {
             continue;
         };
         let value: String = rest.trim().trim_matches(['"', '\'']).to_string();
-        assert!(
-            assigned.is_none(),
-            "two job-level LIBJPEG_TURBO_PREFIX assignments in one job — which \
-             one selects the oracle depends on YAML scoping, so this gate \
-             cannot say what the leg measures"
-        );
-        assigned = Some(value);
+        // A job-level `env:` mapping's entries sit one level in from the key.
+        if inside_job_env && indent <= JOB_KEY_INDENT + 2 {
+            assert!(
+                found.job_level.is_none(),
+                "two job-level LIBJPEG_TURBO_PREFIX assignments in one job — \
+                 which one selects the oracle depends on YAML scoping, so this \
+                 gate cannot say what the leg measures"
+            );
+            found.job_level = Some(value);
+        } else {
+            found.step_level.push(value);
+        }
     }
-    assigned
+    found
 }
 
-/// Does this line *check* that a command's output carries `needle`, as opposed
-/// to printing `needle` itself?
+/// Does this line *assert* that a command's output carries `needle`?
 ///
-/// `echo "version 3.2.0"` satisfies any substring search and asserts nothing —
-/// the same distinction [`is_provisioning_line`] draws between installing a
-/// release and mentioning one.
+/// Three ways to look like a check without being one, all of them accepted by
+/// an earlier draft of this predicate: printing the string (`echo "version
+/// 3.2.0"`), writing the check in a comment, and running one that cannot fail
+/// (`grep … || true`, or a `true` with the grep commented out). A step's shell
+/// runs under `set -e`, so an *uncommented* grep at the head of a line or at
+/// the end of a pipeline is the thing that stops the job.
 fn is_assertion_over_output(line: &str, needle: &str) -> bool {
     let trimmed: &str = line.trim_start();
-    !trimmed.starts_with('#')
-        && !trimmed.contains("echo ")
-        && trimmed.contains("grep")
-        && trimmed.contains(needle)
+    if trimmed.starts_with('#') || trimmed.contains("echo ") || !trimmed.contains(needle) {
+        return false;
+    }
+    // `|| true`, `|| :`, `|| echo …`: the exit status is swallowed, so a
+    // mismatch does not fail the step.
+    if trimmed.contains("||") {
+        return false;
+    }
+    // The grep has to be the command being run, not something quoted inside a
+    // comment further along the line.
+    let code: &str = trimmed.split('#').next().unwrap_or(trimmed);
+    code.trim_start().starts_with("grep ") || code.contains("| grep ")
 }
 
 #[test]
@@ -1044,7 +1076,8 @@ fn every_full_c_parity_leg_verifies_the_prefix_it_measures() {
             (current_job, "tool-current"),
         ] {
             let block: String = job_block(&text, job, FULL_PARITY_WORKFLOW);
-            let prefix: String = oracle_prefix_assigned_by(&block).unwrap_or_else(|| {
+            let assignments: PrefixAssignments = oracle_prefixes_assigned_by(&block);
+            let prefix: String = assignments.job_level.clone().unwrap_or_else(|| {
                 panic!(
                     "{FULL_PARITY_WORKFLOW}'s {job} leg assigns no job-level \
                      LIBJPEG_TURBO_PREFIX, so which install its `cargo test` \
@@ -1053,6 +1086,19 @@ fn every_full_c_parity_leg_verifies_the_prefix_it_measures() {
                      the oracle for that step alone."
                 )
             });
+            let overrides: Vec<&String> = assignments
+                .step_level
+                .iter()
+                .filter(|value| **value != prefix)
+                .collect();
+            assert!(
+                overrides.is_empty(),
+                "{job} inherits {prefix} but one of its steps overrides \
+                 LIBJPEG_TURBO_PREFIX with {overrides:?}. A step-level value \
+                 wins for that step, so the leg would verify one install and \
+                 measure another — the split this pair of legs exists to make \
+                 impossible."
+            );
             let version: String = declared_version(&rows, role);
             let checks_that_prefix: bool = block
                 .lines()
@@ -1194,36 +1240,70 @@ fn running_a_suite_twice_in_one_leg_selects_the_union() {
 }
 
 #[test]
+fn a_value_taking_harness_flag_does_not_look_like_a_filter() {
+    // `--test-threads 1` runs every test. Reading the `1` as unmodelled syntax
+    // would fail the pairing gate on two legs that select identical sets — the
+    // opposite error from the one the fail-closed rule exists for, and just as
+    // useless. `--skip` is not in that list on purpose: it *does* change the
+    // set.
+    let neutral: &str =
+        "      - run: cargo test --test c_croptest -- --test-threads 1 --color=always\n";
+    assert_eq!(
+        root_suites_selected_by(neutral).get("c_croptest"),
+        Some(&Selection::All)
+    );
+
+    let skipping: &str = "      - run: cargo test --test c_croptest -- --skip c_croptest_full\n";
+    assert!(matches!(
+        root_suites_selected_by(skipping).get("c_croptest"),
+        Some(Selection::Unrecognised(_))
+    ));
+}
+
+#[test]
 fn only_a_job_level_prefix_assignment_selects_the_oracle_for_a_whole_leg() {
-    // A comment mentioning the variable selects nothing, and a step-level
-    // assignment selects the oracle for that step alone — so a leg could verify
-    // one install in the step that names it and run its matrices against
-    // another. Both read identically once indentation is trimmed.
+    // A comment mentioning the variable selects nothing; a step-level
+    // assignment selects the oracle for that step alone and overrides the
+    // inherited one — so both have to be visible to the gate rather than
+    // skipped. Both read identically once indentation is trimmed.
     assert_eq!(
-        oracle_prefix_assigned_by("    env:\n      # LIBJPEG_TURBO_PREFIX: /opt/libjpeg-turbo\n"),
-        None
+        oracle_prefixes_assigned_by("    env:\n      # LIBJPEG_TURBO_PREFIX: /opt/libjpeg-turbo\n"),
+        PrefixAssignments::default()
     );
     assert_eq!(
-        oracle_prefix_assigned_by(
-            "    steps:\n      - name: Verify\n        run: djpeg -version\n        env:\n          LIBJPEG_TURBO_PREFIX: /tmp/ljt320/prefix\n"
+        oracle_prefixes_assigned_by(
+            "    steps:\n      - name: Verify\n        run: djpeg -version\n        env:\n          LIBJPEG_TURBO_PREFIX: /opt/homebrew\n"
         ),
-        None,
-        "a step-level assignment does not reach the leg's other steps"
+        PrefixAssignments {
+            job_level: None,
+            step_level: vec!["/opt/homebrew".to_string()],
+        },
+        "a step-level assignment is reported as one, not silently ignored"
     );
     assert_eq!(
-        oracle_prefix_assigned_by("    env:\n      LIBJPEG_TURBO_PREFIX: /tmp/ljt320/prefix\n"),
-        Some("/tmp/ljt320/prefix".to_string())
+        oracle_prefixes_assigned_by(
+            "    env:\n      LIBJPEG_TURBO_PREFIX: /tmp/ljt320/prefix\n    steps:\n      - run: cargo test\n        env:\n          LIBJPEG_TURBO_PREFIX: /opt/homebrew\n"
+        ),
+        PrefixAssignments {
+            job_level: Some("/tmp/ljt320/prefix".to_string()),
+            step_level: vec!["/opt/homebrew".to_string()],
+        },
+        "an override wins for its own step, so the gate has to see both"
     );
 }
 
 #[test]
-fn an_echoed_version_string_is_not_a_version_check() {
+fn a_version_check_that_cannot_fail_is_not_a_version_check() {
     // The version assertion is the only thing standing between "the leg
-    // installed something" and "the leg installed what it claims", so it has to
-    // be an assertion over djpeg's output rather than any line carrying the
-    // number.
+    // installed something" and "the leg installed what it claims". Three ways
+    // to look like one without being one: print the string, write it in a
+    // comment, or run a check whose exit status is swallowed.
     assert!(is_assertion_over_output(
         "          grep -q \"version 3.2.0\" /tmp/oracle-version.txt",
+        "version 3.2.0"
+    ));
+    assert!(is_assertion_over_output(
+        "          /opt/libjpeg-turbo/bin/cjpeg -version 2>&1 | grep -q \"version 3.2.0\"",
         "version 3.2.0"
     ));
     assert!(!is_assertion_over_output(
@@ -1232,6 +1312,14 @@ fn an_echoed_version_string_is_not_a_version_check() {
     ));
     assert!(!is_assertion_over_output(
         "          # asserts version 3.2.0 below",
+        "version 3.2.0"
+    ));
+    assert!(!is_assertion_over_output(
+        "          true # grep -q \"version 3.2.0\" /tmp/oracle-version.txt",
+        "version 3.2.0"
+    ));
+    assert!(!is_assertion_over_output(
+        "          grep -q \"version 3.2.0\" /tmp/oracle-version.txt || true",
         "version 3.2.0"
     ));
 }

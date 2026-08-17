@@ -5254,26 +5254,33 @@ step-key boundary the next step's name reads as another filter on the previous
 invocation), `a_harness_flag_is_not_a_filter_and_a_redirect_ends_the_invocation`
 (`--nocapture` selects nothing; `2>&1 | tee` is the shell taking the line
 back), `an_argument_this_scanner_cannot_read_fails_the_comparison_closed`,
+`a_value_taking_harness_flag_does_not_look_like_a_filter` (`--test-threads 1`
+runs everything, `--skip` does not — failing closed is only useful if it fires
+on the arguments that really change the set),
 `a_narrower_selection_on_the_current_leg_does_not_cover_the_baseline`,
 `running_a_suite_twice_in_one_leg_selects_the_union` (an unfiltered run absorbs
 a filtered one, or a leg running both would compare equal to one running only
 the filter), `only_a_job_level_prefix_assignment_selects_the_oracle_for_a_whole_leg`,
-`an_echoed_version_string_is_not_a_version_check`,
+`a_version_check_that_cannot_fail_is_not_a_version_check`,
 `the_oracle_classifier_reads_root_crate_suites_too` in both directions, and
 `a_job_block_stops_at_the_next_job` extended to the new pairs — every
 full-parity leg name is a prefix of its own current-oracle twin, so the
 block-parse trap that gate exists for is waiting once per architecture.
 
 The selection comparison and the prefix parse are both **later-round work**,
-and the sequence is the interesting part: the first draft compared binary names
+and the sequence is the interesting part. The first draft compared binary names
 and grepped for the variable; a codex review pointed out that each would stay
-green through exactly the substitution it was written to catch; the second
-draft carried filters and parsed the assignment, and a second review found four
-more shapes that still passed — an unmodelled `--ignored`, a quoted filter, a
-step-scoped assignment, and an `echo` standing in for the version check. Three
-rounds, and every hole was in the *gate*, not in the workflow. That is the
-argument for pinning each helper against the shape that would make it lie,
-rather than trusting a gate because it is green.
+green through exactly the substitution it was written to catch. The second
+carried filters and parsed the assignment, and a second review found four more
+shapes that still passed — an unmodelled `--ignored`, a shell-quoted filter, a
+suite run twice whose unfiltered run was merged away, and a step-scoped
+assignment. The third fixed those, and a third review found the version check
+accepted `true # grep …` and `grep … || true`, that a step-level override was
+skipped rather than rejected, and that `--test-threads 1` was misread as a
+filter — a *false* failure, the mirror of the rest. Every hole was in the
+**gate**, not in the workflow, which is the argument for pinning each helper
+against the shape that would make it lie rather than trusting a gate because it
+is green.
 
 Measured on macOS aarch64 against locally built prefixes at both releases,
 running the four binaries unfiltered: **15 tests, 0 failed on each leg**, with
