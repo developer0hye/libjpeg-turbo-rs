@@ -5227,14 +5227,30 @@ unit tests and the ELF symbol-version leg compare against constants, our own
 generated files, or the pinned headers, so a second run at another upstream
 release measures the same thing twice.
 
-Measured before landing on macOS aarch64, against locally built 3.2.0 prefixes
-(default and `WITH_JPEG8=1`): the three new steps are **14 suite sections, 77
+One of the fourteen did not honour the prefix, and the review caught it before
+this landed. `capi_classic_lifecycle_pathological` carried a **private**
+`find_c_tool` — a survivor of the P4-116 sweep of residual private helpers —
+that ignored `LIBJPEG_TURBO_PREFIX` and searched `/opt/homebrew/bin`,
+`/usr/local/bin`, `/usr/bin` and only then `/opt/libjpeg-turbo/bin`. So the
+first measurement of that suite compared against homebrew's 3.1.4.1 while
+reporting under a step named 3.2.0 — the exact false green the two legs exist
+to prevent, reappearing inside the change that adds them. It now mirrors
+`tests/helpers::c_tool_path`: an explicit prefix is exclusive, with the
+lookup split into an injectable `find_c_tool_under` so
+`an_explicit_oracle_prefix_is_exclusive` can assert both branches on every
+platform rather than only where a second install happens to exist. The
+baseline leg's step now names its prefix too — it had been landing on the
+right install by absence rather than by choice.
+
+Measured on macOS aarch64 after that fix, against locally built 3.2.0 prefixes
+(default and `WITH_JPEG8=1`): the three new steps are **14 suite sections, 78
 passed, 0 failed**. The one skip is `stdio_dev_full` — `/dev/full` does not
 exist on macOS; on the Ubuntu runner it is exercised, and the step fails closed
 on any skip line exactly as its baseline twin does. The oracle was verified
-mandatory rather than assumed: with `LIBJPEG_TURBO_PREFIX` pointed at a
-non-existent path, `capi_classic_lifecycle_state` fails with
-`no stock *v8* libjpeg development install found` rather than passing.
+mandatory rather than assumed, in both shapes: pointed at a non-existent
+prefix, `capi_classic_lifecycle_state` fails with `no stock *v8* libjpeg
+development install found`, and `capi_classic_lifecycle_pathological` fails
+with its own missing-oracle panic instead of falling back to the host's.
 
 *Criterion 1 — two legs.* `ci.yml`'s `test-integration-current-oracle`
 ("Integration Tests (oracle 3.2.0)") installs the official 3.2.0 deb, asserts
@@ -8513,3 +8529,51 @@ warn about it in prose. Prose has now failed to prevent it twice.
 **Why deferred.** Unrelated to the oracle-currency work that found it, and
 criterion 3 is a gate of its own — it needs the opt-out list triaged across
 every capi suite, not just this one.
+
+## P4-176. Every C Oracle Is Fetched by a Moveable Name, With Nothing Verifying What Arrived — **OPEN**
+
+**GitHub:** [#568](https://github.com/developer0hye/libjpeg-turbo-rs/issues/568) — found 2026-08-18 by the codex review on the P4-130 C-ABI oracle-leg change.
+
+**Motivation.** Every C libjpeg-turbo oracle here is fetched by a name upstream
+can repoint, and nothing checks what arrived:
+
+- the official deb, in five workflows —
+  `curl -fL .../releases/download/${VERSION}/libjpeg-turbo-official_${VERSION}_${ARCH}.deb`,
+  installed with no digest;
+- the source clones — `--branch 3.1.4.1` for the corpus job and `--branch
+  3.2.0` for the `trace-current` v8-ABI oracle;
+- `references/libjpeg-turbo` is the exception. A submodule is pinned by commit,
+  which is why it is not part of this gap.
+
+The `trace-current` step greps `set(VERSION 3.2.0)` from the cloned tree, so a
+tag repointed at a *different release* fails there. That is the only case
+covered. A tag repointed at a modified tree of the same version, or a replaced
+release asset, is indistinguishable from the real thing — and these oracles are
+what every differential gate in this repository compares against, so a
+substituted oracle does not fail: it silently redefines "correct".
+
+The risk is small (release assets and tags on a widely mirrored project), which
+is why it is filed rather than fixed inline. It is recorded because the
+alternative is that the next reader takes the version pins to imply integrity.
+They pin *which* release is requested, not *what* is delivered.
+
+**Acceptance criteria.**
+
+1. Each provisioning site verifies what it fetched: a recorded `sha256` per deb
+   (per architecture) and a recorded commit SHA per source clone, checked
+   against `HEAD` after checkout.
+2. The digests live beside the versions they belong to.
+   `docs/oracle_versions.tsv` already answers "which release" and is the
+   natural place to answer "which bytes".
+3. `tests/oracle_version_pins.rs` extends over the new columns in the
+   both-directions style it already uses: a provisioning site whose digest is
+   undeclared fails, and a declared digest nothing uses fails.
+4. Or an explicitly recorded decision that upstream's assets are trusted
+   unverified, with the reasoning. A recorded non-goal closes this as
+   legitimately as an implementation does — what it may not do is stay
+   unanswered.
+
+**Why deferred.** Unrelated to the oracle-currency work that surfaced it, and
+it touches all five workflows rather than the one step under review. Bundling
+it into that change would have mixed a supply-chain change into a coverage
+change.

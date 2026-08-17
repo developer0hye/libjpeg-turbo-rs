@@ -319,13 +319,31 @@ fn every_declared_tool_version_is_actually_provisioned() {
         return;
     }
 
+    // Every provisioned role is present, exactly once, before any row is
+    // checked against a workflow. Rows are examined one at a time below, so a
+    // *deleted* row is examined zero times and passes — and `trace-current`
+    // shares its version with `tool-current`, so deleting it would leave 3.2.0
+    // still declared and every direction of this gate still green while the
+    // v8-ABI role it names had silently ceased to exist.
+    let rows: Vec<Declared> = manifest_rows();
+    for (role, _) in PROVISIONED_ROLES {
+        let matching: usize = rows.iter().filter(|row| row.role == role).count();
+        assert_eq!(
+            matching, 1,
+            "{MANIFEST} must declare exactly one {role:?} row; found {matching}. \
+             Every role in this list backs a CI leg, so a missing row is a leg \
+             nothing describes and a duplicate is two answers to \"which \
+             release does this gate prove parity with?\""
+        );
+    }
+
     // Strict: only lines that install or build an oracle count. A comment
     // naming the version is not a leg.
     let provisioned: BTreeMap<String, Vec<String>> =
         version_sites_in_workflows(SiteFilter::Provisioning);
     let cloned: BTreeMap<String, Vec<String>> = version_sites_in_workflows(SiteFilter::SourceClone);
 
-    let unused: Vec<String> = manifest_rows()
+    let unused: Vec<String> = rows
         .into_iter()
         .filter_map(|row| {
             let shape: SiteShape = PROVISIONED_ROLES

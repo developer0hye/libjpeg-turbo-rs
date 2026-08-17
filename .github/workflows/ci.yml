@@ -380,6 +380,15 @@ jobs:
           cargo test -p libjpeg-turbo-rs-capi
           --test capi_classic_lifecycle_pathological
           --test capi_suspended_body_cap -- --nocapture
+        env:
+          # This suite resolves its stock tools itself, and its search order
+          # reads /opt/homebrew and /usr before /opt/libjpeg-turbo. On this
+          # runner only the baseline install exists, so it landed on the right
+          # one by absence rather than by choice — and the same code on the
+          # 3.2.0 leg would have measured whatever else was present. Naming the
+          # prefix makes both legs say which release they mean; the lookup
+          # treats it as exclusive.
+          LIBJPEG_TURBO_PREFIX: /opt/libjpeg-turbo
       # P4-81: the ELF symbol-version leg. This crate's tests are selected by
       # name here, so a suite that is never named never runs -- which is exactly
       # what happened to this one: it reported green on two full CI runs without
@@ -688,8 +697,13 @@ jobs:
           sudo apt-get install -y cmake nasm
           git clone --depth 1 --branch 3.2.0 \
             https://github.com/libjpeg-turbo/libjpeg-turbo.git /tmp/ljt320src
-          # A tag is a moveable name. Assert the tree agrees with the pin, so
-          # this oracle cannot be relabelled from outside the repository.
+          # A tag is a moveable name, and this grep catches exactly one way it
+          # can move: a tag repointed at a *different release* fails here
+          # instead of building an older tree under this label. It does not
+          # detect a tag repointed at a modified tree of the same release —
+          # that residual exposure is the one every oracle here carries, since
+          # the deb downloads are unverified too, and it is tracked as its own
+          # gap rather than solved for one step (P4-176).
           grep -Eq '^set\(VERSION 3\.2\.0\)$' /tmp/ljt320src/CMakeLists.txt
           cmake -S /tmp/ljt320src -B /tmp/ljt320v8/build \
             -DCMAKE_BUILD_TYPE=Release -DWITH_JPEG8=1 \
