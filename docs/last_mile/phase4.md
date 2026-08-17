@@ -5236,7 +5236,7 @@ was filed with:
 | beta1-6 | RISC-V Vector (RVV) SIMD | **Tracked — [P4-134](#p4-134-no-risc-v-rvv-simd-backend--upstream-32-ships-one--open)**, and it expires [P4-60](#p4-60-scalar-kernels-are-25x-slower-than-cs-scalar-kernels--open)'s premise that riscv64 was scalar-vs-scalar. |
 | beta1-8 | 8-bit lossy JPEG decompressed to 12-bit output | **New — [P4-171](#p4-171-8-bit-lossy-jpeg-cannot-be-decompressed-to-12-bit-output-32-beta1-note-8--open).** Measured: `src/api/precision.rs:865` refuses any stream whose precision is not 12, so we reject where 3.2 decodes. |
 | beta1-10 | TurboJPEG: `TJCS_DEFAULT`, repeated `tj3GetICCProfile`, ICC from a compression instance, 4:1:0 and 2:4 subsampling | **Split.** 4:1:0 and 2:4 are implemented (`TJSAMP_410`/`TJSAMP_24`) and covered by the subsampling matrices; the ICC and `TJCS_DEFAULT` additions are **new — [P4-172](#p4-172-turbojpeg-32-icc-and-tjcs_default-additions-are-unimplemented-32-beta1-note-10--open)**. |
-| beta1-4, beta1-12, 3.2.0-4 | jpegtran `-crop` expansion honouring `-trim`/`-perfect`; new `-roll`; the `-crop`/`-trim` overflow fix and its flatten/reflect error | **New — [P4-173](#p4-173-jpegtran-32-crop-expansion-roll-and-the-flattenreflect-refusal-are-unported--open).** These are `transupp.c` semantics our transform API mirrors, so "it is app code" does not exempt us. |
+| beta1-4, beta1-12, 3.2.0-4 | jpegtran `-crop` expansion honouring `-trim`/`-perfect`; new `-roll`; the `-crop`/`-trim` overflow fix and its flatten/reflect error | **New — [P4-173](#p4-173-jpegtran-32-crop-expansion--roll-and-the-flattenreflect-refusal-are-unported--open).** These are `transupp.c` semantics our transform API mirrors, so "it is app code" does not exempt us. |
 | beta1-9, 3.2.0-2 | 8/16-bit PNG in cjpeg/djpeg and `tj3LoadImage*`/`tj3SaveImage*`, ICC transfer, PNG-writer hardening | **New — [P4-174](#p4-174-png-interchange-parity-for-tj3loadimagetj3saveimage-is-narrower-than-32--open).** PNG exists here behind a cargo feature; the 3.2 additions (16-bit, ICC transfer under `TJPARAM_SAVEMARKERS`, reversible upscaling of non-standard precisions) are not implemented. |
 | 3.2.0-3 | `jpeg_crop_scanline()` errors when buffered-image mode and raw-data output are both enabled | **Tracked — [P4-103](#p4-103-jpeg_crop_scanline-does-not-implement-imcu-aligned-c-semantics--open).** The delta is exactly one condition: 3.2.0 `src/jdapistd.c:203` reads `if (cinfo->master->lossless \|\| cinfo->raw_data_out)` where 3.1.90 reads `if (cinfo->master->lossless)`. Recorded in P4-103 as an acceptance line. |
 | beta1-1, beta1-5 | GAS Neon implementation removed; MIPS DSPr2 SIMD removed | **Non-goal.** We have neither an assembler Neon path (ours is `core::arch` intrinsics) nor a MIPS backend, so there is nothing to follow. |
@@ -8274,7 +8274,7 @@ straight through to it, so a consumer following the 3.2 documentation gets
 `-1` and an error string where upstream returns a 12-bit image. The classic
 side is unmeasured: `data_precision` is a public ABI field a caller can simply
 assign, and what our `jpeg_start_decompress` does with a value the header did
-not put there is not covered by [P4-154](#p4-154-classic-c-abi-data_precision-gates--closed-2026-08-13)'s compression-side matrix.
+not put there is not covered by [P4-154](#p4-154-classic-jpeg_write_scanlines--jpeg_start_compress-ignore-data_precision-entirely--closed-2026-08-13)'s compression-side matrix.
 
 The failure direction is the safe one — we refuse where upstream accepts, not
 the reverse — so this is a feature gap rather than a defect.
@@ -8418,3 +8418,36 @@ supports PNG or does not, and a consumer cannot see a cargo feature.
 **Why deferred.** It is the largest of the four 3.2 gaps and the least
 load-bearing for the replacement gate — PNG interchange is a convenience
 surface around the codec, not the codec.
+
+## P4-175. `capi_classic_decode_budget` Is Never Named by a Workflow, So It Has Never Run in CI — **OPEN**
+
+**GitHub:** [#565](https://github.com/developer0hye/libjpeg-turbo-rs/issues/565) — found 2026-08-17 while auditing which oracle each gate uses for P4-130.
+
+**Motivation.** Integration suites in the C-ABI crate run only when a workflow
+names them: `cargo test --lib` selects the default workspace member, and the
+Integration Tests job's `cargo test --tests` is the root crate. `grep -rn
+"capi_classic_decode_budget" .github/workflows/` returns nothing, so P4-14's
+decode-sequence budget enforcement — cited in `docs/LAST_MILE.md`'s live-gate
+row as "the 3-test `capi_classic_decode_budget` suite" — compiles on every pull
+request and executes on none.
+
+This is the third instance of one defect class. P4-61 recorded it first (a test
+filter that matched nothing), `capi_classic_error_codes` was caught the same way
+("it compiled on every PR and executed on none, which is precisely how it
+reported '18 codes verified' through the entire period when all 18 rendered as
+'bogus message code'"), and the comments around the named steps in `ci.yml`
+warn about it in prose. Prose has now failed to prevent it twice.
+
+**Acceptance criteria.**
+
+1. `capi_classic_decode_budget` is named in a CI step, with the
+   `LIBJPEG_TURBO_PREFIX` its oracle needs so it fails rather than soft-skips.
+2. It passes there, or the failure it surfaces is filed.
+3. A mechanism, not another comment: an enumeration test comparing
+   `crates/libjpeg-turbo-rs-capi/tests/*.rs` against the suites named in
+   `.github/workflows/*.yml`, with an explicit opt-out list for suites that are
+   deliberately local-only. Criterion 3 is the valuable half.
+
+**Why deferred.** Unrelated to the oracle-currency work that found it, and
+criterion 3 is a gate of its own — it needs the opt-out list triaged across
+every capi suite, not just this one.

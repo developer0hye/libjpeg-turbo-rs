@@ -2,7 +2,9 @@
 //! trace-compared verbatim against stock libjpeg.
 //!
 //! The upstream contracts under test (`jdatasrc.c`, measured by
-//! `examples/classic_source_mgr_oracle.c` against stock 3.1.4.1):
+//! `examples/classic_source_mgr_oracle.c` against stock libjpeg — 3.1.4.1
+//! locally, and in CI the pinned 3.1.90 submodule build the step points
+//! `LIBJPEG_TURBO_PREFIX` at; see `docs/oracle_versions.tsv`):
 //!
 //! * `jpeg_mem_src` rejects NULL/empty input (`JERR_INPUT_EMPTY`, 43) and
 //!   refuses to overwrite a source manager it did not create
