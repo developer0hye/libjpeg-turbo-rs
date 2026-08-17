@@ -214,6 +214,23 @@ enum Entry {
     File { mode: u32, bytes: Vec<u8> },
 }
 
+/// Permission bits, or 0 on a platform that has none.
+///
+/// Every test here skips on Windows — the bundle is a Unix artifact — but the
+/// file still has to *compile* there: `cargo test --workspace --no-run` and
+/// the `capi-abi-checks` matrix both build it on `windows-latest`, ahead of any
+/// runtime skip. `std::os::unix` does not exist for the MSVC target.
+#[cfg(unix)]
+fn permission_bits(meta: &std::fs::Metadata) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    meta.permissions().mode() & 0o777
+}
+
+#[cfg(not(unix))]
+fn permission_bits(_meta: &std::fs::Metadata) -> u32 {
+    0
+}
+
 /// Every path under `root`, relative to it, with its content or link target.
 fn tree(root: &Path) -> BTreeMap<PathBuf, Entry> {
     let mut entries: BTreeMap<PathBuf, Entry> = BTreeMap::new();
@@ -242,11 +259,10 @@ fn walk(root: &Path, dir: &Path, out: &mut BTreeMap<PathBuf, Entry>) {
         } else if meta.is_dir() {
             walk(root, &path, out);
         } else {
-            use std::os::unix::fs::PermissionsExt;
             out.insert(
                 relative,
                 Entry::File {
-                    mode: meta.permissions().mode() & 0o777,
+                    mode: permission_bits(&meta),
                     bytes: std::fs::read(&path).expect("read file"),
                 },
             );
