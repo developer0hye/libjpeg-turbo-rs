@@ -318,44 +318,58 @@ the work is:
 
 This is genuinely large work and is *out of scope* for the current "v8-targeted with documented v6b risk" policy. The decision to take it on should be evidence-driven: at least one named real consumer that we want to support, and an explicit user requirement that opt-in `CAPI_SONAME=libjpeg.so.8` is not acceptable.
 
-## Binary distribution: what is not shipped, and why (P4-131)
+## Binary distribution (P4-131 — PARTIAL)
 
-**No native binary artifact is published.** `release.yml` publishes to crates.io
-and npm only, so a packager wanting to replace a system `libjpeg.so.8` must
-clone, install a Rust toolchain, build, and run `scripts/install_capi.sh`.
+**Tagged releases attach native bundles** for `x86_64`/`aarch64` Linux and
+`x86_64`/`aarch64` macOS: the libraries with their SONAME chains, the headers,
+the `.pc` files and the CMake config, checksummed by a single `SHA256SUMS`.
+Before 2026-08-18 there was no such artifact, and a packager wanting to replace
+a system `libjpeg.so.8` had to clone, install a Rust toolchain, build, and run
+`scripts/install_capi.sh` by hand.
 
-The install layout itself is correct — that script already stages a proper
-prefix with the libraries, headers, `.pc` files and CMake config. The gap is
-that **nothing runs it in CI**, so the staged prefix only ever exists on a
-developer's machine.
+The bundle *is* that script's output — `scripts/package_capi_release.sh` runs
+it and archives the result unchanged, so what a packager downloads is the tree
+the downstream harnesses test (P4-124). Contents, verification and install
+steps are in [`RELEASE_ARTIFACTS.md`](RELEASE_ARTIFACTS.md).
 
-**This is deliberate, not an oversight.** Shipping a convenient binary of a
-library whose classic-ABI gaps are still open would *increase* the blast radius
-of those gaps rather than reduce it: a packager who has to build from source
-reads the tier table on the way past, and one who installs a prebuilt `.so`
-does not. It stays sequenced behind the soundness work (P4-135..P4-139) and the
-T3 error/state contracts. Tracked as **P4-131 (#462)**.
+**Downloading it does not make this a drop-in.** The convenience cuts against
+the tier table: a packager who builds from source reads it on the way past, and
+one who unpacks a `.so` does not. The T3 classic-ABI gaps are open, the bundle
+says so in its own `BUNDLE.txt`, and the tiers above still govern whether it
+may replace a system library.
+
+Three parts of **P4-131 (#462)** remain open, which is why it is PARTIAL rather
+than closed.
+
+### Windows — open
+
+No DLL or import library. `install_capi.sh` handles Linux and macOS only, and
+the Windows layout is a separate decision (no SONAME chain, an import library,
+a toolchain-dependent `.pc` convention) rather than another matrix row.
 
 ### Signing and SBOM — a recorded gap
 
-Neither is implemented, and no release currently carries a signature, a
-checksum manifest, or an SBOM. Upstream libjpeg-turbo ships signed source
-tarballs and official per-platform packages with published verification
+The bundles are checksummed but **not signed**, and no SBOM is published.
+Upstream libjpeg-turbo ships signed source tarballs with published verification
 instructions; a project asking distributions to swap out their JPEG library is
 asking for a higher bar than that, not a lower one.
 
-The reason it is unimplemented is sequencing, not disagreement: signing is only
-meaningful once there is an artifact to sign, and (above) there deliberately
-is not one yet. Recorded here so the absence is a stated position rather than
-something a packager discovers.
+The reason recorded here previously was sequencing — nothing to sign yet — and
+that reason is now spent. What remains is that a checksum published beside the
+file it covers proves integrity, not origin, and that closing the difference
+(Sigstore provenance or detached signatures) is only observable on a real
+tagged run. [`RELEASE_ARTIFACTS.md`](RELEASE_ARTIFACTS.md) states the residual
+risk to a downloader.
 
 ### Distro packaging (deb/rpm) — undecided
 
-Currently neither in scope nor a recorded non-goal, which is itself the
-problem: a packager cannot plan against "unstated". The trade-off is that
-first-party `.deb`/`.rpm` packages would reach the consumers most exposed to
-the T3 gaps above, while the same packages are what a distribution would need
-in order to evaluate the library at all.
+Still neither in scope nor a recorded non-goal, which is itself the problem: a
+packager cannot plan against "unstated". The trade-off is that first-party
+`.deb`/`.rpm` packages would reach the consumers most exposed to the T3 gaps
+above, while the same packages are what a distribution would need in order to
+evaluate the library at all. The tarballs now give a packager everything a
+`debian/rules` needs, so what is left is whether this project wants to be the
+packager itself.
 
 **This is a maintainer decision, not a technical one**, and it is recorded as
 open rather than resolved here. #462 carries it.

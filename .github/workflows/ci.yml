@@ -867,6 +867,27 @@ jobs:
       - name: Symbol inventory diff (P2-5)
         run: cargo test -p libjpeg-turbo-rs-capi --release --test symbol_inventory -- --nocapture
         timeout-minutes: 10
+      # P2-8 / P4-131: the artifact we ship, as opposed to the cdylib cargo
+      # emits. `install_layout` asserts the staged prefix — both SONAME
+      # chains, the binary's own identity, the `.pc` and CMake substitutions,
+      # the five headers — and `release_bundle` asserts that the release
+      # archive is that prefix and nothing else, which is the one-staging-path
+      # rule P4-131 and P4-124 share. Both are per-platform structural facts
+      # (DT_SONAME vs install_name, `.so` vs `.dylib`), so they belong in this
+      # matrix rather than on Linux alone; on Windows they skip with a reason,
+      # because a Windows bundle is still open under P4-131.
+      #
+      # `install_layout` has existed since P2-8 and no workflow had ever named
+      # it, so the gate that closed P2-8 ran on no pull request. Named here
+      # for the reason the P4-81 step in Integration Tests records from
+      # experience: in this crate suites are selected by name, and one that
+      # nothing names never runs and reports green forever.
+      - name: Shipped install layout and release bundle (P2-8, P4-131)
+        run: >
+          cargo test -p libjpeg-turbo-rs-capi --release
+          --test install_layout
+          --test release_bundle -- --nocapture
+        timeout-minutes: 15
 
   test-cross-encode:
     name: C Interop (${{ matrix.os }})

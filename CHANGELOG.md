@@ -8,6 +8,21 @@ and `git log` between tags.
 
 ## [Unreleased]
 
+### Added
+
+- **Prebuilt native bundles on every tagged release** (P4-131, #462).
+  `libjpeg-turbo-rs-capi-<version>-<target>.tar.gz` for
+  `x86_64`/`aarch64-unknown-linux-gnu` and `x86_64`/`aarch64-apple-darwin`,
+  each carrying the libraries with their SONAME chains, the five public
+  headers, both `.pc` files and `JPEGConfig.cmake`, with a single `SHA256SUMS`
+  manifest attached beside them. Replacing a system `libjpeg.so.8` no longer
+  requires cloning the repository and installing a Rust toolchain. The bundle
+  is `scripts/install_capi.sh`'s output archived unchanged — one staging path,
+  so what you download is the tree the downstream harnesses test. See
+  [`docs/RELEASE_ARTIFACTS.md`](docs/RELEASE_ARTIFACTS.md) for verification and
+  install steps, and for what is still missing: no Windows bundle, no
+  signature or SBOM, and no first-party deb/rpm.
+
 ### Changed
 
 - **Breaking (C ABI, argument validation):** `tj3SaveImage8` now refuses a

@@ -5627,7 +5627,7 @@ was filed with:
    behaviour-regression half of the pair, and it retires only when its
    expectations are known to hold on the newer leg.
 
-## P4-131. No Native Binary Distribution — Releases Ship crates.io and npm Only — **OPEN**
+## P4-131. No Native Binary Distribution — Releases Ship crates.io and npm Only — **PARTIAL: Unix bundles ship and are gated; Windows, signing/SBOM and the deb/rpm decision remain**
 
 **GitHub:** [#462](https://github.com/developer0hye/libjpeg-turbo-rs/issues/462) — under the [#470](https://github.com/developer0hye/libjpeg-turbo-rs/issues/470) umbrella.
 
@@ -5674,6 +5674,61 @@ binary of a library that is not yet a general drop-in increases the blast
 radius of the gaps rather than reducing it. Sequenced in Stage C, after the
 export surface (P4-129) and the shipped-artifact test path (P4-124) are settled,
 since both change what a release artifact should contain.
+
+**Status (2026-08-18): PARTIAL** — criteria 2 and 3 are met, criterion 1 is met
+for Unix and open for Windows, criteria 4 and 5 remain.
+
+*What landed.* `scripts/package_capi_release.sh` and a `native-artifacts`
+matrix job in `release.yml` build and attach
+`libjpeg-turbo-rs-capi-<version>-<target>.tar.gz` for
+`x86_64`/`aarch64-unknown-linux-gnu` and `x86_64`/`aarch64-apple-darwin` on
+every `v*` tag, and `github-release` folds the per-bundle sums into one
+`SHA256SUMS` and attaches it with them (criterion 2). The workflow also gained
+`workflow_dispatch`, which runs that job alone — every publish job is now
+additionally gated on a `refs/tags/` ref, because `publish-capi` and
+`publish-wasm` both accept a *skipped* upstream job and would otherwise have
+published to crates.io and npm off a branch dispatch.
+
+*Criterion 3, mechanically.* The packaging script stages nothing: it calls
+`scripts/install_capi.sh` and archives its output, adding only a `BUNDLE.txt`.
+`crates/libjpeg-turbo-rs-capi/tests/release_bundle.rs`
+(`release_bundle_is_exactly_what_install_capi_sh_stages`) unpacks a bundle and
+compares it against a direct install run entry by entry — paths, symlink
+targets and file bytes — so a second staging path fails rather than diverges
+quietly. Its siblings assert the SONAME chains survive the archive as symlinks,
+that the `.pc` files carry the requested prefix, and that `sha256sum -c`
+accepts the archive and *rejects* a byte-flipped one.
+
+*Where it runs.* `capi-abi-checks` in `ci.yml` gained a step naming
+`--test install_layout --test release_bundle`, so the gate runs on
+`ubuntu-latest` and `macos-latest` (and skips with a reason on
+`windows-latest`) for every pull request. That step is also the first CI
+coverage `install_layout` has ever had: it has existed since P2-8 and no
+workflow named it, so the layout gate that closed P2-8 ran on no pull request —
+the same "a suite nothing names never runs" shape P4-81 and P4-61 each hit
+before. The Linux release legs additionally install `patchelf` and fail if the
+packaging log lacks `P4-81: relinked`, so neither of `install_capi.sh`'s two
+warn-and-continue degradations can ship silently in a published bundle.
+
+*What remains.*
+
+1. **Windows (criterion 1).** No DLL or import library. `install_capi.sh` is
+   Linux/macOS-only and the packaging script refuses to run elsewhere rather
+   than emit an unverified shape. Windows needs its own layout decision — no
+   SONAME chain, an import library, a toolchain-dependent `.pc` convention —
+   so it is separate work, not another matrix row.
+2. **Signing and SBOM (criterion 4).** Still a recorded gap, but the recorded
+   *reason* changed: "nothing to sign yet" is spent. A checksum published
+   beside the file it covers proves integrity, not origin. Closing it means
+   Sigstore provenance (`actions/attest-build-provenance`) or detached
+   signatures, and neither is observable from a pull request — it needs a
+   dispatch run and then a real tag to verify, which is why it was not wired
+   into the release path blind. `docs/RELEASE_ARTIFACTS.md` states the residual
+   risk to a downloader.
+3. **deb/rpm (criterion 5).** Unchanged and deliberately so: `ABI_COMPATIBILITY.md`
+   already records it as a maintainer decision rather than a technical one, and
+   an unattended session is not the place to make it. The tarballs do remove
+   the technical obstacle — a packager now has everything `debian/rules` needs.
 
 ## P4-132. Classic C-ABI Per-`cinfo` State Is Thread-Affine (P4-16 Option A) — **OPEN**
 
