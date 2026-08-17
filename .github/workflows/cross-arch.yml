@@ -22,7 +22,7 @@ jobs:
           submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Install libjpeg-turbo 3.x from official release (matches macOS homebrew)
+      - name: Install libjpeg-turbo 3.1.4.1 from official release (matches the macOS legs' pinned build)
         run: |
           ARCH=$(dpkg --print-architecture)
           VERSION=3.1.4.1
@@ -31,7 +31,13 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y /tmp/ljt.deb
           echo "/opt/libjpeg-turbo/bin" >> $GITHUB_PATH
-          /opt/libjpeg-turbo/bin/djpeg -version
+          # Asserted, not printed: the release these SIMD backends are compared
+          # against decides what "parity" means here, and a `-version` line
+          # nobody reads fails nothing (P4-130).
+          /opt/libjpeg-turbo/bin/djpeg -version 2>&1 | tee /tmp/oracle-version.txt
+          grep -q "version 3.1.4.1" /tmp/oracle-version.txt
+          /opt/libjpeg-turbo/bin/cjpeg -version 2>&1 | grep -q "version 3.1.4.1"
+          /opt/libjpeg-turbo/bin/jpegtran -version 2>&1 | grep -q "version 3.1.4.1"
       - name: Run full test suite with NEON SIMD
         # Use default features only — `--all-features` enables `full-c-parity`
         # which gates aspirational Rust-vs-C byte-exact encoder tests (opt-in).
@@ -53,7 +59,7 @@ jobs:
           submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Install libjpeg-turbo 3.x from official release (matches macOS homebrew)
+      - name: Install libjpeg-turbo 3.1.4.1 from official release (matches the macOS legs' pinned build)
         run: |
           ARCH=$(dpkg --print-architecture)
           VERSION=3.1.4.1
@@ -62,7 +68,13 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y /tmp/ljt.deb
           echo "/opt/libjpeg-turbo/bin" >> $GITHUB_PATH
-          /opt/libjpeg-turbo/bin/djpeg -version
+          # Asserted, not printed: the release these SIMD backends are compared
+          # against decides what "parity" means here, and a `-version` line
+          # nobody reads fails nothing (P4-130).
+          /opt/libjpeg-turbo/bin/djpeg -version 2>&1 | tee /tmp/oracle-version.txt
+          grep -q "version 3.1.4.1" /tmp/oracle-version.txt
+          /opt/libjpeg-turbo/bin/cjpeg -version 2>&1 | grep -q "version 3.1.4.1"
+          /opt/libjpeg-turbo/bin/jpegtran -version 2>&1 | grep -q "version 3.1.4.1"
       - name: Run full test suite with AVX2 enabled
         # Use default features only — `--all-features` enables `full-c-parity`
         # which gates aspirational Rust-vs-C byte-exact encoder tests (opt-in).
@@ -89,7 +101,7 @@ jobs:
           submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Install libjpeg-turbo 3.x from official release (matches macOS homebrew)
+      - name: Install libjpeg-turbo 3.1.4.1 from official release (matches the macOS legs' pinned build)
         run: |
           ARCH=$(dpkg --print-architecture)
           VERSION=3.1.4.1
@@ -98,7 +110,13 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y /tmp/ljt.deb
           echo "/opt/libjpeg-turbo/bin" >> $GITHUB_PATH
-          /opt/libjpeg-turbo/bin/djpeg -version
+          # Asserted, not printed: the release these SIMD backends are compared
+          # against decides what "parity" means here, and a `-version` line
+          # nobody reads fails nothing (P4-130).
+          /opt/libjpeg-turbo/bin/djpeg -version 2>&1 | tee /tmp/oracle-version.txt
+          grep -q "version 3.1.4.1" /tmp/oracle-version.txt
+          /opt/libjpeg-turbo/bin/cjpeg -version 2>&1 | grep -q "version 3.1.4.1"
+          /opt/libjpeg-turbo/bin/jpegtran -version 2>&1 | grep -q "version 3.1.4.1"
       - name: Run full test suite with AVX2 disabled at compile time
         # Use default features only — `--all-features` enables `full-c-parity`
         # which gates aspirational Rust-vs-C byte-exact encoder tests (opt-in).

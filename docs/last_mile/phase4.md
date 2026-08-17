@@ -1306,7 +1306,7 @@ The one non-obvious piece was the **scan script**. `jpeg_simple_progression` tak
 
 **Acceptance criteria.** Both `C Interop` legs report a non-zero test count; the job is validated by mechanism (a deliberately broken encoder byte-comparison must fail it) rather than by "it passed"; any aarch64 divergence the newly-live tests surface is filed before the filter fix merges.
 
-**Status (2026-07-28): closed.** The fix sketch above was itself falsified before merging: the corrected multi-filter form (`cargo test --tests -- cross_encode cross_check`) selects only **8 tests** on this workspace, because libtest filters match test *names*, and the tests inside `cross_check_*`/`cross_encode_*` files have names like `c_xval_decode_bgr_444` that contain neither substring. The job now runs the full unfiltered `cargo test --tests` on **macos-latest only** (timeout 15→30 min) — aarch64 + Homebrew jpeg-turbo 3.x, the one C-tool environment no other job covers. The former ubuntu leg is **removed**, not fixed: with apt's 2.1.x tools the unfiltered suite cannot run (codex review caught that e.g. `lossless_point_transform_matches_c_djpeg_exactly` feeds SOF3 to `djpeg` with no capability probe), and installing the official 3.1.4.1 deb would make the leg an exact environment+command duplicate of `Integration Tests` — the redundancy this entry's Impact paragraph already established. The "both legs non-zero" acceptance criterion is therefore satisfied in its intent (every remaining leg runs the full suite; no leg silently runs zero) rather than its letter. A comment in `ci.yml` pins the substring-vs-regex trap so a filter cannot quietly come back. **Mechanism-validated**, not validated-by-passing: with a deliberate encoder break (`FIX_0_299` 19595→20100 in `src/encode/color.rs`), `cargo test --test cross_check_encoder_binary` fails 3 of 4 byte-exact comparisons against `cjpeg`; reverted, green again. aarch64 + Homebrew first run: the full `--tests` suite was executed on a macOS aarch64 host with Homebrew jpeg-turbo before merging — no divergence surfaced, so nothing needed filing; the PR's own `C Interop (macos-latest)` leg is the first CI proof and must show a non-zero test count.
+**Status (2026-07-28): closed.** The fix sketch above was itself falsified before merging: the corrected multi-filter form (`cargo test --tests -- cross_encode cross_check`) selects only **8 tests** on this workspace, because libtest filters match test *names*, and the tests inside `cross_check_*`/`cross_encode_*` files have names like `c_xval_decode_bgr_444` that contain neither substring. The job now runs the full unfiltered `cargo test --tests` on **macos-latest only** (timeout 15→30 min) — aarch64 + Homebrew jpeg-turbo 3.x, the one C-tool environment no other job covers. The former ubuntu leg is **removed**, not fixed: with apt's 2.1.x tools the unfiltered suite cannot run (codex review caught that e.g. `lossless_point_transform_matches_c_djpeg_exactly` feeds SOF3 to `djpeg` with no capability probe), and installing the official 3.1.4.1 deb would make the leg an exact environment+command duplicate of `Integration Tests` — the redundancy this entry's Impact paragraph already established. The "both legs non-zero" acceptance criterion is therefore satisfied in its intent (every remaining leg runs the full suite; no leg silently runs zero) rather than its letter. A comment in `ci.yml` pins the substring-vs-regex trap so a filter cannot quietly come back. **Mechanism-validated**, not validated-by-passing: with a deliberate encoder break (`FIX_0_299` 19595→20100 in `src/encode/color.rs`), `cargo test --test cross_check_encoder_binary` fails 3 of 4 byte-exact comparisons against `cjpeg`; reverted, green again. aarch64 + Homebrew first run: the full `--tests` suite was executed on a macOS aarch64 host with Homebrew jpeg-turbo before merging — no divergence surfaced, so nothing needed filing; the PR's own `C Interop (macos-latest)` leg is the first CI proof and must show a non-zero test count. **Amended 2026-08-18 by [P4-130](#p4-130-c-parity-oracle-is-pinned-to-3141-upstream-stable-is-320--partial-every-oracle-provisioning-job-is-now-pinned-checked-and-measured-the-legs-still-on-one-release-the-submodule-bump-and-the-four-filed-gaps-remain):** the environment is still aarch64 macOS, but the oracle is no longer `brew install jpeg-turbo` — the leg builds 3.1.4.1 from source at `/tmp/ljt3141/prefix`, asserts it, and selects it with `LIBJPEG_TURBO_PREFIX`.
 
 ## P4-62. `cargo test --workspace` Does Not Build on windows-msvc — **CLOSED 2026-07-28**
 
@@ -2425,7 +2425,7 @@ subsampling/scaling/grayscale, invalid null/zero/out-of-bounds/after-read calls,
 returned x/width/output_width, component geometry, and subsequent row bytes.
 The 12-bit initialization/order portion remains in P4-98.
 
-**Extended 2026-08-17 by the [P4-130](#p4-130-c-parity-oracle-is-pinned-to-3141-upstream-stable-is-320--partial-both-tool-legs-now-cover-the-c-abi-oracle-suites-and-the-exhaustive-matrices-the-legs-still-on-one-release-the-submodule-bump-and-the-four-filed-gaps-remain)
+**Extended 2026-08-17 by the [P4-130](#p4-130-c-parity-oracle-is-pinned-to-3141-upstream-stable-is-320--partial-every-oracle-provisioning-job-is-now-pinned-checked-and-measured-the-legs-still-on-one-release-the-submodule-bump-and-the-four-filed-gaps-remain)
 3.2 delta triage.** 3.2.0 note 3 hardened this entry point, and the delta is
 exactly one condition: 3.2.0 `src/jdapistd.c:203` reads
 `if (cinfo->master->lossless || cinfo->raw_data_out)` where 3.1.90 reads
@@ -5118,7 +5118,7 @@ prevent, and it undermines any claim that the shipped surface is audited.
 
 **Status (2026-08-09): closed.** Landed in #486; `crates/libjpeg-turbo-rs-capi/build.rs` now routes the 16 `jpeg_capi_test_*` accessors to a `LIBJPEGTURBORS_PRIVATE_1.0` node via an exact-name list, and `tests/soname.rs` asserts no `jpeg_capi_test_*` symbol carries `LIBJPEG_8.0`.
 
-## P4-130. C-Parity Oracle Is Pinned to 3.1.4.1; Upstream Stable Is 3.2.0 — **PARTIAL: both tool legs now cover the C-ABI oracle suites and the exhaustive matrices; the legs still on one release, the submodule bump and the four filed gaps remain**
+## P4-130. C-Parity Oracle Is Pinned to 3.1.4.1; Upstream Stable Is 3.2.0 — **PARTIAL: every oracle-provisioning job is now pinned, checked and measured; the legs still on one release, the submodule bump and the four filed gaps remain**
 
 **GitHub:** [#461](https://github.com/developer0hye/libjpeg-turbo-rs/issues/461) — under the [#470](https://github.com/developer0hye/libjpeg-turbo-rs/issues/470) umbrella.
 
@@ -5188,8 +5188,169 @@ sources of diff into one signal.
 **Status (2026-08-18): partial.** Criteria 1, 3 and 4 are delivered — criterion
 1 over the root matrix on 2026-08-17, over the C-ABI crate's oracle suites on
 2026-08-18, and over the exhaustive `full-c-parity` matrices the same day — and
-criterion 2's triage is complete. What remains is the *work* the triage filed,
-the four workflows still measuring one release, and the submodule bump.
+criterion 2's triage is complete. Every job that provisions an oracle is now
+pinned, checked and measured, whichever workflow it lives in. What remains is
+the *work* the triage filed, the legs still measuring one release, and the
+submodule bump.
+
+*The pin-and-name rule, generalised to every job (2026-08-18).* The three gates
+above name the workflows they read. That is not a detail of their
+implementation — it is the reason `ci.yml`'s `test-cross-encode` still ran
+`brew install jpeg-turbo` the day after the aarch64 full-parity legs lost
+exactly that shape for exactly that reason. It runs on **every pull request**,
+on the only macOS leg that runs the whole root suite, and the release it
+measured was whatever homebrew shipped that week.
+
+So the rule moved off the list of workflow files and onto the **job**.
+`tests/oracle_version_pins.rs` enumerates every job in `.github/workflows`
+(41 today, in nine files; the enumeration was checked once against a real YAML
+parser, name for name) and holds each one that provisions a C libjpeg-turbo to
+three things:
+
+- **pinned** — the install names the release it installs. Upstream's
+  `libjpeg-turbo-official_<version>` package and a `--branch <tag>` clone do;
+  a package manager's own name for the package does not, and is now
+  unrepresentable rather than discouraged. A submodule build is pinned by
+  commit, and a fetch shape the scanner cannot read fails *closed* — a clone
+  with no tag is the worst pin of all, and reporting it as "no install here"
+  would let it pass.
+- **checked** — the job asserts that release. Seven did not: five ran a
+  `djpeg -version` and read the output nowhere, which is a print, not a check,
+  and two ran no version step at all. A deb that installed something else, a
+  tag repointed at another release, or a runner image carrying its own libjpeg
+  would each have run the whole leg green under a release it was not measuring.
+- **measured** — the prefix it checked is the prefix its tests resolve.
+  `test-integration` checked `djpeg -version` *by PATH*, which names no install
+  at all. On a macOS runner a PATH entry does not even select an oracle:
+  `helpers::c_tool_path` reads `/opt/homebrew/bin` first, so only
+  `LIBJPEG_TURBO_PREFIX` counts there — the false green #569 found inside its
+  own change, now a rule instead of a memory.
+
+Written first and red on unmodified `main` in all three directions, naming
+**eight jobs**: `test-cross-encode` unpinned; `mutants-in-diff`,
+`test-integration`, `test-corpus`, the three oracle-installing `cross-arch.yml`
+jobs and `fuzz-smoke.yml`'s `fuzz` never asserting; and `mutants-in-diff`,
+`test-integration` and `test-corpus` checking no install path at all. Two of
+those — `mutants-in-diff` and `test-integration` — are *not* in the inventory
+this item's remainder listed, because that inventory counted legs measuring one
+release and these were correctly pinned. Being pinned and being checked are
+different properties, and only the second survives a mis-provisioned runner.
+One of the eight is weaker than the rest by construction and says so in the
+workflow: `mutants-in-diff` is `continue-on-error`, so its assertion stops that
+job and leaves CI green. It protects the meaning of the mutation result — a
+mutant that survives because the oracle was a different libjpeg reads as MISSED
+for the wrong reason — not the merge.
+
+*The scope that matters is the step, not the job (codex round).* The first
+draft of the "measured" rule compared a job's *union* of prefix assignments
+against the prefixes it checked, and a review pointed out that the union is
+precisely the wrong shape: a step-level assignment overrides the job's for that
+step alone, so a leg could name the checked install on one step and run
+`cargo test` against another — `/opt/homebrew`, on macOS — with the gate green.
+The rule is now per step: each step's *effective* prefix (its own, else the
+job's) must be one the job checked, and a step that names none relies on lookup
+order, which is accepted only off macOS and only when a checked prefix is on
+PATH. Two things followed. First, checking became per prefix at a release
+(`prefix_releases_checked_in`) rather than "somewhere in this job a version is
+asserted", since `test-integration` carries three oracles and one check would
+otherwise vouch for all of them; a `tee` file belongs to the invocation that
+wrote it. Second, the two v8 source builds — `/tmp/ljt8/prefix` from the
+submodule and `/tmp/ljt320v8/prefix` from the 3.2.0 clone — now assert their
+own releases, which is also what makes a submodule bump come through a workflow
+line rather than re-baselining the classic-ABI trace oracles silently. Verified
+by removing each check in turn: dropping the 3.1.90 assertion turns the four
+steps that select that prefix red, dropping `test-cross-encode`'s job-level
+prefix turns its `cargo test` step red as a macOS lookup-order step, and
+pointing one `test-integration` step at `/opt/homebrew` turns exactly that step
+red. The step parser had the same bug in miniature and is pinned against it: it
+read the step indent off the first `- ` line in the job, which in a matrix job
+is a matrix entry, so every step merged into one — a job-scope union arriving
+through the parser rather than the rule.
+
+A second review round found the same class once more, in *which steps get
+asked*. "Does this step run the tests?" was a substring search for
+`cargo test`, `cargo run`, `cargo mutants` and `fuzz run` — and
+`cargo +nightly test` contains none of them while running the whole suite, a
+spelling these workflows already use. A step the predicate misses is a step the
+gate never asks about, so the answer is not another substring: the cargo
+invocation is parsed, the optional `+toolchain` skipped, and the subcommand
+compared against a **deny** list of the ones that cannot reach an oracle
+(`build`, `clippy`, `install`, `fmt`, …). The directions are not symmetric —
+an unlisted subcommand that *does* reach the oracle is a silent hole, while an
+unlisted one that does not costs a line here the first time it appears in an
+oracle-installing job. Verified against the reproduction: pointing the macOS
+leg at `cargo +nightly test` with no prefix is red.
+
+A third round found the cost of that parse. An exact-token comparison for
+`cargo` no longer recognised `"cargo test"` in a quoted YAML scalar or
+`out=$(cargo test …)` in a command substitution — both of which the substring
+match it replaced had handled by accident. The token is now read past the shell
+punctuation that can precede a command word, `--cargo-test-arg` still being a
+flag that names cargo rather than an invocation of it; that shape is red
+against the real workflow too.
+
+A fourth round found the mirror — *false failures*, the direction that costs a
+valid CI change rather than a silent hole. Stripping punctuation off every
+token promoted an argument to a command, so `echo "cargo test --tests"` read as
+a test run, and `CARGO=/usr/bin/cargo cargo build` read as one too; while a
+wrapper closing right after a deny-listed subcommand left `build)` and `fmt"`,
+which match no deny-list entry. Tokens are now read in *command* position only
+— after separators, after the keywords these workflows wrap commands in
+(`test-corpus` runs `if ! cargo run …`), and past an environment prefix — and a
+word is trimmed of its closers before its openers, since stripping only openers
+turns `"cargo fmt"` into an empty subcommand that is in no deny list.
+
+A fifth round found what the command-position rule had *cost*, including one
+case live in `ci.yml`. The step reader joined a `run: |` block's lines with
+spaces, so a block was one long command: P4-81's step is `set -o pipefail`
+followed by `cargo test …`, and flattened it reads as a single command named
+`set` — invisible to a rule that only looks at command position. Scripts are
+now read per logical line, each of which starts a command. Three narrower
+misses came with it: a command substitution runs its contents wherever it
+appears (`echo "$(cargo test)"` runs the tests), a wrapper takes options of its
+own before the command it wraps (`sudo -E cargo test`, `env -u FOO cargo test`),
+and an inline assignment whose value contains a space is two tokens of which
+the second is not an assignment (`RUSTFLAGS="-C target-cpu=native" cargo test`).
+
+Five rounds, eight findings, both polarities, and every one of them in the
+*scanner* rather than the rule: shapes it could not see, and shapes it saw
+where there was nothing. Each fix bought its own next finding — the substring
+match handled quoting by accident, the parse that fixed toolchain qualifiers
+lost it, the command-position rule that fixed the false positives lost the
+multi-line block — which is the argument for pinning every helper against the
+spelling that would make it lie rather than trusting a gate because it is
+green, and for keeping *both* polarities in the pins, since a gate that cannot
+be wrong in the second direction is usually one that has stopped matching.
+Verified against the real workflows at the end of it: with the macOS leg's
+prefix removed, all six spellings of its test step are red, and the multi-line
+P4-81 step is now one of the steps the rule reads. A sixth round found three
+more shapes — an escaped quote inside an inline assignment, folded scalars and
+heredocs, and substitution syntax inside single quotes — and none of them is in
+`.github/workflows`, so they are filed as
+**[P4-177](#p4-177-the-workflow-scanner-does-not-model-heredocs-folded-scalars-or-quoted-substitution-syntax--open)**
+rather than fixed here. The gate fails closed, so what they cost is precision,
+not coverage; and this file's own history is the argument for giving the
+scanner its own change and its own review rather than a seventh pass inside
+one about oracle legs.
+
+`test-cross-encode` now builds 3.1.4.1 from source at `/tmp/ljt3141/prefix` and
+selects it with `LIBJPEG_TURBO_PREFIX`, the same shape the aarch64 full-parity
+baseline leg took. It is the same measurement under a name: homebrew's formula
+was 3.1.4.1 on the day it was replaced. Both per-job gates report *every*
+offender rather than the first, since these legs span three workflows and a
+gate that names one per run turns one review into as many rounds as there are
+legs.
+
+The helpers are pinned against the shapes that would make them lie, as the
+gates above are: an unpinned package-manager install is recognised while
+`apt-get install -y /tmp/ljt.deb` and `brew install cmake` are not; a comment,
+an `echo`'d reproduction instruction and a step *title* naming a release are
+documentation rather than installs; a backslash continuation is classified as
+the one command it is (`ci.yml` splits both provisioning shapes across lines,
+and each half alone names either the release or the command, never both); a
+bare `djpeg -version` checks no install; and a PATH entry selects the oracle
+everywhere **except** macOS, read from the whole job block because
+`test-cross-encode` names its runner only in its matrix.
 
 *Criterion 1, the exhaustive matrices (2026-08-18).* The widest differential
 surface in this repository is not in `ci.yml` at all. The `full-c-parity`
@@ -5443,15 +5604,21 @@ was filed with:
      take the 3.1.4.1 deb, and the reproduction instructions they emit name it
      too;
    - `ci.yml`'s `test-corpus` — a 3.1.4.1 source build at `/usr/local`;
-   - `ci.yml`'s `test-cross-encode` — `brew install jpeg-turbo`, the **same
-     unpinned shape** the aarch64 full-parity legs just lost. It is the only
-     remaining oracle in this repository whose release is named nowhere, and it
-     runs on every pull request.
+   - `ci.yml`'s `test-cross-encode` — a 3.1.4.1 source build at
+     `/tmp/ljt3141/prefix` since 2026-08-18, on the only macOS leg that runs
+     the whole root suite.
 
-   The gates added on 2026-08-18 read `full-c-parity.yml` by name, so none of
-   these is covered by them; extending the pin-and-name rule to every
-   oracle-provisioning job, rather than to a list of workflows, is the natural
-   next milestone.
+   Every one of them is now **pinned, checked and measured** — the release each
+   installs is named in `docs/oracle_versions.tsv`, asserted at the path it was
+   installed to, and selected for the tests that read it. What none of them has
+   is a *second* leg: they answer against 3.1.4.1 alone, so a 3.2.0 divergence
+   in the NEON backend, in the differential fuzz targets, or in the corpus
+   comparison is still unmeasured. Pairing them is the next milestone, and it
+   is a question of runner cost rather than of mechanism: the pairing gates
+   `every_oracle_backed_capi_suite_…` and
+   `every_oracle_backed_full_parity_suite_…` already classify suites from their
+   own source, so a second leg per workflow inherits the membership rule
+   without a list.
 3. `references/libjpeg-turbo` stays at 3.1.90. Bumping it to 3.2.0 moves every
    `j*.c:NNN` citation in this repository and re-baselines the classic-ABI
    trace oracles at the same time, which is its own change with its own
@@ -8451,7 +8618,7 @@ change with its own oracle traces.
 
 ## P4-171. 8-Bit Lossy JPEG Cannot Be Decompressed to 12-Bit Output (3.2 beta1 note 8) — **OPEN**
 
-**GitHub:** [#561](https://github.com/developer0hye/libjpeg-turbo-rs/issues/561) — filed 2026-08-17 by the [P4-130](#p4-130-c-parity-oracle-is-pinned-to-3141-upstream-stable-is-320--partial-both-tool-legs-now-cover-the-c-abi-oracle-suites-and-the-exhaustive-matrices-the-legs-still-on-one-release-the-submodule-bump-and-the-four-filed-gaps-remain) 3.2 delta triage.
+**GitHub:** [#561](https://github.com/developer0hye/libjpeg-turbo-rs/issues/561) — filed 2026-08-17 by the [P4-130](#p4-130-c-parity-oracle-is-pinned-to-3141-upstream-stable-is-320--partial-every-oracle-provisioning-job-is-now-pinned-checked-and-measured-the-legs-still-on-one-release-the-submodule-bump-and-the-four-filed-gaps-remain) 3.2 delta triage.
 
 **Motivation.** 3.2 beta1 note 8 added a capability, not a fix: an 8-bit-per-sample
 *lossy* JPEG can now be decompressed to a 12-bit-per-sample output image, to
@@ -8673,19 +8840,21 @@ can repoint, and nothing checks what arrived:
 
 - **eight** deb downloads —
   `curl -fL .../releases/download/${VERSION}/libjpeg-turbo-official_${VERSION}_${ARCH}.deb`,
-  installed with no digest: `ci.yml:64,320,616`, `cross-arch.yml:30,61,97`,
-  `fuzz-smoke.yml:95`, `full-c-parity.yml:97`. (`fuzz-smoke.yml:201` prints the
+  installed with no digest: `ci.yml:64,327,629`, `cross-arch.yml:30,67,109`,
+  `fuzz-smoke.yml:95`, `full-c-parity.yml:99`. (`fuzz-smoke.yml:206` prints the
   same command as reproduction instructions and does not fetch.)
-- **five** source clones — `full-c-parity.yml:56,150` and `ci.yml:892` at
-  `--branch 3.1.4.1`, and `full-c-parity.yml:189` and `ci.yml:702` at
-  `--branch 3.2.0`, the last of them for the `trace-current` v8-ABI oracle;
+- **six** source clones — `full-c-parity.yml:58,152` and `ci.yml:890,937` at
+  `--branch 3.1.4.1`, and `full-c-parity.yml:191` and `ci.yml:715` at
+  `--branch 3.2.0`, the last of them for the `trace-current` v8-ABI oracle.
+  `ci.yml:890` is `test-cross-encode`, which became a source clone on
+  2026-08-18 when P4-130 replaced its `brew install jpeg-turbo`;
 - `references/libjpeg-turbo` is the exception. A submodule is pinned by commit,
   which is why it is not part of this gap.
 
 The `trace-current` step greps `set(VERSION 3.2.0)` from the cloned tree, so a
 tag repointed at a *different release* fails there; since 2026-08-17 the
-`tool-current` leg and, since 2026-08-18, all four `Full C Parity` legs check
-their installed tools' `-version` output the same way. Every one of those
+`tool-current` leg, and since 2026-08-18 every job that provisions an oracle,
+checks its installed tools' `-version` output the same way. Every one of those
 checks answers the same question — *is this the release it claims to be* — and
 none answers the integrity one. A tag repointed at a modified tree of the same
 version, or a replaced release asset, is indistinguishable from the real thing — and these oracles are
@@ -8717,3 +8886,54 @@ They pin *which* release is requested, not *what* is delivered.
 it touches all five workflows rather than the one step under review. Bundling
 it into that change would have mixed a supply-chain change into a coverage
 change.
+
+## P4-177. The Workflow Scanner Does Not Model Heredocs, Folded Scalars or Quoted Substitution Syntax — **OPEN**
+
+**GitHub:** [#572](https://github.com/developer0hye/libjpeg-turbo-rs/issues/572) — filed 2026-08-18 from the sixth codex round on the
+[P4-130](#p4-130-c-parity-oracle-is-pinned-to-3141-upstream-stable-is-320--partial-every-oracle-provisioning-job-is-now-pinned-checked-and-measured-the-legs-still-on-one-release-the-submodule-bump-and-the-four-filed-gaps-remain)
+per-job pin-and-name gates.
+
+**Motivation.** `tests/oracle_version_pins.rs` decides which workflow steps
+reach a C oracle by reading their shell, and five review rounds moved that
+reader from a substring match to a per-line command-position walk. Each round
+found a shape the previous one could not see or saw where there was nothing,
+and the sixth found three more. Unlike the first five, none of these exists in
+`.github/workflows` today — which is why they are filed rather than fixed
+inside a change whose subject is the oracle legs:
+
+1. **Escaped quotes in an inline assignment.** `leaves_a_quote_open` counts
+   `"` characters, so `FOO="\"" cargo test` reads as an unterminated value and
+   every following token is skipped — a *missed* invocation.
+2. **Folded scalars and heredocs.** The step reader inserts a newline between a
+   `run:` block's physical lines, which is right for a literal `|` block and
+   wrong for a folded `>` one, where YAML joins with spaces; and a heredoc body
+   is data, not commands. Both directions are reachable: a folded `echo` /
+   `cargo test` pair would read as two commands, and a heredoc containing
+   `cargo test` would read as an invocation — *false failures* in an
+   oracle-provisioning job with no prefix.
+3. **Quoted substitution syntax.** `$(` and a backtick are treated as an active
+   command substitution wherever they appear, so `echo '$(cargo test)'` — which
+   prints literal text — reads as a test run.
+
+The residual is bounded by what the gate is for: it decides which steps must
+name an oracle prefix, and it fails closed, so the live risk is a rejected
+valid workflow rather than an unchecked oracle. What it costs is *precision*,
+and precision is what keeps a gate from being edited away the first time it
+blocks a legitimate change.
+
+**Acceptance criteria.**
+
+1. The scalar style is retained through the step reader, so a folded `>` block
+   joins with spaces and a literal `|` block with newlines, each pinned by a
+   test using the real shape from `ci.yml`.
+2. Heredoc bodies are recognised and excluded from command scanning.
+3. Quote and escape state is tracked well enough that a single-quoted or
+   escaped `$(` is not an active substitution, and an escaped `"` inside an
+   assignment value does not open one.
+4. Each of the three shapes above is pinned in both directions — the shape that
+   must be seen, and the neighbouring shape that must not be.
+
+**Why deferred.** None of these shapes is in the workflows, and the same file's
+history is the argument for not fixing them inline: each of the five rounds
+that preceded this one bought its next finding, so a further pass at the
+scanner belongs in a change whose subject *is* the scanner, with its own review.

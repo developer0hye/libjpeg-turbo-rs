@@ -23,12 +23,18 @@
 //!   workflows install, so the classic-ABI trace oracles were already running
 //!   against a different release than the tool oracles.
 //!
-//! A second, independent dimension lives in the back half of this file: the
-//! two tool legs have to run the *same* C-ABI oracle suites. Versions being
-//! declared says nothing about which suites actually meet them, and the C-ABI
-//! crate's suites are selected by name — so a suite added to one leg is
-//! invisible to the other. That gate, its classifier and the job-block parse
-//! it rests on are documented at their own banner below.
+//! Two further dimensions live in the back half of this file, each under its
+//! own banner:
+//!
+//! * **the two tool legs run the same oracle-backed suites** — declaring
+//!   versions says nothing about which suites actually meet them, and suites
+//!   are selected by name, so one added to one leg is invisible to the other.
+//!   One pairing gate per crate: the C-ABI crate's suites, and the root
+//!   crate's exhaustive `full-c-parity` matrices.
+//! * **every oracle-provisioning job is pinned, checked and measured** — read
+//!   from all the jobs in all the workflows rather than from a list of
+//!   workflow files, which is what let one leg keep an unpinned
+//!   `brew install jpeg-turbo` while the legs a gate happened to name lost it.
 //!
 //! Currency against *upstream* is a network question and cannot be asked here;
 //! `scripts/check_oracle_currency.sh` asks it on a schedule.
@@ -1401,6 +1407,1149 @@ fn every_oracle_backed_full_parity_suite_on_the_baseline_leg_also_runs_on_the_cu
              measured against is precisely the unmeasured delta P4-130 was \
              filed for.",
             missing.join("\n")
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// P4-130 criterion 1, generalised: the pin-and-name rule holds for every job
+// that installs an oracle, in every workflow.
+//
+// Every gate above names the workflow it reads — `ci.yml`'s two legs,
+// `full-c-parity.yml`'s four. That is how `test-cross-encode` still ran
+// `brew install jpeg-turbo` the day after the aarch64 full-parity legs lost
+// exactly that shape: homebrew has no per-version formula for jpeg-turbo, so
+// the release that leg measures is whatever the packager shipped that week,
+// named nowhere in this repository and free to move without a commit to
+// review. Eight legs across three workflows were in the same position, and a
+// gate keyed to a list of workflow files cannot see one of them.
+//
+// So this half is keyed to *jobs*, enumerated by reading every workflow. Three
+// requirements, each the general form of one the full-parity legs already
+// meet:
+//
+// * **pinned** — an install names the release it installs. A package manager's
+//   own name for the package does not name a release, so that shape is
+//   rejected rather than discouraged. A shape this scanner cannot read fails
+//   closed for the same reason.
+// * **checked** — the job *asserts* that release. Running `djpeg -version` and
+//   printing the output is what five of these legs did, and it fails nothing.
+// * **measured** — the tests resolve to the install the job checked. On a
+//   macOS runner that requires `LIBJPEG_TURBO_PREFIX`: `helpers::c_tool_path`
+//   reads `/opt/homebrew/bin` before PATH, so a PATH entry does not select an
+//   oracle there. That is the false green #569 found inside its own change.
+// ---------------------------------------------------------------------------
+
+/// Package managers whose install names a *package*, leaving the release to
+/// the packager.
+const PACKAGE_MANAGER_INSTALLS: [&str; 6] = [
+    "brew install",
+    "apt-get install",
+    "apt install",
+    "dnf install",
+    "yum install",
+    "port install",
+];
+
+/// Commands that fetch a tree or an archive. A fetch that names upstream but
+/// matches none of the pinned shapes is unreadable, not absent.
+const FETCH_COMMANDS: [&str; 3] = ["curl ", "wget ", "git clone"];
+
+/// This repository's own crate names, which contain upstream's as a prefix.
+/// Stripped before asking whether a line names upstream, so `cargo publish -p
+/// libjpeg-turbo-rs-capi` is not read as provisioning a C oracle.
+const OUR_CRATE_NAME: &str = "libjpeg-turbo-rs";
+
+/// How a line provisions a C libjpeg-turbo, if it does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OracleInstall {
+    /// Pinned by a release the line names: upstream's
+    /// `libjpeg-turbo-official_<version>` package, or a `--branch <tag>` clone.
+    /// Which release is read at job scope by [`provisioned_versions_in`],
+    /// because these workflows put the version in a `VERSION=` assignment one
+    /// line above the URL that interpolates it.
+    Pinned,
+    /// Built from `references/libjpeg-turbo`, a git submodule — pinned by
+    /// commit rather than by a version token, and cross-checked against the
+    /// manifest by [`the_submodule_row_matches_the_checked_out_submodule`].
+    Submodule,
+    /// Installed under a name whose release the packager chooses.
+    Unpinned,
+    /// Names upstream and fetches something, in a shape this scanner cannot
+    /// resolve to a release.
+    Unreadable,
+}
+
+/// Shell lines with backslash continuations joined, so a command split across
+/// lines is classified as the one command it is.
+///
+/// `ci.yml` splits both provisioning shapes: `curl -fL -o /tmp/ljt.deb \` puts
+/// the URL carrying `libjpeg-turbo-official` on the next line, and
+/// `git clone --depth 1 --branch 3.2.0 \` puts the repository on the next.
+/// Read line by line, the half naming upstream and the half naming the release
+/// are different lines and neither is an install.
+fn logical_lines(block: &str) -> Vec<String> {
+    let mut joined: Vec<String> = Vec::new();
+    let mut pending: Option<String> = None;
+    for line in block.lines() {
+        let trimmed: &str = line.trim();
+        let continues: bool = trimmed.ends_with('\\');
+        let body: &str = trimmed.strip_suffix('\\').unwrap_or(trimmed).trim_end();
+        match pending.as_mut() {
+            Some(current) => {
+                current.push(' ');
+                current.push_str(body);
+            }
+            None => pending = Some(body.to_string()),
+        }
+        if !continues {
+            joined.extend(pending.take());
+        }
+    }
+    joined.extend(pending);
+    joined
+}
+
+fn oracle_install_on(line: &str) -> Option<OracleInstall> {
+    let trimmed: &str = line.trim_start();
+    // Documentation about an install is not one — the distinction
+    // [`is_provisioning_line`] already draws, and `fuzz-smoke.yml` needs it:
+    // the reproduction instructions it prints on failure name the deb, the
+    // release and the PATH entry in full.
+    if trimmed.starts_with('#') || trimmed.contains("echo ") {
+        return None;
+    }
+    if trimmed.contains("cmake -S references/libjpeg-turbo") {
+        return Some(OracleInstall::Submodule);
+    }
+    let without_our_crate: String = trimmed.replace(OUR_CRATE_NAME, "");
+    if !without_our_crate.contains("jpeg-turbo") && !without_our_crate.contains("libjpeg") {
+        return None;
+    }
+    // Upstream's own release assets: the official package carries the release
+    // in its filename, a `--branch` clone in its tag.
+    if without_our_crate.contains("libjpeg-turbo-official")
+        || without_our_crate.contains("--branch ")
+    {
+        return Some(OracleInstall::Pinned);
+    }
+    if PACKAGE_MANAGER_INSTALLS
+        .iter()
+        .any(|command| without_our_crate.contains(command))
+    {
+        return Some(OracleInstall::Unpinned);
+    }
+    if FETCH_COMMANDS
+        .iter()
+        .any(|command| without_our_crate.contains(command))
+    {
+        return Some(OracleInstall::Unreadable);
+    }
+    None
+}
+
+/// Every job in a workflow, in file order.
+///
+/// Only the mapping under the top-level `jobs:` key: `on:` carries two-space
+/// keys of its own (`push:`, `schedule:`, `workflow_dispatch:`), and reading
+/// those as jobs would ask [`job_block`] for a block that is not one.
+///
+/// Checked once against a real YAML parser while this gate was written: the
+/// scanner's list is identical to PyYAML's for all 41 jobs in the nine
+/// workflows, name for name. The standing protection is the sibling test —
+/// a workflow this returns nothing for is a workflow every gate here passes
+/// vacuously.
+fn job_names_in(text: &str) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    let mut inside_jobs: bool = false;
+    for line in text.lines() {
+        if line.trim().is_empty() || line.trim_start().starts_with('#') {
+            continue;
+        }
+        if !line.starts_with(' ') {
+            inside_jobs = line.trim_end() == "jobs:";
+            continue;
+        }
+        if !inside_jobs {
+            continue;
+        }
+        let is_job_header: bool =
+            line.starts_with("  ") && !line.starts_with("   ") && line.trim_end().ends_with(':');
+        if is_job_header {
+            names.push(line.trim().trim_end_matches(':').to_string());
+        }
+    }
+    names
+}
+
+/// `(workflow file name, job name, job block)` for every job in the repository.
+fn every_job() -> Vec<(String, String, String)> {
+    let mut jobs: Vec<(String, String, String)> = Vec::new();
+    for path in workflow_files() {
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let workflow: String = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        for job in job_names_in(&text) {
+            let block: String = job_block(&text, &job, &workflow);
+            jobs.push((workflow.clone(), job, block));
+        }
+    }
+    jobs
+}
+
+/// How this job installs a C oracle, over all of its lines.
+fn oracle_installs_in(block: &str) -> Vec<(OracleInstall, String)> {
+    logical_lines(block)
+        .into_iter()
+        .filter_map(|line| oracle_install_on(&line).map(|kind| (kind, line)))
+        .collect()
+}
+
+/// Does this line assert that a release really is the one installed?
+///
+/// Two spellings, because the two things a job can check are the built tool
+/// and the tree it was built from: `djpeg -version` prints `version 3.2.0`,
+/// while upstream's `CMakeLists.txt` states `set(VERSION 3.2.0)` and the grep
+/// that reads it escapes the dots. Both are assertions in the sense
+/// [`is_assertion_over_output`] means — a grep whose failure stops the step.
+fn asserts_release(line: &str, version: &str) -> bool {
+    let escaped: String = version.replace('.', "\\.");
+    is_assertion_over_output(line, &format!("version {version}"))
+        || is_assertion_over_output(line, &format!("VERSION {escaped}"))
+}
+
+/// The absolute path a `<prefix>/bin/djpeg -version` line invokes, and the
+/// file it tees the output into, if any.
+///
+/// An absolute path, because a bare `djpeg -version` is answered by PATH and
+/// says nothing about the install the job made — the shape `test-integration`
+/// carried while reading as a version check.
+fn djpeg_version_invocation(line: &str) -> Option<(String, Option<String>)> {
+    let trimmed: &str = line.trim_start();
+    if trimmed.starts_with('#') || !trimmed.contains("-version") {
+        return None;
+    }
+    let at: usize = trimmed.find("/bin/djpeg")?;
+    let head: &str = &trimmed[..at];
+    let start: usize = head
+        .rfind([' ', '"', '\'', '\t', '('])
+        .map(|index| index + 1)
+        .unwrap_or(0);
+    let prefix: &str = &head[start..];
+    if !prefix.starts_with('/') {
+        return None;
+    }
+    let teed: Option<String> = trimmed.split("tee ").nth(1).map(|rest| {
+        rest.split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .trim_matches(['"', '\''])
+            .to_string()
+    });
+    Some((prefix.to_string(), teed))
+}
+
+/// Which release each prefix in this job has been *checked* to be.
+///
+/// A prefix is checked at a release when the job both invokes that prefix's
+/// `djpeg -version` and asserts the release over the output — either on the
+/// one line, or through the file the invocation tees into. Loose pairing
+/// ("somewhere in the job a version is asserted, somewhere a prefix is run")
+/// is not enough once a job carries more than one oracle, and
+/// `test-integration` carries three.
+fn prefix_releases_checked_in(block: &str) -> BTreeMap<String, BTreeSet<String>> {
+    let mut checked: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let lines: Vec<&str> = block.lines().collect();
+    for line in &lines {
+        let Some((prefix, teed)) = djpeg_version_invocation(line) else {
+            continue;
+        };
+        for version in versions_asserted_over(line, teed.as_deref(), &lines) {
+            checked.entry(prefix.clone()).or_default().insert(version);
+        }
+    }
+    checked
+}
+
+/// The releases asserted over one `djpeg -version` invocation's output.
+fn versions_asserted_over(line: &str, teed: Option<&str>, lines: &[&str]) -> BTreeSet<String> {
+    let mut versions: BTreeSet<String> = BTreeSet::new();
+    for candidate in dotted_numeric_tokens_in_job(lines) {
+        let on_this_line: bool = asserts_release(line, &candidate);
+        let through_the_file: bool = teed.is_some_and(|file| {
+            lines
+                .iter()
+                .any(|other| other.contains(file) && asserts_release(other, &candidate))
+        });
+        if on_this_line || through_the_file {
+            versions.insert(candidate);
+        }
+    }
+    versions
+}
+
+/// Every 3.x token a job names anywhere — the candidate releases its checks
+/// could be asserting.
+fn dotted_numeric_tokens_in_job(lines: &[&str]) -> BTreeSet<String> {
+    let mut tokens: BTreeSet<String> = BTreeSet::new();
+    for line in lines {
+        for token in dotted_numeric_tokens(line) {
+            if token.split('.').next() == Some(ORACLE_MAJOR) {
+                tokens.insert(token);
+            }
+        }
+    }
+    tokens
+}
+
+/// Environment variables that name an oracle prefix for the step they are set
+/// on. `LIBJPEG_TURBO_REFERENCE_DIR` is P4-108's spelling of the same thing.
+const ORACLE_PREFIX_VARS: [&str; 2] = ["LIBJPEG_TURBO_PREFIX", "LIBJPEG_TURBO_REFERENCE_DIR"];
+
+/// One step of a job: what it runs, and the oracle prefixes it names.
+#[derive(Debug, Default)]
+struct Step {
+    script: String,
+    prefixes: BTreeSet<String>,
+}
+
+/// The steps of a job, each with its own `env:` scope.
+///
+/// Per step rather than per job, because a step-level assignment overrides the
+/// job's for that step alone. A union over the job would report a leg green
+/// whenever *any* of its steps named the checked install, while another
+/// `cargo test` step resolved a different oracle — on macOS, homebrew's. That
+/// is #569's false green one step over, and it is what a job-scope union
+/// cannot see.
+fn steps_in(job_block: &str) -> Vec<Step> {
+    // From the `steps:` key, not from the first `- ` in the job: a matrix
+    // entry (`- os: macos-latest`) comes first and sits deeper, and taking its
+    // indent as the step indent merged every real step into one — which is a
+    // job-scope union again, arriving through the parser, on the matrix jobs
+    // where the macOS rule matters most.
+    let after_steps_key: Option<&str> = job_block
+        .find("\n    steps:")
+        .map(|at| &job_block[at + "\n    steps:".len()..]);
+    let Some(body) = after_steps_key else {
+        return Vec::new();
+    };
+    let step_indent: Option<usize> = body
+        .lines()
+        .find(|line| line.trim_start().starts_with("- ") && !line.trim_start().starts_with("- #"))
+        .map(|line| line.len() - line.trim_start().len());
+    let Some(step_indent) = step_indent else {
+        return Vec::new();
+    };
+    let mut steps: Vec<Step> = Vec::new();
+    let mut current: Option<Step> = None;
+    let mut in_run: bool = false;
+    for line in body.lines() {
+        let trimmed: &str = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let indent: usize = line.len() - line.trim_start().len();
+        if indent == step_indent && trimmed.starts_with("- ") {
+            steps.extend(current.take());
+            current = Some(Step::default());
+            in_run = false;
+        }
+        let Some(step) = current.as_mut() else {
+            continue;
+        };
+        for variable in ORACLE_PREFIX_VARS {
+            if let Some(rest) = trimmed.strip_prefix(&format!("{variable}:")) {
+                step.prefixes
+                    .insert(rest.trim().trim_matches(['"', '\'']).to_string());
+            }
+        }
+        let starts_run: Option<&str> = ["- run:", "run:"]
+            .iter()
+            .find(|key| trimmed.starts_with(**key))
+            .copied();
+        if let Some(key) = starts_run {
+            in_run = true;
+            step.script
+                .push_str(trimmed[key.len()..].trim().trim_start_matches(['|', '>']));
+            continue;
+        }
+        if STEP_KEYS.iter().any(|key| trimmed.starts_with(key)) {
+            in_run = false;
+            continue;
+        }
+        if in_run {
+            // Newline, not space. A `run: |` block is a sequence of commands,
+            // and flattening it into one line loses every boundary between
+            // them: `set -o pipefail` followed by `cargo test` would read as
+            // one command whose name is `set` — which is exactly the shape
+            // `ci.yml`'s P4-81 step has.
+            step.script.push('\n');
+            step.script.push_str(trimmed);
+        }
+    }
+    steps.extend(current);
+    steps
+}
+
+/// The prefixes a job prepends to PATH, read from its `$GITHUB_PATH` writes.
+fn path_entry_prefixes_in(block: &str) -> BTreeSet<String> {
+    let mut prefixes: BTreeSet<String> = BTreeSet::new();
+    for line in block.lines() {
+        let trimmed: &str = line.trim_start();
+        if trimmed.starts_with('#') || !trimmed.contains("GITHUB_PATH") {
+            continue;
+        }
+        let mut quoted = trimmed.split('"');
+        let _before: Option<&str> = quoted.next();
+        let Some(entry) = quoted.next() else {
+            continue;
+        };
+        if let Some(prefix) = entry.strip_suffix("/bin") {
+            if prefix.starts_with('/') {
+                prefixes.insert(prefix.to_string());
+            }
+        }
+    }
+    prefixes
+}
+
+/// Does this job run on macOS, where a PATH entry does not select the oracle?
+///
+/// Reads the whole block rather than `runs-on:` alone: `test-cross-encode`
+/// runs on `${{ matrix.os }}` and names macOS only in its matrix.
+fn job_runs_on_macos(block: &str) -> bool {
+    block
+        .lines()
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .any(|line| line.contains("macos"))
+}
+
+#[test]
+fn every_oracle_install_in_every_workflow_names_the_release_it_installs() {
+    if !repository_tree_is_readable() {
+        eprintln!("SKIP: repository tree not readable; see the sibling test.");
+        return;
+    }
+    let mut offenders: Vec<String> = Vec::new();
+    for (workflow, job, block) in every_job() {
+        for (kind, line) in oracle_installs_in(&block) {
+            let complaint: &str = match kind {
+                OracleInstall::Unpinned => {
+                    "installs a C libjpeg-turbo by package name, so the release \
+                     it measures is the packager's choice and changes without a \
+                     commit here"
+                }
+                OracleInstall::Unreadable => {
+                    "fetches a C libjpeg-turbo in a shape this gate cannot \
+                     resolve to a release; failing closed, because an \
+                     unreadable pin and no pin are the same thing to a reader"
+                }
+                OracleInstall::Pinned | OracleInstall::Submodule => continue,
+            };
+            offenders.push(format!("  {workflow} / {job} — {complaint}\n      {line}"));
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "every oracle install must name the release it installs:\n{}\n\n\
+         Pin it the way the other legs are pinned — upstream's \
+         `libjpeg-turbo-official_<version>` package, or a `--branch <tag>` \
+         source build — and declare the release in {MANIFEST}. An oracle whose \
+         release is named nowhere re-baselines every expectation it backs the \
+         week the packager moves, which is the single global bump P4-130's \
+         first criterion forbids, arriving without a commit to review.",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn every_job_that_installs_an_oracle_asserts_the_release_it_installed() {
+    if !repository_tree_is_readable() {
+        eprintln!("SKIP: repository tree not readable; see the sibling test.");
+        return;
+    }
+    let declared: BTreeSet<String> = manifest_rows().into_iter().map(|row| row.version).collect();
+    let mut offenders: Vec<String> = Vec::new();
+    for (workflow, job, block) in every_job() {
+        let installs_a_release: bool = oracle_installs_in(&block)
+            .iter()
+            .any(|(kind, _)| *kind == OracleInstall::Pinned);
+        if !installs_a_release {
+            continue;
+        }
+        let versions: BTreeSet<String> = provisioned_versions_in(&block);
+        assert!(
+            !versions.is_empty(),
+            "{workflow} / {job} installs an upstream release asset but names no \
+             version this gate can read"
+        );
+        let checked: BTreeMap<String, BTreeSet<String>> = prefix_releases_checked_in(&block);
+        for version in versions {
+            assert!(
+                declared.contains(&version),
+                "{workflow} / {job} installs libjpeg-turbo {version}, which \
+                 {MANIFEST} does not declare"
+            );
+            // Checked *at a prefix*, not merely somewhere in the job: a job
+            // carrying two oracles could otherwise satisfy both rows with one
+            // check on one of them.
+            if !checked.values().any(|releases| releases.contains(&version)) {
+                offenders.push(format!("  {workflow} / {job} — installs {version}"));
+            }
+        }
+    }
+    // Every offender, not the first: these legs are spread over three
+    // workflows, and a gate that names one per run turns one review into as
+    // many rounds as there are legs.
+    assert!(
+        offenders.is_empty(),
+        "these jobs install a release they never *assert*:\n{}\n\n\
+         Printing `djpeg -version` fails nothing, so a deb that installed \
+         something else, a tag moved to another release, or a runner image \
+         carrying its own libjpeg would run the whole leg under a release it \
+         is not measuring — and report green. The other legs check it with \
+         `<prefix>/bin/djpeg -version 2>&1 | grep -q \"version <release>\"`.",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn every_job_that_installs_an_oracle_measures_the_install_it_checked() {
+    if !repository_tree_is_readable() {
+        eprintln!("SKIP: repository tree not readable; see the sibling test.");
+        return;
+    }
+    let mut offenders: Vec<String> = Vec::new();
+    for (workflow, job, block) in every_job() {
+        let installs_a_release: bool = oracle_installs_in(&block)
+            .iter()
+            .any(|(kind, _)| *kind == OracleInstall::Pinned);
+        if !installs_a_release {
+            continue;
+        }
+        let checked: BTreeMap<String, BTreeSet<String>> = prefix_releases_checked_in(&block);
+        if checked.is_empty() {
+            offenders.push(format!(
+                "  {workflow} / {job} — runs no `<prefix>/bin/djpeg -version` \
+                 at all, so nothing ties the release it installed to a place \
+                 on disk; a bare `djpeg` is answered by PATH and can be any \
+                 djpeg on the runner"
+            ));
+            continue;
+        }
+        let job_level: Option<String> = oracle_prefixes_assigned_by(&block).job_level;
+        let on_macos: bool = job_runs_on_macos(&block);
+        let path_prefixes: BTreeSet<String> = path_entry_prefixes_in(&block);
+        for (index, step) in steps_in(&block).into_iter().enumerate() {
+            let consumes_an_oracle: bool = reaches_the_oracle(&step.script);
+            // A step's own assignment wins over the job's for that step alone,
+            // which is the whole reason this is read per step.
+            let effective: BTreeSet<String> = if !step.prefixes.is_empty() {
+                step.prefixes
+            } else if let Some(prefix) = job_level.clone() {
+                BTreeSet::from([prefix])
+            } else {
+                BTreeSet::new()
+            };
+            for prefix in &effective {
+                if !checked.contains_key(prefix) {
+                    offenders.push(format!(
+                        "  {workflow} / {job} step {index} — selects {prefix}, \
+                         which this job never checks the release of; it checks \
+                         {:?}",
+                        checked.keys().collect::<Vec<&String>>()
+                    ));
+                }
+            }
+            if consumes_an_oracle && effective.is_empty() {
+                // Nothing names an oracle for this step, so it takes whatever
+                // lookup order finds.
+                let resolvable: bool = !on_macos
+                    && path_prefixes
+                        .iter()
+                        .any(|prefix| checked.contains_key(prefix));
+                if !resolvable {
+                    offenders.push(format!(
+                        "  {workflow} / {job} step {index} — runs tests against \
+                         whatever lookup order finds{}",
+                        if on_macos {
+                            ", and this is a macOS runner, where \
+                             `helpers::c_tool_path` reads /opt/homebrew/bin \
+                             before PATH: only LIBJPEG_TURBO_PREFIX names an \
+                             oracle there"
+                        } else {
+                            ", and no prefix this job checked is on its PATH"
+                        }
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "these steps measure an oracle the job never checked:\n{}\n\n\
+         Installing the right release is not measuring it, and the scope that \
+         matters is the *step*: a job-level prefix is overridden by a \
+         step-level one for that step alone, so a leg can verify one install \
+         and run its tests against another. Give the step a \
+         LIBJPEG_TURBO_PREFIX the job checked, or — off macOS, where lookup \
+         order can express it — put that prefix's bin first on PATH.",
+        offenders.join("\n")
+    );
+}
+
+/// Cargo subcommands that cannot reach a C oracle, so a step running only
+/// these needs no prefix.
+///
+/// A *deny* list rather than an allow list, because the failure directions are
+/// not symmetric: an unlisted subcommand that does reach the oracle would be a
+/// step this gate never asks about, while an unlisted one that does not costs
+/// a line here the first time it appears in an oracle-installing job. The
+/// first draft listed the invocations that *do* consume — `cargo test`,
+/// `cargo run`, `cargo mutants`, `fuzz run` — as substrings, and a review
+/// pointed out that `cargo +nightly test` matches none of them while running
+/// the whole suite, a spelling these workflows already use.
+const CARGO_SUBCOMMANDS_WITHOUT_AN_ORACLE: [&str; 12] = [
+    "build", "check", "clippy", "deny", "doc", "fmt", "install", "metadata", "package", "publish",
+    "tree", "update",
+];
+
+/// The command word inside a shell token, with the syntax that can precede it
+/// removed.
+///
+/// `"cargo`, `$(cargo` and `out=$(cargo` are all the shell running cargo, and
+/// an exact-token comparison sees none of them — the regression a review found
+/// in the first parsed version of [`reaches_the_oracle`], which the substring
+/// match it replaced had handled by accident. Taking the tail after the last
+/// piece of opening punctuation reads all of them, and leaves
+/// `--cargo-test-arg` alone, which is a flag naming cargo rather than an
+/// invocation of it.
+fn shell_word(token: &str) -> &str {
+    // Closers first, then the tail after the last opener. Both directions are
+    // needed and the order matters: the subcommand in `out=$(cargo build)` is
+    // `build`, and in a quoted `"cargo fmt"` it is `fmt` — strip only openers
+    // and the second reads as the empty string, which is in no deny list and
+    // would make a formatting step demand an oracle.
+    let body: &str = token.trim_end_matches([')', '"', '\'', ';', '`', '}']);
+    match body.rfind(['"', '\'', '(', '$', '`', ';', '&', '|', '{', '=']) {
+        Some(at) => &body[at + 1..],
+        None => body,
+    }
+}
+
+/// `NAME=value` with no command substitution in it — an environment prefix
+/// rather than a command, so the command word is still ahead.
+fn is_environment_prefix(token: &str) -> bool {
+    let Some((name, value)) = token.split_once('=') else {
+        return false;
+    };
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
+        && !name.starts_with(|c: char| c.is_ascii_digit())
+        && !value.contains("$(")
+        && !value.contains('`')
+}
+
+/// Words after which the next token is a command again: separators, and the
+/// shell keywords these workflows wrap commands in — `if ! cargo run …` is how
+/// `test-corpus` invokes the corpus comparison.
+fn hands_off_to_another_command(token: &str) -> bool {
+    matches!(
+        shell_word(token),
+        "if" | "!" | "then" | "elif" | "else" | "do" | "while" | "until" | "&&" | "||" | "|" | ""
+    ) || token.ends_with(';')
+        || token.ends_with('|')
+        || token.ends_with("&&")
+}
+
+/// Commands that run another command, after taking options of their own.
+///
+/// `sudo -E cargo test` and `time -p cargo test` hand off like the keywords
+/// above, but not to the *next* token — their own flags come first, and
+/// `env -u FOO cargo test` even puts a bare word between them. So the command
+/// position stays open for the rest of the line rather than for one token,
+/// which over-approximates in the direction that fails closed.
+fn wraps_another_command(token: &str) -> bool {
+    matches!(
+        shell_word(token),
+        "sudo" | "env" | "time" | "exec" | "nohup" | "xargs" | "command" | "stdbuf"
+    )
+}
+
+/// Does this token leave a double quote open — the shape of an inline
+/// assignment whose value has a space in it, `RUSTFLAGS="-C target-cpu=native"`,
+/// which `split_whitespace` cuts in half?
+fn leaves_a_quote_open(token: &str) -> bool {
+    token.chars().filter(|c| *c == '"').count() % 2 == 1
+}
+
+/// Does this step run cargo in a way that can reach the C oracle?
+///
+/// Parsed rather than matched as a substring: `cargo +nightly test`,
+/// `cargo test` and `/usr/bin/cargo test` are one shape with three spellings,
+/// and the toolchain qualifier sits between the two words a substring match
+/// would look for. Only tokens in *command* position are read, so
+/// `echo "cargo test"` reports what it is — a step printing a string — and
+/// `CARGO=/usr/bin/cargo cargo build` is read as the `build` it runs.
+fn reaches_the_oracle(script: &str) -> bool {
+    // Per logical line: a `run: |` block is a sequence of commands, and every
+    // line starts one.
+    logical_lines(script).iter().any(|line| runs_cargo_in(line))
+}
+
+fn runs_cargo_in(line: &str) -> bool {
+    let tokens: Vec<&str> = line.split_whitespace().collect();
+    let mut command_position: bool = true;
+    let mut inside_a_wrapper: bool = false;
+    let mut inside_a_quoted_value: bool = false;
+    for (at, token) in tokens.iter().enumerate() {
+        if inside_a_quoted_value {
+            inside_a_quoted_value = !leaves_a_quote_open(token);
+            continue;
+        }
+        if command_position && is_environment_prefix(token) {
+            inside_a_quoted_value = leaves_a_quote_open(token);
+            continue;
+        }
+        let word: &str = shell_word(token);
+        // A command substitution runs its contents wherever it appears, so
+        // `echo "$(cargo test)"` runs the tests however little the `echo`
+        // suggests it.
+        let substitutes: bool = token.contains("$(") || token.contains('`');
+        let eligible: bool = command_position || inside_a_wrapper || substitutes;
+        if eligible && (word == "cargo" || word.ends_with("/cargo")) {
+            let subcommand: Option<&str> = tokens[at + 1..]
+                .iter()
+                .map(|argument| shell_word(argument))
+                .find(|argument| !argument.starts_with('+') && !argument.starts_with('-'));
+            match subcommand {
+                // `cargo` alone prints help; nothing runs.
+                None => {}
+                Some(name) if CARGO_SUBCOMMANDS_WITHOUT_AN_ORACLE.contains(&name) => {}
+                Some(_) => return true,
+            }
+        }
+        if hands_off_to_another_command(token) {
+            command_position = true;
+            inside_a_wrapper = false;
+        } else if wraps_another_command(token) {
+            command_position = true;
+            inside_a_wrapper = true;
+        } else if !inside_a_wrapper {
+            command_position = false;
+        }
+    }
+    false
+}
+
+#[test]
+fn an_unpinned_package_manager_install_is_an_oracle_install() {
+    // The shape this half of the gate exists for. Both spellings: homebrew's
+    // formula and a distribution package, neither of which names a release.
+    for line in [
+        "            install: brew install jpeg-turbo",
+        "          sudo apt-get install -y libjpeg-turbo-progs",
+        "          brew install libjpeg-turbo",
+    ] {
+        assert_eq!(
+            oracle_install_on(line),
+            Some(OracleInstall::Unpinned),
+            "{line:?} installs a C oracle under a name the packager controls"
+        );
+    }
+}
+
+#[test]
+fn installing_a_pinned_asset_is_not_an_unpinned_install() {
+    // The pinned shapes must not be swept up by the package-manager rule —
+    // upstream's deb *is* installed with `apt-get install`, by file path.
+    for line in [
+        "          sudo apt-get install -y /tmp/ljt.deb",
+        "            \"https://github.com/libjpeg-turbo/libjpeg-turbo/releases/download/\
+         ${VERSION}/libjpeg-turbo-official_${VERSION}_${ARCH}.deb\"",
+        "          git clone --depth 1 --branch 3.1.4.1 \
+         https://github.com/libjpeg-turbo/libjpeg-turbo.git /tmp/ljt",
+    ] {
+        assert_ne!(
+            oracle_install_on(line),
+            Some(OracleInstall::Unpinned),
+            "{line:?} names the release it installs"
+        );
+    }
+    // Tooling installs are not oracle installs, however they are spelled.
+    for line in [
+        "          command -v cmake >/dev/null || brew install cmake",
+        "          sudo apt-get install -y cmake nasm",
+        "        run: cargo publish -p libjpeg-turbo-rs-capi",
+    ] {
+        assert_eq!(
+            oracle_install_on(line),
+            None,
+            "{line:?} installs no C libjpeg-turbo"
+        );
+    }
+}
+
+#[test]
+fn a_documented_install_is_not_an_install() {
+    // `fuzz-smoke.yml` prints reproduction instructions on failure: the deb
+    // URL, the release, the PATH entry. Read as actions they would satisfy
+    // this gate from inside an error message, and `full-c-parity.yml`'s
+    // comments discuss `brew install jpeg-turbo` by name in order to explain
+    // why it is gone.
+    for line in [
+        "  # jpeg-turbo, so `brew install jpeg-turbo` is an oracle whose release is",
+        "                echo \"  VERSION=3.1.4.1\"",
+        "                echo \"  Install libjpeg-turbo 3.1.4.1 C tools and put \
+         /opt/libjpeg-turbo/bin first on PATH.\"",
+        "          echo \"/opt/libjpeg-turbo/bin\" >> $GITHUB_PATH",
+        "      - name: Install libjpeg-turbo 3.2.0 from official release",
+    ] {
+        assert_eq!(
+            oracle_install_on(line),
+            None,
+            "{line:?} describes an install rather than performing one"
+        );
+    }
+}
+
+#[test]
+fn a_clone_with_no_tag_is_unreadable_rather_than_absent() {
+    // A clone of the default branch is the worst pin of all: it moves every
+    // time upstream commits. Reporting it as "no install here" would let it
+    // pass; reporting it as unreadable fails the gate and asks for a tag.
+    assert_eq!(
+        oracle_install_on(
+            "          git clone https://github.com/libjpeg-turbo/libjpeg-turbo.git /tmp/ljt"
+        ),
+        Some(OracleInstall::Unreadable)
+    );
+    assert_eq!(
+        oracle_install_on(
+            "          git clone --depth 1 --branch 3.2.0 \
+             https://github.com/libjpeg-turbo/libjpeg-turbo.git /tmp/ljt320src"
+        ),
+        Some(OracleInstall::Pinned)
+    );
+}
+
+#[test]
+fn a_submodule_build_is_pinned_by_commit_rather_than_by_a_version_token() {
+    assert_eq!(
+        oracle_install_on("          cmake -S references/libjpeg-turbo -B /tmp/ljt8/build \\"),
+        Some(OracleInstall::Submodule),
+        "the submodule is pinned by commit; its release is cross-checked \
+         against the manifest from the checked-out tree"
+    );
+    // Reading a file out of the submodule is not building it.
+    assert_eq!(
+        oracle_install_on("            references/libjpeg-turbo/testimages/testorig.jpg \\"),
+        None
+    );
+}
+
+#[test]
+fn a_continued_command_is_classified_as_the_one_command_it_is() {
+    // Both provisioning shapes in `ci.yml` are split across lines, and each
+    // half alone is invisible: the first names no release, the second no
+    // command.
+    let split_clone: &str = "          git clone --depth 1 --branch 3.2.0 \\\n\
+                             \x20           https://github.com/libjpeg-turbo/libjpeg-turbo.git \
+                             /tmp/ljt320src";
+    let joined: Vec<String> = logical_lines(split_clone);
+    assert_eq!(joined.len(), 1, "a continuation is one command: {joined:?}");
+    assert_eq!(oracle_install_on(&joined[0]), Some(OracleInstall::Pinned));
+
+    let split_curl: &str = "          curl -fL -o /tmp/ljt.deb \\\n\
+                            \x20           \"https://github.com/libjpeg-turbo/libjpeg-turbo/\
+                            releases/download/${VERSION}/libjpeg-turbo-official_${VERSION}_\
+                            ${ARCH}.deb\"";
+    let joined: Vec<String> = logical_lines(split_curl);
+    assert_eq!(joined.len(), 1);
+    assert_eq!(oracle_install_on(&joined[0]), Some(OracleInstall::Pinned));
+}
+
+#[test]
+fn printing_the_release_is_not_asserting_it() {
+    // The shape five of these legs carried: an absolute-path `-version` call
+    // whose output nothing reads.
+    assert!(!asserts_release(
+        "          /opt/libjpeg-turbo/bin/djpeg -version",
+        "3.1.4.1"
+    ));
+    assert!(asserts_release(
+        "          /opt/libjpeg-turbo/bin/djpeg -version 2>&1 | grep -q \"version 3.1.4.1\"",
+        "3.1.4.1"
+    ));
+    // The source-tree spelling, for a leg that checks the tag it cloned rather
+    // than the tool it built.
+    assert!(asserts_release(
+        "          grep -Eq '^set\\(VERSION 3\\.2\\.0\\)$' /tmp/ljt320src/CMakeLists.txt",
+        "3.2.0"
+    ));
+    // …and a check on the wrong release is not a check on this one.
+    assert!(!asserts_release(
+        "          /opt/libjpeg-turbo/bin/djpeg -version 2>&1 | grep -q \"version 3.2.0\"",
+        "3.1.4.1"
+    ));
+}
+
+#[test]
+fn a_bare_tool_name_does_not_check_an_install() {
+    // `test-integration` ran `djpeg -version` after exporting PATH. It reads
+    // as a version check and names no install: which djpeg answered is decided
+    // by lookup order, which is the ambiguity this item is about.
+    assert!(
+        prefix_releases_checked_in("          djpeg -version | grep -q \"version 3.1.4.1\"")
+            .is_empty()
+    );
+    // The one-line spelling and the `tee`-then-`grep` spelling both check the
+    // prefix they name; the second is what the older legs carry.
+    assert_eq!(
+        prefix_releases_checked_in(
+            "          /tmp/ljt3141/prefix/bin/djpeg -version 2>&1 | grep -q \"version 3.1.4.1\""
+        ),
+        BTreeMap::from([(
+            "/tmp/ljt3141/prefix".to_string(),
+            BTreeSet::from(["3.1.4.1".to_string()])
+        )])
+    );
+    assert_eq!(
+        prefix_releases_checked_in(
+            "          /usr/local/bin/djpeg -version 2>&1 | tee /tmp/oracle-version.txt\n\
+             \x20         grep -q \"version 3.1.4.1\" /tmp/oracle-version.txt"
+        ),
+        BTreeMap::from([(
+            "/usr/local".to_string(),
+            BTreeSet::from(["3.1.4.1".to_string()])
+        )])
+    );
+}
+
+#[test]
+fn one_prefixs_check_does_not_vouch_for_another() {
+    // The shape a job-scope pairing accepts and this one must not: two oracles
+    // in one job, one release asserted. `test-integration` carries three
+    // prefixes, so "somewhere in this job a version is asserted" would let a
+    // second oracle ride in unchecked — the finding that turned this from a
+    // set of prefixes into a map.
+    let two_oracles: &str = "          /opt/libjpeg-turbo/bin/djpeg -version 2>&1 | \
+                             grep -q \"version 3.1.4.1\"\n\
+                             \x20         /tmp/ljt8/prefix/bin/djpeg -version";
+    let checked: BTreeMap<String, BTreeSet<String>> = prefix_releases_checked_in(two_oracles);
+    assert!(checked.contains_key("/opt/libjpeg-turbo"));
+    assert!(
+        !checked.contains_key("/tmp/ljt8/prefix"),
+        "the second prefix is run, not checked: {checked:?}"
+    );
+    // A `tee` file belongs to the invocation that wrote it. Asserting one
+    // release over one file does not check the *other* prefix, however
+    // adjacent the lines are.
+    let crossed: &str = "          /opt/libjpeg-turbo/bin/djpeg -version 2>&1 | tee /tmp/a.txt\n\
+                         \x20         /tmp/ljt8/prefix/bin/djpeg -version 2>&1 | tee /tmp/b.txt\n\
+                         \x20         grep -q \"version 3.1.4.1\" /tmp/a.txt";
+    let checked: BTreeMap<String, BTreeSet<String>> = prefix_releases_checked_in(crossed);
+    assert_eq!(
+        checked.keys().collect::<Vec<&String>>(),
+        vec!["/opt/libjpeg-turbo"],
+        "{checked:?}"
+    );
+}
+
+#[test]
+fn a_step_level_prefix_is_read_at_step_scope() {
+    // Why this is parsed per step at all: a job-level value and a step-level
+    // override read identically once indentation is gone, and the difference
+    // decides which oracle a `cargo test` step measures.
+    let job: &str = "\n    steps:\n\
+                     \x20     - name: Install\n\
+                     \x20       run: echo install\n\
+                     \x20     - name: Tests against the deb\n\
+                     \x20       run: cargo test --tests\n\
+                     \x20       env:\n\
+                     \x20         LIBJPEG_TURBO_PREFIX: /opt/libjpeg-turbo\n\
+                     \x20     - name: Traces against the v8 build\n\
+                     \x20       run: cargo test -p libjpeg-turbo-rs-capi --test capi_x\n\
+                     \x20       env:\n\
+                     \x20         LIBJPEG_TURBO_REFERENCE_DIR: /tmp/ljt8/prefix\n";
+    let steps: Vec<Step> = steps_in(job);
+    assert_eq!(steps.len(), 3, "{steps:?}");
+    assert!(steps[0].prefixes.is_empty());
+    assert!(!steps[0].script.contains("cargo test"));
+    assert_eq!(
+        steps[1].prefixes,
+        BTreeSet::from(["/opt/libjpeg-turbo".to_string()])
+    );
+    assert!(steps[1].script.contains("cargo test"));
+    // P4-108's spelling of the same idea names the oracle just as surely.
+    assert_eq!(
+        steps[2].prefixes,
+        BTreeSet::from(["/tmp/ljt8/prefix".to_string()])
+    );
+}
+
+#[test]
+fn a_matrix_entry_is_not_the_first_step() {
+    // `test-cross-encode` declares its runner in a matrix, and a matrix entry
+    // is a `- ` line that comes before `steps:` and sits deeper. Reading the
+    // step indent off the first `- ` in the job took *that* line, so no real
+    // step boundary matched and every step — with every prefix any of them
+    // set — merged into one. That is the job-scope union this parser exists to
+    // replace, arriving through the parser instead of the rule.
+    let job: &str = "    runs-on: ${{ matrix.os }}\n\
+                     \x20   strategy:\n\
+                     \x20     matrix:\n\
+                     \x20       include:\n\
+                     \x20         - os: macos-latest\n\
+                     \x20   steps:\n\
+                     \x20     - uses: actions/checkout@v7\n\
+                     \x20     - name: Tests\n\
+                     \x20       run: cargo test --tests\n";
+    let steps: Vec<Step> = steps_in(job);
+    assert_eq!(steps.len(), 2, "{steps:?}");
+    assert!(
+        !steps[0].script.contains("cargo test"),
+        "the checkout step runs no tests: {steps:?}"
+    );
+    assert!(steps[1].script.contains("cargo test"));
+}
+
+#[test]
+fn a_toolchain_qualifier_does_not_hide_a_cargo_test() {
+    // A step this predicate misses is a step the gate never asks about, so an
+    // unchecked oracle rides in under a spelling nobody thought of. The first
+    // draft matched `"cargo test"` as a substring; `cargo +nightly test` runs
+    // the same suite and contains neither that string nor any other in the
+    // list, and these workflows already write nightly invocations that way.
+    for script in [
+        "cargo test --tests",
+        "cargo +nightly test --tests",
+        "cargo +1.87 test -p libjpeg-turbo-rs-capi --test capi_x",
+        "cargo run --release --example corpus_test -- --corpus-dir tests/corpus/",
+        "cargo mutants --in-diff /tmp/pr.diff",
+        "cargo +nightly fuzz run --target x86_64-unknown-linux-gnu \"${FUZZ_TARGET}\"",
+        "cargo +nightly fuzz cmin --target x86_64-unknown-linux-gnu \"${FUZZ_TARGET}\"",
+        // Failing closed: a subcommand nobody has classified is treated as
+        // reaching the oracle, so the first unknown one asks the question here
+        // rather than passing silently.
+        "cargo xtask verify-everything",
+        // The shell spellings. A quoted YAML scalar and a command
+        // substitution are still the shell running cargo, and the parsed
+        // version regressed on both where the substring match had handled
+        // them by accident — the review round that added these cases.
+        "\"cargo test --tests\"",
+        "out=$(cargo test --tests)",
+        "set -o pipefail; cargo test --tests | tee log",
+        "/usr/local/bin/cargo test --tests",
+        // `test-corpus` wraps its example in a conditional, so the command
+        // word is two keywords in.
+        "if ! cargo run --release --example corpus_test > corpus-test.tsv 2>&1; then",
+        // A `run: |` block is a sequence of commands and each line starts one.
+        // `ci.yml`'s P4-81 step is exactly this, and flattening the block into
+        // one line made it read as a single command named `set`.
+        "set -o pipefail\ncargo test -p libjpeg-turbo-rs-capi --test capi_symbol_versions",
+        // A command substitution runs wherever it appears, however little the
+        // command around it suggests it.
+        "echo \"$(cargo test --tests)\"",
+        // Wrappers take options of their own before the command they wrap.
+        "sudo -E cargo test --tests",
+        "time -p cargo test --tests",
+        "env -u RUSTFLAGS cargo test --tests",
+        // An inline assignment whose value has a space in it is two tokens,
+        // and the second is not an assignment.
+        "RUSTFLAGS=\"-C target-cpu=native\" cargo test --tests",
+    ] {
+        assert!(
+            reaches_the_oracle(script),
+            "{script:?} can reach the C oracle"
+        );
+    }
+    for script in [
+        "sudo apt-get install -y /tmp/ljt.deb",
+        "cargo build --release",
+        "cargo install cargo-mutants --locked",
+        "cargo +nightly clippy --workspace -- -D warnings",
+        "cargo fmt --check",
+        // A flag is not the subcommand, and a bare `cargo` runs nothing.
+        "cargo --version",
+        // A flag that merely names cargo is not an invocation of it — the
+        // shape `mutants-in-diff` writes over and over.
+        "cargo install cargo-mutants --locked --cargo-test-arg --test",
+        // The mirror of the round above, and the one that costs a *false
+        // failure* rather than a false green: a step that prints the command
+        // is not running it, an environment prefix is not a command, and a
+        // wrapper closing right after a deny-listed subcommand still names
+        // that subcommand.
+        "echo \"cargo test --tests\"",
+        "CARGO=/usr/bin/cargo cargo build --release",
+        "out=$(cargo build)",
+        "\"cargo fmt\"",
+    ] {
+        assert!(
+            !reaches_the_oracle(script),
+            "{script:?} cannot reach the C oracle"
+        );
+    }
+}
+
+#[test]
+fn a_path_entry_selects_an_oracle_everywhere_except_macos() {
+    let linux_leg: &str = "    runs-on: ubuntu-latest\n\
+                           \x20         echo \"/opt/libjpeg-turbo/bin\" >> $GITHUB_PATH\n";
+    assert!(!job_runs_on_macos(linux_leg));
+    assert_eq!(
+        path_entry_prefixes_in(linux_leg),
+        BTreeSet::from(["/opt/libjpeg-turbo".to_string()])
+    );
+    // The matrix spelling: `runs-on: ${{ matrix.os }}` names macOS nowhere but
+    // in the matrix, and that is the leg where PATH does not select.
+    let macos_leg: &str = "    runs-on: ${{ matrix.os }}\n\
+                           \x20         - os: macos-latest  # aarch64\n";
+    assert!(job_runs_on_macos(macos_leg));
+    // A comment recalling that some other leg runs on macOS must not make this
+    // one a macOS leg, or the rule would be applied where it does not hold.
+    assert!(!job_runs_on_macos(
+        "    runs-on: ubuntu-latest\n      # matches the macos leg's oracle\n"
+    ));
+}
+
+#[test]
+fn the_job_scanner_reads_jobs_and_not_trigger_keys() {
+    if !repository_tree_is_readable() {
+        eprintln!("SKIP: repository tree not readable; see the sibling test.");
+        return;
+    }
+    let text: String = workflow_text(CI_WORKFLOW);
+    let jobs: Vec<String> = job_names_in(&text);
+    for expected in [BASELINE_LEG_JOB, CURRENT_LEG_JOB, "test-cross-encode"] {
+        assert!(
+            jobs.iter().any(|job| job == expected),
+            "{CI_WORKFLOW} has a {expected} job, but the scanner found {jobs:?}"
+        );
+    }
+    // `on:` carries two-space keys of its own; reading them as jobs would ask
+    // `job_block` for a block that is not one.
+    for trigger in ["push", "pull_request", "schedule", "workflow_dispatch"] {
+        assert!(
+            !jobs.iter().any(|job| job == trigger),
+            "{trigger:?} is a trigger, not a job"
+        );
+    }
+    // Every workflow in the repository parses, and the enumeration is not
+    // silently empty for one of them — an empty list passes every gate above.
+    for path in workflow_files() {
+        let text: String = std::fs::read_to_string(&path).expect("workflow must be readable");
+        assert!(
+            !job_names_in(&text).is_empty(),
+            "no jobs found in {} — the scanner has stopped matching, and a \
+             workflow it cannot read is a workflow these gates do not check",
+            path.display()
         );
     }
 }
