@@ -145,9 +145,10 @@
 ### croptest.in (Crop Region Validation)
 - [x] Basic crop operations — `crop_skip.rs`, `transform_options.rs`
 - [x] Exhaustive crop window iteration (Y 0-16, H 1-16) — `c_croptest_full` (`--features full-c-parity`)
+- [x] Non-iMCU-aligned crop x (`jpeg_crop_scanline` snap + widen) — `c_croptest_unaligned_x`; the mirrored `croptest.in` formula only ever emits an already-aligned x
 - [ ] ImageMagick reference comparison — not available
-- [ ] Progressive + crop — partial
-- [ ] Smooth + crop — not tested
+- [x] Progressive + crop — `c_croptest_full` iterates `prog_flags = [false, true]` (`--features full-c-parity`)
+- [x] Smooth + crop — `c_croptest_full` iterates `nosmooth_flags = [false, true]`; the `-nosmooth` half now tracks C's merged-upsample selection, so both the merged and non-merged crop paths are compared
 
 ---
 

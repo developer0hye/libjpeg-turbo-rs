@@ -7970,3 +7970,196 @@ that criterion 1 is about the *root crate's* `compress_raw` contract, so
 check whether `api::raw_data` should pad internally or whether the C-ABI
 layer should, and whether `P4-95`'s classic raw-data path has the same
 hole.
+
+---
+
+## P4-168. `c_croptest` Anchored C Columns at the Requested Crop x, Not the iMCU-Aligned One — **CLOSED 2026-08-17**
+
+**Motivation.** Filed and closed 2026-08-17 from the scheduled `Full C Parity`
+run [32001568347](https://github.com/developer0hye/libjpeg-turbo-rs/actions/runs/32001568347),
+which failed identically on both legs (aarch64 and x86_64) at
+`c_croptest_full`:
+
+```
+[full_prog0_ns0_y1_h1_GRAY] C buffer too short at row 0 x 89 (idx=315, len=315)
+```
+
+**Root cause — the harness, not the codec.** `run_crop_scenario` computed the
+iMCU-aligned origin itself and handed *that* to the Rust decoder
+(`aligned_x`/`aligned_w`, mirroring `jpeg_crop_scanline`), but then indexed
+djpeg's PPM as if it began at image column 0, re-applying `crop_x` as a column
+offset. It does not: `jpeg_crop_scanline` snaps the requested x down to an iMCU
+boundary and widens the region so the right edge stays put
+(`references/libjpeg-turbo/src/jdapistd.c:245-255`), and djpeg emits exactly
+that aligned region. Both buffers therefore already start at the same image
+column, so the offset counted the alignment twice and ran off the end of the C
+buffer. Verified directly: `djpeg -rgb -crop 105x1+16+1` on a 128x95 grayscale
+JPEG emits `P6 105 1` — width equal to the Rust crop width, and column 0
+carrying image column 16's value.
+
+**Why it surfaced only now, and only in the nightly leg.** Two masks stacked.
+`60d7337` (2026-04-14) "fixed" the same overrun by turning it into
+`eprintln!("SKIP: ...")` + `return false`, so the scenarios silently vanished
+from the count — exactly the pattern [P4-116](#p4-116-c-parity-tests-can-convert-failures-or-missing-comparisons-into-a-pass--closed-2026-08-08)
+was filed to abolish. P4-116 converted that skip into an assert, which is what
+turned the mask into a red run. The second mask is coverage: `compute_crop_spec`
+derives x from `(y_iter * 16) % 128`, and every `y_iter` in the three quick
+tiers (`0`, `8`, `16`) yields `crop_x == 0`, where a mis-anchored offset is
+indistinguishable from a correct one. Only the full grid reaches a non-zero
+crop x, so only the scheduled job could fail. Roughly 896 GRAY scenarios
+(14 of 17 `y_iter` values x 16 `h_iter` x 2 prog x 2 nosmooth) had never
+actually compared pixels since 2026-04-14.
+
+**Status (2026-08-17): closed.** The C columns are read at offset 0 against an
+asserted `c_w == effective_w`, matching the existing height assertion — a
+geometry disagreement is now a failure rather than something the indexing
+papers over. The dead "djpeg output may be wider" branches are gone.
+`cargo test --features full-c-parity --test c_croptest c_croptest_full` passes
+with **5440 comparisons completed out of 10880 planned**, the only exclusion
+being the deliberate colour-quantization half; every one of those 5440 asserts
+`max_diff == 0` against `djpeg -crop`, so the Rust crop decoder was correct
+throughout and the defect was confined to the harness. `y_iter = 1` is now in
+the three quick tiers, putting a non-zero crop x in the default `cargo test`
+run so this class of regression no longer waits for the nightly leg.
+
+**Two coverage holes the fix exposed, both closed here.** The review pass that
+checked the diagnosis found that the harness was not exercising what its own
+comments claimed:
+
+- **The alignment path was never taken, and our own alignment was never under
+  test.** `croptest.in` derives x from `(y_iter * 16) % 128` while `align` is 8
+  or 16, so `aligned_x == crop_x` in all 5,440 scenarios — the snap-and-widen
+  behaviour the fix reasons about never actually ran. Worse, the harness
+  pre-aligned the request with a local copy of `jpeg_crop_scanline`'s formula
+  before calling `set_crop_region`, so the matrix compared C against a second
+  implementation of C living in the test file, and a regression in the decoder's
+  own alignment would have passed. Both sides now receive the raw request and
+  align it themselves, which makes the geometry assertions a real differential
+  check, and `c_croptest_unaligned_x` adds four deliberately unaligned specs
+  (x = 20, 12, 4, 44) across all five layouts and both `nosmooth` values:
+  **40 comparisons, 40 compared, `max_diff == 0`**. `djpeg -rgb -crop 101x4+20+1`
+  returns `P6 105 4` — C snapped the origin to 16 and widened to 105, and
+  `Decoder::set_crop_region(20, 1, 101, 4)` independently produces the same
+  105x4, which is now asserted rather than assumed.
+- **Half the grid compared two different pipelines.** `set_merged_upsample`
+  was pinned to `false`, but C's `use_merged_upsample` returns TRUE exactly when
+  fancy upsampling is off and the layout is 2hNv YCbCr→RGB (`jdmaster.c:43-71`),
+  which `-nosmooth` selects for 420/422. So the entire `nosmooth = true` half of
+  the grid compared C's *merged* output against our *non-merged* path, leaving
+  our merged crop path structurally invisible to the matrix. It now tracks C's
+  own condition (`set_merged_upsample(nosmooth)`), and the full grid stays at
+  5440/5440 with `max_diff == 0` — the merged crop path was correct, it had
+  simply never been cross-validated.
+
+---
+
+## P4-169. Three Sibling Crop Harnesses Carry the Same C-Column Mis-Anchoring, Two of Them Unguarded — **OPEN**
+
+**Motivation.** Filed 2026-08-17 while fixing [P4-168](#p4-168-c_croptest-anchored-c-columns-at-the-requested-crop-x-not-the-imcu-aligned-one--closed-2026-08-17).
+`c_croptest` was not the only harness that reads `djpeg -crop` output as though
+it began at image column 0. The same `row * c_w * 3 + crop_x * 3` expression
+appears in three more places:
+
+- `tests/cross_check_crop_scale.rs:232` — reached when `c_w > rust_img.width`.
+- `tests/crop_c_compat.rs:491` — reached whenever `c_w != crop_w`, with **no
+  width guard at all**.
+- `tests/crop_skip.rs:345` — same expression, but guarded by
+  `assert_eq!(c_w, full_width)` immediately above it, so a snapped C origin
+  fails loudly instead of comparing shifted columns.
+
+**Root-cause hypothesis.** Per `jdapistd.c:245-255` djpeg's output starts at the
+iMCU-aligned x, not at the requested one, so the correct column offset is
+`crop_x - aligned_x`. These three use `crop_x`. The reason they are green today
+appears to be reachability rather than correctness: every crop x they use
+(0, 4 in `crop_skip`; 0, 32, 40 in `cross_check_crop_scale`; 16 in
+`crop_c_compat`) is a multiple of the `align` value its fixture produces, so
+`c_w == crop_w` and the offending branch is never entered. That makes the bug
+latent — one subsampling change or one new crop case away from live. Note
+`crop_c_compat.rs` is the dangerous shape: with no width assertion it would
+silently compare the wrong columns rather than fail.
+
+**Why this is a P4-116-family item, not a cleanup.** The failure mode is a
+harness converting a real Rust-vs-C divergence into a pass (or into a confusing
+OOB panic), which is exactly what P4-116 exists to abolish. P4-168 shows the
+cost of leaving one of these in place: the masked scenarios sat green from
+2026-04-14 until a scheduled job finally reached a non-zero crop x.
+
+**Acceptance criteria.**
+
+1. Each of the three sites either drops the offset and asserts
+   `c_w == effective_w` (the P4-168 shape), or computes `crop_x - aligned_x`
+   explicitly and proves the branch is reachable with a test that enters it.
+2. Reachability is settled by evidence, not by inspection: add at least one
+   non-iMCU-aligned crop x per harness, or record why that harness cannot
+   produce one.
+3. `crop_c_compat.rs` gains a width assertion regardless of which option is
+   taken, so a geometry disagreement can never be silently re-indexed.
+4. A repository-wide grep for `crop_x *` / `+ crop_x` against parsed C output
+   confirms no fourth site.
+
+**Why deferred.** P4-168's PR is scoped to the failing scheduled job and its
+proof; these three are latent, currently green, and each needs its own
+reachability analysis and fixture work. Filing rather than folding in keeps that
+verification honest.
+
+---
+
+## P4-170. Classic Source-Manager Parity Fails in `--release` and Passes in Debug, So CI Never Sees It — **OPEN**
+
+**Motivation.** Filed 2026-08-17 while running the live gate's own command
+(`cargo test --workspace --release`) to re-measure test counts for the
+[P4-168](#p4-168-c_croptest-anchored-c-columns-at-the-requested-crop-x-not-the-imcu-aligned-one--closed-2026-08-17)
+closure. Two tests in `crates/libjpeg-turbo-rs-capi/tests/capi_classic_source_mgr.rs`
+fail — the P4-109 suite that trace-compares the classic source manager against
+stock libjpeg:
+
+```
+classic_source_mgr_matches_stock_libjpeg      FAILED
+stdio_fill_after_decode_serves_trailing_bytes_first  FAILED  (decode failed with code 69)
+```
+
+The trace diff is ours-vs-stock on three rows; stock decodes where we raise 69:
+
+```
+left  (ours):  m4 err 69   f1 err 69                    f2 err 69
+right (stock): m4 ok rows 64   f1 rows 64 pos_class before_eof   f2 rows 64
+```
+
+**Root-cause hypothesis — profile-dependent, not platform-dependent.** The same
+commit, machine and oracle pass in debug and fail in release:
+
+| Command (origin/main `d76f57c`, macOS aarch64, unmodified tree) | Result |
+| --- | --- |
+| `cargo test -p libjpeg-turbo-rs-capi --test capi_classic_source_mgr` | **2 passed** |
+| `cargo test --release -p libjpeg-turbo-rs-capi --test capi_classic_source_mgr` | **2 failed** |
+
+Reproduced in two independent worktrees with separate `CARGO_TARGET_DIR`s, so it
+is not a stale artifact. The oracle is a stock Homebrew libjpeg-turbo 3.1.4.1
+development install selected by `helpers::find_libjpeg_dev`, which rejects our
+own shim by design, so this is not the self-comparison hazard.
+
+**Why CI is green.** `.github/workflows/ci.yml`'s Integration Tests step runs
+`cargo test -p libjpeg-turbo-rs-capi --test capi_input_complete_contract … --test
+capi_classic_source_mgr -- --nocapture` — **debug, no `--release`**. Run
+31783899509 (main, 2026-08-14) shows `test classic_source_mgr_matches_stock_libjpeg
+... ok` on that leg. So the failing configuration is the one nothing runs, while
+`docs/LAST_MILE.md`'s live gate asserts `cargo test --workspace --release`
+passes. That combination is how a release-only divergence stays invisible.
+
+**Acceptance criteria.**
+
+1. Identify why the release profile changes classic source-manager behaviour.
+   Error 69 arriving where stock returns 64 rows points at the fill/drain
+   bookkeeping P4-109 and [P4-164](#p4-164-classic-source-manager-residuals-dangling-post-decode-window-pre-parse-fill-continuity-stream-error-codes--open)
+   own; determine whether this is UB the optimiser exposes (in which case it
+   outranks everything in Stage 0), a debug-only assertion masking a real error
+   path, or a genuine profile-conditional branch.
+2. The suite passes in both profiles on macOS aarch64 and Linux x86_64.
+3. CI runs at least one C-ABI parity leg in `--release`, so a profile-conditional
+   divergence cannot pass again.
+4. `docs/LAST_MILE.md`'s live-gate row reflects a re-measured release run.
+
+**Why deferred.** It reproduces on unmodified `origin/main` and is unrelated to
+the crop harness work that surfaced it (different crate, different subsystem).
+Diagnosing a release-only divergence in the classic source manager needs its own
+change with its own oracle traces.

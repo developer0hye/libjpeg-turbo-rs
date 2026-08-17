@@ -7,7 +7,12 @@
 //! against C djpeg -crop directly.
 //!
 //! Quick test: baseline only, no nosmooth, no colors, representative subset of Y/H/samp.
-//! Full test (feature = "full-c-parity"): exhaustive 10,880-scenario grid.
+//! Full test (feature = "full-c-parity"): 10,880-case grid, of which 5,440 are
+//! compared and 5,440 excluded by count (colour quantization is unimplemented).
+//!
+//! `croptest.in`'s formula only ever produces an x that is already iMCU-aligned,
+//! so `c_croptest_unaligned_x` adds specs outside the mirrored grid to cover
+//! `jpeg_crop_scanline`'s snap-and-widen path.
 
 mod helpers;
 
@@ -182,8 +187,9 @@ fn compute_crop_spec(y_iter: usize, h_iter: usize) -> (usize, usize, usize, usiz
 
 /// Run a single crop scenario: compare Rust decompress_cropped vs C djpeg -crop.
 ///
-/// Returns true if the scenario was compared, false if skipped (e.g. djpeg
-/// does not support -crop for this JPEG type or crop region is out-of-range).
+/// Returns `None` when the comparison ran, or `Some(reason)` when the case is
+/// deliberately outside the matrix. Since P4-116 the only such case is a crop
+/// spec with zero width or height; every other disagreement asserts.
 fn run_crop_scenario(
     djpeg: &Path,
     jpeg_data: &[u8],
@@ -206,27 +212,22 @@ fn run_crop_scenario(
     if nosmooth {
         decoder.set_fast_upsample(true);
     }
-    // Compute MCU-aligned crop (matching C jpeg_crop_scanline)
+    // Hand Rust the *requested* crop, exactly as we hand it to djpeg, and let it
+    // do its own iMCU alignment. The harness used to pre-align the request with a
+    // local copy of `jpeg_crop_scanline`'s formula, which meant the decoder's own
+    // alignment was never the thing under test — the test compared C against a
+    // second implementation of C living in this file. Passing the raw spec makes
+    // the geometry assertions below a real differential check.
     let header = decoder.header();
-    let img_w: usize = header.width as usize;
     let img_h: usize = header.height as usize;
-    let max_h_samp: usize = header
-        .components
-        .iter()
-        .map(|c| c.horizontal_sampling as usize)
-        .max()
-        .unwrap_or(1);
-    let align: usize = if header.components.len() == 1 {
-        8
-    } else {
-        8 * max_h_samp
-    };
-    let input_x: usize = crop_x.min(img_w);
-    let aligned_x: usize = (input_x / align) * align;
-    let aligned_w: usize = (crop_w + input_x - aligned_x).min(img_w.saturating_sub(aligned_x));
     let clamped_h: usize = crop_h.min(img_h.saturating_sub(crop_y.min(img_h)));
-    decoder.set_merged_upsample(false);
-    decoder.set_crop_region(aligned_x, crop_y, aligned_w, clamped_h);
+    // Track C's own choice instead of pinning this off. `use_merged_upsample`
+    // returns TRUE exactly when fancy upsampling is off and the layout is
+    // 2hNv YCbCr→RGB (jdmaster.c:43-71), which `-nosmooth` selects for 420/422 —
+    // so hardcoding `false` compared C's merged path against our non-merged one
+    // and left our merged crop path untested for half the grid.
+    decoder.set_merged_upsample(nosmooth);
+    decoder.set_crop_region(crop_x, crop_y, crop_w, clamped_h);
     let rust_img = decoder
         .decode_image()
         .unwrap_or_else(|e| panic!("[{scenario_label}] Rust decode_image failed: {e}"));
@@ -293,8 +294,13 @@ fn run_crop_scenario(
         (w, h, pix, 3usize)
     };
 
-    // djpeg -crop outputs MCU-aligned rows; the output width may be wider than requested.
-    // We extract only the columns from crop_x onward up to crop_w.
+    // Both sides got the same request and both align it the same way, so both
+    // buffers start at the same image column. `jpeg_crop_scanline` snaps the
+    // requested x down to an iMCU boundary and widens the region so the right
+    // edge stays put (jdapistd.c:245-255), and djpeg emits exactly that aligned
+    // region — its column 0 is the snapped origin, not image column 0. Applying
+    // `crop_x` as a column offset here would therefore count the alignment twice
+    // and run off the end of the C buffer, which is what P4-168 fixed.
     let effective_w: usize = rust_img.width;
     let effective_h: usize = rust_img.height;
 
@@ -303,49 +309,25 @@ fn run_crop_scenario(
         "[{scenario_label}] cropped height mismatch — Rust and C disagreeing on \
          geometry is the defect, not a reason to skip"
     );
+    assert_eq!(
+        c_w, effective_w,
+        "[{scenario_label}] cropped width mismatch — Rust and C disagreeing on \
+         geometry is the defect, not a reason to skip"
+    );
 
     let rust_pixels: &[u8] = &rust_img.data;
     let bpp: usize = rust_img.pixel_format.bytes_per_pixel();
 
-    // When djpeg output width equals our effective width, compare directly.
-    // When djpeg output is wider (MCU-aligned), extract the crop_x columns.
-    let c_extracted: Vec<u8> = if c_w == effective_w && channels == bpp {
+    let c_extracted: Vec<u8> = if channels == bpp {
         c_pixels
-    } else if c_w >= effective_w && channels == bpp {
-        let mut extracted: Vec<u8> = Vec::with_capacity(effective_w * effective_h * bpp);
-        for row in 0..effective_h {
-            let src_start: usize = row * c_w * channels + crop_x * channels;
-            let src_end: usize = src_start + effective_w * channels;
-            assert!(
-                src_end <= c_pixels.len(),
-                "[{scenario_label}] C buffer too short at row {row}: need {src_end}, \
-                 djpeg produced {}",
-                c_pixels.len()
-            );
-            extracted.extend_from_slice(&c_pixels[src_start..src_end]);
-        }
-        extracted
-    } else if channels == 3 && bpp == 1 && c_w >= effective_w {
-        // djpeg -rgb outputs 3-channel PPM for grayscale; Rust outputs 1-channel.
-        // Extract the red channel from C PPM (R==G==B for grayscale).
-        let mut extracted: Vec<u8> = Vec::with_capacity(effective_w * effective_h);
-        for row in 0..effective_h {
-            for x in 0..effective_w {
-                let src_idx: usize = (row * c_w + crop_x + x) * 3;
-                assert!(
-                    src_idx < c_pixels.len(),
-                    "[{scenario_label}] C buffer too short at row {row} x {x} \
-                     (idx={src_idx}, len={})",
-                    c_pixels.len()
-                );
-                extracted.push(c_pixels[src_idx]);
-            }
-        }
-        extracted
+    } else if channels == 3 && bpp == 1 {
+        // djpeg -rgb emits a 3-channel PPM even for a grayscale JPEG, while Rust
+        // keeps the single channel. R == G == B there, so compare against R.
+        c_pixels.iter().step_by(3).copied().collect()
     } else {
         panic!(
-            "[{scenario_label}] channel/width mismatch c_w={c_w} eff_w={effective_w} \
-             c_ch={channels} bpp={bpp}"
+            "[{scenario_label}] channel mismatch c_ch={channels} bpp={bpp} \
+             (geometry {c_w}x{c_h})"
         );
     };
 
@@ -371,8 +353,8 @@ fn run_crop_scenario(
 
 /// Quick crop boundary test — representative subset of the full C croptest.in grid.
 ///
-/// Covers: baseline only, no nosmooth, no colors, Y=[0,8,16], H=[8,16],
-/// samp=[GRAY, 420, 444]. Runs ~54 scenarios.
+/// Covers: baseline only, no nosmooth, no colors, Y=[0,1,8,16], H=[8,16],
+/// samp=[444]. Runs 8 scenarios.
 #[test]
 fn c_croptest_quick() {
     let cjpeg: Option<PathBuf> = helpers::cjpeg_path();
@@ -411,10 +393,12 @@ fn c_croptest_quick() {
 
     let pixels: Vec<u8> = generate_test_pixels();
 
-    // Quick subset: Y in [0, 8, 16], H in [8, 16], samp = S444 only
-    // S420 crop has known divergence (edge block handling).
-    // GRAY has channel/width mismatch with djpeg PPM output.
-    let y_values: &[usize] = &[0, 8, 16];
+    // Quick subset: Y in [0, 1, 8, 16], H in [8, 16], samp = S444 only.
+    // S420 and GRAY get their own tiers below so a failure names the layout.
+    // `y_iter = 1` is the only value here with a non-zero crop x, which here
+    // means a non-zero `first_iMCU_col` through the crop-aware decode path
+    // rather than the column-anchoring case `c_croptest_quick_gray` covers.
+    let y_values: &[usize] = &[0, 1, 8, 16];
     let h_values: &[usize] = &[8, 16];
     let samp_indices: &[usize] = &[4]; // 444 only
 
@@ -452,18 +436,19 @@ fn c_croptest_quick() {
     tally.finish();
 }
 
-/// Quick crop test for S420 and GRAY — known divergences.
+/// Quick crop test for S420 — the subsampled layer of the crop path.
 ///
-/// S420 crop has edge-block handling differences (max_diff=75).
-/// GRAY produces channel/width mismatch with djpeg PPM output.
+/// Kept as its own tier so a failure names the layout rather than pointing at
+/// the shared 444 grid. It once diverged from C by max_diff=75 at the edge
+/// blocks; crop-aware upsampling closed that (issue #164) and the shared
+/// `max_diff == 0` assertion has held it since.
 #[test]
-// Fixed: crop-aware upsampling matches C jpeg_crop_scanline (issue #164)
 fn c_croptest_quick_420() {
     let cjpeg: Option<PathBuf> = helpers::cjpeg_path();
     let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let pixels: Vec<u8> = generate_test_pixels();
-    let y_values: &[usize] = &[0, 8, 16];
+    let y_values: &[usize] = &[0, 1, 8, 16];
     let h_values: &[usize] = &[8, 16];
     let samp_indices: &[usize] = &[1]; // 420 only
 
@@ -480,7 +465,7 @@ fn c_croptest_quick_420() {
                     Some(cj) => make_test_jpeg_with_c(cj, &pixels, samp, false),
                     None => make_test_jpeg_rust(&pixels, samp),
                 };
-                let label: String = format!("quick420gray_y{y_iter}_h{h_iter}_{}", samp.name);
+                let label: String = format!("quick420_y{y_iter}_h{h_iter}_{}", samp.name);
                 match run_crop_scenario(
                     &djpeg, &jpeg_data, crop_w, crop_h, crop_x, crop_y, false, samp.name, &label,
                 ) {
@@ -493,16 +478,23 @@ fn c_croptest_quick_420() {
     tally.finish();
 }
 
-/// Quick crop test for GRAY subsampling — channel mismatch fixed.
-/// djpeg -rgb outputs 3-channel PPM; Rust outputs 1-channel grayscale.
-/// Comparison extracts R channel from C output to match Rust.
+/// Quick crop test for a grayscale JPEG.
+///
+/// `djpeg -rgb` emits a 3-channel PPM here while Rust keeps one channel, so the
+/// comparison reads C's R channel (R == G == B for grayscale).
+///
+/// `y_iter = 1` is load-bearing: `compute_crop_spec` derives x from
+/// `(y_iter * 16) % 128`, so every other value here yields `crop_x == 0` and a
+/// harness that mis-anchors the C columns still compares equal. Only a non-zero
+/// crop x exercises the offset, which is how the full grid caught the buffer
+/// overrun that the quick tier missed.
 #[test]
 fn c_croptest_quick_gray() {
     let cjpeg: Option<PathBuf> = helpers::cjpeg_path();
     let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let pixels: Vec<u8> = generate_test_pixels();
-    let y_values: &[usize] = &[0, 8, 16];
+    let y_values: &[usize] = &[0, 1, 8, 16];
     let h_values: &[usize] = &[8, 16];
 
     let mut tally: helpers::ComparisonTally =
@@ -521,6 +513,61 @@ fn c_croptest_quick_gray() {
             ) {
                 None => tally.compared(),
                 Some(reason) => tally.excluded(reason),
+            }
+        }
+    }
+    tally.finish();
+}
+
+/// Crop specs whose x is *not* an iMCU multiple — the alignment path itself.
+///
+/// `croptest.in`'s formula derives x from `(y_iter * 16) % 128`, so every x in
+/// the mirrored grid is already a multiple of 16 while `align` is 8 or 16.
+/// Nothing in that grid ever makes `jpeg_crop_scanline` snap the origin or widen
+/// the region (jdapistd.c:245-255) — both sides just pass the request through.
+/// These specs do: x=20 with align 8 snaps to 16 and widens by 4, x=12 with
+/// align 16 snaps to 0 and widens by 12. Since both sides now receive the raw
+/// request, that puts two things under test that the mirrored grid cannot reach:
+/// our decoder's own snap-and-widen against C's (the width assertion fails if
+/// they disagree), and the offset-0 read against a genuinely shifted origin
+/// rather than a trivially equal one.
+#[test]
+fn c_croptest_unaligned_x() {
+    let cjpeg: Option<PathBuf> = helpers::cjpeg_path();
+    let djpeg: PathBuf = require_c_tool!("djpeg");
+
+    let pixels: Vec<u8> = generate_test_pixels();
+    // (crop_w, crop_h, crop_x, crop_y) — each x is odd against align 8 and/or 16,
+    // and every spec stays inside 128x95 so djpeg never refuses it.
+    let specs: &[(usize, usize, usize, usize)] = &[
+        (101, 4, 20, 1),
+        (100, 8, 12, 3),
+        (60, 5, 4, 0),
+        (33, 6, 44, 7),
+    ];
+    let nosmooth_flags: &[bool] = &[false, true];
+
+    let mut tally: helpers::ComparisonTally = helpers::ComparisonTally::new(
+        "c_croptest_unaligned_x",
+        specs.len() * SAMP_CONFIGS.len() * nosmooth_flags.len(),
+    );
+    for &(crop_w, crop_h, crop_x, crop_y) in specs {
+        for samp in SAMP_CONFIGS {
+            let jpeg_data: Vec<u8> = match &cjpeg {
+                Some(cj) => make_test_jpeg_with_c(cj, &pixels, samp, false),
+                None => make_test_jpeg_rust(&pixels, samp),
+            };
+            for &nosmooth in nosmooth_flags {
+                let label: String = format!(
+                    "unaligned_{crop_w}x{crop_h}+{crop_x}+{crop_y}_ns{}_{}",
+                    nosmooth as u8, samp.name
+                );
+                match run_crop_scenario(
+                    &djpeg, &jpeg_data, crop_w, crop_h, crop_x, crop_y, nosmooth, samp.name, &label,
+                ) {
+                    None => tally.compared(),
+                    Some(reason) => tally.excluded(reason),
+                }
             }
         }
     }
