@@ -5323,7 +5323,15 @@ green, and for keeping *both* polarities in the pins, since a gate that cannot
 be wrong in the second direction is usually one that has stopped matching.
 Verified against the real workflows at the end of it: with the macOS leg's
 prefix removed, all six spellings of its test step are red, and the multi-line
-P4-81 step is now one of the steps the rule reads.
+P4-81 step is now one of the steps the rule reads. A sixth round found three
+more shapes — an escaped quote inside an inline assignment, folded scalars and
+heredocs, and substitution syntax inside single quotes — and none of them is in
+`.github/workflows`, so they are filed as
+**[P4-177](#p4-177-the-workflow-scanner-does-not-model-heredocs-folded-scalars-or-quoted-substitution-syntax--open)**
+rather than fixed here. The gate fails closed, so what they cost is precision,
+not coverage; and this file's own history is the argument for giving the
+scanner its own change and its own review rather than a seventh pass inside
+one about oracle legs.
 
 `test-cross-encode` now builds 3.1.4.1 from source at `/tmp/ljt3141/prefix` and
 selects it with `LIBJPEG_TURBO_PREFIX`, the same shape the aarch64 full-parity
@@ -8878,3 +8886,54 @@ They pin *which* release is requested, not *what* is delivered.
 it touches all five workflows rather than the one step under review. Bundling
 it into that change would have mixed a supply-chain change into a coverage
 change.
+
+## P4-177. The Workflow Scanner Does Not Model Heredocs, Folded Scalars or Quoted Substitution Syntax — **OPEN**
+
+**GitHub:** [#572](https://github.com/developer0hye/libjpeg-turbo-rs/issues/572) — filed 2026-08-18 from the sixth codex round on the
+[P4-130](#p4-130-c-parity-oracle-is-pinned-to-3141-upstream-stable-is-320--partial-every-oracle-provisioning-job-is-now-pinned-checked-and-measured-the-legs-still-on-one-release-the-submodule-bump-and-the-four-filed-gaps-remain)
+per-job pin-and-name gates.
+
+**Motivation.** `tests/oracle_version_pins.rs` decides which workflow steps
+reach a C oracle by reading their shell, and five review rounds moved that
+reader from a substring match to a per-line command-position walk. Each round
+found a shape the previous one could not see or saw where there was nothing,
+and the sixth found three more. Unlike the first five, none of these exists in
+`.github/workflows` today — which is why they are filed rather than fixed
+inside a change whose subject is the oracle legs:
+
+1. **Escaped quotes in an inline assignment.** `leaves_a_quote_open` counts
+   `"` characters, so `FOO="\"" cargo test` reads as an unterminated value and
+   every following token is skipped — a *missed* invocation.
+2. **Folded scalars and heredocs.** The step reader inserts a newline between a
+   `run:` block's physical lines, which is right for a literal `|` block and
+   wrong for a folded `>` one, where YAML joins with spaces; and a heredoc body
+   is data, not commands. Both directions are reachable: a folded `echo` /
+   `cargo test` pair would read as two commands, and a heredoc containing
+   `cargo test` would read as an invocation — *false failures* in an
+   oracle-provisioning job with no prefix.
+3. **Quoted substitution syntax.** `$(` and a backtick are treated as an active
+   command substitution wherever they appear, so `echo '$(cargo test)'` — which
+   prints literal text — reads as a test run.
+
+The residual is bounded by what the gate is for: it decides which steps must
+name an oracle prefix, and it fails closed, so the live risk is a rejected
+valid workflow rather than an unchecked oracle. What it costs is *precision*,
+and precision is what keeps a gate from being edited away the first time it
+blocks a legitimate change.
+
+**Acceptance criteria.**
+
+1. The scalar style is retained through the step reader, so a folded `>` block
+   joins with spaces and a literal `|` block with newlines, each pinned by a
+   test using the real shape from `ci.yml`.
+2. Heredoc bodies are recognised and excluded from command scanning.
+3. Quote and escape state is tracked well enough that a single-quoted or
+   escaped `$(` is not an active substitution, and an escaped `"` inside an
+   assignment value does not open one.
+4. Each of the three shapes above is pinned in both directions — the shape that
+   must be seen, and the neighbouring shape that must not be.
+
+**Why deferred.** None of these shapes is in the workflows, and the same file's
+history is the argument for not fixing them inline: each of the five rounds
+that preceded this one bought its next finding, so a further pass at the
+scanner belongs in a change whose subject *is* the scanner, with its own review.
