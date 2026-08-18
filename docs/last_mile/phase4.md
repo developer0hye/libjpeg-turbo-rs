@@ -9255,3 +9255,68 @@ literal `set -o pipefail` + `cargo test` stays two). Criterion 2's heredoc
 half, criterion 3 (quote and escape state, including the escaped `"` inside an
 inline assignment) and criterion 4's remaining both-direction pins are
 untouched.
+
+## P4-179. An Oracle-Provisioning Step Can Stall Indefinitely Because Nothing Bounds Its Wall Clock — **OPEN**
+
+**GitHub:** [#576](https://github.com/developer0hye/libjpeg-turbo-rs/issues/576) — found 2026-08-18 while landing the cross-arch oracle pair (#575).
+
+**Motivation.** Every oracle-provisioning step here fetches the deb and then
+runs `sudo apt-get update -qq` before installing it. Nothing bounds that
+command, and nothing bounds the step: `timeout-minutes` sits on the `cargo
+test` step, never on the install, so an `apt-get update` that stalls holds the
+runner until the job default of **360 minutes**.
+
+It stalls. Measured on #575, four times across three attempts at the same head,
+all on `ubuntu-24.04` in `cross-arch.yml`, on baseline and current legs alike:
+`Test (linux-x86_64 AVX2)` for 24m37s (run 32084516493), then
+`Build (linux-x86_64, AVX2 disabled at compile time)` and
+`Test (linux-x86_64 AVX2, oracle 3.2.0)` for ~31m each (run 32086139577), then
+that second one again for 22m on its rerun. Every one ended by cancellation,
+never by failing.
+
+The log places it precisely. In job 95554147447 the download finished in
+**0.15 s** — `100 608k 100 608k 0 0 4818k` at `00:27:59.4` — and the step
+printed nothing further until `##[error]The operation was canceled` at
+`00:52:36`. `curl` is not the stall; the package-index fetch is. A healthy run
+of the identical step takes **17 seconds** (job 95568671681,
+`01:48:00Z → 01:48:17Z`), so the distribution is 17 s or hours with nothing in
+between — which is what makes it diagnosable and what makes a bound safe.
+
+The cost is 20–30 runner-minutes per stall and a pull request blocked until a
+human cancels. The reason it is filed rather than tolerated is the second-order
+one: **a step that never returns does not fail.** The legs P4-130 added exist
+to make a 3.2.0 divergence visible; a leg that hangs produces neither a
+divergence nor a red check, and every reader — the merge button, `gh pr checks`,
+the next agent — sees "still running", which is the one state that asserts
+nothing. `apt` is configured here with no `Acquire::Retries` and no
+`Acquire::http::Timeout`, so a stalled mirror connection has nothing to time it
+out.
+
+Distinct from [P4-176](#p4-176-every-c-oracle-is-fetched-by-a-moveable-name-with-nothing-verifying-what-arrived--open),
+which asks whether the bytes that arrive are the ones we asked for. This one
+asks whether the fetch terminates.
+
+**Acceptance criteria.**
+
+1. Every oracle-provisioning step bounds its own wall clock —
+   `timeout-minutes` sized from the measured 17 s rather than guessed — so a
+   stalled index fetch turns the job red instead of holding a runner.
+2. The index fetch is bounded and retried at the `apt` level
+   (`-o Acquire::Retries=…`, `-o Acquire::http::Timeout=…`), or `apt-get
+   update` is dropped where installing a local `.deb` does not need a fresh
+   index — with the dependency-resolution argument recorded either way, since
+   the deb's declared dependencies decide whether the image's existing index
+   suffices.
+3. `tests/oracle_version_pins.rs` extends over the new property in the
+   both-directions style its `pinned` / `checked` / `measured` rules already
+   use: an oracle-provisioning step with no bound fails, and the pin is
+   asserted against a step that has one.
+4. The measurement is recorded — normal install duration per runner class — so
+   the bound is evidence rather than a round number.
+
+**Why deferred.** Found while landing #575, whose subject is which *release*
+each leg measures. The stall is in a step shape that predates that change and
+appears in all five workflows, so fixing it there would have mixed a
+CI-robustness change into a coverage one — and the fix wants its own
+measurement of what a healthy install costs on each runner class before it
+picks a bound.
