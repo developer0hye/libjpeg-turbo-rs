@@ -9218,6 +9218,20 @@ blocks a legitimate change.
    assignment value does not open one.
 4. Each of the three shapes above is pinned in both directions — the shape that
    must be seen, and the neighbouring shape that must not be.
+5. A `cargo test` in a **conditional** position keeps that context. `if cargo
+   test; then …` and a `while` condition are exempt from `errexit`, so a
+   failing test leaves the step green — and the scanner normalises the command
+   to the same `TestRun` as a plain one, so a pair where only one leg wraps its
+   run compares equal. Either the context is part of what is compared, or the
+   shape is rejected. Added 2026-08-18 from the sixth round on the cross-arch
+   pairing gate; not in `.github/workflows` today (`test-corpus`'s `if ! cargo
+   run …` is a run, not a test).
+6. A baseline selection merged from two runs under one feature set is covered
+   when the twin splits those filters across *several* builds that each cover
+   it (`--features F,png` and `--all-features`, say). The comparison asks one
+   twin build to cover the whole merged selection, which rejects a pair whose
+   coverage is genuinely equal — a false failure, the polarity that costs a
+   valid change rather than hiding a gap. Added 2026-08-18 from the same round.
 
 **Why deferred.** None of these shapes is in the workflows, and the same file's
 history is the argument for not fixing them inline: each of the five rounds
