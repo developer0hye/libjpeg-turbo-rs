@@ -5644,7 +5644,7 @@ suites off its twin; a leg that selects none runs whole crates, and then the
 `cargo test` command — with the environment it runs under and the runner it
 runs on — is the only thing there is to compare.
 
-*Four review rounds, thirteen findings, all of them on the gate again.* The
+*Five review rounds, seventeen findings, all of them on the gate again.* The
 first draft was green through each of the substitutions it existed to catch:
 
 - **An echo is not a run.** The command scanner was a substring split on
@@ -5742,7 +5742,20 @@ yes/no beside it. The same round found the tokeniser dropping
 operator is kept now unless it is a bare file descriptor, which is the only
 thing `2>&1` has there.
 
-Mechanism-validated in twenty-one directions rather than by passing: on the
+A fifth round split the last conflation. The feature set and the libtest
+selection were two independent unions, so a baseline running
+`--features full-c-parity -- c_croptest_full` was covered by a twin that ran
+`full-c-parity` under some *other* filter and `c_croptest_full` without the
+feature — neither of which compiled the exhaustive case. They are one key now:
+what a leg runs of a suite is a selection *per build*. The same round found
+three spellings the parser rejected rather than missed — `--all-features` read
+as a literal feature name instead of a top value, cargo's attached `-Ffeature`
+form, and an operator glued to the command word (`cargo test; echo done`, where
+scanning past it took `echo` for a positional filter). Those cost valid
+workflow changes rather than coverage, which is the polarity worth keeping in
+the pins.
+
+Mechanism-validated in twenty-five directions rather than by passing: on the
 workflow side, dropping the twin's job-level RUSTFLAGS, overriding RUSTFLAGS on
 its test step, replacing its command with an `echo`, narrowing either leg to a
 single suite (oracle-backed or not), moving the twin to another runner,
@@ -5751,7 +5764,7 @@ baseline out from under it each turn the intended gate red; so do the three
 mixed-leg shapes on `ci.yml`'s pair — echoing its twin's whole-root command,
 adding a RUSTFLAGS to it, and echoing its twin's capi step — and swapping both
 its legs' `--tests` for `--lib`, adding `--no-run` to both, adding a positional
-filter to both, widening its baseline's selection with `--features`, or
+filter to both, widening its baseline's selection with `--features`, and
 dropping `--features` from a `full-c-parity` twin; and on the inventory side,
 deleting a remainder row while its leg stays single, keeping one after the leg
 is paired, and naming a job that does not exist or that installs no oracle.

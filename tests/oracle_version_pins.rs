@@ -760,6 +760,15 @@ fn cargo_test_argument_lists_in(job_block: &str) -> Vec<Vec<String>> {
 /// the line back.
 fn arguments_of<'a>(tokens: &[&'a str], at: usize) -> Vec<&'a str> {
     let mut arguments: Vec<&str> = Vec::new();
+    // The operator can be glued to the command word itself — `cargo test; echo
+    // done` — and then the invocation has no arguments at all. Scanning past
+    // it would read `echo` as a positional filter.
+    if tokens
+        .get(at)
+        .is_some_and(|token| token.contains([';', '|', '&', '>', '<']))
+    {
+        return arguments;
+    }
     for token in tokens.iter().skip(at + 1) {
         if hands_off_to_another_command(token) || token.contains(['>', '<']) {
             // A separator can be glued to the argument in front of it —
@@ -2773,6 +2782,11 @@ fn cargo_test_commands_in(script: &str) -> BTreeSet<String> {
                 continue;
             };
             let mut words: Vec<&str> = tokens[start..=subcommand].to_vec();
+            // An operator glued to the command word is the shell's, not the
+            // command's: `cargo test; echo done` runs `cargo test`.
+            if let Some(last) = words.last_mut() {
+                *last = last.split([';', '|', '&', '>', '<']).next().unwrap_or(last);
+            }
             words.extend(arguments_of(&tokens, subcommand));
             commands.insert(words.join(" "));
         }
@@ -3149,49 +3163,91 @@ fn a_default_root_run_covers(selection: &Selection) -> bool {
     }
 }
 
-/// The cargo features each suite is built with, per suite the job names.
+/// The cargo features one `cargo test` invocation builds with.
 ///
-/// Two reasons the pairing gate needs this rather than a yes/no. A
-/// feature-gated test is not in a default `cargo test --tests` build, so a
-/// shared whole-root run cannot vouch for one — `full-c-parity` gates 12,230
-/// transform cases behind exactly that flag. And two legs naming the same
-/// suite under *different* feature sets are not running the same tests, which
-/// a selection comparison alone reads as equal.
-fn suite_features_in(job_block: &str) -> BTreeMap<String, BTreeSet<String>> {
-    let mut features_of: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+/// `--all-features` is a top value rather than a member: cargo really does
+/// enable `full-c-parity` with it, so recording it as a literal name would
+/// reject a twin that built *more* than its baseline.
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord)]
+struct Features {
+    all: bool,
+    named: BTreeSet<String>,
+}
+
+impl Features {
+    fn covers(&self, other: &Features) -> bool {
+        self.all || (!other.all && other.named.is_subset(&self.named))
+    }
+
+    fn is_default(&self) -> bool {
+        !self.all && self.named.is_empty()
+    }
+}
+
+/// What each leg runs of each suite: the libtest selection, **keyed by the
+/// features it was built with**.
+///
+/// Coupled rather than kept as two independent unions, which a review found
+/// reads as a pass it should not: a baseline running `--features full-c-parity`
+/// with the filter `c_croptest_full` would be covered by a twin that runs
+/// `full-c-parity` under some *other* filter and `c_croptest_full` without the
+/// feature, though the exhaustive case was never compiled. Selections merge
+/// within one feature set, because two runs of the same build do union their
+/// coverage.
+fn suite_runs_in(
+    job_block: &str,
+    accepts_invocation: fn(&str) -> bool,
+) -> BTreeMap<String, BTreeMap<Features, Selection>> {
+    let mut runs: BTreeMap<String, BTreeMap<Features, Selection>> = BTreeMap::new();
     for arguments in cargo_test_argument_lists_in(job_block) {
-        let mut features: BTreeSet<String> = BTreeSet::new();
+        if !accepts_invocation(&arguments.join(" ")) {
+            continue;
+        }
+        let mut features: Features = Features::default();
         let mut suites: Vec<String> = Vec::new();
-        let mut tokens = arguments.iter().peekable();
+        let mut selection: Selection = Selection::All;
+        let mut tokens = arguments.iter().map(String::as_str);
         while let Some(token) = tokens.next() {
             if token == "--all-features" {
-                features.insert("*".to_string());
+                features.all = true;
                 continue;
             }
-            if let Some(value) = token.strip_prefix("--features=") {
-                features.extend(value.split(',').map(str::to_string));
+            // Cargo takes the value attached (`-Ffull-c-parity`,
+            // `--features=a,b`) or as the next token.
+            let attached: Option<&str> = token
+                .strip_prefix("--features=")
+                .or_else(|| token.strip_prefix("-F").filter(|value| !value.is_empty()));
+            if let Some(value) = attached {
+                features.named.extend(value.split(',').map(str::to_string));
                 continue;
             }
             if token == "--features" || token == "-F" {
                 if let Some(value) = tokens.next() {
-                    features.extend(value.split(',').map(str::to_string));
+                    features.named.extend(value.split(',').map(str::to_string));
                 }
                 continue;
             }
             if token == "--test" {
                 if let Some(suite) = tokens.next() {
-                    suites.push(suite.clone());
+                    suites.push(suite.to_string());
                 }
+                continue;
+            }
+            if token == "--" {
+                selection = selection_after_the_double_dash(tokens.by_ref());
+                break;
             }
         }
         for suite in suites {
-            features_of
-                .entry(suite)
-                .or_default()
-                .extend(features.clone());
+            let per_feature: &mut BTreeMap<Features, Selection> = runs.entry(suite).or_default();
+            let merged: Selection = match per_feature.remove(&features) {
+                Some(existing) => existing.merge(selection.clone()),
+                None => selection.clone(),
+            };
+            per_feature.insert(features.clone(), merged);
         }
     }
-    features_of
+    runs
 }
 
 /// Does this pair run one identical whole-root-crate command on both legs?
@@ -3224,53 +3280,52 @@ fn compare_oracle_suites(baseline: &str, current: &str, workflow: &str) -> (usiz
     let mut selected: usize = 0;
     let mut missing: Vec<String> = Vec::new();
     let shared_root_run: bool = a_shared_whole_root_run_covers_both_legs(baseline, current);
-    let wanted_features: BTreeMap<String, BTreeSet<String>> = suite_features_in(baseline);
-    let have_features: BTreeMap<String, BTreeSet<String>> = suite_features_in(current);
-    let empty: BTreeSet<String> = BTreeSet::new();
-    for (test_dir, select) in [
+    for (test_dir, accepts) in [
         (
             ROOT_TEST_DIR,
-            root_suites_selected_by as fn(&str) -> BTreeMap<String, Selection>,
+            (|invocation: &str| !invocation.contains(PACKAGE_SELECTOR)) as fn(&str) -> bool,
         ),
-        (CAPI_TEST_DIR, capi_suites_selected_by),
+        (CAPI_TEST_DIR, |invocation: &str| {
+            invocation.contains(CAPI_PACKAGE)
+        }),
     ] {
-        let wanted: BTreeMap<String, Selection> = select(baseline);
-        let have: BTreeMap<String, Selection> = select(current);
-        for (suite, selection) in wanted {
+        let wanted: BTreeMap<String, BTreeMap<Features, Selection>> =
+            suite_runs_in(baseline, accepts);
+        let have: BTreeMap<String, BTreeMap<Features, Selection>> = suite_runs_in(current, accepts);
+        for (suite, builds) in wanted {
             if !suite_consumes_a_c_oracle_in(test_dir, &suite, workflow) {
                 continue;
             }
             selected += 1;
-            // A shared `cargo test --tests` runs every root suite's default
-            // tests on both legs — but only what a *default* build selects: it
-            // says nothing about the C-ABI crate, whose suites are only ever
-            // named, nothing about a feature-gated suite that build does not
-            // contain, and nothing about a selection widening past the default
-            // set.
-            let features: &BTreeSet<String> = wanted_features.get(&suite).unwrap_or(&empty);
-            let covered_by_the_shared_run: bool = test_dir == ROOT_TEST_DIR
-                && shared_root_run
-                && features.is_empty()
-                && a_default_root_run_covers(&selection);
-            if covered_by_the_shared_run {
-                continue;
-            }
-            match have.get(&suite) {
-                None => missing.push(format!("  {suite} — not run at all")),
-                Some(run) if !run.covers(&selection) => {
-                    missing.push(format!("  {suite} — runs {run:?}, wanted {selection:?}"))
+            for (features, selection) in builds {
+                // A shared `cargo test --tests` runs every root suite's
+                // default tests on both legs — but only what a *default* build
+                // selects: it says nothing about the C-ABI crate, whose suites
+                // are only ever named, nothing about a feature-gated suite that
+                // build does not contain, and nothing about a selection
+                // widening past the default set.
+                let covered_by_the_shared_run: bool = test_dir == ROOT_TEST_DIR
+                    && shared_root_run
+                    && features.is_default()
+                    && a_default_root_run_covers(&selection);
+                if covered_by_the_shared_run {
+                    continue;
                 }
-                // Same suite, same selection, different build. A leg without
-                // `--features full-c-parity` compiles none of the 12,230
-                // transform cases the flag gates, and a selection comparison
-                // alone reads the two as equal.
-                Some(_) => {
-                    let built_with: &BTreeSet<String> = have_features.get(&suite).unwrap_or(&empty);
-                    if !features.is_subset(built_with) {
-                        missing.push(format!(
-                            "  {suite} — built with features {built_with:?}, wanted {features:?}"
-                        ));
-                    }
+                // One run of the twin has to cover this one *as built*. A leg
+                // without `--features full-c-parity` compiles none of the
+                // 12,230 transform cases the flag gates, however matching its
+                // libtest filter looks.
+                let covered: bool = have.get(&suite).is_some_and(|theirs| {
+                    theirs.iter().any(|(built_with, run)| {
+                        built_with.covers(&features) && run.covers(&selection)
+                    })
+                });
+                if !covered {
+                    missing.push(format!(
+                        "  {suite} — wanted {selection:?} built with {features:?}; \
+                         the current leg runs {:?}",
+                        have.get(&suite)
+                    ));
                 }
             }
         }
@@ -3645,33 +3700,74 @@ fn a_shared_whole_root_run_is_what_covers_a_suite_neither_leg_names() {
 
     // A feature-gated suite is not in a default build, so a shared whole-root
     // run cannot vouch for one: `full-c-parity` gates 12,230 transform cases
-    // behind exactly that flag. The features are read per suite rather than as
-    // a yes/no, because two legs naming one suite under different feature sets
-    // are not running the same tests either.
-    assert_eq!(
-        suite_features_in(&job_around(
-            "      - run: cargo test --features full-c-parity --test c_croptest\n\
-             \x20     - run: cargo test --test cross_check_encoder_binary\n"
-        )),
-        BTreeMap::from([
-            (
-                "c_croptest".to_string(),
-                BTreeSet::from(["full-c-parity".to_string()])
-            ),
-            ("cross_check_encoder_binary".to_string(), BTreeSet::new()),
-        ])
+    // behind exactly that flag. The features are read per *invocation* and
+    // keyed against the selection, so a review's shape — one run with the
+    // feature under another filter, one with this filter and no feature —
+    // does not add up to a covered run.
+    let root = |invocation: &str| -> bool { !invocation.contains(PACKAGE_SELECTOR) };
+    let runs = suite_runs_in(
+        &job_around(
+            "      - run: cargo test --features full-c-parity --test c_croptest -- c_croptest_full\n\
+             \x20     - run: cargo test --test c_croptest -- c_croptest_quick\n",
+        ),
+        root,
     );
-    // Both spellings, and a comma-separated list.
+    let builds = runs.get("c_croptest").expect("c_croptest is named twice");
     assert_eq!(
-        suite_features_in(&job_around(
-            "      - run: cargo test --features=full-c-parity,simd --test c_croptest\n"
-        ))
-        .remove("c_croptest"),
-        Some(BTreeSet::from([
-            "full-c-parity".to_string(),
-            "simd".to_string()
-        ]))
+        builds.len(),
+        2,
+        "two builds, not one merged set: {builds:?}"
     );
+    let with_feature = Features {
+        all: false,
+        named: BTreeSet::from(["full-c-parity".to_string()]),
+    };
+    assert_eq!(
+        builds.get(&with_feature),
+        Some(&Selection::Filters(BTreeSet::from([
+            "c_croptest_full".to_string()
+        ])))
+    );
+    assert_eq!(
+        builds.get(&Features::default()),
+        Some(&Selection::Filters(BTreeSet::from([
+            "c_croptest_quick".to_string()
+        ])))
+    );
+
+    // Cargo's spellings, all of them: attached, `=`-joined, comma-separated,
+    // and the short option with its value stuck to it. Missing one records an
+    // empty feature set and reports a twin as short of a feature it builds.
+    for spelling in [
+        "--features full-c-parity",
+        "--features=full-c-parity",
+        "-F full-c-parity",
+        "-Ffull-c-parity",
+    ] {
+        let runs = suite_runs_in(
+            &job_around(&format!(
+                "      - run: cargo test {spelling} --test c_croptest\n"
+            )),
+            root,
+        );
+        assert_eq!(
+            runs["c_croptest"].keys().next(),
+            Some(&with_feature),
+            "{spelling:?} names full-c-parity"
+        );
+    }
+
+    // `--all-features` is wider than any named set, so it covers one — a
+    // literal `"*"` member would have rejected a twin that builds *more*.
+    let everything = Features {
+        all: true,
+        named: BTreeSet::new(),
+    };
+    assert!(everything.covers(&with_feature));
+    assert!(everything.covers(&Features::default()));
+    assert!(!with_feature.covers(&everything));
+    assert!(with_feature.covers(&Features::default()));
+    assert!(!Features::default().covers(&with_feature));
 }
 
 #[test]
@@ -3729,6 +3825,24 @@ fn a_control_operator_glued_to_an_argument_does_not_eat_it() {
     assert_eq!(
         cargo_test_commands_in("cargo test --tests; echo done"),
         BTreeSet::from(["cargo test --tests".to_string()])
+    );
+    // The operator can be glued to the command word itself, and then there are
+    // no arguments to read — scanning past it would take `echo` for a
+    // positional filter and reject a leg that runs the whole matrix.
+    assert_eq!(
+        cargo_test_commands_in("cargo test; echo done"),
+        BTreeSet::from(["cargo test".to_string()])
+    );
+    assert!(runs_the_root_integration_matrix("cargo test; echo done"));
+    // A suite name with a redirect stuck to it is still a suite name; only a
+    // bare file descriptor in that position is not.
+    assert_eq!(
+        root_suites_selected_by(&job_around(
+            "      - run: cargo test --test c_croptest>/dev/null\n"
+        ))
+        .into_keys()
+        .collect::<Vec<String>>(),
+        vec!["c_croptest".to_string()]
     );
 }
 
