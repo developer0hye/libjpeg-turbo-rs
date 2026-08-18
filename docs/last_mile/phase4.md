@@ -9256,7 +9256,7 @@ half, criterion 3 (quote and escape state, including the escaped `"` inside an
 inline assignment) and criterion 4's remaining both-direction pins are
 untouched.
 
-## P4-179. An Oracle-Provisioning Step Can Stall Indefinitely Because Nothing Bounds Its Wall Clock — **OPEN**
+## P4-179. An `apt`-Provisioning Step Can Stall Indefinitely Because Nothing Bounds Its Wall Clock — **OPEN**
 
 **GitHub:** [#576](https://github.com/developer0hye/libjpeg-turbo-rs/issues/576) — found 2026-08-18 while landing the cross-arch oracle pair (#575).
 
@@ -9264,7 +9264,9 @@ untouched.
 runs `sudo apt-get update -qq` before installing it. Nothing bounds that
 command, and nothing bounds the step: `timeout-minutes` sits on the `cargo
 test` step, never on the install, so an `apt-get update` that stalls holds the
-runner until the job default of **360 minutes**.
+runner until the job default of **360 minutes**. There are **twelve**
+`apt-get update` sites across `ci.yml`, `cross-arch.yml`, `armv7.yml` and
+`release.yml`, and none of them is bounded.
 
 It stalls. Measured on #575, four times across three attempts at the same head,
 all on `ubuntu-24.04` in `cross-arch.yml`, on baseline and current legs alike:
@@ -9292,15 +9294,27 @@ nothing. `apt` is configured here with no `Acquire::Retries` and no
 `Acquire::http::Timeout`, so a stalled mirror connection has nothing to time it
 out.
 
+**It is not the oracle steps — it is `apt`.** The PR filing this entry (#577,
+documentation only) stalled twice more while it waited for CI, and one of them
+installs no oracle at all: `Test (linux-armv7 scalar, emulated)` sat 29 minutes
+in `Install armhf cross toolchain + qemu-user` (`armv7.yml:66`), whose first
+line is the same unbounded `sudo apt-get update -qq`. `Test (linux-x86_64
+AVX2)` stalled beside it for 25 minutes on the oracle install. Six stalls in
+one evening, across two workflows and two step kinds, share exactly one
+command — which is why the criteria below are written against every `apt`
+provisioning step rather than the oracle ones that surfaced it.
+
 Distinct from [P4-176](#p4-176-every-c-oracle-is-fetched-by-a-moveable-name-with-nothing-verifying-what-arrived--open),
 which asks whether the bytes that arrive are the ones we asked for. This one
 asks whether the fetch terminates.
 
 **Acceptance criteria.**
 
-1. Every oracle-provisioning step bounds its own wall clock —
-   `timeout-minutes` sized from the measured 17 s rather than guessed — so a
-   stalled index fetch turns the job red instead of holding a runner.
+1. Every provisioning step that runs `apt` bounds its own wall clock —
+   `timeout-minutes` sized from the measured healthy duration rather than
+   guessed — so a stalled index fetch turns the job red instead of holding a
+   runner. All twelve sites, not only the oracle ones: the armv7 toolchain step
+   stalled the same way and installs no oracle.
 2. The index fetch is bounded and retried at the `apt` level
    (`-o Acquire::Retries=…`, `-o Acquire::http::Timeout=…`), or `apt-get
    update` is dropped where installing a local `.deb` does not need a fresh
@@ -9309,14 +9323,17 @@ asks whether the fetch terminates.
    suffices.
 3. `tests/oracle_version_pins.rs` extends over the new property in the
    both-directions style its `pinned` / `checked` / `measured` rules already
-   use: an oracle-provisioning step with no bound fails, and the pin is
-   asserted against a step that has one.
-4. The measurement is recorded — normal install duration per runner class — so
-   the bound is evidence rather than a round number.
+   use: a provisioning step with no bound fails, and the pin is asserted
+   against a step that has one. That file already enumerates every job in every
+   workflow, so the rule has somewhere to live — but its subject is oracles,
+   and a bound on `armv7.yml`'s toolchain step is not an oracle property, so
+   where the gate goes is part of the work rather than settled here.
+4. The measurement is recorded — normal duration per step and runner class — so
+   each bound is evidence rather than a round number.
 
 **Why deferred.** Found while landing #575, whose subject is which *release*
 each leg measures. The stall is in a step shape that predates that change and
-appears in all five workflows, so fixing it there would have mixed a
+appears in four workflows, so fixing it there would have mixed a
 CI-robustness change into a coverage one — and the fix wants its own
-measurement of what a healthy install costs on each runner class before it
+measurement of what a healthy run costs per step and runner class before it
 picks a bound.
