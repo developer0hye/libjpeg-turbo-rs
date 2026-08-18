@@ -9124,15 +9124,19 @@ every capi suite, not just this one.
 **Motivation.** Every C libjpeg-turbo oracle here is fetched by a name upstream
 can repoint, and nothing checks what arrived:
 
-- **eight** deb downloads —
+- **eleven** deb downloads —
   `curl -fL .../releases/download/${VERSION}/libjpeg-turbo-official_${VERSION}_${ARCH}.deb`,
-  installed with no digest: `ci.yml:64,327,629`, `cross-arch.yml:30,67,109`,
-  `fuzz-smoke.yml:95`, `full-c-parity.yml:99`. (`fuzz-smoke.yml:206` prints the
-  same command as reproduction instructions and does not fetch.)
-- **six** source clones — `full-c-parity.yml:58,152` and `ci.yml:890,937` at
-  `--branch 3.1.4.1`, and `full-c-parity.yml:191` and `ci.yml:715` at
+  installed with no digest: `ci.yml:64,330,639`,
+  `cross-arch.yml:48,88,131,169,214,256`, `fuzz-smoke.yml:95`,
+  `full-c-parity.yml:99`. (`fuzz-smoke.yml:206` prints the same command as
+  reproduction instructions and does not fetch.) Three of the `cross-arch.yml`
+  sites arrived on 2026-08-18 with P4-130's `-current-oracle` twins, which is
+  the point: every leg this repository pairs adds a fetch, so the inventory
+  grows with the coverage rather than with this gap.
+- **six** source clones — `full-c-parity.yml:58,152` and `ci.yml:925,972` at
+  `--branch 3.1.4.1`, and `full-c-parity.yml:191` and `ci.yml:725` at
   `--branch 3.2.0`, the last of them for the `trace-current` v8-ABI oracle.
-  `ci.yml:890` is `test-cross-encode`, which became a source clone on
+  `ci.yml:925` is `test-cross-encode`, which became a source clone on
   2026-08-18 when P4-130 replaced its `brew install jpeg-turbo`;
 - `references/libjpeg-turbo` is the exception. A submodule is pinned by commit,
   which is why it is not part of this gap.
