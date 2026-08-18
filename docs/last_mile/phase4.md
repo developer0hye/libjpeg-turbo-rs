@@ -5644,8 +5644,8 @@ suites off its twin; a leg that selects none runs whole crates, and then the
 `cargo test` command — with the environment it runs under and the runner it
 runs on — is the only thing there is to compare.
 
-*Three review rounds, ten findings, all of them on the gate again.* The first
-draft was green through each of the substitutions it existed to catch:
+*Four review rounds, thirteen findings, all of them on the gate again.* The
+first draft was green through each of the substitutions it existed to catch:
 
 - **An echo is not a run.** The command scanner was a substring split on
   `cargo test`, so replacing a twin's real command with `echo cargo test
@@ -5728,7 +5728,21 @@ credited.
   precedes `2>&1` is a file descriptor, and keeping it would turn `2` into a
   libtest filter.
 
-Mechanism-validated in eighteen directions rather than by passing: on the
+A fourth round found the same class once more, and the pattern by then was
+plain: **every miss is a command that looks like the one being credited.**
+`cargo test --tests --no-run` compiles the binaries and runs nothing;
+`cargo test --tests c_crop` runs the tests whose names match, which is the
+zero-test positional-filter shape `ci.yml` carries a comment about; and a twin
+naming the same suite *without* `--features full-c-parity` compiles none of the
+12,230 transform cases the flag gates while comparing equal on selection alone.
+Whole-matrix credit now rejects a compile-only or filtered invocation, and the
+feature set is part of what the two legs are compared on rather than a
+yes/no beside it. The same round found the tokeniser dropping
+`--test c_croptest>/dev/null` entirely: the argument in front of a glued
+operator is kept now unless it is a bare file descriptor, which is the only
+thing `2>&1` has there.
+
+Mechanism-validated in twenty-one directions rather than by passing: on the
 workflow side, dropping the twin's job-level RUSTFLAGS, overriding RUSTFLAGS on
 its test step, replacing its command with an `echo`, narrowing either leg to a
 single suite (oracle-backed or not), moving the twin to another runner,
@@ -5736,10 +5750,11 @@ pointing it at 3.1.4.1, renaming it so the pair dissolves, and renaming its
 baseline out from under it each turn the intended gate red; so do the three
 mixed-leg shapes on `ci.yml`'s pair — echoing its twin's whole-root command,
 adding a RUSTFLAGS to it, and echoing its twin's capi step — and swapping both
-its legs' `--tests` for `--lib`, or widening its baseline's selection with
-`--features`; and on the inventory side, deleting a remainder row while its leg
-stays single, keeping one after the leg is paired, and naming a job that does
-not exist or that installs no oracle.
+its legs' `--tests` for `--lib`, adding `--no-run` to both, adding a positional
+filter to both, widening its baseline's selection with `--features`, or
+dropping `--features` from a `full-c-parity` twin; and on the inventory side,
+deleting a remainder row while its leg stays single, keeping one after the leg
+is paired, and naming a job that does not exist or that installs no oracle.
 
 The scanner work also discharges criterion 1 of
 **[P4-177](#p4-177-the-workflow-scanner-does-not-model-heredocs-folded-scalars-or-quoted-substitution-syntax--partial-folded-scalars-are-modelled-heredocs-and-quoteescape-state-remain)**,

@@ -738,11 +738,14 @@ fn cargo_test_argument_lists_in(job_block: &str) -> Vec<Vec<String>> {
         for line in logical_lines(&step.script) {
             let tokens: Vec<&str> = line.split_whitespace().collect();
             for (_, at) in cargo_invocations_in(&tokens) {
-                if cargo_subcommand_after(&tokens, at) != Some("test") {
+                let Some(subcommand) = cargo_subcommand_index_after(&tokens, at) else {
+                    continue;
+                };
+                if shell_word(tokens[subcommand]) != "test" {
                     continue;
                 }
                 invocations.push(
-                    arguments_of(&tokens, at)
+                    arguments_of(&tokens, subcommand)
                         .into_iter()
                         .map(|token| token.to_string())
                         .collect(),
@@ -753,21 +756,24 @@ fn cargo_test_argument_lists_in(job_block: &str) -> Vec<Vec<String>> {
     invocations
 }
 
-/// The arguments of the `cargo test` at `at`, ending where the shell takes the
-/// line back.
+/// The arguments after the subcommand at `at`, ending where the shell takes
+/// the line back.
 fn arguments_of<'a>(tokens: &[&'a str], at: usize) -> Vec<&'a str> {
     let mut arguments: Vec<&str> = Vec::new();
     for token in tokens.iter().skip(at + 1) {
         if hands_off_to_another_command(token) || token.contains(['>', '<']) {
-            // A control operator can be glued to the argument in front of it —
+            // A separator can be glued to the argument in front of it —
             // `if cargo test --test c_croptest; then` leaves `c_croptest;` as
-            // one token, and dropping the token drops the suite name with the
-            // separator. A *redirect* is different: whatever precedes `2>&1`
-            // is a file descriptor, not an argument, so a token carrying one
-            // keeps nothing.
-            let redirects: bool = token.contains(['>', '<']);
-            if let Some(head) = token.split([';', '|', '&']).next() {
-                if !redirects && !head.is_empty() && head != *token {
+            // one whitespace token, and dropping the token drops the suite
+            // name with it. What sits in front of a *redirect* is usually a
+            // file descriptor (`2>&1`), and keeping that `2` would turn it
+            // into a libtest filter — but `--test c_croptest>/dev/null` is a
+            // suite name, so the test is what the prefix looks like, not which
+            // operator follows it.
+            if let Some(head) = token.split([';', '|', '&', '>', '<']).next() {
+                let is_a_file_descriptor: bool =
+                    head.chars().all(|character| character.is_ascii_digit());
+                if !head.is_empty() && head != *token && !is_a_file_descriptor {
                     arguments.push(head);
                 }
             }
@@ -2213,14 +2219,22 @@ fn cargo_invocations_in(tokens: &[&str]) -> Vec<(usize, usize)> {
     found
 }
 
-/// The subcommand a `cargo` invocation runs: the first argument that is
-/// neither a `+toolchain` qualifier nor a flag. `None` means bare `cargo`,
+/// Where the subcommand of the `cargo` at `at` sits: the first argument that
+/// is neither a `+toolchain` qualifier nor a flag. `None` means bare `cargo`,
 /// which prints help.
-fn cargo_subcommand_after<'a>(tokens: &[&'a str], at: usize) -> Option<&'a str> {
+fn cargo_subcommand_index_after(tokens: &[&str], at: usize) -> Option<usize> {
     tokens[at + 1..]
         .iter()
-        .map(|argument| shell_word(argument))
-        .find(|argument| !argument.starts_with('+') && !argument.starts_with('-'))
+        .position(|argument| {
+            let word: &str = shell_word(argument);
+            !word.starts_with('+') && !word.starts_with('-')
+        })
+        .map(|offset| at + 1 + offset)
+}
+
+/// The subcommand a `cargo` invocation runs.
+fn cargo_subcommand_after<'a>(tokens: &[&'a str], at: usize) -> Option<&'a str> {
+    cargo_subcommand_index_after(tokens, at).map(|index| shell_word(tokens[index]))
 }
 
 fn runs_cargo_in(line: &str) -> bool {
@@ -2755,8 +2769,11 @@ fn cargo_test_commands_in(script: &str) -> BTreeSet<String> {
             // prefix, a `sudo` — then the arguments, which end where the shell
             // takes the line back. `if` and `!` are how `test-corpus`
             // *introduces* a command, so the head is taken verbatim.
-            let mut words: Vec<&str> = tokens[start..=at].to_vec();
-            words.extend(arguments_of(&tokens, at));
+            let Some(subcommand) = cargo_subcommand_index_after(&tokens, at) else {
+                continue;
+            };
+            let mut words: Vec<&str> = tokens[start..=subcommand].to_vec();
+            words.extend(arguments_of(&tokens, subcommand));
             commands.insert(words.join(" "));
         }
     }
@@ -3024,30 +3041,93 @@ const CARGO_TARGET_SELECTORS: [&str; 9] = [
     "--test",
 ];
 
-/// Does this command run the root crate's integration tests?
+/// Cargo options whose *next* token is their value rather than a positional
+/// filter. Spelled with `=` they carry it themselves, which is why the check
+/// below looks for the separator before expecting one.
+const CARGO_OPTIONS_WITH_A_VALUE: [&str; 18] = [
+    "-p",
+    "--package",
+    "--exclude",
+    "--test",
+    "--bin",
+    "--example",
+    "--bench",
+    "--features",
+    "-F",
+    "--target",
+    "--target-dir",
+    "--manifest-path",
+    "--profile",
+    "--message-format",
+    "--config",
+    "--color",
+    "-j",
+    "--jobs",
+];
+
+/// Does this command run the root crate's integration tests — all of them?
+///
+/// Every clause is a way of looking like the whole matrix without being it,
+/// and a review found the last two: `cargo test --tests --no-run` compiles the
+/// binaries and executes nothing, and `cargo test --tests c_crop` runs the
+/// tests whose names match, which is the zero-test positional-filter shape
+/// `ci.yml` carries a comment about. Crediting either would vouch for every
+/// root oracle suite over a pair that runs none of them.
 fn runs_the_root_integration_matrix(command: &str) -> bool {
     let tokens: Vec<&str> = command.split_whitespace().collect();
     let Some((_, at)) = cargo_invocations_in(&tokens).first().copied() else {
         return false;
     };
-    let arguments: Vec<&str> = arguments_of(&tokens, at);
-    let names_a_package: bool = arguments
-        .iter()
-        .any(|argument| *argument == "-p" || argument.starts_with("--package"));
-    if names_a_package {
+    let Some(subcommand) = cargo_subcommand_index_after(&tokens, at) else {
+        return false;
+    };
+    let arguments: Vec<&str> = arguments_of(&tokens, subcommand);
+    let mut names_the_integration_matrix: bool = true;
+    let mut expecting_a_value: bool = false;
+    let mut harness_arguments: Vec<&str> = Vec::new();
+    for (index, argument) in arguments.iter().enumerate() {
+        if *argument == "--" {
+            harness_arguments = arguments[index + 1..].to_vec();
+            break;
+        }
+        if expecting_a_value {
+            expecting_a_value = false;
+            continue;
+        }
+        let name: &str = argument.split('=').next().unwrap_or(argument);
+        if CARGO_OPTIONS_WITH_A_VALUE.contains(&name) {
+            expecting_a_value = !argument.contains('=');
+        }
+        if name == "-p" || name == "--package" || *argument == "--no-run" {
+            return false;
+        }
+        if *argument == "--tests" || *argument == "--all-targets" {
+            continue;
+        }
+        if CARGO_TARGET_SELECTORS.contains(&name) {
+            // Some other target, and only that target.
+            names_the_integration_matrix = false;
+        }
+        // A bare word that is nobody's value is a libtest filter, and a
+        // filtered run is not the whole matrix.
+        if !argument.starts_with('-') && !expecting_a_value && !was_a_value(&arguments, index) {
+            return false;
+        }
+    }
+    if !harness_arguments.is_empty()
+        && selection_after_the_double_dash(harness_arguments.into_iter()) != Selection::All
+    {
         return false;
     }
-    if arguments
-        .iter()
-        .any(|argument| *argument == "--tests" || *argument == "--all-targets")
-    {
-        return true;
-    }
-    // No target selector at all: cargo runs every target, integration tests
-    // included.
-    !arguments
-        .iter()
-        .any(|argument| CARGO_TARGET_SELECTORS.contains(argument))
+    names_the_integration_matrix
+        || arguments
+            .iter()
+            .any(|argument| *argument == "--tests" || *argument == "--all-targets")
+}
+
+/// Was the argument at `index` consumed as the previous option's value?
+fn was_a_value(arguments: &[&str], index: usize) -> bool {
+    index > 0 && CARGO_OPTIONS_WITH_A_VALUE.contains(&arguments[index - 1])
 }
 
 /// Does a shared default run of the root integration matrix cover this
@@ -3069,30 +3149,49 @@ fn a_default_root_run_covers(selection: &Selection) -> bool {
     }
 }
 
-/// Suites a job selects through an invocation that also enables cargo features.
+/// The cargo features each suite is built with, per suite the job names.
 ///
-/// A feature-gated test does not exist in a default `cargo test --tests`
-/// build, so a shared whole-root run cannot vouch for one — `full-c-parity`
-/// gates 12,230 transform cases behind exactly that flag.
-fn suites_named_with_features_in(job_block: &str) -> BTreeSet<String> {
-    let mut suites: BTreeSet<String> = BTreeSet::new();
+/// Two reasons the pairing gate needs this rather than a yes/no. A
+/// feature-gated test is not in a default `cargo test --tests` build, so a
+/// shared whole-root run cannot vouch for one — `full-c-parity` gates 12,230
+/// transform cases behind exactly that flag. And two legs naming the same
+/// suite under *different* feature sets are not running the same tests, which
+/// a selection comparison alone reads as equal.
+fn suite_features_in(job_block: &str) -> BTreeMap<String, BTreeSet<String>> {
+    let mut features_of: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for arguments in cargo_test_argument_lists_in(job_block) {
-        let enables_features: bool = arguments
-            .iter()
-            .any(|argument| argument.starts_with("--features") || argument == "--all-features");
-        if !enables_features {
-            continue;
-        }
-        let mut tokens = arguments.iter();
+        let mut features: BTreeSet<String> = BTreeSet::new();
+        let mut suites: Vec<String> = Vec::new();
+        let mut tokens = arguments.iter().peekable();
         while let Some(token) = tokens.next() {
+            if token == "--all-features" {
+                features.insert("*".to_string());
+                continue;
+            }
+            if let Some(value) = token.strip_prefix("--features=") {
+                features.extend(value.split(',').map(str::to_string));
+                continue;
+            }
+            if token == "--features" || token == "-F" {
+                if let Some(value) = tokens.next() {
+                    features.extend(value.split(',').map(str::to_string));
+                }
+                continue;
+            }
             if token == "--test" {
                 if let Some(suite) = tokens.next() {
-                    suites.insert(suite.clone());
+                    suites.push(suite.clone());
                 }
             }
         }
+        for suite in suites {
+            features_of
+                .entry(suite)
+                .or_default()
+                .extend(features.clone());
+        }
     }
-    suites
+    features_of
 }
 
 /// Does this pair run one identical whole-root-crate command on both legs?
@@ -3125,7 +3224,9 @@ fn compare_oracle_suites(baseline: &str, current: &str, workflow: &str) -> (usiz
     let mut selected: usize = 0;
     let mut missing: Vec<String> = Vec::new();
     let shared_root_run: bool = a_shared_whole_root_run_covers_both_legs(baseline, current);
-    let feature_gated: BTreeSet<String> = suites_named_with_features_in(baseline);
+    let wanted_features: BTreeMap<String, BTreeSet<String>> = suite_features_in(baseline);
+    let have_features: BTreeMap<String, BTreeSet<String>> = suite_features_in(current);
+    let empty: BTreeSet<String> = BTreeSet::new();
     for (test_dir, select) in [
         (
             ROOT_TEST_DIR,
@@ -3146,9 +3247,10 @@ fn compare_oracle_suites(baseline: &str, current: &str, workflow: &str) -> (usiz
             // named, nothing about a feature-gated suite that build does not
             // contain, and nothing about a selection widening past the default
             // set.
+            let features: &BTreeSet<String> = wanted_features.get(&suite).unwrap_or(&empty);
             let covered_by_the_shared_run: bool = test_dir == ROOT_TEST_DIR
                 && shared_root_run
-                && !feature_gated.contains(&suite)
+                && features.is_empty()
                 && a_default_root_run_covers(&selection);
             if covered_by_the_shared_run {
                 continue;
@@ -3158,7 +3260,18 @@ fn compare_oracle_suites(baseline: &str, current: &str, workflow: &str) -> (usiz
                 Some(run) if !run.covers(&selection) => {
                     missing.push(format!("  {suite} — runs {run:?}, wanted {selection:?}"))
                 }
-                Some(_) => {}
+                // Same suite, same selection, different build. A leg without
+                // `--features full-c-parity` compiles none of the 12,230
+                // transform cases the flag gates, and a selection comparison
+                // alone reads the two as equal.
+                Some(_) => {
+                    let built_with: &BTreeSet<String> = have_features.get(&suite).unwrap_or(&empty);
+                    if !features.is_subset(built_with) {
+                        missing.push(format!(
+                            "  {suite} — built with features {built_with:?}, wanted {features:?}"
+                        ));
+                    }
+                }
             }
         }
     }
@@ -3532,14 +3645,62 @@ fn a_shared_whole_root_run_is_what_covers_a_suite_neither_leg_names() {
 
     // A feature-gated suite is not in a default build, so a shared whole-root
     // run cannot vouch for one: `full-c-parity` gates 12,230 transform cases
-    // behind exactly that flag.
+    // behind exactly that flag. The features are read per suite rather than as
+    // a yes/no, because two legs naming one suite under different feature sets
+    // are not running the same tests either.
     assert_eq!(
-        suites_named_with_features_in(&job_around(
+        suite_features_in(&job_around(
             "      - run: cargo test --features full-c-parity --test c_croptest\n\
              \x20     - run: cargo test --test cross_check_encoder_binary\n"
         )),
-        BTreeSet::from(["c_croptest".to_string()])
+        BTreeMap::from([
+            (
+                "c_croptest".to_string(),
+                BTreeSet::from(["full-c-parity".to_string()])
+            ),
+            ("cross_check_encoder_binary".to_string(), BTreeSet::new()),
+        ])
     );
+    // Both spellings, and a comma-separated list.
+    assert_eq!(
+        suite_features_in(&job_around(
+            "      - run: cargo test --features=full-c-parity,simd --test c_croptest\n"
+        ))
+        .remove("c_croptest"),
+        Some(BTreeSet::from([
+            "full-c-parity".to_string(),
+            "simd".to_string()
+        ]))
+    );
+}
+
+#[test]
+fn a_command_that_compiles_or_filters_is_not_the_whole_matrix() {
+    // Both shapes name `--tests` and run none of it: `--no-run` compiles the
+    // binaries and stops, and a positional filter runs the tests whose names
+    // match — the zero-test shape `ci.yml` carries a comment about. Crediting
+    // either would vouch for every root oracle suite over a pair that runs
+    // none of them.
+    for command in [
+        "cargo test --tests --no-run",
+        "cargo test --tests c_crop",
+        "cargo test --tests -- c_crop",
+    ] {
+        assert!(
+            !runs_the_root_integration_matrix(command),
+            "{command:?} does not run the whole integration matrix"
+        );
+    }
+    // A flag's *value* is not a positional filter, and a coverage-neutral
+    // harness flag is not one either — failing on those would reject two legs
+    // that run identical sets.
+    for command in [
+        "cargo test --tests --features full-c-parity",
+        "cargo test --tests --target-dir /tmp/t",
+        "cargo test --tests -- --nocapture --test-threads 1",
+    ] {
+        assert!(runs_the_root_integration_matrix(command), "{command:?}");
+    }
 }
 
 #[test]
