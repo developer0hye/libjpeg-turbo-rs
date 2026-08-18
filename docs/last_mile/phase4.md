@@ -5203,9 +5203,10 @@ measured was whatever homebrew shipped that week.
 
 So the rule moved off the list of workflow files and onto the **job**.
 `tests/oracle_version_pins.rs` enumerates every job in `.github/workflows`
-(42 today, in nine files; the enumeration was checked once against a real YAML
-parser, name for name) and holds each one that provisions a C libjpeg-turbo to
-three things:
+(45 today, in nine files; the enumeration is checked against a real YAML
+parser, name for name, whenever a job is added — 42 when this rule landed, 45
+once the cross-arch pairs below joined) and holds each one that provisions a C
+libjpeg-turbo to three things:
 
 - **pinned** — the install names the release it installs. Upstream's
   `libjpeg-turbo-official_<version>` package and a `--branch <tag>` clone do;
@@ -5327,7 +5328,7 @@ P4-81 step is now one of the steps the rule reads. A sixth round found three
 more shapes — an escaped quote inside an inline assignment, folded scalars and
 heredocs, and substitution syntax inside single quotes — and none of them is in
 `.github/workflows`, so they are filed as
-**[P4-177](#p4-177-the-workflow-scanner-does-not-model-heredocs-folded-scalars-or-quoted-substitution-syntax--open)**
+**[P4-177](#p4-177-the-workflow-scanner-does-not-model-heredocs-folded-scalars-or-quoted-substitution-syntax--partial-folded-scalars-are-modelled-heredocs-and-quoteescape-state-remain)**
 rather than fixed here. The gate fails closed, so what they cost is precision,
 not coverage; and this file's own history is the argument for giving the
 scanner its own change and its own review rather than a seventh pass inside
@@ -5590,35 +5591,217 @@ was filed with:
 | beta1-11 | `-nooverwrite` in cjpeg/djpeg/jpegtran | **Non-goal.** Pure CLI file handling in upstream's application code; we ship a library and link *stock* tools against it, so the option is upstream's to implement and ours to inherit. |
 | 3.2.0-1 | Arm64EC Windows build regression fixed | **Non-goal.** An upstream build-system fix with no behavioural surface. |
 
+*Criterion 1, the cross-arch backends — and pairing as a property of the job
+(2026-08-18).* The three legs in `cross-arch.yml` are now paired:
+`test-linux-aarch64-neon-current-oracle`,
+`test-linux-x86_64-avx2-current-oracle` and
+`test-linux-x86_64-no-avx2-build-current-oracle`, each running the same
+`cargo test --tests` command as its baseline twin, on the same runner, under
+the same job-level environment.
+
+Three legs rather than one, for the reason the exhaustive matrices are paired
+per architecture: every case in that root matrix compares *our SIMD bytes*
+against C's, and this workflow exists precisely because the backend differs.
+`ci.yml`'s pair answers for one x86_64 runner at default codegen; these answer
+for Linux NEON, for AVX2-enabled codegen, and for codegen with AVX2 and SSE4.2
+switched off. Three backends against one release is three unmeasured 3.2.0
+answers. The third is the weakest of the three and its job comment says so:
+SIMD *dispatch* is a runtime CPUID query that ignores `-C target-feature`, so
+the kernels are the AVX2 ones on both legs of that pair — what the flags change
+is how LLVM compiles everything that is not a hand-written kernel, which is
+most of what the differential suites compare.
+
+**The membership rule moved onto the job, exactly as the pin-and-name rule
+did.** The three pairing gates that existed each *named* the legs they
+compared — `CI_WORKFLOW`/`BASELINE_LEG_JOB`/`CURRENT_LEG_JOB` and
+`FULL_PARITY_LEG_PAIRS` — which is the shape whose failure this entry already
+records once: a workflow that grows a new oracle leg is covered by nothing
+until someone remembers to add it to a constant, and "someone remembers" is
+what let thirteen pins sit at a superseded release for two months.
+`every_oracle_installing_job_is_paired_or_on_the_recorded_remainder` reads all
+45 jobs in the nine workflows and requires each one that installs a C
+libjpeg-turbo to be a baseline with a `-current-oracle` twin, that twin, or a
+row in `UNPAIRED_ORACLE_JOBS`. Written first and red on the unmodified tree,
+naming exactly the three cross-arch jobs.
+
+That inventory is the item's remainder, moved from this prose into the one
+place a gate can read it, and checked **both ways**: a row naming a job that is
+paired, that installs no oracle, or that does not exist fails as loudly as an
+unpaired job missing from the list. Prose could go stale in either direction —
+a paired leg staying listed, a leg added tomorrow listed nowhere — and this one
+had, in a small way: the paragraph it replaces counted *legs* and said eight,
+while the job scanner counts *jobs* and finds seven, because `fuzz-smoke.yml`'s
+three differential targets are three entries of one matrix job and
+`mutants-in-diff` was left out of the count as "correctly pinned" (a different
+property, as this entry notes above).
+
+`every_leg_pair_is_compared_and_a_twin_runs_what_its_baseline_runs` is the
+second half, because naming a twin is not running one. Every discovered pair
+goes down exactly one of two comparisons and neither branch may empty: a leg
+that selects at least one **oracle-backed suite** by name is compared by
+*selection*, since `test-integration` deliberately keeps its self-contained
+suites off its twin; a leg that selects none runs whole crates, and then the
+`cargo test` command — with the environment it runs under and the runner it
+runs on — is the only thing there is to compare.
+
+*Five review rounds, seventeen findings, all of them on the gate again.* The
+first draft was green through each of the substitutions it existed to catch:
+
+- **An echo is not a run.** The command scanner was a substring split on
+  `cargo test`, so replacing a twin's real command with `echo cargo test
+  --tests` left the echoed text standing in for the invocation the pair
+  requires — 45 gates green over a leg executing nothing. It now shares
+  `cargo_invocations_in` with the "measured" rule's `runs_cargo_in`: command
+  position, `+toolchain` qualifiers, wrappers, environment prefixes and
+  substitutions, one implementation rather than two.
+- **A step's environment overrides its job's.** The comparison read job-level
+  `env:` only, so a twin could set `RUSTFLAGS: -C target-feature=-avx2` on its
+  `cargo test` step and compile the opposite backend with the gate green — the
+  step-versus-job scope error this entry already records once, in the "measured"
+  rule. Commands and environments now travel together as a `TestRun`, the
+  environment being each step's *effective* one, job overlaid by step, minus
+  the oracle prefix a twin is supposed to differ in.
+- **A pair that starts naming suites escaped both comparisons.** The
+  whole-suite branch simply skipped a pair that named any suite, on the
+  assumption that a suite-level gate would take it — and those gates read
+  `ci.yml` and `full-c-parity.yml` by name, so a cross-arch leg narrowed to
+  `--test <something>` was compared by nothing. Every pair is now compared, the
+  branch is chosen by whether *oracle-backed* suites are named (narrowing to a
+  self-contained suite is the same escape one step further on), and the two
+  branch counters must both stay non-zero.
+
+A second round found that the first two fixes had each stopped one step short,
+and that the third had invented a gap:
+
+- **A mixed leg's whole-crate run was compared by nothing.** `test-integration`
+  runs `cargo test --tests` *and* names capi suites, so it took the selection
+  path — and the selection path never looks at commands. Its twin's
+  `cargo test --tests` could become an `echo`, or gain a RUSTFLAGS, with the
+  capi selections still matching. The root crate's whole integration matrix is
+  now compared for **every** pair, before the branch, because that command is
+  what makes a leg a measurement at all.
+- **The selection reader was still a substring split.** Fixing the command
+  scanner left `suites_selected_by` reading `echo cargo test --test c_croptest`
+  as a selection, so the same substitution survived one path over. Both now
+  read through `cargo_invocations_in`; bounding each invocation at the shell
+  separator also stopped a following invocation's `-p` from being carried into
+  this one's arguments, which had let a root-crate run read as another crate's
+  coverage.
+- **The gap the generalisation "found" was not one.** Comparing root
+  selections reported `hard_case_x_byte_and_restart` as running on the baseline
+  leg alone, and it was filed as an item and excepted in a constant. It is
+  wrong: only `restart_bomb_4096_terminates_within_budget` is `#[ignore]`d, and
+  both legs run `cargo test --tests`, so the suite's
+  `restart_bomb_4096_dimensions_match_djpeg` cross-check already answers at
+  **both** releases. The scanner's model — "a suite is covered when a leg names
+  it with `--test`" — could not see a whole-crate run covering a suite neither
+  leg names. `a_shared_whole_root_run_covers_both_legs` models it now, credit
+  exactly as wide as the identical command the two legs share, and the item and
+  its exception are retracted rather than left standing as a gap nobody has.
+  What such a run does not cover is a selection widening past the default set:
+  the serial step's `--include-ignored` adds three timing assertions the twin
+  never runs, and a 60 s liveness bound does not answer differently at another
+  upstream release.
+
+A third round found the credit and the tokeniser each one step short again,
+and each miss was the same shape: something that *looks* like the thing being
+credited.
+
+- **`cargo test --lib` looks whole-crate.** It names no suite and no package,
+  so the classifier read it as the root matrix — and putting it on *both* legs
+  of a pair credited every root oracle suite to a pair running no integration
+  test at all. The classification is now cargo's own: a package selector
+  disqualifies, `--tests`/`--all-targets` qualifies, and a command with no
+  target selector qualifies because that is what cargo does with one.
+- **The credit was unconditional.** It has to be exactly as wide as a *default*
+  build of that command: a `--features full-c-parity` selection is not in one
+  (that flag gates 12,230 transform cases), and neither is a selection widening
+  past the default set. `--include-ignored` stays credited and says why — the
+  default half runs on both legs and the ignored half is this repository's
+  serial timing assertions — while bare `--ignored` selects only tests the
+  shared run never executes.
+- **A control operator glued to an argument ate it.** `if cargo test --test
+  c_croptest; then` leaves `c_croptest;` as one whitespace token, and ending
+  the invocation *at* that token dropped the suite name with the separator, so
+  a leg naming an oracle suite read as naming none. The argument in front of
+  the operator is kept now — but not in front of a redirect, where what
+  precedes `2>&1` is a file descriptor, and keeping it would turn `2` into a
+  libtest filter.
+
+A fourth round found the same class once more, and the pattern by then was
+plain: **every miss is a command that looks like the one being credited.**
+`cargo test --tests --no-run` compiles the binaries and runs nothing;
+`cargo test --tests c_crop` runs the tests whose names match, which is the
+zero-test positional-filter shape `ci.yml` carries a comment about; and a twin
+naming the same suite *without* `--features full-c-parity` compiles none of the
+12,230 transform cases the flag gates while comparing equal on selection alone.
+Whole-matrix credit now rejects a compile-only or filtered invocation, and the
+feature set is part of what the two legs are compared on rather than a
+yes/no beside it. The same round found the tokeniser dropping
+`--test c_croptest>/dev/null` entirely: the argument in front of a glued
+operator is kept now unless it is a bare file descriptor, which is the only
+thing `2>&1` has there.
+
+A fifth round split the last conflation. The feature set and the libtest
+selection were two independent unions, so a baseline running
+`--features full-c-parity -- c_croptest_full` was covered by a twin that ran
+`full-c-parity` under some *other* filter and `c_croptest_full` without the
+feature — neither of which compiled the exhaustive case. They are one key now:
+what a leg runs of a suite is a selection *per build*. The same round found
+three spellings the parser rejected rather than missed — `--all-features` read
+as a literal feature name instead of a top value, cargo's attached `-Ffeature`
+form, and an operator glued to the command word (`cargo test; echo done`, where
+scanning past it took `echo` for a positional filter). Those cost valid
+workflow changes rather than coverage, which is the polarity worth keeping in
+the pins.
+
+Mechanism-validated in twenty-five directions rather than by passing: on the
+workflow side, dropping the twin's job-level RUSTFLAGS, overriding RUSTFLAGS on
+its test step, replacing its command with an `echo`, narrowing either leg to a
+single suite (oracle-backed or not), moving the twin to another runner,
+pointing it at 3.1.4.1, renaming it so the pair dissolves, and renaming its
+baseline out from under it each turn the intended gate red; so do the three
+mixed-leg shapes on `ci.yml`'s pair — echoing its twin's whole-root command,
+adding a RUSTFLAGS to it, and echoing its twin's capi step — and swapping both
+its legs' `--tests` for `--lib`, adding `--no-run` to both, adding a positional
+filter to both, widening its baseline's selection with `--features`, and
+dropping `--features` from a `full-c-parity` twin; and on the inventory side,
+deleting a remainder row while its leg stays single, keeping one after the leg
+is paired, and naming a job that does not exist or that installs no oracle.
+
+The scanner work also discharges criterion 1 of
+**[P4-177](#p4-177-the-workflow-scanner-does-not-model-heredocs-folded-scalars-or-quoted-substitution-syntax--partial-folded-scalars-are-modelled-heredocs-and-quoteescape-state-remain)**,
+which that item was holding open: comparing two legs' commands is impossible
+while a folded `>` block reads as one command per physical line, because every
+argument past the first drops out of the comparison.
+
 **What remains.**
 
 1. The four filed gaps (P4-171..P4-174) are triaged, not fixed.
-2. **Eight legs across three workflows still measure one release** — matrix
-   entries counted one apiece — and the inventory is written out here rather
-   than left to the next reader's grep:
-   - `cross-arch.yml` — three jobs (linux-aarch64 NEON, linux-x86_64 AVX2,
-     AVX2-disabled build), each running the root `cargo test --tests` matrix
-     against the 3.1.4.1 deb;
-   - `fuzz-smoke.yml` — the three differential fuzz targets
-     (`fuzz_decode_diff_c`, `fuzz_encode_diff_c`, `fuzz_transform_diff_c`)
-     take the 3.1.4.1 deb, and the reproduction instructions they emit name it
-     too;
+2. **Four jobs still measure one release**, and the inventory now lives in
+   `UNPAIRED_ORACLE_JOBS` in `tests/oracle_version_pins.rs`, where a gate reads
+   it, with the reason on each row:
+   - `fuzz-smoke.yml`'s `fuzz` — the three differential fuzz targets
+     (`fuzz_decode_diff_c`, `fuzz_encode_diff_c`, `fuzz_transform_diff_c`) are
+     matrix entries taking the 3.1.4.1 deb, and the reproduction instructions
+     the failure path prints name that release too, so pairing has to reach
+     those as well;
    - `ci.yml`'s `test-corpus` — a 3.1.4.1 source build at `/usr/local`;
    - `ci.yml`'s `test-cross-encode` — a 3.1.4.1 source build at
-     `/tmp/ljt3141/prefix` since 2026-08-18, on the only macOS leg that runs
-     the whole root suite.
+     `/tmp/ljt3141/prefix`, on the only macOS leg that runs the whole root
+     suite; upstream ships no macOS package, so its twin is a *second* source
+     build on every pull request;
+   - `ci.yml`'s `mutants-in-diff` — a mutation run rather than a parity
+     measurement, and `continue-on-error` besides. Recorded as a decision, not
+     a backlog entry: pairing it would double a job's cost to answer the same
+     question twice.
 
-   Every one of them is now **pinned, checked and measured** — the release each
+   Every one of them is **pinned, checked and measured** — the release each
    installs is named in `docs/oracle_versions.tsv`, asserted at the path it was
-   installed to, and selected for the tests that read it. What none of them has
-   is a *second* leg: they answer against 3.1.4.1 alone, so a 3.2.0 divergence
-   in the NEON backend, in the differential fuzz targets, or in the corpus
-   comparison is still unmeasured. Pairing them is the next milestone, and it
-   is a question of runner cost rather than of mechanism: the pairing gates
-   `every_oracle_backed_capi_suite_…` and
-   `every_oracle_backed_full_parity_suite_…` already classify suites from their
-   own source, so a second leg per workflow inherits the membership rule
-   without a list.
+   installed to, and selected for the tests that read it. What none has is a
+   *second* leg, so a 3.2.0 divergence in the differential fuzz targets or in
+   the corpus comparison is still unmeasured. Pairing the remaining three is a
+   question of runner cost rather than of mechanism.
 3. `references/libjpeg-turbo` stays at 3.1.90. Bumping it to 3.2.0 moves every
    `j*.c:NNN` citation in this repository and re-baselines the classic-ABI
    trace oracles at the same time, which is its own change with its own
@@ -8941,15 +9124,19 @@ every capi suite, not just this one.
 **Motivation.** Every C libjpeg-turbo oracle here is fetched by a name upstream
 can repoint, and nothing checks what arrived:
 
-- **eight** deb downloads —
+- **eleven** deb downloads —
   `curl -fL .../releases/download/${VERSION}/libjpeg-turbo-official_${VERSION}_${ARCH}.deb`,
-  installed with no digest: `ci.yml:64,327,629`, `cross-arch.yml:30,67,109`,
-  `fuzz-smoke.yml:95`, `full-c-parity.yml:99`. (`fuzz-smoke.yml:206` prints the
-  same command as reproduction instructions and does not fetch.)
-- **six** source clones — `full-c-parity.yml:58,152` and `ci.yml:890,937` at
-  `--branch 3.1.4.1`, and `full-c-parity.yml:191` and `ci.yml:715` at
+  installed with no digest: `ci.yml:64,330,639`,
+  `cross-arch.yml:48,88,131,169,214,256`, `fuzz-smoke.yml:95`,
+  `full-c-parity.yml:99`. (`fuzz-smoke.yml:206` prints the same command as
+  reproduction instructions and does not fetch.) Three of the `cross-arch.yml`
+  sites arrived on 2026-08-18 with P4-130's `-current-oracle` twins, which is
+  the point: every leg this repository pairs adds a fetch, so the inventory
+  grows with the coverage rather than with this gap.
+- **six** source clones — `full-c-parity.yml:58,152` and `ci.yml:925,972` at
+  `--branch 3.1.4.1`, and `full-c-parity.yml:191` and `ci.yml:725` at
   `--branch 3.2.0`, the last of them for the `trace-current` v8-ABI oracle.
-  `ci.yml:890` is `test-cross-encode`, which became a source clone on
+  `ci.yml:925` is `test-cross-encode`, which became a source clone on
   2026-08-18 when P4-130 replaced its `brew install jpeg-turbo`;
 - `references/libjpeg-turbo` is the exception. A submodule is pinned by commit,
   which is why it is not part of this gap.
@@ -8990,7 +9177,7 @@ it touches all five workflows rather than the one step under review. Bundling
 it into that change would have mixed a supply-chain change into a coverage
 change.
 
-## P4-177. The Workflow Scanner Does Not Model Heredocs, Folded Scalars or Quoted Substitution Syntax — **OPEN**
+## P4-177. The Workflow Scanner Does Not Model Heredocs, Folded Scalars or Quoted Substitution Syntax — **PARTIAL: folded scalars are modelled; heredocs and quote/escape state remain**
 
 **GitHub:** [#572](https://github.com/developer0hye/libjpeg-turbo-rs/issues/572) — filed 2026-08-18 from the sixth codex round on the
 [P4-130](#p4-130-c-parity-oracle-is-pinned-to-3141-upstream-stable-is-320--partial-every-oracle-provisioning-job-is-now-pinned-checked-and-measured-the-legs-still-on-one-release-the-submodule-bump-and-the-four-filed-gaps-remain)
@@ -9035,8 +9222,36 @@ blocks a legitimate change.
    assignment value does not open one.
 4. Each of the three shapes above is pinned in both directions — the shape that
    must be seen, and the neighbouring shape that must not be.
+5. A `cargo test` in a **conditional** position keeps that context. `if cargo
+   test; then …` and a `while` condition are exempt from `errexit`, so a
+   failing test leaves the step green — and the scanner normalises the command
+   to the same `TestRun` as a plain one, so a pair where only one leg wraps its
+   run compares equal. Either the context is part of what is compared, or the
+   shape is rejected. Added 2026-08-18 from the sixth round on the cross-arch
+   pairing gate; not in `.github/workflows` today (`test-corpus`'s `if ! cargo
+   run …` is a run, not a test).
+6. A baseline selection merged from two runs under one feature set is covered
+   when the twin splits those filters across *several* builds that each cover
+   it (`--features F,png` and `--all-features`, say). The comparison asks one
+   twin build to cover the whole merged selection, which rejects a pair whose
+   coverage is genuinely equal — a false failure, the polarity that costs a
+   valid change rather than hiding a gap. Added 2026-08-18 from the same round.
 
 **Why deferred.** None of these shapes is in the workflows, and the same file's
 history is the argument for not fixing them inline: each of the five rounds
 that preceded this one bought its next finding, so a further pass at the
 scanner belongs in a change whose subject *is* the scanner, with its own review.
+
+**Status (2026-08-18): partial — criterion 1 delivered.** The cross-arch
+pairing work did not set out to touch this item, but it could not avoid half of
+criterion 2: comparing two legs' `cargo test` commands means reading a folded
+`>` block as the one command it is, or every argument past its first line drops
+out of the comparison — which is where a twin's selection would differ if it
+did. `steps_in` now keeps the scalar style and joins `>` with spaces and `|`
+with newlines, pinned by
+`a_folded_block_is_one_command_and_a_literal_block_is_many` using `ci.yml`'s
+real shape in both directions (a folded `--test` list stays one command; a
+literal `set -o pipefail` + `cargo test` stays two). Criterion 2's heredoc
+half, criterion 3 (quote and escape state, including the escaped `"` inside an
+inline assignment) and criterion 4's remaining both-direction pins are
+untouched.

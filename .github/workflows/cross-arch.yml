@@ -9,6 +9,24 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# Every oracle leg here is paired: one job at `tool-baseline` (3.1.4.1) and one
+# `-current-oracle` twin at `tool-current` (3.2.0), per
+# `docs/oracle_versions.tsv`. A single global bump is what P4-130's first
+# acceptance criterion forbids — it re-baselines every expectation at once, and
+# a divergence it papers over is indistinguishable from a pass.
+#
+# Paired *per backend* rather than once, because that is what this workflow
+# measures. `ci.yml`'s pair runs the root matrix on one x86_64 runner with
+# whatever the default codegen picks; the answers here come from NEON, from
+# AVX2-enabled codegen and from codegen with AVX2 and SSE4.2 switched off, and
+# every one of them is our SIMD bytes compared against C's. Three backends
+# against one release is three unmeasured 3.2.0 answers, not one.
+#
+# `tests/oracle_version_pins.rs` holds the shape: a job here that installs a C
+# libjpeg-turbo without a twin fails the build, and a twin must run the same
+# `cargo test` command on the same runner under the same job-level
+# environment — RUSTFLAGS included, since a pair that disagrees on it compares
+# two backends and blames the difference on an upstream release.
 jobs:
   # Linux aarch64 native runner — exercises the NEON backend without
   # emulation. macOS arm64 is already covered by the default CI matrix,
@@ -41,6 +59,52 @@ jobs:
       - name: Run full test suite with NEON SIMD
         # Use default features only — `--all-features` enables `full-c-parity`
         # which gates aspirational Rust-vs-C byte-exact encoder tests (opt-in).
+        run: cargo test --tests
+        timeout-minutes: 45
+
+  # The NEON backend against current upstream stable. Identical to the leg
+  # above in every respect but the release it compares against — same runner,
+  # same command, no RUSTFLAGS on either — which is what makes a divergence
+  # between the two evidence about 3.2.0 rather than about this job.
+  test-linux-aarch64-neon-current-oracle:
+    name: Test (linux-aarch64 NEON, oracle 3.2.0)
+    runs-on: ubuntu-24.04-arm
+    env:
+      # Exclusive selection, as on ci.yml's current-parity leg: a tool missing
+      # under this prefix is an error rather than a quiet fallback to some
+      # other djpeg reporting a 3.2.0 result it did not measure.
+      LIBJPEG_TURBO_PREFIX: /opt/libjpeg-turbo
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install libjpeg-turbo 3.2.0 from official release (current-parity leg)
+        run: |
+          ARCH=$(dpkg --print-architecture)
+          VERSION=3.2.0
+          curl -fL -o /tmp/ljt320.deb \
+            "https://github.com/libjpeg-turbo/libjpeg-turbo/releases/download/${VERSION}/libjpeg-turbo-official_${VERSION}_${ARCH}.deb"
+          sudo apt-get update -qq
+          sudo apt-get install -y /tmp/ljt320.deb
+          echo "/opt/libjpeg-turbo/bin" >> $GITHUB_PATH
+      # The version this leg is named for has to be the version it runs, and
+      # the development files are checked too: some suites compile a C oracle
+      # instead of shelling out, and the prefix is exclusive for those as well.
+      - name: Verify the oracle really is 3.2.0
+        run: |
+          /opt/libjpeg-turbo/bin/djpeg -version 2>&1 | tee /tmp/oracle-version.txt
+          grep -q "version 3.2.0" /tmp/oracle-version.txt
+          /opt/libjpeg-turbo/bin/cjpeg -version 2>&1 | grep -q "version 3.2.0"
+          /opt/libjpeg-turbo/bin/jpegtran -version 2>&1 | grep -q "version 3.2.0"
+          test -f /opt/libjpeg-turbo/include/jpeglib.h
+          test -f /opt/libjpeg-turbo/include/turbojpeg.h
+          ls /opt/libjpeg-turbo/lib64/libjpeg.* /opt/libjpeg-turbo/lib/libjpeg.* \
+             2>/dev/null | grep -q .
+          ls /opt/libjpeg-turbo/lib64/libturbojpeg.* /opt/libjpeg-turbo/lib/libturbojpeg.* \
+             2>/dev/null | grep -q .
+      - name: Run full test suite with NEON SIMD
         run: cargo test --tests
         timeout-minutes: 45
 
@@ -78,6 +142,47 @@ jobs:
       - name: Run full test suite with AVX2 enabled
         # Use default features only — `--all-features` enables `full-c-parity`
         # which gates aspirational Rust-vs-C byte-exact encoder tests (opt-in).
+        run: cargo test --tests
+        timeout-minutes: 45
+
+  # AVX2-enabled codegen against current upstream stable. The RUSTFLAGS below
+  # are the leg above's, verbatim: a twin that dropped them would compile a
+  # different backend, and the pair would report a codegen difference as an
+  # oracle difference.
+  test-linux-x86_64-avx2-current-oracle:
+    name: Test (linux-x86_64 AVX2, oracle 3.2.0)
+    runs-on: ubuntu-24.04
+    env:
+      RUSTFLAGS: "-C target-feature=+avx2"
+      LIBJPEG_TURBO_PREFIX: /opt/libjpeg-turbo
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install libjpeg-turbo 3.2.0 from official release (current-parity leg)
+        run: |
+          ARCH=$(dpkg --print-architecture)
+          VERSION=3.2.0
+          curl -fL -o /tmp/ljt320.deb \
+            "https://github.com/libjpeg-turbo/libjpeg-turbo/releases/download/${VERSION}/libjpeg-turbo-official_${VERSION}_${ARCH}.deb"
+          sudo apt-get update -qq
+          sudo apt-get install -y /tmp/ljt320.deb
+          echo "/opt/libjpeg-turbo/bin" >> $GITHUB_PATH
+      - name: Verify the oracle really is 3.2.0
+        run: |
+          /opt/libjpeg-turbo/bin/djpeg -version 2>&1 | tee /tmp/oracle-version.txt
+          grep -q "version 3.2.0" /tmp/oracle-version.txt
+          /opt/libjpeg-turbo/bin/cjpeg -version 2>&1 | grep -q "version 3.2.0"
+          /opt/libjpeg-turbo/bin/jpegtran -version 2>&1 | grep -q "version 3.2.0"
+          test -f /opt/libjpeg-turbo/include/jpeglib.h
+          test -f /opt/libjpeg-turbo/include/turbojpeg.h
+          ls /opt/libjpeg-turbo/lib64/libjpeg.* /opt/libjpeg-turbo/lib/libjpeg.* \
+             2>/dev/null | grep -q .
+          ls /opt/libjpeg-turbo/lib64/libturbojpeg.* /opt/libjpeg-turbo/lib/libturbojpeg.* \
+             2>/dev/null | grep -q .
+      - name: Run full test suite with AVX2 enabled
         run: cargo test --tests
         timeout-minutes: 45
 
@@ -120,6 +225,51 @@ jobs:
       - name: Run full test suite with AVX2 disabled at compile time
         # Use default features only — `--all-features` enables `full-c-parity`
         # which gates aspirational Rust-vs-C byte-exact encoder tests (opt-in).
+        run: cargo test --tests
+        timeout-minutes: 45
+
+  # The same compile-time-disabled codegen against current upstream stable.
+  #
+  # Worth a leg for the reason the job above is worth one, and no more: the
+  # SIMD *dispatch* is a runtime CPUID query that ignores these flags, so the
+  # kernels this pair exercises are the AVX2 ones either way. What
+  # `-C target-feature=-avx2,-sse4.2` does change is how LLVM compiles
+  # everything that is not a hand-written kernel — the scalar and portable
+  # paths whose bytes these differential suites compare against C's.
+  test-linux-x86_64-no-avx2-build-current-oracle:
+    name: Build (linux-x86_64, AVX2 disabled at compile time, oracle 3.2.0)
+    runs-on: ubuntu-24.04
+    env:
+      RUSTFLAGS: "-C target-feature=-avx2,-sse4.2"
+      LIBJPEG_TURBO_PREFIX: /opt/libjpeg-turbo
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install libjpeg-turbo 3.2.0 from official release (current-parity leg)
+        run: |
+          ARCH=$(dpkg --print-architecture)
+          VERSION=3.2.0
+          curl -fL -o /tmp/ljt320.deb \
+            "https://github.com/libjpeg-turbo/libjpeg-turbo/releases/download/${VERSION}/libjpeg-turbo-official_${VERSION}_${ARCH}.deb"
+          sudo apt-get update -qq
+          sudo apt-get install -y /tmp/ljt320.deb
+          echo "/opt/libjpeg-turbo/bin" >> $GITHUB_PATH
+      - name: Verify the oracle really is 3.2.0
+        run: |
+          /opt/libjpeg-turbo/bin/djpeg -version 2>&1 | tee /tmp/oracle-version.txt
+          grep -q "version 3.2.0" /tmp/oracle-version.txt
+          /opt/libjpeg-turbo/bin/cjpeg -version 2>&1 | grep -q "version 3.2.0"
+          /opt/libjpeg-turbo/bin/jpegtran -version 2>&1 | grep -q "version 3.2.0"
+          test -f /opt/libjpeg-turbo/include/jpeglib.h
+          test -f /opt/libjpeg-turbo/include/turbojpeg.h
+          ls /opt/libjpeg-turbo/lib64/libjpeg.* /opt/libjpeg-turbo/lib/libjpeg.* \
+             2>/dev/null | grep -q .
+          ls /opt/libjpeg-turbo/lib64/libturbojpeg.* /opt/libjpeg-turbo/lib/libturbojpeg.* \
+             2>/dev/null | grep -q .
+      - name: Run full test suite with AVX2 disabled at compile time
         run: cargo test --tests
         timeout-minutes: 45
 

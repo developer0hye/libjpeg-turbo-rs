@@ -20,6 +20,14 @@
 # how `brew install jpeg-turbo` survived in ci.yml's C Interop leg for a day
 # after the aarch64 Full C Parity legs lost exactly that shape.
 #
+# A fourth property is read the same way: *pairing*. An oracle-installing job
+# has to be a baseline with a `-current-oracle` twin, that twin, or a row in
+# the gate's UNPAIRED_ORACLE_JOBS inventory with the reason it still answers at
+# one release — and a twin must run the same command on the same runner under
+# the same job-level environment, RUSTFLAGS included, since a pair that
+# disagrees on codegen flags compares two backends and blames the difference on
+# an upstream release.
+#
 # Roles:
 #   tool-baseline  the release the existing expectations were written against.
 #                  Kept as its own leg on purpose: bumping it in place would
@@ -43,6 +51,6 @@
 #
 # role	version	provisioned_as	released	purpose
 tool-baseline	3.1.4.1	libjpeg-turbo-official deb at /opt/libjpeg-turbo, or a source build (/usr/local on x86_64, /tmp/ljt3141/prefix on aarch64)	2026-03-27	Behaviour-regression leg: djpeg/cjpeg/jpegtran + libturbojpeg for the differential suites, at the release the current expectations were written against. The aarch64 legs — Full C Parity and ci.yml's C Interop — build it from source: homebrew has no per-version jpeg-turbo formula, so brew install measured whatever the packager shipped that week.
-tool-current	3.2.0	libjpeg-turbo-official deb at /opt/libjpeg-turbo, or a source build at /tmp/ljt320/prefix on aarch64 (upstream ships no macOS package)	2026-06-30	Current-parity leg: the same differential suites against current upstream stable, selected explicitly through LIBJPEG_TURBO_PREFIX rather than PATH order. Covers the root matrix, the C-ABI crate's TurboJPEG and stock-tool suites, and the weekly exhaustive full-c-parity matrices on x86_64 and aarch64.
+tool-current	3.2.0	libjpeg-turbo-official deb at /opt/libjpeg-turbo, or a source build at /tmp/ljt320/prefix on aarch64 (upstream ships no macOS package)	2026-06-30	Current-parity leg: the same differential suites against current upstream stable, selected explicitly through LIBJPEG_TURBO_PREFIX rather than PATH order. Covers the root matrix, the C-ABI crate's TurboJPEG and stock-tool suites, the weekly exhaustive full-c-parity matrices on x86_64 and aarch64, and the three cross-arch SIMD backends (Linux NEON, AVX2-enabled codegen, AVX2/SSE4.2-disabled codegen).
 trace-current	3.2.0	source clone built with WITH_JPEG8=1 at /tmp/ljt320v8/prefix	2026-06-30	Current-parity leg for the classic-ABI trace suites, which compile a C oracle and compare traces line by line at the v8 ABI. Built from source because the deb above is JPEG_LIB_VERSION 62.
 submodule	3.1.90	references/libjpeg-turbo (git submodule, tag 3.1.90 = 3.2 beta1)	2026-03-27	Classic-ABI trace oracle built with WITH_JPEG8=1, and the source tree the C citations quote. Already on the 3.2 line, which is why the tool pins and the citations disagreed unnoticed.
