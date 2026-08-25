@@ -13,18 +13,15 @@ use std::path::{Path, PathBuf};
 // C tool helpers
 // ---------------------------------------------------------------------------
 
-fn c_tool_path(name: &str) -> Option<PathBuf> {
-    let homebrew = PathBuf::from(format!("/opt/homebrew/bin/{}", name));
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    std::process::Command::new("which")
-        .arg(name)
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
+/// The oracle-selection rule, shared with the differential test suites.
+///
+/// Included by path rather than copied: a private lookup here cannot be pointed
+/// at an oracle prefix, so a corpus leg labelled with one release would compare
+/// against whatever `djpeg` the machine happened to carry (P4-130).
+#[path = "../tests/helpers/oracle_prefix.rs"]
+mod oracle_prefix;
+
+use oracle_prefix::c_tool_path;
 
 fn run_cjpeg(cjpeg: &Path, input_ppm: &Path, output_jpg: &Path, args: &[&str]) -> bool {
     let output = std::process::Command::new(cjpeg)
@@ -797,7 +794,9 @@ fn main() {
         Some(p) => p,
         None => {
             eprintln!(
-                "warning: cjpeg not found in /opt/homebrew/bin or PATH — cannot generate JPEG corpus"
+                "error: cjpeg not found — cannot generate JPEG corpus. With \
+                 LIBJPEG_TURBO_PREFIX set the tool is taken from <prefix>/bin \
+                 and from nowhere else; otherwise /opt/homebrew/bin then PATH."
             );
             eprintln!("install libjpeg-turbo (e.g. `brew install libjpeg-turbo`) and re-run.");
             std::process::exit(1);
