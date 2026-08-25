@@ -1306,7 +1306,7 @@ The one non-obvious piece was the **scan script**. `jpeg_simple_progression` tak
 
 **Acceptance criteria.** Both `C Interop` legs report a non-zero test count; the job is validated by mechanism (a deliberately broken encoder byte-comparison must fail it) rather than by "it passed"; any aarch64 divergence the newly-live tests surface is filed before the filter fix merges.
 
-**Status (2026-07-28): closed.** The fix sketch above was itself falsified before merging: the corrected multi-filter form (`cargo test --tests -- cross_encode cross_check`) selects only **8 tests** on this workspace, because libtest filters match test *names*, and the tests inside `cross_check_*`/`cross_encode_*` files have names like `c_xval_decode_bgr_444` that contain neither substring. The job now runs the full unfiltered `cargo test --tests` on **macos-latest only** (timeout 15→30 min) — aarch64 + Homebrew jpeg-turbo 3.x, the one C-tool environment no other job covers. The former ubuntu leg is **removed**, not fixed: with apt's 2.1.x tools the unfiltered suite cannot run (codex review caught that e.g. `lossless_point_transform_matches_c_djpeg_exactly` feeds SOF3 to `djpeg` with no capability probe), and installing the official 3.1.4.1 deb would make the leg an exact environment+command duplicate of `Integration Tests` — the redundancy this entry's Impact paragraph already established. The "both legs non-zero" acceptance criterion is therefore satisfied in its intent (every remaining leg runs the full suite; no leg silently runs zero) rather than its letter. A comment in `ci.yml` pins the substring-vs-regex trap so a filter cannot quietly come back. **Mechanism-validated**, not validated-by-passing: with a deliberate encoder break (`FIX_0_299` 19595→20100 in `src/encode/color.rs`), `cargo test --test cross_check_encoder_binary` fails 3 of 4 byte-exact comparisons against `cjpeg`; reverted, green again. aarch64 + Homebrew first run: the full `--tests` suite was executed on a macOS aarch64 host with Homebrew jpeg-turbo before merging — no divergence surfaced, so nothing needed filing; the PR's own `C Interop (macos-latest)` leg is the first CI proof and must show a non-zero test count. **Amended 2026-08-18 by [P4-130](#p4-130-c-parity-oracle-is-pinned-to-3141-upstream-stable-is-320--partial-every-oracle-provisioning-job-is-now-pinned-checked-and-measured-the-legs-still-on-one-release-the-submodule-bump-and-the-four-filed-gaps-remain):** the environment is still aarch64 macOS, but the oracle is no longer `brew install jpeg-turbo` — the leg builds 3.1.4.1 from source at `/tmp/ljt3141/prefix`, asserts it, and selects it with `LIBJPEG_TURBO_PREFIX`.
+**Status (2026-07-28): closed.** The fix sketch above was itself falsified before merging: the corrected multi-filter form (`cargo test --tests -- cross_encode cross_check`) selects only **8 tests** on this workspace, because libtest filters match test *names*, and the tests inside `cross_check_*`/`cross_encode_*` files have names like `c_xval_decode_bgr_444` that contain neither substring. The job now runs the full unfiltered `cargo test --tests` on **macos-latest only** (timeout 15→30 min) — aarch64 + Homebrew jpeg-turbo 3.x, the one C-tool environment no other job covers. The former ubuntu leg is **removed**, not fixed: with apt's 2.1.x tools the unfiltered suite cannot run (codex review caught that e.g. `lossless_point_transform_matches_c_djpeg_exactly` feeds SOF3 to `djpeg` with no capability probe), and installing the official 3.1.4.1 deb would make the leg an exact environment+command duplicate of `Integration Tests` — the redundancy this entry's Impact paragraph already established. The "both legs non-zero" acceptance criterion is therefore satisfied in its intent (every remaining leg runs the full suite; no leg silently runs zero) rather than its letter. A comment in `ci.yml` pins the substring-vs-regex trap so a filter cannot quietly come back. **Mechanism-validated**, not validated-by-passing: with a deliberate encoder break (`FIX_0_299` 19595→20100 in `src/encode/color.rs`), `cargo test --test cross_check_encoder_binary` fails 3 of 4 byte-exact comparisons against `cjpeg`; reverted, green again. aarch64 + Homebrew first run: the full `--tests` suite was executed on a macOS aarch64 host with Homebrew jpeg-turbo before merging — no divergence surfaced, so nothing needed filing; the PR's own `C Interop (macos-latest)` leg is the first CI proof and must show a non-zero test count. **Amended 2026-08-18 by [P4-130](#p4-130-c-parity-oracle-is-pinned-to-3141-upstream-stable-is-320--partial-every-oracle-provisioning-job-is-now-pinned-checked-and-measured-three-legs-still-on-one-release-the-submodule-bump-and-the-four-filed-gaps-remain):** the environment is still aarch64 macOS, but the oracle is no longer `brew install jpeg-turbo` — the leg builds 3.1.4.1 from source at `/tmp/ljt3141/prefix`, asserts it, and selects it with `LIBJPEG_TURBO_PREFIX`.
 
 ## P4-62. `cargo test --workspace` Does Not Build on windows-msvc — **CLOSED 2026-07-28**
 
@@ -2425,7 +2425,7 @@ subsampling/scaling/grayscale, invalid null/zero/out-of-bounds/after-read calls,
 returned x/width/output_width, component geometry, and subsequent row bytes.
 The 12-bit initialization/order portion remains in P4-98.
 
-**Extended 2026-08-17 by the [P4-130](#p4-130-c-parity-oracle-is-pinned-to-3141-upstream-stable-is-320--partial-every-oracle-provisioning-job-is-now-pinned-checked-and-measured-the-legs-still-on-one-release-the-submodule-bump-and-the-four-filed-gaps-remain)
+**Extended 2026-08-17 by the [P4-130](#p4-130-c-parity-oracle-is-pinned-to-3141-upstream-stable-is-320--partial-every-oracle-provisioning-job-is-now-pinned-checked-and-measured-three-legs-still-on-one-release-the-submodule-bump-and-the-four-filed-gaps-remain)
 3.2 delta triage.** 3.2.0 note 3 hardened this entry point, and the delta is
 exactly one condition: 3.2.0 `src/jdapistd.c:203` reads
 `if (cinfo->master->lossless || cinfo->raw_data_out)` where 3.1.90 reads
@@ -5118,7 +5118,7 @@ prevent, and it undermines any claim that the shipped surface is audited.
 
 **Status (2026-08-09): closed.** Landed in #486; `crates/libjpeg-turbo-rs-capi/build.rs` now routes the 16 `jpeg_capi_test_*` accessors to a `LIBJPEGTURBORS_PRIVATE_1.0` node via an exact-name list, and `tests/soname.rs` asserts no `jpeg_capi_test_*` symbol carries `LIBJPEG_8.0`.
 
-## P4-130. C-Parity Oracle Is Pinned to 3.1.4.1; Upstream Stable Is 3.2.0 — **PARTIAL: every oracle-provisioning job is now pinned, checked and measured; the legs still on one release, the submodule bump and the four filed gaps remain**
+## P4-130. C-Parity Oracle Is Pinned to 3.1.4.1; Upstream Stable Is 3.2.0 — **PARTIAL: every oracle-provisioning job is now pinned, checked and measured; three legs still on one release, the submodule bump and the four filed gaps remain**
 
 **GitHub:** [#461](https://github.com/developer0hye/libjpeg-turbo-rs/issues/461) — under the [#470](https://github.com/developer0hye/libjpeg-turbo-rs/issues/470) umbrella.
 
@@ -5203,9 +5203,9 @@ measured was whatever homebrew shipped that week.
 
 So the rule moved off the list of workflow files and onto the **job**.
 `tests/oracle_version_pins.rs` enumerates every job in `.github/workflows`
-(45 today, in nine files; the enumeration is checked against a real YAML
+(46 today, in nine files; the enumeration is checked against a real YAML
 parser, name for name, whenever a job is added — 42 when this rule landed, 45
-once the cross-arch pairs below joined) and holds each one that provisions a C
+once the cross-arch pairs below joined, 46 with the corpus twin) and holds each one that provisions a C
 libjpeg-turbo to three things:
 
 - **pinned** — the install names the release it installs. Upstream's
@@ -5619,7 +5619,7 @@ records once: a workflow that grows a new oracle leg is covered by nothing
 until someone remembers to add it to a constant, and "someone remembers" is
 what let thirteen pins sit at a superseded release for two months.
 `every_oracle_installing_job_is_paired_or_on_the_recorded_remainder` reads all
-45 jobs in the nine workflows and requires each one that installs a C
+46 jobs in the nine workflows and requires each one that installs a C
 libjpeg-turbo to be a baseline with a `-current-oracle` twin, that twin, or a
 row in `UNPAIRED_ORACLE_JOBS`. Written first and red on the unmodified tree,
 naming exactly the three cross-arch jobs.
@@ -5775,10 +5775,92 @@ which that item was holding open: comparing two legs' commands is impossible
 while a folded `>` block reads as one command per physical line, because every
 argument past the first drops out of the comparison.
 
+*Criterion 1, the corpus leg (2026-09-07).* `test-corpus` is the widest
+**real-world** differential surface here — 9,216 files generated by C `cjpeg`
+across a 384-variant option matrix over 24 sources, plus 336 strict-parity fuzz
+seeds and 188 committed fixtures, 9,740 in all, every one of them decoded,
+re-encoded and transformed against `djpeg`/`cjpeg`/`jpegtran` — and it answered
+at 3.1.4.1 alone.
+`test-corpus-current-oracle` ("Corpus Test (C parity, oracle 3.2.0)") runs the
+same two commands on the same runner against the official 3.2.0 deb. It is
+*cheaper* than its baseline rather than dearer, which is why this pair landed
+before the other two on the remainder: the baseline builds its oracle from
+source at `/usr/local`, so pairing it costs a package install rather than a
+second build. (apt's own libjpeg-turbo serves neither leg: it is 2.1.x, which
+lacks the lossless and 12-bit options this corpus is generated with.)
+
+**Pairing it was not a workflow edit, because the comparison could not see what
+this leg measures.** `test-corpus` runs no `cargo test`: it measures with
+`cargo run --release --example generate_corpus` and
+`cargo run --release --example corpus_test`. The pairing gate read `cargo test`
+invocations only, so the pair would have fallen into the whole-command branch
+with an **empty** baseline set — which that branch refuses ("its twin is being
+compared against nothing") rather than passes. That is the "an echo is not a
+run" finding one subcommand over: what the scanner cannot see, the gate never
+asks about. `measurement_commands_in` now keeps every invocation whose
+subcommand can reach an oracle, sharing the deny list with the `measured` rule
+so the two cannot disagree about what a step does, and
+`runs_the_root_integration_matrix` requires the `test` subcommand explicitly —
+a bare `cargo run` carries no argument that would otherwise give it away, and
+crediting one would vouch for every root oracle suite over a pair that runs no
+test at all.
+
+**The harness had the #569 lookup bug, in both examples.** `corpus_test.rs` and
+`generate_corpus.rs` each carried a private `c_tool_path` that read
+`/opt/homebrew/bin` and then PATH and never looked at `LIBJPEG_TURBO_PREFIX` —
+the residual private lookup the P4-116 sweep left behind in
+`capi_classic_lifecycle_pathological`, where the review of #569 caught a step
+named "oracle 3.2.0" comparing against homebrew's 3.1.4.1. A twin selecting its
+oracle by prefix would have been ignored by the harness it labels. Both now
+include `tests/helpers/oracle_prefix.rs`, the single implementation the
+differential suites resolve through, whose two branches `helpers_smoke.rs`
+already asserts; `helpers::c_tool_path` is a re-export of it rather than a
+second copy. The twin therefore puts **nothing on PATH** and names its oracle
+with the prefix alone: a harness that stopped reading the variable would find no
+`djpeg` at all, every row would be a skip, and `corpus_test` exits non-zero on a
+single skip. The check is a mechanism, not a comment.
+
+Measured 2026-08-25 on macOS aarch64 against a locally built 3.2.0 prefix,
+running the two commands the leg runs: the corpus regenerates at **9,740 files** (9,216
+generated across the 384-variant matrix with **0 cjpeg failures**, 336
+strict-parity fuzz seeds, 188 fixtures) and the comparison is
+**84,972 rows, 0 fail, 0 crash, 0 skip** in 31 minutes — decode 9,737 pass /
+2 expected-reject / 1 known-mismatch, encode 9,403 / 1 / 0, transform 65,758 /
+56 / 14. The same two commands with the variable unset
+(homebrew 3.1.4.1, the release the baseline leg measures) regenerate the
+corpus — again 9,216 of 9,216 — and produce **tallies identical to the
+3.2.0 leg's, line for line, exclusions included**. So the corpus is already
+at parity with 3.2.0 and this leg is what keeps that true; the pair adds
+coverage rather than replacing it.
+
+*The generator could shrink the corpus silently, and a review found it.*
+`generate_corpus` printed its `failed` counter and carried on; the only check on
+the result was a bucket **floor** of 9,000 against a matrix of 384 x 24 = 9,216,
+so up to 216 variants could fail with the corpus still accepted. Harmless while
+one release generated it — and a hole the day a second one does, because a
+variant *this release's* `cjpeg` refuses is precisely the 3.2 delta the leg
+exists to surface, and dropping it shrinks what the comparison runs on while the
+leg stays green. `assert_every_variant_generated` makes any failure fatal.
+Validated end to end rather than by its unit test alone, which matters here
+because that test is in an example's `#[cfg(test)]` module and **no workflow
+runs those** (filed as
+[P4-183](#p4-183-example-target-unit-tests-never-run-in-ci-because-no-workflow-selects-that-target-kind--open)):
+a stand-in `cjpeg` under `LIBJPEG_TURBO_PREFIX` refusing one variant label lost
+46 of 8,832 in a scratch run — well inside the slack the floor leaves — and the
+run exits 1 naming the count.
+
+The gates were validated by mutation rather than by passing, in eight
+directions: echoing the twin's corpus run, moving it to another runner, pointing
+it at 3.1.4.1, deleting its version assertion, deleting its oracle prefix,
+deleting its corpus-generation step, leaving the now-paired row in
+`UNPAIRED_ORACLE_JOBS`, and giving `corpus_test.rs` a private lookup back. Each
+turns exactly the intended gate red, and the unmutated tree is 54 green (52 at
+the time; P4-175's closure added two more the day this landed).
+
 **What remains.**
 
 1. The four filed gaps (P4-171..P4-174) are triaged, not fixed.
-2. **Four jobs still measure one release**, and the inventory now lives in
+2. **Three jobs still measure one release**, and the inventory now lives in
    `UNPAIRED_ORACLE_JOBS` in `tests/oracle_version_pins.rs`, where a gate reads
    it, with the reason on each row:
    - `fuzz-smoke.yml`'s `fuzz` — the three differential fuzz targets
@@ -5786,7 +5868,6 @@ argument past the first drops out of the comparison.
      matrix entries taking the 3.1.4.1 deb, and the reproduction instructions
      the failure path prints name that release too, so pairing has to reach
      those as well;
-   - `ci.yml`'s `test-corpus` — a 3.1.4.1 source build at `/usr/local`;
    - `ci.yml`'s `test-cross-encode` — a 3.1.4.1 source build at
      `/tmp/ljt3141/prefix`, on the only macOS leg that runs the whole root
      suite; upstream ships no macOS package, so its twin is a *second* source
@@ -5809,6 +5890,63 @@ argument past the first drops out of the comparison.
 4. Retiring the 3.1.4.1 leg is deliberately **not** scheduled: it is the
    behaviour-regression half of the pair, and it retires only when its
    expectations are known to hold on the newer leg.
+
+## P4-180. The Differential Fuzz Targets Resolve Their C Oracle by a Fixed Path List, and Skip the Comparison When It Misses — **OPEN**
+
+**GitHub:** [#579](https://github.com/developer0hye/libjpeg-turbo-rs/issues/579) — prerequisite for
+[P4-130](#p4-130-c-parity-oracle-is-pinned-to-3141-upstream-stable-is-320--partial-every-oracle-provisioning-job-is-now-pinned-checked-and-measured-three-legs-still-on-one-release-the-submodule-bump-and-the-four-filed-gaps-remain)'s
+remaining pairing of `fuzz-smoke.yml`.
+
+**Motivation.** Filed 2026-08-25 while pairing `ci.yml`'s `test-corpus` with a
+3.2.0 leg. All three differential fuzz targets resolve their oracle from a
+hard-coded list — `/opt/homebrew/bin`, `/usr/local/bin`,
+`/opt/libjpeg-turbo/bin`, `/usr/bin` — and never read
+`LIBJPEG_TURBO_PREFIX`: `fuzz/fuzz_targets/fuzz_decode_diff_c.rs:63`,
+`fuzz_encode_diff_c.rs:93,98`, `fuzz_transform_diff_c.rs:67,72`. It is the same
+list in the same order as the private `find_c_tool` the review of #569 found in
+`capi_classic_lifecycle_pathological` — a survivor of the P4-116 sweep — and the
+same one both corpus examples carried until this pairing moved them onto
+`tests/helpers/oracle_prefix.rs`.
+
+Two consequences. **The oracle cannot be selected**, so the leg cannot be
+paired: the 3.2.0 deb installs at `/opt/libjpeg-turbo`, which this list reads
+*after* `/usr/local/bin`, and a second matrix dimension would be a leg labelled
+3.2.0 comparing against whatever install sorts first. **And a missing oracle
+skips the comparison silently** — every target does
+`let Some(djpeg) = djpeg_path() else { return; };`, so with no C tool
+discoverable a differential target degrades to fuzzing our decoder alone and
+reports success. `corpus_test` exits non-zero on a single skip row and the capi
+oracle suites panic rather than fall back; this one returns.
+
+`examples/diag_4pixel_chroma_diff.rs` and
+`examples/diag_4pixel_chroma_transform_diff.rs` carry the same shape. They are
+developer diagnostics rather than gates, recorded here so the sweep is complete
+rather than as part of the failure.
+
+**Acceptance criteria.**
+
+1. All three differential fuzz targets resolve `djpeg`/`cjpeg`/`jpegtran` by the
+   rule in `tests/helpers/oracle_prefix.rs`: an explicit `LIBJPEG_TURBO_PREFIX`
+   is **exclusive**, and lookup order applies only when it is unset. The fuzz
+   crate is a separate cargo package, so the *mechanism* may have to differ from
+   the corpus examples' `#[path]` include; the rule may not.
+2. A missing oracle is an error rather than a silent `return`, at least under
+   `CI`, matching `helpers::require_c_tool!`.
+3. `the_corpus_harness_resolves_its_oracle_through_the_shared_rule` in
+   `tests/oracle_version_pins.rs` enumerates every oracle-consuming harness
+   rather than naming two files by hand, so a fourth copy of the lookup fails
+   the gate that exists to catch the third.
+4. `fuzz-smoke.yml` names the prefix for the three differential targets, and the
+   reproduction instructions its failure path prints name the release the target
+   ran against.
+
+**Why deferred.** It is not what the corpus pairing changes, and it is a
+prerequisite for a *different* leg's pairing rather than a defect in this one:
+mixing a fuzz-harness change into a corpus leg would have put two unrelated
+mechanisms behind one review. Nothing regresses today — `fuzz-smoke.yml`
+installs the 3.1.4.1 deb at `/opt/libjpeg-turbo` and the runner carries no other
+libjpeg-turbo, so the list resolves to the intended install by absence rather
+than by choice.
 
 ## P4-131. No Native Binary Distribution — Releases Ship crates.io and npm Only — **PARTIAL: Unix bundles ship and are gated; Windows, signing/SBOM and the deb/rpm decision remain**
 
@@ -8895,7 +9033,7 @@ change with its own oracle traces.
 
 ## P4-171. 8-Bit Lossy JPEG Cannot Be Decompressed to 12-Bit Output (3.2 beta1 note 8) — **OPEN**
 
-**GitHub:** [#561](https://github.com/developer0hye/libjpeg-turbo-rs/issues/561) — filed 2026-08-17 by the [P4-130](#p4-130-c-parity-oracle-is-pinned-to-3141-upstream-stable-is-320--partial-every-oracle-provisioning-job-is-now-pinned-checked-and-measured-the-legs-still-on-one-release-the-submodule-bump-and-the-four-filed-gaps-remain) 3.2 delta triage.
+**GitHub:** [#561](https://github.com/developer0hye/libjpeg-turbo-rs/issues/561) — filed 2026-08-17 by the [P4-130](#p4-130-c-parity-oracle-is-pinned-to-3141-upstream-stable-is-320--partial-every-oracle-provisioning-job-is-now-pinned-checked-and-measured-three-legs-still-on-one-release-the-submodule-bump-and-the-four-filed-gaps-remain) 3.2 delta triage.
 
 **Motivation.** 3.2 beta1 note 8 added a capability, not a fix: an 8-bit-per-sample
 *lossy* JPEG can now be decompressed to a 12-bit-per-sample output image, to
@@ -9183,7 +9321,7 @@ change.
 ## P4-177. The Workflow Scanner Does Not Model Heredocs, Folded Scalars or Quoted Substitution Syntax — **PARTIAL: folded scalars are modelled; heredocs and quote/escape state remain**
 
 **GitHub:** [#572](https://github.com/developer0hye/libjpeg-turbo-rs/issues/572) — filed 2026-08-18 from the sixth codex round on the
-[P4-130](#p4-130-c-parity-oracle-is-pinned-to-3141-upstream-stable-is-320--partial-every-oracle-provisioning-job-is-now-pinned-checked-and-measured-the-legs-still-on-one-release-the-submodule-bump-and-the-four-filed-gaps-remain)
+[P4-130](#p4-130-c-parity-oracle-is-pinned-to-3141-upstream-stable-is-320--partial-every-oracle-provisioning-job-is-now-pinned-checked-and-measured-three-legs-still-on-one-release-the-submodule-bump-and-the-four-filed-gaps-remain)
 per-job pin-and-name gates.
 
 **Motivation.** `tests/oracle_version_pins.rs` decides which workflow steps
@@ -9378,3 +9516,45 @@ picks a bound.
 5. **capi header override.** `materialize_foreign_coef_arrays` folds the destination cinfo's `write_JFIF_header` / `write_Adobe_marker` / `jpeg_color_space` into the classifier's two inputs, which round-trips only the four states `jpeg_set_colorspace` produces. An application that clears both flags (`JCS_UNKNOWN`, or `write_JFIF_header = FALSE` by hand) gets a JFIF or Adobe 0 header where `write_file_header` writes none, and `write_Adobe_marker` on a YCbCr destination gets JFIF alone where C writes JFIF + Adobe 1. Give the core writers an explicit header override (an internal `write_coefficients_with_header(coeffs, CoefficientHeaderMarkers)`) so the shim passes the decision through instead of reconstructing it, and pin both hand-set states against C `jpeg_write_coefficients`. Pre-existing — the old shim had its own divergences here — surfaced by the P4-181 review.
 
 **Why deferred.** P4-181 is a correctness fix for a warning-free drop-in; this is a byte-level fidelity gap on streams that already decode identically, and it touches the scan-script selection for 4-component progressive output, which deserves its own oracle run.
+
+## P4-183. Example-Target Unit Tests Never Run in CI Because No Workflow Selects That Target Kind — **OPEN**
+
+**GitHub:** [#586](https://github.com/developer0hye/libjpeg-turbo-rs/issues/586) — found 2026-08-25 while pairing `ci.yml`'s `test-corpus` with a 3.2.0 oracle for
+[P4-130](#p4-130-c-parity-oracle-is-pinned-to-3141-upstream-stable-is-320--partial-every-oracle-provisioning-job-is-now-pinned-checked-and-measured-three-legs-still-on-one-release-the-submodule-bump-and-the-four-filed-gaps-remain).
+
+**Motivation.** `examples/corpus_test.rs` and `examples/generate_corpus.rs` each
+carry a `#[cfg(test)] mod tests` — the corpus harness's own discovery, copy,
+bucket-minimum and coverage-gate tests, plus the `assert_every_variant_generated`
+test the corpus pairing added. Cargo does not run an example target's tests
+unless it is asked for that target kind (`cargo test --examples` or
+`--all-targets`), and no workflow passes either to `cargo test`. `ci.yml` runs
+`cargo check --examples` and `cargo clippy --workspace --all-targets`, which
+compile and lint those modules but never execute them. So every unit test inside
+an example has compiled on every pull request and executed on none.
+
+It is the
+[P4-175](#p4-175-capi_classic_decode_budget-is-never-named-by-a-workflow-so-it-has-never-run-in-ci--closed-2026-09-07)
+defect class with a different mechanism: not "no workflow names this binary" but
+"no workflow selects this *target kind*". P4-175 closed by letting Cargo
+enumerate the C-ABI crate's integration targets; that enumeration is over
+`--tests`, so it cannot see this — which is why an enumeration of what runs has
+to be over target kinds as well as over `tests/`.
+
+**Acceptance criteria.**
+
+1. A CI step executes the example targets' unit tests on at least one leg
+   (`cargo test --examples`, or `--all-targets` on a job that already builds
+   them), with each test either passing there or its failure filed.
+2. A mechanism rather than a comment: a gate that enumerates the example targets
+   carrying `#[cfg(test)]` and fails when a workflow selection leaves one
+   unexecuted — the same shape as P4-175's criterion 3, over target kinds rather
+   than over `tests/`.
+3. `assert_every_variant_generated`'s unit test is among the tests the step
+   runs.
+
+**Why deferred.** Not what the corpus pairing changes (P4-130 criterion 1);
+mixing a target-kind coverage gate into an oracle-pairing pull request would put
+two unrelated mechanisms behind one review. Nothing regresses today — the corpus
+harness is validated end to end by the paired `test-corpus` legs, whose `cjpeg`
+failure path was exercised with a stand-in tool — but the unit tests that pin
+the harness's own helpers have never run under CI.
