@@ -9517,101 +9517,6 @@ fn inject_markers_after_soi(encoded: &[u8], priv_state: &CompressPrivate) -> Vec
     out
 }
 
-/// Replace any leading JFIF APP0 segment in `encoded` with an Adobe
-/// APP14 marker whose `color_transform` byte equals `transform`. JPEG
-/// forbids JFIF on 4-component images, and a stray JFIF (or a missing
-/// Adobe APP14 when the source had one) makes downstream decoders
-/// mis-detect the colorspace, so the caller decides the transform byte
-/// from `JpegCoefficients::adobe_transform` first and the destination
-/// `jpeg_color_space` only as a fallback.
-fn swap_jfif_for_adobe_app14(encoded: &[u8], transform: u8) -> Vec<u8> {
-    if encoded.len() < 4 || encoded[0] != 0xFF || encoded[1] != 0xD8 {
-        return encoded.to_vec();
-    }
-    let mut out: Vec<u8> = Vec::with_capacity(encoded.len() + 16);
-    out.extend_from_slice(&encoded[..2]);
-    write_adobe_app14_segment(&mut out, transform);
-    let mut p: usize = 2;
-    while p + 4 <= encoded.len() {
-        if encoded[p] != 0xFF {
-            break;
-        }
-        let marker: u8 = encoded[p + 1];
-        let seg_len: usize = ((encoded[p + 2] as usize) << 8) | encoded[p + 3] as usize;
-        if seg_len < 2 || p + 2 + seg_len > encoded.len() {
-            break;
-        }
-        let payload: &[u8] = &encoded[p + 4..p + 2 + seg_len];
-        // Drop only the JFIF APP0; preserve everything else (including
-        // any Adobe APP14 the writer might have emitted, though our
-        // writers do not currently emit one).
-        if marker == 0xE0 && payload.starts_with(b"JFIF\0") {
-            p += 2 + seg_len;
-            continue;
-        }
-        break;
-    }
-    out.extend_from_slice(&encoded[p..]);
-    out
-}
-
-/// Insert an Adobe APP14 segment immediately after SOI plus any
-/// leading JFIF APP0, preserving both. Used when the source had Adobe
-/// APP14 metadata that must survive the transcode but the writer's
-/// auto-emitted JFIF is still legal (3-component output).
-fn inject_adobe_app14_after_jfif(encoded: &[u8], transform: u8) -> Vec<u8> {
-    if encoded.len() < 2 || encoded[0] != 0xFF || encoded[1] != 0xD8 {
-        return encoded.to_vec();
-    }
-    let split: usize = scan_past_jfif_app14(encoded);
-    // If the encoder already emitted an Adobe APP14 (current writers
-    // do not, but be defensive) leave the stream untouched rather than
-    // double-emit.
-    if has_adobe_marker(&encoded[2..split]) {
-        return encoded.to_vec();
-    }
-    let mut out: Vec<u8> = Vec::with_capacity(encoded.len() + 16);
-    out.extend_from_slice(&encoded[..split]);
-    write_adobe_app14_segment(&mut out, transform);
-    out.extend_from_slice(&encoded[split..]);
-    out
-}
-
-/// Return true if `region` contains an APP14 segment whose identifier
-/// is "Adobe". Used to avoid double-emitting an Adobe APP14 when the
-/// writer already produced one.
-fn has_adobe_marker(region: &[u8]) -> bool {
-    let mut p: usize = 0;
-    while p + 9 <= region.len() {
-        if region[p] != 0xFF {
-            break;
-        }
-        let marker: u8 = region[p + 1];
-        let seg_len: usize = ((region[p + 2] as usize) << 8) | region[p + 3] as usize;
-        if seg_len < 2 || p + 2 + seg_len > region.len() {
-            break;
-        }
-        if marker == 0xEE && &region[p + 4..p + 9] == b"Adobe" {
-            return true;
-        }
-        p += 2 + seg_len;
-    }
-    false
-}
-
-/// Emit an Adobe APP14 segment with the given color-transform byte.
-/// Layout matches libjpeg `write_adobe_marker`: identifier `"Adobe"`,
-/// version=100, flags0=0, flags1=0, transform=color_transform.
-fn write_adobe_app14_segment(buf: &mut Vec<u8>, color_transform: u8) {
-    buf.push(0xFF);
-    buf.push(0xEE);
-    let seg_len: u16 = 14;
-    buf.extend_from_slice(&seg_len.to_be_bytes());
-    buf.extend_from_slice(b"Adobe");
-    buf.extend_from_slice(&[0u8, 100u8, 0u8, 0u8, 0u8, 0u8]);
-    buf.push(color_transform);
-}
-
 /// Return the byte offset just past SOI plus any leading JFIF (APP0 with
 /// "JFIF\0" identifier) and Adobe (APP14 with "Adobe" identifier) marker
 /// segments. Falls back to byte 2 (just past SOI) for non-JPEG inputs or
@@ -11301,13 +11206,11 @@ fn populate_dst_block_dims_for_transform(c: &mut JpegCompressPublic) {
 /// and assemble them into a `JpegCoefficients` ready for re-encoding.
 ///
 /// The returned coefficients carry only the fields the encoder reads
-/// (dimensions, components, quant tables, restart, density). Adobe
-/// transform classification is intentionally left as `None` — the
-/// destination cinfo's `write_Adobe_marker` flag and `jpeg_color_space`
-/// drive the existing 4-component CMYK/YCCK branch in
-/// `run_coefficient_writer_and_flush` to inject Adobe APP14 with the
-/// right transform byte, and any source APP14 transupp wanted to
-/// preserve has already been queued onto `pending_markers` via
+/// (dimensions, components, quant tables, restart, density) plus the
+/// JFIF/Adobe classification inputs derived from the destination cinfo's
+/// `write_JFIF_header` / `write_Adobe_marker` / `jpeg_color_space` — see
+/// the comment at the derivation site below. Any source APP14 transupp
+/// wanted to preserve has already been queued onto `pending_markers` via
 /// `jcopy_markers_execute → jpeg_write_marker`.
 fn materialize_foreign_coef_arrays(
     c: &JpegCompressPublic,
@@ -11527,42 +11430,62 @@ fn materialize_foreign_coef_arrays(
         c.image_height
     };
 
-    // Preserve the source's Adobe APP14 transform classification when
-    // we can recover it AND when the destination output keeps a
-    // colourspace where APP14 is meaningful (3 or 4 components).
+    // The core writers classify the output colorspace from
+    // `saw_jfif_marker` / `adobe_transform` / component IDs exactly as
+    // `jdapimin.c` classifies a source, then emit the JFIF or Adobe
+    // header that `jpeg_set_colorspace` + `write_file_header` would —
+    // the transform byte is derived from that classification (0 for
+    // RGB/CMYK, 2 for YCCK), never copied from the source (P4-181).
     //
-    // The encoder's 4-component CMYK/YCCK branch injects an Adobe
-    // APP14 with the right transform byte regardless, but for
-    // 3-component sources that DID carry an Adobe APP14 (e.g. an
-    // RGB-encoded JPEG that wants to be re-emitted with
-    // `transform=0` to keep the RGB classification) the field is
-    // load-bearing because `inject_adobe_app14_after_jfif` only
-    // fires when `adobe_transform.is_some()`.
-    //
-    // For 1-component grayscale outputs (e.g. transupp's
+    // Arrays registered by *this* shim's `jpeg_read_coefficients`
+    // carry the source's markers in the side-table CoefHandle, which
+    // reproduces `jpeg_copy_critical_parameters` forwarding
+    // `srcinfo->jpeg_color_space`. For 1-component outputs (transupp's
     // `-grayscale` no-workspace path leaves the dst cinfo at
     // `num_components = 1` while still handing us the registered
-    // 3-component source array), copying the source's transform
-    // would emit a stale APP14 marker that libjpeg's parser would
-    // suppress on read — flagged in codex round-8 review of b7f690d.
+    // 3-component source array) the source's transform is dropped —
+    // a stale APP14 on a grayscale stream is exactly what libjpeg's
+    // parser would suppress on read (codex round-8 review of b7f690d).
     //
-    // Pull from the side-table CoefHandle when the array was
-    // registered by *this* shim's `jpeg_read_coefficients`. Foreign
-    // workspace arrays from transupp's `-rotate` etc. preserve
-    // Adobe via `jcopy_markers_execute → jpeg_write_marker`
-    // instead, so falling through to `None` in that case is
-    // correct.
-    let adobe_transform: Option<u8> = if n == 3 || n == 4 {
-        match coef_lookup_handle(handle) {
-            Some(handle_ptr) => unsafe { (*handle_ptr).inner.adobe_transform },
-            None => None,
+    // Foreign workspace arrays from transupp's `-rotate` etc. have no
+    // side-table entry; there the destination cinfo is the only
+    // source of truth. `write_JFIF_header` / `write_Adobe_marker` /
+    // `jpeg_color_space` are folded into the classifier's two inputs,
+    // which round-trips the four states `jpeg_set_colorspace` produces
+    // (grayscale and YCbCr → JFIF; RGB and CMYK → Adobe 0; YCCK →
+    // Adobe 2, the byte `emit_adobe_app14` derives at
+    // `jcmarker.c:423-429`). It cannot express the states an application
+    // reaches by hand — both flags clear (`JCS_UNKNOWN`, or
+    // `write_JFIF_header = FALSE`), or `write_Adobe_marker` set on a
+    // YCbCr destination — which `write_file_header` would honour; that
+    // residue is tracked under P4-182. Any source APP14 transupp wanted
+    // to keep has already been queued onto `pending_markers` via
+    // `jcopy_markers_execute → jpeg_write_marker`.
+    let (saw_jfif_marker, adobe_transform): (bool, Option<u8>) = match coef_lookup_handle(handle) {
+        Some(handle_ptr) => {
+            // SAFETY: the CoefHandle behind `handle_ptr` lives until
+            // `jpeg_destroy_decompress` frees it, and this shared borrow
+            // does not outlive the match arm.
+            let inner: &libjpeg_turbo_rs::JpegCoefficients = unsafe { &(*handle_ptr).inner };
+            let adobe_transform: Option<u8> = if n == 3 || n == 4 {
+                inner.adobe_transform
+            } else {
+                None
+            };
+            (inner.saw_jfif_marker, adobe_transform)
         }
-    } else {
-        None
-    };
-    let saw_jfif_marker: bool = match coef_lookup_handle(handle) {
-        Some(handle_ptr) => unsafe { (*handle_ptr).inner.saw_jfif_marker },
-        None => c.write_JFIF_header != 0,
+        None => {
+            let adobe_transform: Option<u8> = if c.write_Adobe_marker != 0 {
+                Some(match c.jpeg_color_space {
+                    JCS_YCBCR => 1,
+                    JCS_YCCK => 2,
+                    _ => 0,
+                })
+            } else {
+                None
+            };
+            (c.write_JFIF_header != 0, adobe_transform)
+        }
     };
 
     Ok(libjpeg_turbo_rs::JpegCoefficients {
@@ -11723,33 +11646,16 @@ fn run_coefficient_writer_and_flush(
                 return None;
             }
         };
-        // Adobe APP14 handling — see the original comment block above
-        // the function: 4-component output strips JFIF and substitutes
-        // Adobe APP14; 3-component source with Adobe APP14 keeps both.
-        let with_app14: Vec<u8> = if adjusted.components.len() == 4 {
-            let transform: u8 = adjusted.adobe_transform.unwrap_or({
-                if c.jpeg_color_space == JCS_YCCK {
-                    2
-                } else {
-                    0
-                }
-            });
-            let r = swap_jfif_for_adobe_app14(&raw_encoded, transform);
-            drop(raw_encoded);
-            r
-        } else if let Some(transform) = adjusted.adobe_transform {
-            let r = inject_adobe_app14_after_jfif(&raw_encoded, transform);
-            drop(raw_encoded);
-            r
-        } else {
-            raw_encoded
-        };
+        // The core writer already emitted the JFIF/Adobe header that
+        // `write_file_header` would (see `materialize_foreign_coef_arrays`
+        // for how the classification inputs are chosen), so the stream
+        // only needs the caller's queued markers spliced in after it.
         let with_markers: Vec<u8> =
             if priv_state.pending_markers.is_empty() && priv_state.icc_profile.is_none() {
-                with_app14
+                raw_encoded
             } else {
-                let r = inject_markers_after_soi(&with_app14, priv_state);
-                drop(with_app14);
+                let r = inject_markers_after_soi(&raw_encoded, priv_state);
+                drop(raw_encoded);
                 r
             };
         let ok = push_bytes_through_dest_mgr(c, priv_state, &with_markers);

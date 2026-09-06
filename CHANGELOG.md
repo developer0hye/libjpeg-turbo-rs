@@ -26,6 +26,26 @@ and `git log` between tags.
 
 ### Changed
 
+- **Transcode header markers follow the colorspace classification, not the
+  source's Adobe byte** (P4-181, #581). `write_coefficients` and its
+  progressive/arithmetic/optimized siblings, and therefore
+  `transform_jpeg_with_options`, now classify the coefficient set the way
+  libjpeg's `default_decompress_parms` does — from the JFIF/Adobe state at
+  the *first* SOS — and emit the header `jpeg_set_colorspace` +
+  `write_file_header` would: JFIF for grayscale/YCbCr, Adobe APP14 with
+  transform 0 for RGB/CMYK and 2 for YCCK. A source Adobe transform byte is
+  no longer re-emitted verbatim (a bogus 255 made stock `djpeg` warn on our
+  output where `jpegtran`'s decoded cleanly), a JFIF+Adobe source no longer
+  gets a second, synthesized Adobe segment under `MarkerCopyMode::All`, that
+  mode now keeps non-JFIF APP0 segments (only a `JFIF\0` duplicate of the
+  written header is dropped, as `jcopy_markers_execute` does), and saved
+  markers — on the `Encoder` path too — are inserted after the writer's own
+  JFIF/Adobe header rather than before an Adobe segment. The `Decoder`
+  classifies from the same first-SOS state, so an Adobe marker that only
+  appears between scans no longer changes the decoded colorspace. The capi's
+  `jpeg_write_coefficients` no longer prepends its own Adobe APP14 on top of
+  the writer's.
+
 - **Breaking (C ABI, argument validation):** `tj3SaveImage8` now refuses a
   negative `pitch` instead of reading it as "tightly packed", and
   `tj3LoadImage8` now requires `align` to be a positive power of two instead
