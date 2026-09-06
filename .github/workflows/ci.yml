@@ -352,9 +352,8 @@ jobs:
         run: >
           cargo test -p libjpeg-turbo-rs-capi
           --test capi_jpeglib_encode -- --nocapture
-      # P4-139's span guards. Named explicitly for the reason the P4-81 note
-      # below records from experience: tests in this crate are selected by
-      # name, so a suite nothing names never runs and reports green forever.
+      # P4-139's span guards remain a focused, early failure signal before
+      # the complete P4-175 inventory run later in this job.
       - name: Classic C-ABI span overflow guards (P4-139)
         run: >
           cargo test -p libjpeg-turbo-rs-capi
@@ -529,6 +528,16 @@ jobs:
           # development install.
           LIBJPEG_TURBO_PREFIX: /opt/libjpeg-turbo
 
+      # P4-175: Cargo discovers every C-ABI test target, including new files.
+      # Keep named focused gates too; --no-fail-fast reports all failing suites.
+      - name: Complete C-ABI integration inventory (P4-175)
+        run: >
+          cargo test -p libjpeg-turbo-rs-capi --tests --features png --no-fail-fast
+        env:
+          LIBJPEG_TURBO_PREFIX: /tmp/ljt8/prefix
+          LIBJPEG_TURBO_REFERENCE_DIR: /tmp/ljt8/prefix
+        timeout-minutes: 30
+
       - name: Classic C-ABI create guards (P4-110)
         run: >
           cargo test -p libjpeg-turbo-rs-capi
@@ -682,7 +691,9 @@ jobs:
       # Which suites belong here is not a judgement call maintained in prose:
       # `tests/oracle_version_pins.rs` reads each baseline-leg suite's own
       # source for a C-oracle marker and fails if one of them is missing from
-      # this job. What stays behind is everything self-contained: the four capi
+      # this job's focused selections. The complete P4-175 run below also runs
+      # self-contained suites; the focused steps retained only on baseline are:
+      # the four capi
       # steps duplicated nowhere here — the span-overflow guards, the
       # error-code and message-rendering gates, the crate's unit tests, the ELF
       # symbol-version leg — plus the self-contained suites riding inside the
@@ -757,6 +768,16 @@ jobs:
           --test capi_resync_suspend -- --nocapture
         env:
           LIBJPEG_TURBO_PREFIX: /tmp/ljt320v8/prefix
+
+      # P4-175: Cargo discovers every C-ABI test target, including new files.
+      # Keep named focused gates too; --no-fail-fast reports all failing suites.
+      - name: Complete C-ABI integration inventory (P4-175)
+        run: >
+          cargo test -p libjpeg-turbo-rs-capi --tests --features png --no-fail-fast
+        env:
+          LIBJPEG_TURBO_PREFIX: /tmp/ljt320v8/prefix
+          LIBJPEG_TURBO_REFERENCE_DIR: /tmp/ljt320v8/prefix
+        timeout-minutes: 30
 
       - name: Classic destination ownership + stdio I/O parity (3.2.0)
         env:

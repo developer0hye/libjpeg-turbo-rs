@@ -9104,18 +9104,39 @@ warn about it in prose. Prose has now failed to prevent it twice.
 
 **Acceptance criteria.**
 
-1. `capi_classic_decode_budget` and `capi_yuv_gray` are named in a CI step,
+1. `capi_classic_decode_budget` and `capi_yuv_gray` execute in a CI step,
    each with the `LIBJPEG_TURBO_PREFIX` its oracle needs so it fails rather
    than soft-skips.
 2. Each passes there, or the failure it surfaces is filed.
-3. A mechanism, not another comment: an enumeration test comparing
-   `crates/libjpeg-turbo-rs-capi/tests/*.rs` against the suites named in
-   `.github/workflows/*.yml`, with an explicit opt-out list for suites that are
-   deliberately local-only. Criterion 3 is the valuable half.
+3. A mechanism, not another comment: require coverage for every target under
+   `crates/libjpeg-turbo-rs-capi/tests/`. Either compare the inventory against
+   workflow selections with explicit local-only opt-outs, or require an
+   unfiltered complete-package run that lets Cargo enumerate every target.
+   Criterion 3 is the valuable half; a hand-maintained list alone is insufficient.
 
 **Why deferred.** Unrelated to the oracle-currency work that found it, and
 criterion 3 is a gate of its own — it needs the opt-out list triaged across
 every capi suite, not just this one.
+
+**Implementation update (2026-09-07, CI verification pending).** Both integration
+oracle jobs now run `cargo test -p libjpeg-turbo-rs-capi --tests --features png
+--no-fail-fast` after provisioning their v8 SDK. This executes Cargo's complete
+C-ABI integration inventory rather than another hand-maintained suite list,
+including `capi_classic_decode_budget` and `capi_yuv_gray`. Both
+`LIBJPEG_TURBO_PREFIX` and `LIBJPEG_TURBO_REFERENCE_DIR` name that SDK.
+`oracle_version_pins::every_capi_test_target_runs_on_both_oracle_legs` inventories
+the current test files and requires the complete command on each leg. Its
+negative controls reject filters, compilation-only runs, wrong packages,
+missing/wrong oracle prefixes, conditional steps and failure suppression.
+Older external-consumer harnesses retain their prerequisite skips; this change
+claims target execution, not universal downstream coverage. No opt-out list is
+needed because no C-ABI integration target is excluded.
+
+Local verification on macOS aarch64: all 76 integration targets plus the C-ABI
+unit target completed (335 passed, 0 failed, 0 ignored) with PNG enabled and
+the pinned submodule built as a v8 SDK. The 52-test `oracle_version_pins` suite
+also passed, after its new inventory assertion failed on the old workflow.
+These are host-qualified results; Linux CI is still pending.
 
 ## P4-176. Every C Oracle Is Fetched by a Moveable Name, With Nothing Verifying What Arrived — **OPEN**
 
@@ -9337,3 +9358,30 @@ appears in four workflows, so fixing it there would have mixed a
 CI-robustness change into a coverage one — and the fix wants its own
 measurement of what a healthy run costs per step and runner class before it
 picks a bound.
+
+## P4-181. Differential HFlip Fuzzing Emits a JPEG That Stock djpeg Rejects — **OPEN**
+
+**GitHub:** [#581](https://github.com/developer0hye/libjpeg-turbo-rs/issues/581).
+
+**Evidence.** Scheduled Fuzz Smoke [run 34042331788](https://github.com/developer0hye/libjpeg-turbo-rs/actions/runs/34042331788)
+failed on `main` at `118a9f9` on 2026-09-06. The saved reproduction records
+Linux x86_64, libjpeg-turbo 3.1.4.1 and Rust nightly 2026-09-05. Artifact
+`crash-3732c8eae6ee71b7e90ba334fcb94b2e6d8de878` triggers
+`fuzz_transform_diff_c.rs:308`: `transform-diff HFlip: djpeg rejected our
+transformed JPEG (input=16x16, rust_len=925, c_len=1053)`.
+
+**Motivation.** A transform accepted by the Rust API must not produce an invalid
+JPEG where C's transform succeeds. The artifact and its `repro.txt`/`versions.txt`
+were downloaded together during the P4-175 CI inventory audit. A separate local
+`fix/fuzz-transform-hflip-progressive` worktree already contains an uncommitted
+fix attempt and this exact seed; it is not merged evidence and is preserved.
+Root cause remains to be established from that work and the saved artifact.
+
+**Acceptance criteria.** Reproduce against the recorded C oracle; retain the
+input and a strict differential regression in the normal suite; fix the general
+transform defect; confirm stock djpeg accepts the output and compares it to
+stock jpegtran with the fuzz harness's options; pass the exact-head CI and
+fuzz replay before closure.
+
+**Why separate.** The inventory change detects missing test execution. This is
+an independently observed codec defect with an existing, unfinished fix attempt.
