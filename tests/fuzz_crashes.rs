@@ -22,7 +22,10 @@
 use libjpeg_turbo_rs::precision::{
     decompress_12bit, decompress_16bit, decompress_lossless_arbitrary,
 };
-use libjpeg_turbo_rs::{decompress, decompress_lenient, read_coefficients, Decoder, PixelFormat};
+use libjpeg_turbo_rs::{
+    decompress, decompress_lenient, read_coefficients, transform_jpeg_with_options, Decoder,
+    MarkerCopyMode, PixelFormat, TransformOp, TransformOptions,
+};
 use std::path::PathBuf;
 
 /// Mirrors `MAX_FUZZ_PIXELS` in the fuzz targets.
@@ -150,6 +153,35 @@ fn fuzz_progressive_decoder_crashes_are_panic_safe() {
 fn fuzz_read_coefficients_crashes_are_panic_safe() {
     run("fuzz_read_coefficients", |d| {
         let _ = read_coefficients(d);
+    });
+}
+
+/// Replay of the Rust half of `fuzz/fuzz_targets/fuzz_transform_diff_c.rs`:
+/// byte 0 selects HFlip / VFlip / Rot180 (`op_for`), the rest is the JPEG,
+/// and markers are copied like `jpegtran -copy all`. The C-oracle half
+/// (byte-exactness with jpegtran, clean djpeg decode) is pinned per seed in
+/// `tests/regression_transform_fuzz_progressive.rs`; this replay only
+/// guarantees the transform itself stays panic-free.
+#[test]
+fn fuzz_transform_diff_c_crashes_are_panic_safe() {
+    run("fuzz_transform_diff_c", |d| {
+        const HEADER_LEN: usize = 1;
+        if d.len() < HEADER_LEN + 32 {
+            return;
+        }
+        let op: TransformOp = match d[0] % 3 {
+            0 => TransformOp::HFlip,
+            1 => TransformOp::VFlip,
+            _ => TransformOp::Rot180,
+        };
+        let _ = transform_jpeg_with_options(
+            &d[HEADER_LEN..],
+            &TransformOptions {
+                op,
+                copy_markers: MarkerCopyMode::All,
+                ..Default::default()
+            },
+        );
     });
 }
 

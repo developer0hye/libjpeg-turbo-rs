@@ -650,3 +650,46 @@ fn c_jpegtran_copy_icc_preserves_icc_only() {
         "C jpegtran -copy icc should strip COM markers"
     );
 }
+
+/// A saved marker handed to the `Encoder` lands where `jpegtran` and
+/// `cjpeg` put copied markers: after the header the writer emits itself
+/// (here an Adobe APP14 for CMYK) and before anything the encoder appends
+/// afterwards (the ICC APP2). P4-181 moved the insertion point past a
+/// leading APP14; it used to sit between SOI and the Adobe segment, an
+/// order libjpeg cannot produce.
+#[test]
+fn saved_marker_follows_writer_header_on_cmyk_encode() {
+    let (width, height): (usize, usize) = (16, 16);
+    let pixels: Vec<u8> = (0..width * height * 4).map(|i| (i % 251) as u8).collect();
+    let icc: Vec<u8> = b"acsp-test-profile".to_vec();
+    let jpeg: Vec<u8> = Encoder::new(&pixels, width, height, PixelFormat::Cmyk)
+        .quality(75)
+        .icc_profile(&icc)
+        .saved_marker(SavedMarker {
+            code: 0xE3,
+            data: b"CustomAPP3Data".to_vec(),
+        })
+        .encode()
+        .expect("CMYK encode with ICC and a saved marker");
+
+    let mut order: Vec<u8> = Vec::new();
+    let mut pos: usize = 2;
+    while pos + 4 <= jpeg.len() && jpeg[pos] == 0xFF && (0xE0..=0xEF).contains(&jpeg[pos + 1]) {
+        order.push(jpeg[pos + 1]);
+        let len: usize = u16::from_be_bytes([jpeg[pos + 2], jpeg[pos + 3]]) as usize;
+        assert!(
+            len >= 2 && pos + 2 + len <= jpeg.len(),
+            "malformed APP segment"
+        );
+        pos += 2 + len;
+    }
+    assert_eq!(
+        order,
+        vec![0xEE, 0xE3, 0xE2],
+        "expected SOI, Adobe APP14, saved APP3, ICC APP2 — got {order:02X?}"
+    );
+    assert!(
+        jpeg.windows(5).any(|w| w == b"Adobe"),
+        "CMYK encode must carry an Adobe APP14"
+    );
+}

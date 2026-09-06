@@ -6,44 +6,31 @@ use alloc::{format, string::ToString, vec, vec::Vec};
 
 impl<'a> Decoder<'a> {
     /// Determine the JPEG color space from component count and Adobe marker.
-    /// Follows the same heuristic as libjpeg-turbo (jdapimin.c).
+    /// Follows the same heuristic as libjpeg-turbo (jdapimin.c), reading the
+    /// JFIF/Adobe state as it stood at the first SOS: libjpeg classifies
+    /// once, in `default_decompress_parms` at `JPEG_REACHED_SOS`, so
+    /// APP0/APP14 markers between the scans of a progressive or
+    /// non-interleaved stream never change the answer (P4-181).
     pub(super) fn detect_color_space(&self) -> ColorSpace {
-        let num_components = self.metadata.frame.components.len();
-        match num_components {
-            1 => ColorSpace::Grayscale,
-            3 => {
-                if self.metadata.saw_jfif_marker {
-                    // JFIF takes precedence over Adobe and component IDs in
-                    // libjpeg-turbo: a three-component JFIF stream is YCbCr.
-                    ColorSpace::YCbCr
-                } else if self.metadata.saw_adobe_marker {
-                    if self.metadata.adobe_transform == 0 {
-                        ColorSpace::Rgb
-                    } else {
-                        ColorSpace::YCbCr
-                    }
-                } else {
-                    let components = &self.metadata.frame.components;
-                    let ids = [components[0].id, components[1].id, components[2].id];
-                    if ids == *b"RGB" || self.metadata.frame.is_lossless {
-                        ColorSpace::Rgb
-                    } else {
-                        ColorSpace::YCbCr
-                    }
-                }
-            }
-            4 => {
-                if self.metadata.saw_adobe_marker {
-                    match self.metadata.adobe_transform {
-                        0 => ColorSpace::Cmyk,
-                        2 => ColorSpace::Ycck,
-                        _ => ColorSpace::Ycck, // default for unknown Adobe transforms
-                    }
-                } else {
-                    ColorSpace::Cmyk // no Adobe marker → assume CMYK
-                }
-            }
-            _ => ColorSpace::YCbCr, // fallback
+        let components = &self.metadata.frame.components;
+        let ids: [u8; 3] = if components.len() == 3 {
+            [components[0].id, components[1].id, components[2].id]
+        } else {
+            [0; 3]
+        };
+        let color_space: ColorSpace = ColorSpace::classify_source(
+            components.len(),
+            self.metadata.saw_jfif_marker_at_first_sos,
+            self.metadata.adobe_transform_at_first_sos,
+            &ids,
+            self.metadata.frame.is_lossless,
+        );
+        // Callers of this decoder treat every other count as YCbCr (the
+        // pre-existing fallback); libjpeg itself says JCS_UNKNOWN.
+        if color_space == ColorSpace::Unknown {
+            ColorSpace::YCbCr
+        } else {
+            color_space
         }
     }
 

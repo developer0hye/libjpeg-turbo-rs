@@ -5,8 +5,9 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use libjpeg_turbo_rs::{
-    compress, decompress, read_coefficients, transform, write_coefficients, ColorSpace, Encoder,
-    PixelFormat, Subsampling, TransformOp,
+    compress, decompress, read_coefficients, transform, transform_jpeg_with_options,
+    write_coefficients, ColorSpace, Encoder, MarkerCopyMode, PixelFormat, Subsampling, TransformOp,
+    TransformOptions,
 };
 
 /// Roundtrip: compress → read_coefficients → write_coefficients → decompress
@@ -327,6 +328,154 @@ fn coefficient_transform_preserves_coexisting_jfif_and_adobe_markers() {
         helpers::decode_with_c_djpeg(&djpeg, &c_transformed, "both_markers_c"),
         "Rust marker-preserving transform must decode identically to C jpegtran"
     );
+}
+
+/// Splice an Adobe APP14 segment carrying `transform` into `jpeg`, either
+/// right after its JFIF APP0 or in place of it.
+fn with_adobe_app14(jpeg: &[u8], transform: u8, keep_jfif: bool) -> Vec<u8> {
+    assert_eq!(
+        &jpeg[..4],
+        &[0xFF, 0xD8, 0xFF, 0xE0],
+        "source must start with SOI + JFIF"
+    );
+    let jfif_end: usize = 4 + u16::from_be_bytes([jpeg[4], jpeg[5]]) as usize;
+    let mut out: Vec<u8> = Vec::with_capacity(jpeg.len() + 16);
+    out.extend_from_slice(&jpeg[..2]);
+    if keep_jfif {
+        out.extend_from_slice(&jpeg[2..jfif_end]);
+    }
+    // FF EE, length 14, "Adobe", version 100, flags0, flags1, transform.
+    out.extend_from_slice(&[0xFF, 0xEE, 0x00, 0x0E]);
+    out.extend_from_slice(b"Adobe");
+    out.extend_from_slice(&[0, 100, 0, 0, 0, 0, transform]);
+    out.extend_from_slice(&jpeg[jfif_end..]);
+    out
+}
+
+/// `jpegtran` exits 2 (not 0) when it decoded the source with a warning —
+/// "Unknown Adobe color transform code 255" here — and still writes a
+/// complete output, so the shared helper's exit-0 assertion is too strict
+/// for these sources.
+fn run_c_jpegtran_allow_warnings(
+    jpegtran: &Path,
+    args: &[&str],
+    jpeg: &[u8],
+    label: &str,
+) -> Vec<u8> {
+    let input: helpers::TempFile = helpers::TempFile::new(&format!("{label}_in.jpg"));
+    let output: helpers::TempFile = helpers::TempFile::new(&format!("{label}_out.jpg"));
+    input.write_bytes(jpeg);
+    let status: std::process::Output = Command::new(jpegtran)
+        .args(args)
+        .arg("-outfile")
+        .arg(output.path())
+        .arg(input.path())
+        .output()
+        .unwrap_or_else(|e| panic!("{label}: failed to run jpegtran: {e:?}"));
+    assert!(
+        matches!(status.status.code(), Some(0) | Some(2)),
+        "{label}: jpegtran failed: {}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    std::fs::read(output.path()).unwrap_or_else(|e| panic!("{label}: read jpegtran output: {e:?}"))
+}
+
+/// The APPn/COM segments between SOI and the first table segment, in order.
+fn header_segments(jpeg: &[u8]) -> Vec<(u8, Vec<u8>)> {
+    assert_eq!(&jpeg[..2], &[0xFF, 0xD8], "expected SOI");
+    let mut segments: Vec<(u8, Vec<u8>)> = Vec::new();
+    let mut pos: usize = 2;
+    while pos + 4 <= jpeg.len() && jpeg[pos] == 0xFF {
+        let marker: u8 = jpeg[pos + 1];
+        let is_app_or_com: bool = (0xE0..=0xEF).contains(&marker) || marker == 0xFE;
+        if !is_app_or_com {
+            break;
+        }
+        let len: usize = u16::from_be_bytes([jpeg[pos + 2], jpeg[pos + 3]]) as usize;
+        if len < 2 || pos + 2 + len > jpeg.len() {
+            break;
+        }
+        segments.push((marker, jpeg[pos + 4..pos + 2 + len].to_vec()));
+        pos += 2 + len;
+    }
+    segments
+}
+
+/// P4-181: the JFIF/Adobe header of a transcoded stream comes from the
+/// colorspace classification (`jpeg_copy_critical_parameters` →
+/// `jpeg_set_colorspace` → `write_file_header`), never from the source's
+/// transform byte. A YCbCr source therefore gets a JFIF header even when
+/// its only colorspace hint was an Adobe marker, a bogus transform byte is
+/// never re-emitted, and the source's Adobe marker reaches the output only
+/// through `-copy all` — once, since `jcopy_markers_execute` only drops it
+/// when the encoder wrote its own. Byte-exactness against `jpegtran` pins
+/// all of that at once, for both copy modes.
+///
+/// The `adobe0` source (Adobe transform 0 with component IDs 1/2/3, so
+/// RGB by classification) is held to header-segment and decoded-pixel
+/// agreement only: its entropy segment still differs from jpegtran's
+/// because `jpeg_set_colorspace(JCS_RGB)` assigns Huffman slot 0 to every
+/// component while we key that assignment on the `R`/`G`/`B` component
+/// IDs — tracked as P4-182.
+#[test]
+fn coefficient_transform_header_markers_match_jpegtran_for_adobe_sources() {
+    let jpegtran: PathBuf = require_c_tool!("jpegtran");
+    let djpeg: PathBuf = require_c_tool!("djpeg");
+    let (width, height): (usize, usize) = (32, 24);
+    let pixels: Vec<u8> = (0..width * height * 3)
+        .map(|index| ((index * 53 + index / (width * 3) * 7) & 0xFF) as u8)
+        .collect();
+    let jfif_source: Vec<u8> = Encoder::new(&pixels, width, height, PixelFormat::Rgb)
+        .subsampling(Subsampling::S420)
+        .encode()
+        .expect("JFIF source must encode");
+
+    for (label, transform_byte, keep_jfif, byte_exact) in [
+        ("jfif_adobe1", 1u8, true, true),
+        ("jfif_adobe255", 255u8, true, true),
+        ("adobe0", 0u8, false, false),
+        ("adobe1", 1u8, false, true),
+        ("adobe255", 255u8, false, true),
+    ] {
+        let source: Vec<u8> = with_adobe_app14(&jfif_source, transform_byte, keep_jfif);
+        for (copy_label, copy_mode, c_copy) in [
+            ("copy_all", MarkerCopyMode::All, "all"),
+            ("copy_none", MarkerCopyMode::None, "none"),
+        ] {
+            let case: String = format!("{label}_{copy_label}");
+            let rust_out: Vec<u8> = transform_jpeg_with_options(
+                &source,
+                &TransformOptions {
+                    op: TransformOp::None,
+                    copy_markers: copy_mode,
+                    ..Default::default()
+                },
+            )
+            .unwrap_or_else(|e| panic!("{case}: Rust transform failed: {e:?}"));
+            let c_out: Vec<u8> =
+                run_c_jpegtran_allow_warnings(&jpegtran, &["-copy", c_copy], &source, &case);
+            if byte_exact {
+                assert_eq!(
+                    rust_out, c_out,
+                    "{case}: Rust output must be byte-exact with jpegtran -copy {c_copy}"
+                );
+            } else {
+                assert_eq!(
+                    header_segments(&rust_out),
+                    header_segments(&c_out),
+                    "{case}: header segments must match jpegtran -copy {c_copy}"
+                );
+            }
+            // djpeg exits 2 on a warning such as an unknown Adobe transform
+            // code; `decode_with_c_djpeg` asserts exit 0, so this also pins
+            // that the header we wrote decodes cleanly.
+            assert_eq!(
+                helpers::decode_with_c_djpeg(&djpeg, &rust_out, &format!("{case}_rust")),
+                helpers::decode_with_c_djpeg(&djpeg, &c_out, &format!("{case}_c")),
+                "{case}: djpeg output must agree"
+            );
+        }
+    }
 }
 
 #[test]
