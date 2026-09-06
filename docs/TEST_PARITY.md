@@ -135,12 +135,12 @@
 - [ ] Restart intervals in transform output — not tested in transform context
 - [x] Trim flag — `transform_options.rs`
 - [ ] 8-bit and 12-bit precision transforms — only 8-bit tested
-- [ ] MD5/binary comparison against C jpegtran — not implemented
+- [x] MD5/binary comparison against C jpegtran — byte-exact `assert_eq!` against `jpegtran` output in `transform_small_image_byte_exact.rs`, `regression_progressive_4pixel_chroma_transform.rs`, `transcode_12bit_byte_exact.rs`, `regression_transform_fuzz_progressive.rs` (P4-181 seed, three ops) and `transform.rs::coefficient_transform_header_markers_match_jpegtran_for_adobe_sources` (`-copy all` / `-copy none`)
 - [x] Progressive output — `tjunittest_transform.rs`
 - [x] Arithmetic output — `tjunittest_transform.rs`
 - [x] Restart intervals in transform — not directly, but restart encode/decode tested
 - [x] Trim markers — `transform_options.rs`
-- [ ] MD5 comparison between our transform and C jpegtran — not implemented
+- [x] MD5 comparison between our transform and C jpegtran — subsumed by the byte-exact comparisons above (a byte-equal stream has an equal digest)
 
 ### croptest.in (Crop Region Validation)
 - [x] Basic crop operations — `crop_skip.rs`, `transform_options.rs`

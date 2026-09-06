@@ -117,20 +117,30 @@ pub fn inject_comment(base: &[u8], text: &str) -> Vec<u8> {
 
 /// Inject saved markers (APP/COM) into an existing JPEG byte stream.
 ///
-/// Markers are inserted after SOI + APP0 (and any existing metadata markers),
-/// preserving the same insertion point pattern as `inject_metadata`/`inject_comment`.
+/// Markers are inserted after SOI and the header markers the encoder wrote
+/// itself — a JFIF APP0 and/or an Adobe APP14 — which is where
+/// `jpegtran` places them: `write_file_header` (`jcmarker.c:475`) emits
+/// SOI + JFIF/Adobe, then `jcopy_markers_execute` (`transupp.c:2487`)
+/// appends every saved marker before the first table segment.
 pub fn inject_saved_markers(base: &[u8], markers: &[SavedMarker]) -> Vec<u8> {
     if markers.is_empty() {
         return base.to_vec();
     }
 
-    // Find insertion point after APP0 JFIF marker (SOI + APP0)
-    let insert_pos: usize = if base.len() >= 4 && base[2] == 0xFF && base[3] == 0xE0 {
-        let app0_len: usize = u16::from_be_bytes([base[4], base[5]]) as usize;
-        2 + 2 + app0_len
-    } else {
-        2
-    };
+    const APP0: u8 = 0xE0;
+    const APP14: u8 = 0xEE;
+    let mut insert_pos: usize = 2;
+    while base.len() >= insert_pos + 4
+        && base[insert_pos] == 0xFF
+        && (base[insert_pos + 1] == APP0 || base[insert_pos + 1] == APP14)
+    {
+        let segment_len: usize =
+            u16::from_be_bytes([base[insert_pos + 2], base[insert_pos + 3]]) as usize;
+        if segment_len < 2 || insert_pos + 2 + segment_len > base.len() {
+            break;
+        }
+        insert_pos += 2 + segment_len;
+    }
 
     let extra: usize = markers.iter().map(|m| m.data.len() + 4).sum();
     let mut out: Vec<u8> = Vec::with_capacity(base.len() + extra);

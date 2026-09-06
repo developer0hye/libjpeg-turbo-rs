@@ -9064,7 +9064,7 @@ supports PNG or does not, and a consumer cannot see a cargo feature.
 load-bearing for the replacement gate — PNG interchange is a convenience
 surface around the codec, not the codec.
 
-## P4-175. `capi_classic_decode_budget` Is Never Named by a Workflow, So It Has Never Run in CI — **OPEN**
+## P4-175. `capi_classic_decode_budget` Is Never Named by a Workflow, So It Has Never Run in CI — **CLOSED 2026-09-07**
 
 **GitHub:** [#565](https://github.com/developer0hye/libjpeg-turbo-rs/issues/565) — found 2026-08-17 while auditing which oracle each gate uses for P4-130.
 
@@ -9118,25 +9118,7 @@ warn about it in prose. Prose has now failed to prevent it twice.
 criterion 3 is a gate of its own — it needs the opt-out list triaged across
 every capi suite, not just this one.
 
-**Implementation update (2026-09-07, CI verification pending).** Both integration
-oracle jobs now run `cargo test -p libjpeg-turbo-rs-capi --tests --features png
---no-fail-fast` after provisioning their v8 SDK. This executes Cargo's complete
-C-ABI integration inventory rather than another hand-maintained suite list,
-including `capi_classic_decode_budget` and `capi_yuv_gray`. Both
-`LIBJPEG_TURBO_PREFIX` and `LIBJPEG_TURBO_REFERENCE_DIR` name that SDK.
-`oracle_version_pins::every_capi_test_target_runs_on_both_oracle_legs` inventories
-the current test files and requires the complete command on each leg. Its
-negative controls reject filters, compilation-only runs, wrong packages,
-missing/wrong oracle prefixes, conditional steps and failure suppression.
-Older external-consumer harnesses retain their prerequisite skips; this change
-claims target execution, not universal downstream coverage. No opt-out list is
-needed because no C-ABI integration target is excluded.
-
-Local verification on macOS aarch64: all 76 integration targets plus the C-ABI
-unit target completed (335 passed, 0 failed, 0 ignored) with PNG enabled and
-the pinned submodule built as a v8 SDK. The 52-test `oracle_version_pins` suite
-also passed, after its new inventory assertion failed on the old workflow.
-These are host-qualified results; Linux CI is still pending.
+**Status (2026-09-07): closed.** Both integration oracle jobs (`test-integration` on the 3.1.4.1 baseline SDK, `test-integration-current-oracle` on 3.2.0) now run `cargo test -p libjpeg-turbo-rs-capi --tests --features png --no-fail-fast` as the step `Complete C-ABI integration inventory (P4-175)`, with `LIBJPEG_TURBO_PREFIX` and `LIBJPEG_TURBO_REFERENCE_DIR` both naming the leg's SDK so an oracle suite fails rather than soft-skips. Cargo enumerates the inventory, so a new test file is executed from its first pull request without anyone naming it — which is why no opt-out list exists: no C-ABI integration target is excluded. Proof is the pull request's own CI ([run 34044740931](https://github.com/developer0hye/libjpeg-turbo-rs/actions/runs/34044740931)): on the baseline leg the step executed **77 test binaries, 335 passed, 0 failed, 0 ignored**, `capi_classic_decode_budget` and `capi_yuv_gray` among them, in 2m21s; the 3.2.0 leg ran the same inventory green in 3m51s. Criterion 3 is `tests/oracle_version_pins.rs::every_capi_test_target_runs_on_both_oracle_legs`, which requires that unfiltered command with both prefixes on each leg, plus `complete_capi_coverage_rejects_compilation_filters_and_wrong_oracles`, whose negative controls reject an `echo`, `--no-run`, a positional filter, `--list`/`--ignored`, `|| true`, `--lib`, the wrong package, a missing or wrong prefix, and `if:` / `continue-on-error:` / `working-directory:` / `shell:` / `defaults:` overrides at step or job level. The inventory assertion failed against the previous workflow before the steps were added. The focused named steps stay as earlier failure signals; the two legs cost 6→7 and 4→9 minutes for the whole inventory. Older external-consumer harnesses keep their own prerequisite skips, so this closes *execution* of every target, not availability of every downstream consumer (P2-G).
 
 ## P4-176. Every C Oracle Is Fetched by a Moveable Name, With Nothing Verifying What Arrived — **OPEN**
 
@@ -9359,29 +9341,40 @@ CI-robustness change into a coverage one — and the fix wants its own
 measurement of what a healthy run costs per step and runner class before it
 picks a bound.
 
-## P4-181. Differential HFlip Fuzzing Emits a JPEG That Stock djpeg Rejects — **OPEN**
+## P4-181. Differential HFlip Fuzzing Emits a JPEG That Stock djpeg Rejects — **CLOSED 2026-09-07**
 
-**GitHub:** [#581](https://github.com/developer0hye/libjpeg-turbo-rs/issues/581).
+**GitHub:** [#581](https://github.com/developer0hye/libjpeg-turbo-rs/issues/581) — filed 2026-09-06 from scheduled Fuzz Smoke [run 34042331788](https://github.com/developer0hye/libjpeg-turbo-rs/actions/runs/34042331788) (`main` at `118a9f9`; recorded oracle Linux x86_64, libjpeg-turbo 3.1.4.1, Rust nightly 2026-09-05).
 
-**Evidence.** Scheduled Fuzz Smoke [run 34042331788](https://github.com/developer0hye/libjpeg-turbo-rs/actions/runs/34042331788)
-failed on `main` at `118a9f9` on 2026-09-06. The saved reproduction records
-Linux x86_64, libjpeg-turbo 3.1.4.1 and Rust nightly 2026-09-05. Artifact
-`crash-3732c8eae6ee71b7e90ba334fcb94b2e6d8de878` triggers
-`fuzz_transform_diff_c.rs:308`: `transform-diff HFlip: djpeg rejected our
-transformed JPEG (input=16x16, rust_len=925, c_len=1053)`.
+**Evidence.** Artifact `crash-3732c8eae6ee71b7e90ba334fcb94b2e6d8de878` (876 bytes: one op-selector byte, then an 875-byte JPEG) trips the acceptance-agreement panic in `fuzz_transform_diff_c.rs`: `transform-diff HFlip: djpeg rejected our transformed JPEG (input=16x16, rust_len=925, c_len=1053)`. Re-running `djpeg` on the 925-byte output gives the actual verdict, which the panic did not carry: `Unknown Adobe color transform code 255`, exit 2 — djpeg *decoded* the file, but with a warning, and the harness (correctly) counts any non-zero exit as a rejection because jpegtran's 1053-byte output decodes with exit 0.
 
-**Motivation.** A transform accepted by the Rust API must not produce an invalid
-JPEG where C's transform succeeds. The artifact and its `repro.txt`/`versions.txt`
-were downloaded together during the P4-175 CI inventory audit. A separate local
-`fix/fuzz-transform-hflip-progressive` worktree already contains an uncommitted
-fix attempt and this exact seed; it is not merged evidence and is preserved.
-Root cause remains to be established from that work and the saved artifact.
+**Root cause.** The source is a 16x16 4:2:0 progressive JPEG whose only scan is DC-first, followed by a stray DHT, six APP0 segments (none carrying a `JFIF\0` identifier), two Exif APP1 segments and nine APP14 segments — five of them identified as `Adobe`, the last of those carrying transform byte 255. Two things about it matter to libjpeg: the leading APP0's identifier is `JFIF\x02`, not `JFIF\0`, so `examine_app0` (`jdmarker.c:606`) never sets `saw_JFIF_marker`; and every Adobe marker sits *after* the first SOS, so at `jpeg_read_header` time `default_decompress_parms` (`jdapimin.c:137`) sees no marker at all and classifies the stream as YCbCr from component IDs 1/2/3. `jpegtran` then re-encodes through `jpeg_copy_critical_parameters` (`jctrans.c:71`) → `jpeg_set_colorspace(JCS_YCbCr)` (`jcparam.c:333`) → `write_file_header` (`jcmarker.c:475`): a JFIF APP0, no Adobe marker, and — under `-copy all` — every saved APP segment copied verbatim, including the non-JFIF APP0s and all nine APP14 segments.
 
-**Acceptance criteria.** Reproduce against the recorded C oracle; retain the
-input and a strict differential regression in the normal suite; fix the general
-transform defect; confirm stock djpeg accepts the output and compares it to
-stock jpegtran with the fuzz harness's options; pass the exact-head CI and
-fuzz replay before closure.
+`write_coefficient_colorspace_marker` in `src/api/coefficient.rs` did something else: it re-emitted `JpegCoefficients::adobe_transform` *verbatim* as a synthesized Adobe APP14 whenever the source had one, and wrote JFIF only when the source had a `JFIF\0` marker or had neither an Adobe marker nor `R`/`G`/`B` component IDs. So the transcode carried `Adobe … transform=255` and no JFIF, and every libjpeg consumer that opens it warns. The verbatim rule (introduced by `abcfb1a`/`0b83648` to keep RGB-vs-YCbCr classification stable across a transcode) had three further consequences the fuzz target never reached: a JFIF+Adobe source transcoded under `-copy all` came out with **two** Adobe segments (one synthesized, one copied); `MarkerCopyMode::All` dropped **every** APP0 from the copied set where `jcopy_markers_execute` (`transupp.c:2487`) drops only a `JFIF\0` duplicate of the header the encoder wrote; and the capi's `jpeg_write_coefficients` prepended a second Adobe segment to 4-component outputs on top of the one the core writer had started emitting.
 
-**Why separate.** The inventory change detects missing test execution. This is
-an independently observed codec defect with an existing, unfinished fix attempt.
+**Fix.** The marker reader now snapshots the JFIF/Adobe state at the first SOS (`JpegMetadata::saw_jfif_marker_at_first_sos` / `adobe_transform_at_first_sos`), because libjpeg classifies exactly once — `jpeg_consume_input` calls `default_decompress_parms` at `JPEG_REACHED_SOS` — while `examine_app0`/`examine_app14` keep updating `saw_*` between scans without ever re-classifying; both the decoder's `detect_color_space` and `read_coefficients` read the snapshot (a whole-stream reading would have turned this seed's post-SOS Adobe marker into an RGB header had its byte been 0, and decoded it without the YCbCr conversion djpeg applies — caught in review). `classify_coefficient_colorspace` ports `default_decompress_parms` (JFIF outranks Adobe; Adobe 0 = RGB/CMYK, 2 = YCCK, anything else = YCbCr/YCCK with libjpeg's "assume" fallback; `R`/`G`/`B` IDs = RGB), and `coefficient_header_markers` ports `jpeg_set_colorspace` + `write_file_header` (JFIF for grayscale/YCbCr, Adobe 0 for RGB/CMYK, Adobe 2 for YCCK, transform byte derived from the output colorspace per `jcmarker.c:423-429`). `transform_jpeg_with_options` keeps every saved APP/COM segment and applies `jcopy_markers_execute`'s two duplicate rules against the header the *final* coefficient set produces (a `grayscale` request changes it); `inject_saved_markers` places copied markers after the writer's own JFIF/Adobe header, where `jpegtran` puts them. The capi shim drops its `swap_jfif_for_adobe_app14` / `inject_adobe_app14_after_jfif` post-processing and instead feeds the core writer `write_JFIF_header` / `write_Adobe_marker` / `jpeg_color_space` for foreign coefficient arrays. The fuzz target's panic now carries djpeg's exit status and stderr.
+
+**Status (2026-09-07): closed.** `tests/regression_transform_fuzz_progressive.rs::progressive_source_with_bogus_adobe_transform_after_sos_matches_jpegtran` inlines the 875-byte source and holds HFlip, VFlip and Rot180 **byte-exact** against `jpegtran -copy all` (all three were 925 → 1053 bytes, identical to C), then decodes both through `djpeg` with exit 0 asserted; its sibling `adobe_transform_after_first_sos_does_not_change_classification` flips the seed's last Adobe transform byte to 0 and holds the HFlip transcode byte-exact with `jpegtran` and the block-smoothed decode pixel-exact with `djpeg`. `tests/transform.rs::coefficient_transform_header_markers_match_jpegtran_for_adobe_sources` crafts JFIF+Adobe(1), JFIF+Adobe(255), Adobe(0), Adobe(1) and Adobe(255) sources and holds `-copy all` and `-copy none` byte-exact (the RGB-classified Adobe(0) case to header segments + pixels, see P4-182). `crates/libjpeg-turbo-rs-capi/tests/capi_jpeglib_write_coefficients.rs::write_coefficients_preserves_source_adobe_app14` now asserts exactly one Adobe segment. The seed is committed under `fuzz/corpus/fuzz_transform_diff_c/` and replayed by `tests/fuzz_crashes.rs::fuzz_transform_diff_c_crashes_are_panic_safe`. Verified red-before-green: with every `src/` change stashed, the seed test fails at its byte-exact assertion against the old 925-byte output (the stream djpeg exits 2 on), and the post-SOS test fails at its byte-exact assertion on the Adobe-0 header.
+
+## P4-182. Transcode Huffman-Slot Assignment Keys on Component IDs Instead of the Colorspace Classification — **OPEN**
+
+**GitHub:** [#584](https://github.com/developer0hye/libjpeg-turbo-rs/issues/584) — found 2026-09-07 while holding P4-181's crafted sources byte-exact against `jpegtran`.
+
+**Motivation.** `jpeg_copy_critical_parameters` explicitly does **not** copy the source's Huffman table assignments (`jctrans.c:143-144`: *"instead we rely on jpeg_set_colorspace to have made a suitable choice"*). `jpeg_set_colorspace` (`jcparam.c:333`) puts every component of an RGB, CMYK, grayscale or unknown-colorspace stream on DC/AC slot 0; YCbCr uses 0/1/1; YCCK uses 0/1/1/0. `jpeg_simple_progression` likewise reserves the 10-scan luma/chroma script for 3-component YCbCr and uses the all-purpose `2 + 4·n` script for everything else. Our `coding_table_for_component` / `uses_single_rgb_coding_table` put component 0 on slot 0 and every other component on slot 1, except when the IDs are literally `R`/`G`/`B` *and* every component uses quant table 0 — a partial port keyed on the wrong input, now that `classify_coefficient_colorspace` (P4-181) exists.
+
+**Measured** against `jpegtran -copy all -flip horizontal` (libjpeg-turbo 3.1.4.1), pixels identical in every case:
+
+| source | C slots | ours | bytes C / ours |
+| --- | --- | --- | --- |
+| `tests/fixtures/cmyk_scanner/scanner_64x64.jpg` (CMYK, Adobe 0) | 0/0/0/0, two DHTs | 0/1/1/1, four DHTs | 970 / 1132 |
+| `tests/fixtures/real_world/pil_cmyk.jpg` (YCCK, Adobe 2) | 0/1/1/0 | 0/1/1/1 | 31158 / 31167 |
+| 32x24 4:2:0 source, Adobe transform 0, IDs 1/2/3 (RGB by classification) | 0/0/0 | 0/1/1 | differ |
+
+**Acceptance criteria.**
+
+1. Slot assignment (and the progressive scan-script choice) derive from `classify_coefficient_colorspace` per the table above, across every writer variant (`write_coefficients`, `_optimized`, `_progressive`, `_arithmetic`, `_progressive_arithmetic`) — the same two helpers feed all of them, so the change is one site.
+2. The `adobe0` case in `tests/transform.rs::coefficient_transform_header_markers_match_jpegtran_for_adobe_sources` is promoted to byte-exact, and CMYK/YCCK `-copy all` byte-exact cases against `jpegtran` are added for both baseline and `-progressive`.
+3. `examples/stock_djpeg_cjpeg/run.sh` and the corpus transform gate stay green.
+4. **JFIF minor version.** `write_app0_jfif_with_density` always writes 1.01; `jpeg_copy_critical_parameters` (`jctrans.c:155-158`) copies the source's minor version when the major is 1 and `emit_jfif_app0` writes it, so a JFIF 1.02 source transcodes byte-inexactly. `MarkerReader` already parses both bytes; `JpegCoefficients` needs to carry the minor version (an additive field — note the struct is constructed literally by tests) and the writers must emit it. Add a 1.02 source to the byte-exact matrix.
+5. **capi header override.** `materialize_foreign_coef_arrays` folds the destination cinfo's `write_JFIF_header` / `write_Adobe_marker` / `jpeg_color_space` into the classifier's two inputs, which round-trips only the four states `jpeg_set_colorspace` produces. An application that clears both flags (`JCS_UNKNOWN`, or `write_JFIF_header = FALSE` by hand) gets a JFIF or Adobe 0 header where `write_file_header` writes none, and `write_Adobe_marker` on a YCbCr destination gets JFIF alone where C writes JFIF + Adobe 1. Give the core writers an explicit header override (an internal `write_coefficients_with_header(coeffs, CoefficientHeaderMarkers)`) so the shim passes the decision through instead of reconstructing it, and pin both hand-set states against C `jpeg_write_coefficients`. Pre-existing — the old shim had its own divergences here — surfaced by the P4-181 review.
+
+**Why deferred.** P4-181 is a correctness fix for a warning-free drop-in; this is a byte-level fidelity gap on streams that already decode identically, and it touches the scan-script selection for 4-component progressive output, which deserves its own oracle run.

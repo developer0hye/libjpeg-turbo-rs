@@ -3,8 +3,8 @@
 //! Applies the same lossless transform via:
 //!   1. our Rust `transform_jpeg_with_options`, and
 //!   2. a subprocessed C `jpegtran`,
-//! then decodes both outputs through `djpeg` and asserts the pixel
-//! buffers agree within the documented IDCT tolerance.
+//! then decodes both outputs through `djpeg` and asserts they agree
+//! on acceptance, clean decode and dimensions (see **Asserts** below).
 //!
 //! Scope: HFlip, VFlip, Rot180 only. These three ops do not require
 //! MCU alignment, so they are safe across the full fuzz dimension
@@ -19,8 +19,16 @@
 //!    produces a valid JPEG, our `transform_jpeg_with_options` must
 //!    too. Rust accepting an input C rejects is allowed (matches
 //!    the lenient-by-design posture of the decode-side fuzzer).
-//! 2. **Pixel agreement.** When both transforms succeed, the decoded
-//!    pixels must match within ±2 per byte (IDCT tolerance).
+//! 2. **Clean-decode agreement.** When djpeg decodes jpegtran's output
+//!    with exit status 0, it must decode ours with exit status 0 as
+//!    well. djpeg exits 2 when it decoded but warned, so a header we
+//!    write that jpegtran would not (P4-181: an Adobe APP14 carrying a
+//!    bogus transform byte copied from the source) fails here even
+//!    though the pixels come out — that warning is exactly the
+//!    drop-in regression a downstream `-strict` consumer would reject.
+//! 3. **Dimension agreement.** Both decoded outputs report the same
+//!    width, height and channel count. Pixel-level parity on fuzz
+//!    inputs is left to the curated corpus tests (see below).
 
 #![no_main]
 
@@ -155,6 +163,34 @@ fn decode_via_djpeg(djpeg: &PathBuf, jpeg: &[u8]) -> Option<(usize, usize, usize
     let (stdout, c_lenient) = pipe_subprocess(djpeg, &["-pnm"], jpeg)?;
     let (w, h, c, px) = parse_pnm(&stdout)?;
     Some((w, h, c, px, c_lenient))
+}
+
+/// Re-run djpeg on a rejected stream and report its exit status and
+/// stderr, so the crash log names the cause ("Unknown Adobe color
+/// transform code 255", "Bogus marker length", …) instead of forcing a
+/// download of the artifact to find out.
+fn djpeg_rejection_reason(djpeg: &PathBuf, jpeg: &[u8]) -> String {
+    let mut child = match Command::new(djpeg)
+        .arg("-pnm")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(e) => return format!("failed to spawn djpeg: {e}"),
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(jpeg);
+    }
+    match child.wait_with_output() {
+        Ok(out) => format!(
+            "exit={:?} stderr={:?}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ),
+        Err(e) => format!("failed to wait for djpeg: {e}"),
+    }
 }
 
 /// Maps fuzz byte → safe op (HFlip / VFlip / Rot180). Other ops are
@@ -293,26 +329,30 @@ fuzz_target!(|data: &[u8]| {
             let _ = (c_px, r_px, c_lenient, r_lenient, cw, ch, cc);
         }
         (Some(_), None) => {
-            // djpeg accepted C's transform but rejected ours. With the
+            // djpeg decoded C's transform cleanly but exited non-zero
+            // on ours — either a hard reject or, more often, exit 2 for
+            // "decoded with a warning" (see the module docs). With the
             // BitReader multi-FF run fix in place (see
             // `tests/transform_small_image_byte_exact.rs`), the
             // historical "transform encoder small-image entropy
             // divergence" follow-up is closed and Rust's transform
             // output is byte-exact identical to jpegtran's on the
             // pinned fixtures. Any rejection here is a genuine
-            // regression — surface it as a panic.
+            // regression — surface it as a panic that carries djpeg's
+            // own verdict.
             //
             // The `input_w` / `input_h` are still captured above so a
             // future regression report can read the dimensions out of
             // the panic message without a manual re-decode.
             panic!(
                 "transform-diff {:?}: djpeg rejected our transformed JPEG \
-                 (input={}x{}, rust_len={}, c_len={})",
+                 (input={}x{}, rust_len={}, c_len={}, djpeg {})",
                 op,
                 input_w,
                 input_h,
                 r_transformed.len(),
                 c_transformed.len(),
+                djpeg_rejection_reason(&djpeg, &r_transformed),
             );
         }
         (None, _) => {

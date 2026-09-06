@@ -7,7 +7,7 @@ use crate::common::error::{JpegError, Result};
 use crate::common::layout::checked_span;
 use crate::common::quant_table::NATURAL_ORDER;
 use crate::common::try_alloc::try_filled_vec;
-use crate::common::types::{MarkerSaveConfig, SavedMarker};
+use crate::common::types::{ColorSpace, MarkerSaveConfig, SavedMarker};
 use crate::decode::marker::{JpegMetadata, MarkerReader};
 use crate::encode::huffman_encode::{build_huff_table, BitWriter, HuffTable, HuffmanEncoder};
 use crate::encode::marker_writer;
@@ -68,11 +68,21 @@ pub struct JpegCoefficients {
     pub y_density: u16,
     /// Whether the source contained a JFIF APP0 marker. This is independent
     /// of `adobe_transform`: legal streams can contain both APP0 and APP14.
+    ///
+    /// Together with `adobe_transform` and the component IDs this drives the
+    /// colorspace classification of [`write_coefficients`] and its siblings
+    /// (the same heuristic as libjpeg's `default_decompress_parms`); it is
+    /// not copied into the output verbatim.
     pub saw_jfif_marker: bool,
     /// Adobe APP14 color-transform byte from the source JPEG, if an
     /// Adobe marker was present. `None` means no APP14 was seen.
-    /// Re-emitting the same value on transcode preserves the original
-    /// colorspace classification (RGB vs YCbCr vs YCCK vs CMYK).
+    ///
+    /// The writers classify the colorspace from this byte exactly as
+    /// libjpeg's `default_decompress_parms` does (0 = RGB/CMYK, 2 = YCCK,
+    /// anything else = YCbCr/YCCK) and then emit the header markers that
+    /// classification calls for. The byte itself is never re-emitted: a
+    /// source carrying a bogus transform code such as 255 transcodes to a
+    /// JFIF stream, the same way `jpegtran` rewrites it (P4-181).
     pub adobe_transform: Option<u8>,
 }
 
@@ -115,10 +125,75 @@ fn coding_table_for_component(coeffs: &JpegCoefficients, component_index: usize)
     }
 }
 
+/// Classify `coeffs` the way libjpeg classifies a decompression source
+/// (`jdapimin.c:137`, `default_decompress_parms`) — the `jpeg_color_space`
+/// that `jpeg_copy_critical_parameters` (`jctrans.c:71`) hands to
+/// `jpeg_set_colorspace` when `jpegtran` re-encodes coefficients.
+///
+/// `read_coefficients` fills `saw_jfif_marker` / `adobe_transform` from the
+/// marker state at the first SOS, which is what libjpeg classifies from.
+/// Lossless transcoding is rejected by C (`jctrans.c:78`) and by
+/// `read_coefficients`, so the lossless branch of the heuristic is never
+/// taken here. Component counts libjpeg does not classify (0, 2, or more
+/// than 4) come back as `Unknown`.
+fn classify_coefficient_colorspace(coeffs: &JpegCoefficients) -> ColorSpace {
+    let ids: [u8; 3] = if coeffs.components.len() == 3 {
+        [
+            coeffs.components[0].component_id,
+            coeffs.components[1].component_id,
+            coeffs.components[2].component_id,
+        ]
+    } else {
+        [0; 3]
+    };
+    ColorSpace::classify_source(
+        coeffs.components.len(),
+        coeffs.saw_jfif_marker,
+        coeffs.adobe_transform,
+        &ids,
+        false,
+    )
+}
+
+/// Header markers the coefficient writers emit right after SOI.
+///
+/// Mirrors `jpeg_set_colorspace` (`jcparam.c:333`) feeding
+/// `write_file_header` (`jcmarker.c:475`): grayscale and YCbCr get a JFIF
+/// APP0; RGB, CMYK and YCCK get an Adobe APP14 whose transform byte is
+/// derived from the *output* colorspace (`jcmarker.c:423-429`: 2 for YCCK,
+/// 0 otherwise), never copied from the source marker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CoefficientHeaderMarkers {
+    /// Emit a JFIF APP0 (`write_JFIF_header`).
+    jfif: bool,
+    /// Emit an Adobe APP14 with this transform byte (`write_Adobe_marker`).
+    adobe_transform: Option<u8>,
+}
+
+fn coefficient_header_markers(coeffs: &JpegCoefficients) -> CoefficientHeaderMarkers {
+    match classify_coefficient_colorspace(coeffs) {
+        ColorSpace::Grayscale | ColorSpace::YCbCr => CoefficientHeaderMarkers {
+            jfif: true,
+            adobe_transform: None,
+        },
+        ColorSpace::Rgb | ColorSpace::Cmyk => CoefficientHeaderMarkers {
+            jfif: false,
+            adobe_transform: Some(0),
+        },
+        ColorSpace::Ycck => CoefficientHeaderMarkers {
+            jfif: false,
+            adobe_transform: Some(2),
+        },
+        ColorSpace::Unknown => CoefficientHeaderMarkers {
+            jfif: false,
+            adobe_transform: None,
+        },
+    }
+}
+
 fn write_coefficient_colorspace_marker(output: &mut Vec<u8>, coeffs: &JpegCoefficients) {
-    if coeffs.saw_jfif_marker
-        || (coeffs.adobe_transform.is_none() && !has_rgb_component_ids(coeffs))
-    {
+    let markers: CoefficientHeaderMarkers = coefficient_header_markers(coeffs);
+    if markers.jfif {
         marker_writer::write_app0_jfif_with_density(
             output,
             coeffs.density_unit,
@@ -126,14 +201,23 @@ fn write_coefficient_colorspace_marker(output: &mut Vec<u8>, coeffs: &JpegCoeffi
             coeffs.y_density,
         );
     }
-    if let Some(transform) = coeffs.adobe_transform {
+    if let Some(transform) = markers.adobe_transform {
         marker_writer::write_app14_adobe(output, transform);
-    } else if has_rgb_component_ids(coeffs) {
-        // Markerless ASCII R/G/B streams are classified as RGB by libjpeg.
-        // jpegtran emits Adobe transform 0 when rewriting such coefficients;
-        // emitting JFIF here would instead make decoders treat them as YCbCr.
-        marker_writer::write_app14_adobe(output, 0);
     }
+}
+
+/// `jcopy_markers_execute` (`transupp.c:2487`) skips a saved JFIF APP0 when
+/// the encoder writes its own JFIF, and a saved Adobe APP14 when the encoder
+/// writes its own Adobe marker. Every other saved marker — including
+/// non-JFIF APP0 segments and Adobe markers the encoder does not replace —
+/// is copied verbatim.
+fn is_marker_replaced_by_header(marker: &SavedMarker, header: CoefficientHeaderMarkers) -> bool {
+    const APP0: u8 = 0xE0;
+    const APP14: u8 = 0xEE;
+    (header.jfif && marker.code == APP0 && marker.data.starts_with(b"JFIF\0"))
+        || (header.adobe_transform.is_some()
+            && marker.code == APP14
+            && marker.data.starts_with(b"Adobe"))
 }
 
 /// Per-component info extracted for re-encoding.
@@ -312,12 +396,14 @@ pub fn read_coefficients(data: &[u8]) -> Result<JpegCoefficients> {
         density_unit,
         x_density: density.x,
         y_density: density.y,
-        saw_jfif_marker: metadata.saw_jfif_marker,
-        adobe_transform: if metadata.saw_adobe_marker {
-            Some(metadata.adobe_transform)
-        } else {
-            None
-        },
+        // Classification inputs as of the first SOS, not the whole stream:
+        // `jpegtran` re-encodes with `srcinfo->jpeg_color_space`, which
+        // `default_decompress_parms` fixed at `JPEG_REACHED_SOS`; an Adobe
+        // APP14 that only appears between scans is copied as a marker but
+        // never changes the header (P4-181). Density above stays
+        // whole-stream, as `jpeg_copy_critical_parameters` reads it.
+        saw_jfif_marker: metadata.saw_jfif_marker_at_first_sos,
+        adobe_transform: metadata.adobe_transform_at_first_sos,
     })
 }
 
@@ -615,16 +701,14 @@ pub fn transform_jpeg(data: &[u8], op: TransformOp) -> Result<Vec<u8>> {
 /// no_output, progressive, arithmetic, optimize, and copy_markers.
 pub fn transform_jpeg_with_options(data: &[u8], options: &TransformOptions) -> Result<Vec<u8>> {
     // Read saved markers from the source based on copy_markers mode.
-    let saved_markers: Vec<SavedMarker> = match options.copy_markers {
+    let mut saved_markers: Vec<SavedMarker> = match options.copy_markers {
         crate::transform::MarkerCopyMode::All => {
             let mut reader: MarkerReader<'_> = MarkerReader::new(data);
             reader.set_marker_save_config(MarkerSaveConfig::All);
             let meta: JpegMetadata = reader.read_markers()?;
-            // Filter out JFIF APP0 since write_coefficients writes its own.
+            // JFIF/Adobe duplicates are dropped below, once the final
+            // coefficient set decides which header markers the writer emits.
             meta.saved_markers
-                .into_iter()
-                .filter(|m| m.code != 0xE0)
-                .collect()
         }
         crate::transform::MarkerCopyMode::IccOnly => {
             let mut reader: MarkerReader<'_> = MarkerReader::new(data);
@@ -1183,6 +1267,11 @@ pub fn transform_jpeg_with_options(data: &[u8], options: &TransformOptions) -> R
     // beyond the Annex K range (DC > 11, AC > 10).
     let force_optimize: bool =
         coeffs.effective_precision() > 8 || needs_optimized_baseline_huffman(&coeffs);
+    // The header markers depend on the *final* coefficient set (a
+    // `grayscale` request turns a JFIF+Adobe source into a JFIF-only
+    // output), so the `jcopy_markers_execute` duplicate rule runs here.
+    let header_markers: CoefficientHeaderMarkers = coefficient_header_markers(&coeffs);
+    saved_markers.retain(|marker| !is_marker_replaced_by_header(marker, header_markers));
     let output: Vec<u8> = if options.arithmetic && progressive_safe {
         write_coefficients_progressive_arithmetic(&coeffs, progressive_restart_rows)?
     } else if options.arithmetic {

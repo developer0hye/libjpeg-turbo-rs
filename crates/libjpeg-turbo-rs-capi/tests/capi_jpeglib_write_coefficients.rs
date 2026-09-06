@@ -722,10 +722,11 @@ fn write_coefficients_honors_progressive_mode() {
     );
 }
 
-/// Source Adobe APP14 (CMYK fixture with both JFIF and Adobe markers)
-/// must survive the transcode with its color-transform byte intact:
-/// the 4-component output drops JFIF (illegal on 4-comp) and emits an
-/// Adobe APP14 with the same transform byte the source declared.
+/// A CMYK fixture carrying both JFIF and Adobe markers must transcode the
+/// way `jpeg_copy_critical_parameters` + `jpeg_write_coefficients` do in
+/// C: the 4-component output drops JFIF (illegal on 4-comp) and emits a
+/// single Adobe APP14 whose transform byte comes from the CMYK
+/// classification — which equals the byte this source declared.
 #[test]
 fn write_coefficients_preserves_source_adobe_app14() {
     let lib = unsafe { libloading::Library::new(cdylib_path()) }.expect("dlopen");
@@ -835,15 +836,27 @@ fn write_coefficients_preserves_source_adobe_app14() {
         bytes
     };
 
-    // Output must contain Adobe APP14 with the source's transform byte.
-    let out_app14_pos: usize = transcoded
+    // Output must contain exactly one Adobe APP14 whose transform byte is
+    // the one `jpeg_set_colorspace(JCS_CMYK)` + `emit_adobe_app14` derive
+    // (0) — which, for this fixture, is also the byte the source declared.
+    // P4-181: the shim used to prepend its own Adobe segment on top of the
+    // one the core writer emits, so the output carried two.
+    let adobe_positions: Vec<usize> = transcoded
         .windows(9)
-        .position(|w| w[0] == 0xFF && w[1] == 0xEE && &w[4..9] == b"Adobe")
-        .expect("transcoded output must contain Adobe APP14");
-    let out_transform: u8 = transcoded[out_app14_pos + 15];
+        .enumerate()
+        .filter(|(_, w)| w[0] == 0xFF && w[1] == 0xEE && &w[4..9] == b"Adobe")
+        .map(|(pos, _)| pos)
+        .collect();
+    assert_eq!(
+        adobe_positions.len(),
+        1,
+        "transcoded output must contain exactly one Adobe APP14, found at {adobe_positions:?}"
+    );
+    let out_transform: u8 = transcoded[adobe_positions[0] + 15];
+    assert_eq!(src_transform, 0, "fixture is CMYK: Adobe transform 0");
     assert_eq!(
         out_transform, src_transform,
-        "Adobe color-transform byte must be preserved verbatim from the source"
+        "Adobe color-transform byte must be the classification-derived CMYK value"
     );
 
     // 4-component output: JFIF APP0 must be stripped (invalid on 4-comp).
