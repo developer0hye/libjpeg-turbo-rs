@@ -1,0 +1,171 @@
+name: Perf A/B (portable vs native, x86_64 encode)
+
+# P4-133 (#464): how much of the encoder's speed only a `target-cpu=native`
+# build reaches, measured instead of asserted.
+#
+# A system library is compiled once to the architecture baseline and has to
+# light up wider instruction sets at runtime, so the number that matters for
+# a packaged `libjpeg.so` is the *portable* build — plain `cargo build
+# --release`. README quoted native-build encode figures and carried "the last
+# few percent" for BMI2/FMA as an unmeasured claim. This job builds the same
+# encode matrix seven ways on one runner — portable, one compile-time feature
+# at a time, the README's recommended feature set, and native — and times each
+# against the C reference built from upstream's official package, so every
+# per-benchmark delta is a measurement from a single machine and a single hour.
+#
+# Manual only: the deltas being measured are a few percent, and a shared
+# runner's noise floor is of the same order. The job therefore runs the
+# portable binary twice, first and last, and reports that pair alongside the
+# variants — a variant inside the stock/stock spread is noise, not a win.
+# Record the outcome in experiments/encode.tsv per the keep/discard protocol.
+#
+# The C oracle here is a target, not an expectation: nothing is compared
+# byte-for-byte, so this job answers at current upstream stable only and is
+# recorded as such in tests/oracle_version_pins.rs (UNPAIRED_ORACLE_JOBS).
+
+on:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  perf-encode-x86_64:
+    name: Encode A/B (x86_64, oracle 3.2.0)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      LIBJPEG_TURBO_PREFIX: /opt/libjpeg-turbo
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install libjpeg-turbo 3.2.0 from official release
+        run: |
+          ARCH=$(dpkg --print-architecture)
+          VERSION=3.2.0
+          curl -fL -o /tmp/ljt320.deb \
+            "https://github.com/libjpeg-turbo/libjpeg-turbo/releases/download/${VERSION}/libjpeg-turbo-official_${VERSION}_${ARCH}.deb"
+          sudo apt-get install -y /tmp/ljt320.deb
+          echo "/opt/libjpeg-turbo/bin" >> $GITHUB_PATH
+      # Same shape as ci.yml's current-oracle leg: the release this job is
+      # named for has to be the release it times, and the C bench compiles
+      # against the prefix's headers and links its library, so those are
+      # checked too — the alternative is timing /usr's 2.1.x and calling it
+      # a 3.2.0 comparison.
+      - name: Verify the oracle really is 3.2.0
+        run: |
+          /opt/libjpeg-turbo/bin/djpeg -version 2>&1 | tee /tmp/oracle-version.txt
+          grep -q "version 3.2.0" /tmp/oracle-version.txt
+          /opt/libjpeg-turbo/bin/cjpeg -version 2>&1 | grep -q "version 3.2.0"
+          /opt/libjpeg-turbo/bin/jpegtran -version 2>&1 | grep -q "version 3.2.0"
+          test -f /opt/libjpeg-turbo/include/jpeglib.h
+          ls /opt/libjpeg-turbo/lib64/libjpeg.* /opt/libjpeg-turbo/lib/libjpeg.* \
+             2>/dev/null | grep -q .
+      # The CPU decides which variants can differ at all: a runner without
+      # FMA makes the `fma` column meaningless, and `target-cpu=native` means
+      # whatever this box is. Both go into the artifact next to the numbers.
+      - name: Record the runner
+        run: |
+          mkdir -p out
+          { lscpu; echo; rustc -vV; echo; cat /tmp/oracle-version.txt; } | tee out/runner.txt
+          grep -m1 '^flags' /proc/cpuinfo | tr ' ' '\n' \
+            | grep -Ex 'avx|avx2|avx512f|bmi1|bmi2|fma|abm|lzcnt|popcnt|sse4_2' \
+            | sort | tee out/cpu-flags.txt
+      - name: Build and time the C reference encoder
+        run: |
+          LIB=/opt/libjpeg-turbo/lib64
+          [ -d "$LIB" ] || LIB=/opt/libjpeg-turbo/lib
+          cc -O2 -o out/bench_c_encode_linux examples/bench_c_encode_linux.c \
+            -I/opt/libjpeg-turbo/include -L"$LIB" -ljpeg -Wl,-rpath,"$LIB"
+          ldd out/bench_c_encode_linux | grep libjpeg | tee -a out/runner.txt
+          ldd out/bench_c_encode_linux | grep -q /opt/libjpeg-turbo/
+          out/bench_c_encode_linux        | tee out/islow_C.txt
+          out/bench_c_encode_linux float  | tee out/float_C.txt
+      # One target directory per variant: RUSTFLAGS is part of cargo's
+      # fingerprint, but a shared directory would rebuild the world on every
+      # switch and make it impossible to tell afterwards which binary came
+      # from which flags. Each binary is copied out under its variant name.
+      - name: Build every Rust variant
+        run: |
+          mkdir -p out/bin
+          while IFS='|' read -r NAME FLAGS; do
+            echo "::group::build $NAME (RUSTFLAGS='$FLAGS')"
+            RUSTFLAGS="$FLAGS" CARGO_TARGET_DIR="/tmp/ab/$NAME" \
+              cargo build --release --example bench_encode_matrix
+            cp "/tmp/ab/$NAME/release/examples/bench_encode_matrix" "out/bin/$NAME"
+            echo "::endgroup::"
+          done <<'VARIANTS'
+          stock|
+          bmi1-lzcnt|-C target-feature=+bmi1,+lzcnt
+          bmi2|-C target-feature=+bmi2
+          fma|-C target-feature=+fma
+          v3-set|-C target-feature=+bmi1,+lzcnt,+bmi2,+fma
+          avx2|-C target-feature=+avx2
+          native|-C target-cpu=native
+          VARIANTS
+      # Sequential on purpose: two benchmarks at once share cache and memory
+      # bandwidth and neither number means anything. `stock` runs first and
+      # `stock-again` last so the run's own drift brackets the variants.
+      - name: Time the matrix, integer DCT (the default)
+        run: |
+          for NAME in stock bmi1-lzcnt bmi2 fma v3-set avx2 native; do
+            echo "::group::islow $NAME"
+            "out/bin/$NAME" | tee "out/islow_$NAME.txt"
+            echo "::endgroup::"
+          done
+          cp out/bin/stock out/bin/stock-again
+          echo "::group::islow stock-again"
+          out/bin/stock-again | tee out/islow_stock-again.txt
+          echo "::endgroup::"
+      # The float DCT is the one encode path with `mul_add` in it, so it is
+      # where FMA codegen can matter; the integer default never touches it.
+      - name: Time the matrix, float DCT
+        env:
+          BENCH_DCT_METHOD: float
+        run: |
+          for NAME in stock fma v3-set native stock-again; do
+            echo "::group::float $NAME"
+            "out/bin/$NAME" | tee "out/float_$NAME.txt"
+            echo "::endgroup::"
+          done
+      - name: Summarise
+        run: |
+          {
+            echo "## Integer DCT (islow) — µs, ratio to portable build, ratio to C 3.2.0"
+            echo
+            python3 scripts/perf_ab_summary.py --baseline stock --reference C \
+              stock=out/islow_stock.txt \
+              bmi1-lzcnt=out/islow_bmi1-lzcnt.txt \
+              bmi2=out/islow_bmi2.txt \
+              fma=out/islow_fma.txt \
+              v3-set=out/islow_v3-set.txt \
+              avx2=out/islow_avx2.txt \
+              native=out/islow_native.txt \
+              stock-again=out/islow_stock-again.txt \
+              C=out/islow_C.txt
+            echo
+            echo "## Float DCT — µs, ratio to portable build, ratio to C 3.2.0"
+            echo
+            python3 scripts/perf_ab_summary.py --baseline stock --reference C \
+              stock=out/float_stock.txt \
+              fma=out/float_fma.txt \
+              v3-set=out/float_v3-set.txt \
+              native=out/float_native.txt \
+              stock-again=out/float_stock-again.txt \
+              C=out/float_C.txt
+            echo
+            echo "## Runner"
+            echo
+            echo '```'
+            cat out/cpu-flags.txt
+            grep -E 'Model name|^rustc|version 3' out/runner.txt
+            echo '```'
+          } | tee out/summary.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: perf-portable-vs-native-x86_64
+          path: out/
+          if-no-files-found: error

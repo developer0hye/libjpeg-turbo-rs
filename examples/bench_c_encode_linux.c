@@ -7,7 +7,9 @@
  *      -Wl,-rpath,$CONDA_PREFIX/lib
  *
  * Run:
- *   ./bench_c_encode_linux
+ *   ./bench_c_encode_linux            # JDCT_ISLOW (the default)
+ *   ./bench_c_encode_linux float      # JDCT_FLOAT, pairs with BENCH_DCT_METHOD=float
+ *   ./bench_c_encode_linux ifast      # JDCT_IFAST
  */
 
 #include <stdio.h>
@@ -50,6 +52,8 @@ static unsigned char *read_jpeg(const char *path, int *out_w, int *out_h) {
 }
 
 /* Compress RGB pixels to JPEG in memory. Returns compressed size. */
+static J_DCT_METHOD dct_method = JDCT_ISLOW;
+
 static unsigned long compress_jpeg(const unsigned char *pixels, int w, int h,
                                    int quality, int h_samp, int v_samp,
                                    unsigned char **out_buf) {
@@ -67,6 +71,7 @@ static unsigned long compress_jpeg(const unsigned char *pixels, int w, int h,
     cinfo.in_color_space = JCS_RGB;
     jpeg_set_defaults(&cinfo);
     jpeg_set_quality(&cinfo, quality, TRUE);
+    cinfo.dct_method = dct_method;
 
     /* Set subsampling */
     cinfo.comp_info[0].h_samp_factor = h_samp;
@@ -104,7 +109,21 @@ typedef struct {
     int iters;
 } EncodeCase;
 
-int main(void) {
+int main(int argc, char **argv) {
+    const char *dct_label = "islow";
+    if (argc > 1) {
+        if (strcmp(argv[1], "islow") == 0) {
+            dct_method = JDCT_ISLOW;
+        } else if (strcmp(argv[1], "ifast") == 0) {
+            dct_method = JDCT_IFAST;
+        } else if (strcmp(argv[1], "float") == 0) {
+            dct_method = JDCT_FLOAT;
+        } else {
+            fprintf(stderr, "usage: %s [islow|ifast|float]\n", argv[0]);
+            return 2;
+        }
+        dct_label = argv[1];
+    }
     EncodeCase cases[] = {
         /* Resolution scaling (4:2:0) */
         {"tests/fixtures/photo_64x64_420.jpg",       2, 2, "420", 20000},
@@ -124,6 +143,7 @@ int main(void) {
     };
     int ncases = (int)(sizeof(cases) / sizeof(cases[0]));
 
+    printf("dct_method: %s\n", dct_label);
     printf("%-50s %10s %12s %8s\n", "Case", "Size", "Time", "Iters");
     for (int i = 0; i < 85; i++) putchar('-');
     putchar('\n');
