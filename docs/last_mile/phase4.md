@@ -322,7 +322,7 @@ exceeded. The budget is consulted by `jpeg_mem_available`
 
 And the constraint this item records — that we have no backing store, so true
 enforcement means reimplementing the spill path — **does not apply**:
-`references/libjpeg-turbo/CMakeLists.txt:678` compiles `src/jmemnobs.c`
+`references/libjpeg-turbo/CMakeLists.txt:687` compiles `src/jmemnobs.c`
 unconditionally. The library we are replacing has no backing store either. Our
 "all data in RAM, never spills" is not a divergence; it is the same design, and
 matching upstream is a ~60-line change in `realize_virt_arrays_impl` rather than
@@ -373,7 +373,7 @@ at `jpeg_start_decompress`.** `classic_budget_refuses_start`
 (`jpeglib.rs`) mirrors upstream's single enforcement point: the budget
 applies exactly when whole-image coefficient arrays would exist —
 `has_multiple_scans` (progressive *or* non-interleaved sequential,
-`jdinput.c:153-156`) or buffered-image mode (`jdmaster.c:709`) — and the
+`jdinput.c:153-156`) or buffered-image mode (`jdmaster.c:720`) — and the
 quantity weighed is **only** the coefficient-array bytes (summed from
 `coef_array_geometries`, upstream's `realize_virt_arrays` accounting),
 raising `JERR_NO_BACKING_STORE` (51) at start. The check sits before the
@@ -482,7 +482,7 @@ the `msg_parm` payload of `JERR_OUT_OF_MEMORY` was unproven) was closed
 > arrays to a backing store. Neither holds. The budget is consulted by
 > `jpeg_mem_available` and a shortfall raises **`JERR_NO_BACKING_STORE` (51)**;
 > upstream's shipped build has no backing store either
-> (`CMakeLists.txt:678` compiles `src/jmemnobs.c`). The live contract is the
+> (`CMakeLists.txt:687` compiles `src/jmemnobs.c`). The live contract is the
 > Status sections above (2026-08-11 vtable, 2026-08-13 decode sequence). Do
 > not implement to the text below.
 
@@ -1306,7 +1306,7 @@ The one non-obvious piece was the **scan script**. `jpeg_simple_progression` tak
 
 **Acceptance criteria.** Both `C Interop` legs report a non-zero test count; the job is validated by mechanism (a deliberately broken encoder byte-comparison must fail it) rather than by "it passed"; any aarch64 divergence the newly-live tests surface is filed before the filter fix merges.
 
-**Status (2026-07-28): closed.** The fix sketch above was itself falsified before merging: the corrected multi-filter form (`cargo test --tests -- cross_encode cross_check`) selects only **8 tests** on this workspace, because libtest filters match test *names*, and the tests inside `cross_check_*`/`cross_encode_*` files have names like `c_xval_decode_bgr_444` that contain neither substring. The job now runs the full unfiltered `cargo test --tests` on **macos-latest only** (timeout 15→30 min) — aarch64 + Homebrew jpeg-turbo 3.x, the one C-tool environment no other job covers. The former ubuntu leg is **removed**, not fixed: with apt's 2.1.x tools the unfiltered suite cannot run (codex review caught that e.g. `lossless_point_transform_matches_c_djpeg_exactly` feeds SOF3 to `djpeg` with no capability probe), and installing the official 3.1.4.1 deb would make the leg an exact environment+command duplicate of `Integration Tests` — the redundancy this entry's Impact paragraph already established. The "both legs non-zero" acceptance criterion is therefore satisfied in its intent (every remaining leg runs the full suite; no leg silently runs zero) rather than its letter. A comment in `ci.yml` pins the substring-vs-regex trap so a filter cannot quietly come back. **Mechanism-validated**, not validated-by-passing: with a deliberate encoder break (`FIX_0_299` 19595→20100 in `src/encode/color.rs`), `cargo test --test cross_check_encoder_binary` fails 3 of 4 byte-exact comparisons against `cjpeg`; reverted, green again. aarch64 + Homebrew first run: the full `--tests` suite was executed on a macOS aarch64 host with Homebrew jpeg-turbo before merging — no divergence surfaced, so nothing needed filing; the PR's own `C Interop (macos-latest)` leg is the first CI proof and must show a non-zero test count. **Amended 2026-08-18 by [P4-130](#p4-130-c-parity-oracle-is-pinned-to-3141-upstream-stable-is-320--partial-every-oracle-provisioning-job-is-now-pinned-checked-and-measured-two-jobs-still-on-one-release-the-submodule-bump-and-the-four-filed-gaps-remain):** the environment is still aarch64 macOS, but the oracle is no longer `brew install jpeg-turbo` — the leg builds 3.1.4.1 from source at `/tmp/ljt3141/prefix`, asserts it, and selects it with `LIBJPEG_TURBO_PREFIX`.
+**Status (2026-07-28): closed.** The fix sketch above was itself falsified before merging: the corrected multi-filter form (`cargo test --tests -- cross_encode cross_check`) selects only **8 tests** on this workspace, because libtest filters match test *names*, and the tests inside `cross_check_*`/`cross_encode_*` files have names like `c_xval_decode_bgr_444` that contain neither substring. The job now runs the full unfiltered `cargo test --tests` on **macos-latest only** (timeout 15→30 min) — aarch64 + Homebrew jpeg-turbo 3.x, the one C-tool environment no other job covers. The former ubuntu leg is **removed**, not fixed: with apt's 2.1.x tools the unfiltered suite cannot run (codex review caught that e.g. `lossless_point_transform_matches_c_djpeg_exactly` feeds SOF3 to `djpeg` with no capability probe), and installing the official 3.1.4.1 deb would make the leg an exact environment+command duplicate of `Integration Tests` — the redundancy this entry's Impact paragraph already established. The "both legs non-zero" acceptance criterion is therefore satisfied in its intent (every remaining leg runs the full suite; no leg silently runs zero) rather than its letter. A comment in `ci.yml` pins the substring-vs-regex trap so a filter cannot quietly come back. **Mechanism-validated**, not validated-by-passing: with a deliberate encoder break (`FIX_0_299` 19595→20100 in `src/encode/color.rs`), `cargo test --test cross_check_encoder_binary` fails 3 of 4 byte-exact comparisons against `cjpeg`; reverted, green again. aarch64 + Homebrew first run: the full `--tests` suite was executed on a macOS aarch64 host with Homebrew jpeg-turbo before merging — no divergence surfaced, so nothing needed filing; the PR's own `C Interop (macos-latest)` leg is the first CI proof and must show a non-zero test count. **Amended 2026-08-18 by [P4-130](#p4-130-c-parity-oracle-is-pinned-to-3141-upstream-stable-is-320--partial-every-oracle-provisioning-job-is-pinned-checked-and-measured-and-the-submodule-is-at-320-two-jobs-still-on-one-release-and-the-four-filed-gaps-remain):** the environment is still aarch64 macOS, but the oracle is no longer `brew install jpeg-turbo` — the leg builds 3.1.4.1 from source at `/tmp/ljt3141/prefix`, asserts it, and selects it with `LIBJPEG_TURBO_PREFIX`.
 
 ## P4-62. `cargo test --workspace` Does Not Build on windows-msvc — **CLOSED 2026-07-28**
 
@@ -2425,7 +2425,7 @@ subsampling/scaling/grayscale, invalid null/zero/out-of-bounds/after-read calls,
 returned x/width/output_width, component geometry, and subsequent row bytes.
 The 12-bit initialization/order portion remains in P4-98.
 
-**Extended 2026-08-17 by the [P4-130](#p4-130-c-parity-oracle-is-pinned-to-3141-upstream-stable-is-320--partial-every-oracle-provisioning-job-is-now-pinned-checked-and-measured-two-jobs-still-on-one-release-the-submodule-bump-and-the-four-filed-gaps-remain)
+**Extended 2026-08-17 by the [P4-130](#p4-130-c-parity-oracle-is-pinned-to-3141-upstream-stable-is-320--partial-every-oracle-provisioning-job-is-pinned-checked-and-measured-and-the-submodule-is-at-320-two-jobs-still-on-one-release-and-the-four-filed-gaps-remain)
 3.2 delta triage.** 3.2.0 note 3 hardened this entry point, and the delta is
 exactly one condition: 3.2.0 `src/jdapistd.c:203` reads
 `if (cinfo->master->lossless || cinfo->raw_data_out)` where 3.1.90 reads
@@ -2916,7 +2916,7 @@ tests use `/dev/full` plus a portable failing stream and require
 * `MemDestState` / `StdioDestState` mirror `my_mem_destination_mgr` /
   `my_destination_mgr`, so the two managers have **separate** callback sets.
   That separation is what makes upstream's identity check
-  (`init_destination != init_mem_destination`, jdatadst.c:204-212 / 252-257)
+  (`init_destination != init_mem_destination`, jdatadst.c:218-226 / 266-271)
   expressible; installing a memory destination over a foreign manager now
   raises `JERR_BUFFER_SIZE` instead of reinterpreting someone else's private
   area.
@@ -2926,9 +2926,9 @@ tests use `/dev/full` plus a portable failing stream and require
   this library allocated. A caller buffer is never passed to `free`.
 * `*outbuffer == NULL || *outsize == 0` allocates `OUTPUT_BUF_SIZE` inside
   `jpeg_mem_dest` and publishes it immediately, as upstream does
-  (jdatadst.c:267-273). The prior behaviour — leaving `*outbuffer` NULL until
+  (jdatadst.c:281-287). The prior behaviour — leaving `*outbuffer` NULL until
   the first flush — was pinned by a test that has been corrected.
-* `jpeg_mem_dest(cinfo, NULL, …)` raises `JERR_BUFFER_SIZE` (jdatadst.c:242-243)
+* `jpeg_mem_dest(cinfo, NULL, …)` raises `JERR_BUFFER_SIZE` (jdatadst.c:256-257)
   instead of silently installing no destination at all, which is what the shim
   previously did — a caller that passed a NULL out-parameter got a successful
   compress that wrote nowhere.
@@ -2975,7 +2975,7 @@ allocation — undefined behaviour that LLVM's `noalias` would be entitled to
 exploit by folding away the very `pending_error` read this fix depends on. The
 manager's private state now lives *inside* the manager (`OwnedDestMgr`,
 reachable only through `cinfo->dest`), which is both sound and what upstream
-does (`my_mem_destination_mgr`, jdatadst.c:43-53). The same re-derivation
+does (`my_mem_destination_mgr`, jdatadst.c:46-56). The same re-derivation
 pattern exists elsewhere in the shim and is not addressed here.
 
 ## P4-109. Classic Source-Manager Setup and Stdio Semantics Diverge — **CLOSED 2026-08-14**
@@ -3265,7 +3265,7 @@ transcription. The P4-145 oracle's `compress16_*` lines then no longer need
 `TJPARAM_LOSSLESS` to agree, which is the observable proof.
 
 **Root cause.** TurboJPEG imposes no precision rule of its own. It sets
-`cinfo->data_precision = 16` (`turbojpeg-mp.c:107`) and lets
+`cinfo->data_precision = 16` (`turbojpeg-mp.c:111`) and lets
 `jpeg_start_compress` decide, where `jcmaster.c:199-208` admits 2..=16 for a
 lossless compress and only 8 or 12 for a lossy one. Reading `turbojpeg-mp.c`
 alone — which is what the original port did — correctly concludes that
@@ -3279,7 +3279,7 @@ which is why the fix is pinned by an oracle rather than by assertions.
 `Unsupported JPEG data precision 16`, with no `function():` prefix, because an
 error raised inside libjpeg reaches `errStr` through `CATCH_LIBJPEG` verbatim.
 The gate is the lossless flag, not `TJPARAM_PRECISION`: that parameter is read
-only when the flag is set (`turbojpeg-mp.c:111-115`), so requesting 12 bits does
+only when the flag is set (`turbojpeg-mp.c:113-117`), so requesting 12 bits does
 not make a lossy 16-bit call legal — traced as `c16_lossy_prec12`.
 
 Verified by `crates/libjpeg-turbo-rs-capi/tests/capi_compress_precision.rs`
@@ -3291,9 +3291,9 @@ fix exactly two lines diverged (`c16_lossy`, `c16_lossy_prec12`), both
 
 **Where the refusal sits in the chain.** Review found that a gate placed
 naively last gets the *precedence* wrong. Upstream installs the destination
-before `jpeg_start_compress` (`turbojpeg-mp.c:118-120`), so a
+before `jpeg_start_compress` (`turbojpeg-mp.c:123-125`), so a
 `TJPARAM_NOREALLOC` slot that cannot be used at all — empty, or present with
-zero capacity — is refused by `jdatadst-tj.c:184-192` first, and the buffer
+zero capacity — is refused by `jdatadst-tj.c:198-206` first, and the buffer
 error wins. The rule is narrower than "destination before precision", though: a
 slot that is merely *too small* still reports the precision error, because its
 capacity is only tested when output overflows it, which never happens once the
@@ -3303,7 +3303,7 @@ ordering check removed exactly the first line flips, so a fix that checked the
 destination unconditionally would have been caught too.
 
 Review then found a *third* stage above both. `setCompDefaults` calls
-`jpeg_enable_lossless` before `jpeg_mem_dest_tj` (`turbojpeg-mp.c:117-120`), so
+`jpeg_enable_lossless` before `jpeg_mem_dest_tj` (`turbojpeg-mp.c:121-123`), so
 an out-of-range point transform beats the buffer error too: with
 `PRECISION=13`, `LOSSLESSPT=13`, `NOREALLOC` and an empty slot, TurboJPEG 3
 reports the lossless-parameter error. The port's Pt check had to move above the
@@ -3360,7 +3360,7 @@ at it were rejected in review. Legacy `dstSizes[i]` are **outputs**: a caller th
 its destinations with `tjTransformBufSize()` may leave them at zero. TJ3 reads
 the same slot as an input capacity, so under `TJFLAG_NOREALLOC` such a call now
 fails as "buffer too small". Upstream bridges it by filling a temporary array
-with each transformed image's worst case (`turbojpeg.c:3118-3132`).
+with each transformed image's worst case (`turbojpeg.c:3133-3147`).
 
 `tjCompress2`'s equivalent bridge *did* land with P4-145: there the geometry is
 in the parameters, so `tj3JPEGBufSize(width, height, subsamp)` is a direct
@@ -3399,7 +3399,7 @@ this description.
 **Status (2026-08-12): closed.** A legacy `tjTransform` with `TJFLAG_NOREALLOC`
 and `dstSizes[i] = 0` now transforms, filling a temporary capacity array from
 the transformed geometry and copying the produced sizes back, as upstream does
-(`turbojpeg.c:3118-3132`).
+(`turbojpeg.c:3133-3147`).
 
 Both rejected attempts were the acceptance criteria in disguise, and both
 constraints are met by construction rather than by care:
@@ -4412,9 +4412,10 @@ against a reference v8 build — `JERR_BUFFER_SIZE` and `JERR_FILE_WRITE` by
 `tests/capi_classic_lifecycle_pathological.rs`. `JERR_OUT_OF_MEMORY = 56` is
 asserted only by a source comment. A wrong constant would mis-report
 out-of-memory to every consumer with no test able to notice, and the same blind
-spot covers the `msg_parm` payload: upstream uses `ERREXIT1(…, 10)`, so the
-rendered message is `"Insufficient memory (case 10)"`, and only a test that
-formats the message can prove we match.
+spot covers the `msg_parm` payload: upstream used `ERREXIT1(…, 10)` on both
+paths at 3.1.90 — 3.2.0 renumbered the growth failure to 12 (P4-130) — so the
+rendered message is `"Insufficient memory (case 10)"` or `(case 12)`, and only
+a test that formats the message can prove we match.
 
 **Root cause.** The shim's allocation failures all funnel through
 `crate::alloc::libc_malloc`, which calls libc `malloc` directly. There is no
@@ -4446,8 +4447,9 @@ failure countdown armed only by `fail_nth_allocation_for_tests` (not
 `extern "C"`, not exported from the cdylib; one thread-local read on the
 production path). `capi_alloc_failure_injection.rs` forces both
 previously-unreachable `jpeg_mem_dest` OOM paths — the empty-slot initial
-allocation (`jdatadst.c:271`) and the doubling growth (`:132`) — and asserts
-code 56 **with** `msg_parm.i[0] == 10`, the `ERREXIT1` payload this item
+allocation (`jdatadst.c:285`) and the doubling growth (`:146`) — and asserts
+code 56 **with** `msg_parm.i[0] == 10` for the initial allocation and `== 12`
+for the growth since the 3.2.0 bump, the `ERREXIT1` payload this item
 called unproven; the growth path's `pending_error` was widened to carry the
 parm through the deferred flush. A disarmed-hook control test pins that the
 injection, not the sequence, causes the failures. No C oracle exists for
@@ -4470,7 +4472,7 @@ tall**. A 27-row image therefore contains zero whole iMCU rows, and
 transform outright.
 
 Upstream has no such error path. `trim_right_edge` and `trim_bottom_edge`
-(transupp.c:1570-1592) each open with `if (MCU_cols > 0 && …)` /
+(transupp.c:1576-1598) each open with `if (MCU_cols > 0 && …)` /
 `if (MCU_rows > 0 && …)`: an axis holding less than one whole iMCU is simply
 left untrimmed. Measured against stock `jpegtran -trim` on exactly this input:
 
@@ -4478,7 +4480,7 @@ left untrimmed. Measured against stock `jpegtran -trim` on exactly this input:
 | --- | --- | --- |
 | hflip | 32x27 | width 35 → 32; height not trimmed by this op |
 | vflip | **35x27** | height 27 holds no whole iMCU — guard fires |
-| transpose | 27x35 | transpose never trims (transupp.c:1873) |
+| transpose | 27x35 | transpose never trims (transupp.c:1879) |
 | rot90 | **27x35** | output width comes from source height — guard fires |
 | rot180 | 32x27 | width trims; height guarded |
 | rot270 | 27x32 | output height comes from source width → 32 |
@@ -4708,14 +4710,14 @@ wrote a whole extra plane past the caller's allocation:
 
 **Root cause.** A missing upstream guard, not a novel defect. Upstream
 libjpeg-turbo rejects these frames in `tj3DecompressToYUVPlanes8`
-(`references/libjpeg-turbo/src/turbojpeg.c:2229-2230`):
+(`references/libjpeg-turbo/src/turbojpeg.c:2238-2239`):
 
 ```c
   if (dinfo->num_components > 3)
     THROW("JPEG image must have 3 or fewer components");
 ```
 
-Upstream's `tj3DecompressToYUV8` (`turbojpeg.c:2383`) builds a 3-entry
+Upstream's `tj3DecompressToYUV8` (`turbojpeg.c:2394`) builds a 3-entry
 `dstPlanes[3]`/`strides[3]` and inherits that guard by *delegating* to
 `tj3DecompressToYUVPlanes8`, so upstream needs only one guard site. **This port
 does not delegate** — both entry points call `decompress_to_yuv_planes`
@@ -4843,9 +4845,9 @@ mis-sized one. Criteria 2 and 5 are done.
 **Motivation.** Filed 2026-08-08 while closing P4-125, which ported the
 first-layer defence but left upstream's second layer unported in the root-crate
 plane-size helpers. Upstream defends the YUV plane model twice: `tj3YUVBufSize`
-(`references/libjpeg-turbo/src/turbojpeg.c:1029`, line 1038) fixes
+(`references/libjpeg-turbo/src/turbojpeg.c:1031`, line 1040) fixes
 `nc = (subsamp == TJSAMP_GRAY ? 1 : 3)`, and `tj3YUVPlaneWidth` /
-`tj3YUVPlaneHeight` (`turbojpeg.c:1115`, lines 1124-1125) additionally reject an
+`tj3YUVPlaneHeight` (`turbojpeg.c:1118`, lines 1127-1128) additionally reject an
 out-of-range component with `THROWG("Invalid argument", 0)`:
 
 ```c
@@ -4910,10 +4912,10 @@ reviewable.
 before `decompress_to_yuv_planes`, which resolves all three consequences:
 
 1. `TJPARAM_MAXPIXELS` bounds them, enforced at header time as upstream does
-   (`turbojpeg.c:2219-2222`) rather than left to a decode that may never run.
-2. `align` is validated at function entry (`turbojpeg.c:2395-2397`), so it
+   (`turbojpeg.c:2228-2231`) rather than left to a decode that may never run.
+2. `align` is validated at function entry (`turbojpeg.c:2406-2408`), so it
    outranks the component guard again, matching C's precedence.
-3. `dstPlanes[0..n]` are NULL-checked up front (`turbojpeg.c:2226-2227`), so a
+3. `dstPlanes[0..n]` are NULL-checked up front (`turbojpeg.c:2235-2236`), so a
    rejected call leaves every caller buffer untouched instead of writing planes
    0 and 1 before noticing a NULL plane 2.
 
@@ -4936,7 +4938,7 @@ upstream's `num_components > 3` rejection correctly, but placed it at the only
 point the current structure allows: *after* `decompress_to_yuv_planes` has
 already decoded the whole frame and allocated every plane. Upstream validates
 the same frame from the header, before any decompression
-(`references/libjpeg-turbo/src/turbojpeg.c:2214-2230`):
+(`references/libjpeg-turbo/src/turbojpeg.c:2223-2239`):
 
 ```c
     jpeg_read_header(dinfo, TRUE);          /* header only */
@@ -4960,7 +4962,7 @@ here. Any check that upstream performs between "header parsed" and "decode
 begins" therefore has nowhere to live in this port.
 
 1. **`TJPARAM_MAXPIXELS` is not enforced on these two entry points.** Upstream
-   checks it at `turbojpeg.c:2219-2222`, *before* the component guard. The
+   checks it at `turbojpeg.c:2228-2231`, *before* the component guard. The
    handle stores the value (`src/api/tj3.rs:697-699` maps it into `Limits`, and
    `src/common/types.rs:441` enforces it "before any plane allocation"), but
    that plumbing is bypassed: `Decoder::new` uses `Limits::default`. A caller
@@ -4968,14 +4970,14 @@ begins" therefore has nowhere to live in this port.
    unbounded — the 2,147,483,647-pixel default still applies — but not the
    caller's bound either.
 2. **Error precedence diverges for `align`.** Upstream rejects a bad `align` at
-   function entry (`turbojpeg.c:2395-2397`, `"Invalid argument"`). Ours only
+   function entry (`turbojpeg.c:2406-2408`, `"Invalid argument"`). Ours only
    discovers it inside `pack_yuv_planes` (`yuv.rs:627`), which the P4-125 guard
    now precedes, so `tj3DecompressToYUV8(h, cmyk, .., align = 0)` reports
    `"must have 3 or fewer components"` where C reports `"Invalid argument"`.
    Both return -1, which is why `yuv_four_component_c_parity` cannot see it: it
    compares accept-vs-reject, not message or precedence.
 3. **Partial writes on a NULL plane pointer.** Upstream checks `dstPlanes[1]`
-   and `dstPlanes[2]` up front (`turbojpeg.c:2226-2227`) and writes nothing on
+   and `dstPlanes[2]` up front (`turbojpeg.c:2235-2236`) and writes nothing on
    failure. Ours checks each pointer inside the copy loop (`yuv.rs:677`), so a
    NULL `dstPlanes[2]` returns -1 only after planes 0 and 1 have been written
    into caller memory.
@@ -5020,7 +5022,7 @@ The new matrix uses 100 deliberately.
 **The defect.** `crates/libjpeg-turbo-rs-capi/src/bufsize.rs` padded with
 `pad_up(width, mcuw)` — the MCU width in *pixels* (8/16/32) — where C pads with
 `PAD(width, tjMCUWidth[subsamp] / 8)` — the horizontal subsampling ratio
-(1/2/2/4) (`references/libjpeg-turbo/src/turbojpeg.c:1127`, and :1150 for
+(1/2/2/4) (`references/libjpeg-turbo/src/turbojpeg.c:1130`, and :1164 for
 height). That is 8x too coarse, so every plane whose dimension was not already
 MCU-aligned came back over-sized: `tj3YUVPlaneWidth(0, 100, TJSAMP_411)`
 returned 128 where C returns 100, and `TJSAMP_444` returned 104 where C returns
@@ -5118,7 +5120,7 @@ prevent, and it undermines any claim that the shipped surface is audited.
 
 **Status (2026-08-09): closed.** Landed in #486; `crates/libjpeg-turbo-rs-capi/build.rs` now routes the 16 `jpeg_capi_test_*` accessors to a `LIBJPEGTURBORS_PRIVATE_1.0` node via an exact-name list, and `tests/soname.rs` asserts no `jpeg_capi_test_*` symbol carries `LIBJPEG_8.0`.
 
-## P4-130. C-Parity Oracle Is Pinned to 3.1.4.1; Upstream Stable Is 3.2.0 — **PARTIAL: every oracle-provisioning job is now pinned, checked and measured; two jobs still on one release, the submodule bump and the four filed gaps remain**
+## P4-130. C-Parity Oracle Is Pinned to 3.1.4.1; Upstream Stable Is 3.2.0 — **PARTIAL: every oracle-provisioning job is pinned, checked and measured and the submodule is at 3.2.0; two jobs still on one release and the four filed gaps remain**
 
 **GitHub:** [#461](https://github.com/developer0hye/libjpeg-turbo-rs/issues/461) — under the [#470](https://github.com/developer0hye/libjpeg-turbo-rs/issues/470) umbrella.
 
@@ -5259,9 +5261,10 @@ wrote it. Second, the two v8 source builds — `/tmp/ljt8/prefix` from the
 submodule and `/tmp/ljt320v8/prefix` from the 3.2.0 clone — now assert their
 own releases, which is also what makes a submodule bump come through a workflow
 line rather than re-baselining the classic-ABI trace oracles silently. Verified
-by removing each check in turn: dropping the 3.1.90 assertion turns the four
-steps that select that prefix red, dropping `test-cross-encode`'s job-level
-prefix turns its `cargo test` step red as a macOS lookup-order step, and
+by removing each check in turn: dropping the submodule-release assertion
+(3.1.90 at the time) turns the four steps that select that prefix red,
+dropping `test-cross-encode`'s job-level prefix turns its `cargo test` step
+red as a macOS lookup-order step, and
 pointing one `test-integration` step at `/opt/homebrew` turns exactly that step
 red. The step parser had the same bug in miniature and is pinned against it: it
 read the step indent off the first `- ` line in the job, which in a matrix job
@@ -5546,10 +5549,10 @@ it.
 
 *The oracle the write-up missed.* Writing the manifest surfaced that this
 repository was **already running two upstream versions, undocumented**:
-`references/libjpeg-turbo` is pinned at **3.1.90 (3.2 beta1)**, not 3.1.4.1, so
+`references/libjpeg-turbo` was pinned at **3.1.90 (3.2 beta1)**, not 3.1.4.1, so
 the classic-ABI trace oracles built from it (`/tmp/ljt8/prefix`, `WITH_JPEG8=1`)
-and every `j*.c:NNN` citation in this repository already quote the 3.2 line
-while the tool oracles quote 3.1.4.1. `docs/oracle_versions.tsv` records the
+and every `j*.c:NNN` citation in this repository already quoted the 3.2 line
+while the tool oracles quoted 3.1.4.1. `docs/oracle_versions.tsv` records the
 split and `tests/oracle_version_pins.rs` cross-checks that row against the
 submodule's own `CMakeLists.txt`, so it cannot drift again.
 
@@ -5590,6 +5593,11 @@ was filed with:
 | beta1-7 | TurboJPEG Java API moved to its own repository | **Non-goal.** No Java binding is in scope here. |
 | beta1-11 | `-nooverwrite` in cjpeg/djpeg/jpegtran | **Non-goal.** Pure CLI file handling in upstream's application code; we ship a library and link *stock* tools against it, so the option is upstream's to implement and ours to inherit. |
 | 3.2.0-1 | Arm64EC Windows build regression fixed | **Non-goal.** An upstream build-system fix with no behavioural surface. |
+| unlisted — `abf0f592`, `25b62127` | TurboJPEG rejects `pitch < width × pixel size` on every pitch-taking entry point and `stride < plane width` on every planar one | **New — [P4-184](#p4-184-turbojpeg-320-rejects-a-pitch-narrower-than-a-row-and-a-stride-narrower-than-a-plane-the-1216-bit-and-planar-entry-points-here-do-not--open).** Not in the release notes; found in the commit log between the tags during the submodule bump (2026-09-07). The 8-bit packed paths already reject a narrow pitch, in their own words; the 12/16-bit paths check only `pitch < 0` and no planar stride is checked at all. |
+| unlisted — `94d5ff43`, `8ed15736`, `94201557`, `ab4c3a8f` | `tj3JPEGBufSize` / `TJBUFSIZE` / `tj3YUVBufSize` / `tj3*YUV8` integer overflow with large dimensions | **Met.** The shim computes these with checked arithmetic (`crates/libjpeg-turbo-rs-capi/src/bufsize.rs`), and 3.2.0's `tjunittest.c` `overflowTest` — the submodule's copy since the bump, compiled against the shim by `tjunittest_link` — passes with its new 65536×65536 and 1 Gi cases. |
+| unlisted — `4453e227` | `jdmaster.c` rejects an output data precision that differs from the JPEG's, except 8-bit lossy decoded to 12-bit | **Tracked — [P4-171](#p4-171-8-bit-lossy-jpeg-cannot-be-decompressed-to-12-bit-output-32-beta1-note-8--open).** The guard is the other half of beta1 note 8: it names the one mismatch upstream allows, which is the one P4-171 records the shim refusing. |
+| unlisted — `df05c3ca`, `6defa8c3` | `jdatadst.c` and `jdatadst-tj.c` `JERR_OUT_OF_MEMORY` case 10 → 12 for the growth failure; new case 13 for a doubling that would overflow `size_t` | **Closed with the bump for the classic destination** — see the sixth milestone: `jpeg_mem_dest`'s growth arm mirrors both numbers, case 12 test first and case 13 unreachable to any injection. The `jdatadst-tj.c` half is **not** mirrored: the TurboJPEG compress entry points report an allocation failure as `"tj3Compress8: out-of-memory"` and never carried a case number, before or after the bump — a pre-existing message divergence filed as [P4-185](#p4-185-turbojpeg-memory-destination-allocation-failure-reports-a-bespoke-string-instead-of-libjpegs-jerr_out_of_memory-message--open). |
+| unlisted — `96c5446c`, `ed00e0f4`, `d49b16ad`, `01d607bd` | CMake `CPU_TYPE` from the generator platform; libspng drops libm; `indexedcolortest.in`'s md5cmp path; Windows CI | **Non-goal.** Build-system and test-script changes inside the submodule. `c_indexedcolortest.rs` reads the `.in` file's cases, not its md5cmp path, and passes on the new copy. |
 
 *Criterion 1, the cross-arch backends — and pairing as a property of the job
 (2026-08-18).* The three legs in `cross-arch.yml` are now paired:
@@ -5934,6 +5942,46 @@ test says so with a fixture that would distinguish subtraction. A flow list
 wrapped across lines is the one spelling left unmodelled, filed under P4-177.
 `oracle_version_pins` stands at **58**.
 
+**Sixth milestone (2026-09-07) — the submodule bump.** `references/libjpeg-turbo`
+moved from 3.1.90 (3.2 beta1) to the 3.2.0 tag: 23 upstream commits over 17
+files, of which the cited sources are `jdapistd.c`, `jdatadst.c`,
+`jdatadst-tj.c`, `jdmaster.c`, `transupp.c`, `turbojpeg.c`, `turbojpeg-mp.c`,
+`tjunittest.c` and `CMakeLists.txt`. Every `file:NNN` / `file:NNN-MMM` citation in the
+repository was remapped from the tag's `-U0` diff — 207 citations in 38 files:
+186 `file:NNN` tokens, every one re-checked by a script carrying the two tags'
+hunk map, and 21 shorthand `` `:NNN` `` tokens the script cannot attribute to a
+file, each remapped by hand and read against the 3.2.0 tree — with the anchors
+that were already off at 3.1.90 moved to the line they meant rather than
+shifted. The manifest's `submodule`
+row now says 3.2.0; `the_submodule_row_matches_the_checked_out_submodule` was
+red the moment the submodule moved and green once the row followed, which is
+the whole point of that cross-check. `ci.yml`'s `/tmp/ljt8` build asserts the
+new release, and its `-current-oracle` twin keeps building the tagged clone
+beside it: the trace pair names one release today and two again the week
+upstream ships, and the two rows stay separate because they move for different
+reasons (`docs/oracle_versions.tsv` says which).
+
+The bump surfaced one behaviour delta the 3.2.0 tool legs could not see,
+because no C oracle can be made to fail `malloc` on cue: 3.2.0 renumbered
+`empty_mem_output_buffer`'s allocation failure from `JERR_OUT_OF_MEMORY` case
+10 to case 12 (`jdatadst.c:146`) and added case 13 for a doubling that would
+overflow `size_t` (`jdatadst.c:140-141`). The shim mirrored beta1's case 10 on
+both arms. `capi_alloc_failure_injection` was moved to 12 first (red), then the
+shim (green); the overflow arm now carries 13, untested because no injection
+can stage a buffer already past `SIZE_MAX / 2`. `jdapistd.c:203`'s
+`raw_data_out` condition — the one delta the triage had already tied to P4-103
+— is now in the cited tree, so that entry's acceptance line cites the checkout
+rather than a release ahead of it. Measured on macOS aarch64 with the
+submodule built `WITH_JPEG8=1` at `/tmp/ljt8/prefix` (asserting `version 3.2.0`
+and `JPEG_LIB_VERSION 80`), the C-ABI leg's exact command — `cargo test -p
+libjpeg-turbo-rs-capi --tests --features png --no-fail-fast` — is **77
+sections, 335 passed, 0 failed, 0 ignored, 0 SKIP**, including the suites that
+compile the submodule's own sources against the shim (`tjunittest_link`,
+`abi_offsets`, `capi_stock_tool_link`); the root matrix at the 3.2.0 tool
+oracle, `cargo test --tests --no-fail-fast`, is **223 sections, 2410 passed,
+0 failed, 4 ignored**, the same four `--include-ignored` timing assertions as
+before. `oracle_version_pins` stands at **58**.
+
 **What remains.**
 
 1. The four filed gaps (P4-171..P4-174) are triaged, not fixed.
@@ -5956,18 +6004,14 @@ wrapped across lines is the one spelling left unmodelled, filed under P4-177.
    *second* leg, so a 3.2.0 divergence in the differential fuzz targets is still
    unmeasured. Pairing the fuzz leg is a
    question of runner cost rather than of mechanism.
-3. `references/libjpeg-turbo` stays at 3.1.90. Bumping it to 3.2.0 moves every
-   `j*.c:NNN` citation in this repository and re-baselines the classic-ABI
-   trace oracles at the same time, which is its own change with its own
-   drift audit — not a line in this one.
-4. Retiring the 3.1.4.1 leg is deliberately **not** scheduled: it is the
+3. Retiring the 3.1.4.1 leg is deliberately **not** scheduled: it is the
    behaviour-regression half of the pair, and it retires only when its
    expectations are known to hold on the newer leg.
 
 ## P4-180. The Differential Fuzz Targets Resolve Their C Oracle by a Fixed Path List, and Skip the Comparison When It Misses — **OPEN**
 
 **GitHub:** [#579](https://github.com/developer0hye/libjpeg-turbo-rs/issues/579) — prerequisite for
-[P4-130](#p4-130-c-parity-oracle-is-pinned-to-3141-upstream-stable-is-320--partial-every-oracle-provisioning-job-is-now-pinned-checked-and-measured-two-jobs-still-on-one-release-the-submodule-bump-and-the-four-filed-gaps-remain)'s
+[P4-130](#p4-130-c-parity-oracle-is-pinned-to-3141-upstream-stable-is-320--partial-every-oracle-provisioning-job-is-pinned-checked-and-measured-and-the-submodule-is-at-320-two-jobs-still-on-one-release-and-the-four-filed-gaps-remain)'s
 remaining pairing of `fuzz-smoke.yml`.
 
 **Motivation.** Filed 2026-08-25 while pairing `ci.yml`'s `test-corpus` with a
@@ -7425,9 +7469,9 @@ an infallible constructor and so needs an API decision (panic, or a fallible
   Adoption was not behaviour-neutral, and the three caller-visible changes are
   pinned by `crates/libjpeg-turbo-rs-capi/tests/capi_layout_adoption.rs`:
   `tj3SaveImage8` now refuses a negative `pitch` instead of reading it as
-  "dense" (`turbojpeg-mp.c:511-513`), `tj3LoadImage8` requires `align` to be a
+  "dense" (`turbojpeg-mp.c:515-517`), `tj3LoadImage8` requires `align` to be a
   positive power of two instead of clamping with `align.max(1)`
-  (`turbojpeg-mp.c:317-321`), and `tj3Compress12`/`tj3Compress16` bound their
+  (`turbojpeg-mp.c:321-325`), and `tj3Compress12`/`tj3Compress16` bound their
   source span in *bytes*, putting the ×2 element size inside the checked chain
   where `from_raw_parts`' precondition needs it.
 * **Criterion 4 — `ScalingFactor`. Decision recorded: do it, in 0.9.0, as
@@ -7980,7 +8024,7 @@ pointee unconditionally, even when the caller's buffer was large enough.
 *does* read the flag, but its in-place path ignored `*jpeg_size` — the input
 capacity — and `copy_nonoverlapping`'d the encoded output on the assumption the
 buffer was at least `tj3JPEGBufSize(...)`. Upstream instead raises
-`JERR_BUFFER_SIZE` (`jdatadst-tj.c:92`), so a caller doing exactly what upstream
+`JERR_BUFFER_SIZE` (`jdatadst-tj.c:95`), so a caller doing exactly what upstream
 permits — a smaller buffer, its size declared — got a heap overflow.
 Fixed 2026-08-11 under P4-137: the capacity is now compared before the copy.
 `norealloc_buffer_capacity.rs` pins both directions, and removing the check
@@ -8037,7 +8081,7 @@ only when the flag is unset.
 
 **Review found the first version got a case wrong that no self-consistent test
 could have caught.** With the flag set and the output slot **NULL**, it
-allocated. Upstream refuses: `jdatadst-tj.c:184-192` takes the
+allocated. Upstream refuses: `jdatadst-tj.c:198-206` takes the
 `*outbuffer == NULL` branch and, with `alloc` false, raises `JERR_BUFFER_SIZE`.
 The flag is a request *not to allocate*, so honouring it half-way — refusing to
 grow a buffer but conjuring one when none was given — is the one behaviour no
@@ -8077,8 +8121,8 @@ Two further paths, also from review:
   has no reason to write `*jpegSize`, so forwarding it to TJ3 — where the same
   field *is* an input capacity — turned a valid call into "buffer too small".
   Upstream substitutes the worst case instead: `tj3JPEGBufSize(...)` in
-  `tjCompress2` (`turbojpeg.c:1282-1284`) and a per-image temporary array in
-  `tjTransform` (`turbojpeg.c:3118-3132`). **Only the `tjCompress2` adapter is
+  `tjCompress2` (`turbojpeg.c:1285-1287`) and a per-image temporary array in
+  `tjTransform` (`turbojpeg.c:3133-3147`). **Only the `tjCompress2` adapter is
   ported** — see the next point for why the transform one is not. The
   distinguishing input is `size = 0`, which the first legacy test could not
   catch because it passed a real capacity.
@@ -8096,14 +8140,14 @@ Two further paths, also from review:
   call through a local `size_t` hid a NULL `jpegSize` from `tj3Compress8`,
   turning a call upstream rejects into a success that allocated a buffer whose
   size the caller could never learn. Both now validate first
-  (`turbojpeg.c:1274-1280`).
+  (`turbojpeg.c:1277-1283`).
 
 Four review rounds produced five defects *in the fix*, every one on the legacy
 wrappers rather than the TJ3 entry points the item named. The pattern is worth
 keeping: adapting an API whose field *semantics* differ — output slot versus
 input capacity — is where the errors were, not in the ownership rule itself.
 - **`TJXOPT_NOOUTPUT` needs no destination.** Upstream skips destination setup
-  entirely for it (`turbojpeg.c:3007`), so a NULL slot succeeds and a non-NULL
+  entirely for it (`turbojpeg.c:3022`), so a NULL slot succeeds and a non-NULL
   slot is left alone. Delivery now returns early for that option instead of
   demanding a buffer for output that was never produced.
 
@@ -8358,7 +8402,7 @@ Upstream's full order for a compress entry point is
 2. `TJPARAM_QUALITY must be specified` (lossy only)
 3. `TJPARAM_SUBSAMP must be specified` (lossy only)
 4. destination setup — `Buffer passed to JPEG library is too small` under
-   `TJPARAM_NOREALLOC` with a NULL or zero-capacity slot (`jdatadst-tj.c:184-192`)
+   `TJPARAM_NOREALLOC` with a NULL or zero-capacity slot (`jdatadst-tj.c:198-206`)
 5. `jpeg_start_compress` — e.g. `Unsupported JPEG data precision 16`
    (`jcmaster.c:199-208`)
 
@@ -8391,9 +8435,9 @@ gates are ported at both layers: the TJ3 entry points refuse with upstream's
 message shape after argument validation — the lossy compress entries skip
 them under `TJPARAM_LOSSLESS` (`turbojpeg-mp.c:95-98`), the YUV compress
 entries gate quality unconditionally — `tj3CompressFromYUVPlanes8`
-quality-then-subsampling (`turbojpeg.c:1347-1350`), while the packed
+quality-then-subsampling (`turbojpeg.c:1350-1353`), while the packed
 `tj3CompressFromYUV8` gates the subsampling itself first, because it needs it
-to size the planes (`:1497-1498`), and reaches the quality gate only through
+to size the planes (`:1502-1503`), and reaches the quality gate only through
 the delegate — and the YUV encode/decode entries need only the
 subsampling, with *unset* distinguished from *out-of-range* — and the native
 `TjHandle` compress methods carry the same refusal as a backstop for Rust
@@ -8414,10 +8458,10 @@ The #539 review round (adversarial, standing in for the quota-blocked codex
 pass) reordered three gates the first version got wrong, each measured
 against stock TurboJPEG 3.1.4.1 before and after: packed `tj3CompressFromYUV8`
 gates the subsampling in the entry itself — it needs it to size the planes
-(`turbojpeg.c:1497-1498`) — and reaches the quality gate only through the
+(`turbojpeg.c:1502-1503`) — and reaches the quality gate only through the
 `…Planes8` delegate; and the packed `tj3EncodeYUV8` / `tj3DecodeYUV8`
 wrappers gate the subsampling *before* the pixel-format range check, which
-upstream performs in the delegates (`:1745-1750`, `:2721-2726`). The packed
+upstream performs in the delegates (`:1754-1759`, `:2736-2741`). The packed
 entries also now validate `align` (power of two) in argument validation,
 where it beats every gate. The discriminating oracle lines use an
 out-of-range pixel format on purpose — a valid-format line passes with the
@@ -8449,10 +8493,10 @@ path we should not have produced 5619.
 
 **Root cause in upstream, which parity must mimic.** Upstream's marker copying
 is gated by `jcopy_markers_setup(dinfo, saveMarkers)` — registration that must
-run *before* the header is parsed (`turbojpeg.c:2976-2979`, default
+run *before* the header is parsed (`turbojpeg.c:2991-2994`, default
 `saveMarkers = 2` = `JCOPYOPT_ALL`). The legacy NOREALLOC wrapper, uniquely,
 pre-reads the header to derive per-transform capacities
-(`turbojpeg.c:3112-3134`) — so when `tj3Transform` later calls
+(`turbojpeg.c:3127-3149`) — so when `tj3Transform` later calls
 `jcopy_markers_setup` and finds `global_state > DSTATE_INHEADER`, the guarded
 re-read is skipped, nothing was registered, and `jcopy_markers_execute` copies
 *no* markers at all (not just ICC: COM and every APPn die too). On the other
@@ -8763,7 +8807,7 @@ suites — today `tests/yuv.rs` has none.
 
 **Status (2026-08-14): closed.** The plane count now travels separately
 from the geometry. `plane_count_from_tj` in `yuv.rs` is upstream's
-`nc = (subsamp == TJSAMP_GRAY ? 1 : 3)` (`turbojpeg.c:1038`) built on the
+`nc = (subsamp == TJSAMP_GRAY ? 1 : 3)` (`turbojpeg.c:1040`) built on the
 *same* `bufsize::is_gray` predicate `tj3YUVBufSize` sizes by, so the two
 cannot drift; `packed_yuv_len` and `split_packed_yuv` take it as a
 parameter, `pack_yuv_planes` packs exactly the planes it is handed, and
@@ -8884,8 +8928,8 @@ control against the pre-P4-165 call path, which fails identically):
    `api::raw_data::compress_raw` rejects them for being larger than the
    image. Upstream handles the same mismatch by copying rows into
    MCU-sized scratch and replicating the last sample
-   (`turbojpeg.c:1372-1423`, the `usetmpbuf` path — detected at `:1376`,
-   copied and replicated at `:1412-1423`). Only 4:4:4 and
+   (`turbojpeg.c:1375-1428`, the `usetmpbuf` path — detected at `:1381`,
+   copied and replicated at `:1417-1428`). Only 4:4:4 and
    already-aligned geometries work today; a caller doing
    `tj3DecompressToYUV8` → `tj3CompressFromYUV8` on any odd-sized 4:2:0
    image gets a hard failure where stock round-trips.
@@ -9112,7 +9156,7 @@ change with its own oracle traces.
 
 ## P4-171. 8-Bit Lossy JPEG Cannot Be Decompressed to 12-Bit Output (3.2 beta1 note 8) — **OPEN**
 
-**GitHub:** [#561](https://github.com/developer0hye/libjpeg-turbo-rs/issues/561) — filed 2026-08-17 by the [P4-130](#p4-130-c-parity-oracle-is-pinned-to-3141-upstream-stable-is-320--partial-every-oracle-provisioning-job-is-now-pinned-checked-and-measured-two-jobs-still-on-one-release-the-submodule-bump-and-the-four-filed-gaps-remain) 3.2 delta triage.
+**GitHub:** [#561](https://github.com/developer0hye/libjpeg-turbo-rs/issues/561) — filed 2026-08-17 by the [P4-130](#p4-130-c-parity-oracle-is-pinned-to-3141-upstream-stable-is-320--partial-every-oracle-provisioning-job-is-pinned-checked-and-measured-and-the-submodule-is-at-320-two-jobs-still-on-one-release-and-the-four-filed-gaps-remain) 3.2 delta triage.
 
 **Motivation.** 3.2 beta1 note 8 added a capability, not a fix: an 8-bit-per-sample
 *lossy* JPEG can now be decompressed to a 12-bit-per-sample output image, to
@@ -9401,7 +9445,7 @@ change.
 ## P4-177. The Workflow Scanner Does Not Model Heredocs, Folded Scalars or Quoted Substitution Syntax — **PARTIAL: folded scalars are modelled; heredocs and quote/escape state remain**
 
 **GitHub:** [#572](https://github.com/developer0hye/libjpeg-turbo-rs/issues/572) — filed 2026-08-18 from the sixth codex round on the
-[P4-130](#p4-130-c-parity-oracle-is-pinned-to-3141-upstream-stable-is-320--partial-every-oracle-provisioning-job-is-now-pinned-checked-and-measured-two-jobs-still-on-one-release-the-submodule-bump-and-the-four-filed-gaps-remain)
+[P4-130](#p4-130-c-parity-oracle-is-pinned-to-3141-upstream-stable-is-320--partial-every-oracle-provisioning-job-is-pinned-checked-and-measured-and-the-submodule-is-at-320-two-jobs-still-on-one-release-and-the-four-filed-gaps-remain)
 per-job pin-and-name gates.
 
 **Motivation.** `tests/oracle_version_pins.rs` decides which workflow steps
@@ -9576,7 +9620,7 @@ picks a bound.
 
 **Root cause.** The source is a 16x16 4:2:0 progressive JPEG whose only scan is DC-first, followed by a stray DHT, six APP0 segments (none carrying a `JFIF\0` identifier), two Exif APP1 segments and nine APP14 segments — five of them identified as `Adobe`, the last of those carrying transform byte 255. Two things about it matter to libjpeg: the leading APP0's identifier is `JFIF\x02`, not `JFIF\0`, so `examine_app0` (`jdmarker.c:606`) never sets `saw_JFIF_marker`; and every Adobe marker sits *after* the first SOS, so at `jpeg_read_header` time `default_decompress_parms` (`jdapimin.c:137`) sees no marker at all and classifies the stream as YCbCr from component IDs 1/2/3. `jpegtran` then re-encodes through `jpeg_copy_critical_parameters` (`jctrans.c:71`) → `jpeg_set_colorspace(JCS_YCbCr)` (`jcparam.c:333`) → `write_file_header` (`jcmarker.c:475`): a JFIF APP0, no Adobe marker, and — under `-copy all` — every saved APP segment copied verbatim, including the non-JFIF APP0s and all nine APP14 segments.
 
-`write_coefficient_colorspace_marker` in `src/api/coefficient.rs` did something else: it re-emitted `JpegCoefficients::adobe_transform` *verbatim* as a synthesized Adobe APP14 whenever the source had one, and wrote JFIF only when the source had a `JFIF\0` marker or had neither an Adobe marker nor `R`/`G`/`B` component IDs. So the transcode carried `Adobe … transform=255` and no JFIF, and every libjpeg consumer that opens it warns. The verbatim rule (introduced by `abcfb1a`/`0b83648` to keep RGB-vs-YCbCr classification stable across a transcode) had three further consequences the fuzz target never reached: a JFIF+Adobe source transcoded under `-copy all` came out with **two** Adobe segments (one synthesized, one copied); `MarkerCopyMode::All` dropped **every** APP0 from the copied set where `jcopy_markers_execute` (`transupp.c:2487`) drops only a `JFIF\0` duplicate of the header the encoder wrote; and the capi's `jpeg_write_coefficients` prepended a second Adobe segment to 4-component outputs on top of the one the core writer had started emitting.
+`write_coefficient_colorspace_marker` in `src/api/coefficient.rs` did something else: it re-emitted `JpegCoefficients::adobe_transform` *verbatim* as a synthesized Adobe APP14 whenever the source had one, and wrote JFIF only when the source had a `JFIF\0` marker or had neither an Adobe marker nor `R`/`G`/`B` component IDs. So the transcode carried `Adobe … transform=255` and no JFIF, and every libjpeg consumer that opens it warns. The verbatim rule (introduced by `abcfb1a`/`0b83648` to keep RGB-vs-YCbCr classification stable across a transcode) had three further consequences the fuzz target never reached: a JFIF+Adobe source transcoded under `-copy all` came out with **two** Adobe segments (one synthesized, one copied); `MarkerCopyMode::All` dropped **every** APP0 from the copied set where `jcopy_markers_execute` (`transupp.c:2493`) drops only a `JFIF\0` duplicate of the header the encoder wrote; and the capi's `jpeg_write_coefficients` prepended a second Adobe segment to 4-component outputs on top of the one the core writer had started emitting.
 
 **Fix.** The marker reader now snapshots the JFIF/Adobe state at the first SOS (`JpegMetadata::saw_jfif_marker_at_first_sos` / `adobe_transform_at_first_sos`), because libjpeg classifies exactly once — `jpeg_consume_input` calls `default_decompress_parms` at `JPEG_REACHED_SOS` — while `examine_app0`/`examine_app14` keep updating `saw_*` between scans without ever re-classifying; both the decoder's `detect_color_space` and `read_coefficients` read the snapshot (a whole-stream reading would have turned this seed's post-SOS Adobe marker into an RGB header had its byte been 0, and decoded it without the YCbCr conversion djpeg applies — caught in review). `classify_coefficient_colorspace` ports `default_decompress_parms` (JFIF outranks Adobe; Adobe 0 = RGB/CMYK, 2 = YCCK, anything else = YCbCr/YCCK with libjpeg's "assume" fallback; `R`/`G`/`B` IDs = RGB), and `coefficient_header_markers` ports `jpeg_set_colorspace` + `write_file_header` (JFIF for grayscale/YCbCr, Adobe 0 for RGB/CMYK, Adobe 2 for YCCK, transform byte derived from the output colorspace per `jcmarker.c:423-429`). `transform_jpeg_with_options` keeps every saved APP/COM segment and applies `jcopy_markers_execute`'s two duplicate rules against the header the *final* coefficient set produces (a `grayscale` request changes it); `inject_saved_markers` places copied markers after the writer's own JFIF/Adobe header, where `jpegtran` puts them. The capi shim drops its `swap_jfif_for_adobe_app14` / `inject_adobe_app14_after_jfif` post-processing and instead feeds the core writer `write_JFIF_header` / `write_Adobe_marker` / `jpeg_color_space` for foreign coefficient arrays. The fuzz target's panic now carries djpeg's exit status and stderr.
 
@@ -9609,7 +9653,7 @@ picks a bound.
 ## P4-183. Example-Target Unit Tests Never Run in CI Because No Workflow Selects That Target Kind — **OPEN**
 
 **GitHub:** [#586](https://github.com/developer0hye/libjpeg-turbo-rs/issues/586) — found 2026-08-25 while pairing `ci.yml`'s `test-corpus` with a 3.2.0 oracle for
-[P4-130](#p4-130-c-parity-oracle-is-pinned-to-3141-upstream-stable-is-320--partial-every-oracle-provisioning-job-is-now-pinned-checked-and-measured-two-jobs-still-on-one-release-the-submodule-bump-and-the-four-filed-gaps-remain).
+[P4-130](#p4-130-c-parity-oracle-is-pinned-to-3141-upstream-stable-is-320--partial-every-oracle-provisioning-job-is-pinned-checked-and-measured-and-the-submodule-is-at-320-two-jobs-still-on-one-release-and-the-four-filed-gaps-remain).
 
 **Motivation.** `examples/corpus_test.rs` and `examples/generate_corpus.rs` each
 carry a `#[cfg(test)] mod tests` — the corpus harness's own discovery, copy,
@@ -9647,3 +9691,88 @@ two unrelated mechanisms behind one review. Nothing regresses today — the corp
 harness is validated end to end by the paired `test-corpus` legs, whose `cjpeg`
 failure path was exercised with a stand-in tool — but the unit tests that pin
 the harness's own helpers have never run under CI.
+
+## P4-184. TurboJPEG 3.2.0 Rejects a Pitch Narrower Than a Row and a Stride Narrower Than a Plane; the 12/16-bit and Planar Entry Points Here Do Not — **OPEN**
+
+**GitHub:** [#590](https://github.com/developer0hye/libjpeg-turbo-rs/issues/590) — from the
+[P4-130](#p4-130-c-parity-oracle-is-pinned-to-3141-upstream-stable-is-320--partial-every-oracle-provisioning-job-is-pinned-checked-and-measured-and-the-submodule-is-at-320-two-jobs-still-on-one-release-and-the-four-filed-gaps-remain) submodule bump.
+
+**Motivation.** Filed 2026-09-07 while moving `references/libjpeg-turbo` from
+3.1.90 to 3.2.0. Two upstream commits between the tags — `abf0f592` ("TJ:
+Don't allow pitch < (width * pixel size)") and `25b62127` ("TJ: Don't allow
+stride < plane width") — appear in no release note, so the P4-130 triage, which
+read the notes, could not have seen them; they turned up in the commit log the
+bump had to read. At 3.2.0 every TurboJPEG entry point that takes a `pitch`
+throws `"Invalid argument"` when a non-zero pitch is narrower than one row, and
+every planar entry point does the same for a non-zero stride narrower than its
+plane: `turbojpeg-mp.c:101` (`tj3Compress*`), `:230` (`tj3Decompress*`), `:592`
+(`tj3SaveImage*`); `turbojpeg.c:1603` and `:1676` (`tj3EncodeYUVPlanes8`,
+pitch then strides), `:1377` (`tj3CompressFromYUVPlanes8`), `:2254`
+(`tj3DecompressToYUVPlanes8`), `:2595` and `:2654` (`tj3DecodeYUVPlanes8`).
+Before 3.2.0 these read past the end of the caller's rows.
+
+The shim is partway there and says so differently. `tj3Compress8`
+(`compress.rs:128`), `tj3Decompress8` (`decompress.rs:137`) and the packed
+`tj3EncodeYUV*` / `tj3DecodeYUV*` paths (`yuv.rs:201`, `:1192`, `:1321`) return
+-1 for a narrow pitch, but each with its own message
+(`"pitch N smaller than width*bpp (M)"` on the two packed-pixel entries,
+`"bad pitch"` and `"pitch too small"` on the YUV ones), so `tj3GetErrorStr`
+diverges on the one path both sides reject. `tj3Compress12/16` and
+`tj3Decompress12/16` (`precision.rs:183`, `:390`, `:520`, `:770`) check only
+`pitch < 0` and read a narrow positive pitch as if the rows were tight. No
+planar stride is validated against its plane width (`yuv.rs:511` leaves it to
+the caller). `tj3SaveImage*` is unmeasured. None of the 3.2.0 legs sees any of
+this: the differential suites pass valid pitches and strides, so a leg labelled
+3.2.0 is green either way.
+
+**Acceptance criteria.**
+
+1. Each entry point named above returns -1 with `tj3GetErrorStr` reading
+   exactly `"Invalid argument"` for a non-zero pitch narrower than a row and,
+   on the planar paths, for a non-zero stride narrower than the plane — while
+   still accepting 0 and any value at or above the row or plane width.
+2. Measured by a differential test per entry point against `libturbojpeg` at
+   `LIBJPEG_TURBO_PREFIX`. The 3.2.0 oracle is where the contract *must*
+   hold; on the 3.1.4.1 leg the same test records the older behaviour rather
+   than asserting ours.
+3. The shim's existing narrow-pitch rejections adopt upstream's wording, so the
+   message matches on both legs.
+
+**Why deferred.** The bump is a citation and oracle move and was kept to that;
+a validation change across nine entry points wants its own review and its own
+differential tests, and nothing regresses meanwhile — the paths that accepted a
+narrow pitch before the bump accept one after it, and the 3.2.0 legs never
+sent one.
+
+## P4-185. TurboJPEG Memory-Destination Allocation Failure Reports a Bespoke String Instead of libjpeg's `JERR_OUT_OF_MEMORY` Message — **OPEN**
+
+**GitHub:** [#592](https://github.com/developer0hye/libjpeg-turbo-rs/issues/592) — found 2026-09-07 by the
+[P4-130](#p4-130-c-parity-oracle-is-pinned-to-3141-upstream-stable-is-320--partial-every-oracle-provisioning-job-is-pinned-checked-and-measured-and-the-submodule-is-at-320-two-jobs-still-on-one-release-and-the-four-filed-gaps-remain)
+submodule bump's drift audit.
+
+**Motivation.** Upstream's TurboJPEG memory destination (`jdatadst-tj.c`)
+raises `JERR_OUT_OF_MEMORY` with an `ERREXIT1` case number when the output
+buffer cannot grow — since 3.2.0, case 12 for a failed doubling
+(`jdatadst-tj.c:113`) and case 13 for a doubling that would overflow `size_t`
+(`:108`); case 10 for both before. A libjpeg error reaches `tj3GetErrorStr`
+verbatim through `CATCH_LIBJPEG`, so a caller sees
+`Insufficient memory (case 12)`. The shim's `tj3Compress8/12/16` encode into a
+Rust buffer and report an allocation failure as `"tj3Compress8: out-of-memory"`
+(`crates/libjpeg-turbo-rs-capi/src/compress.rs:299`, `precision.rs:352`,
+`:732`) through `OutputDelivery::OutOfMemory` (`alloc.rs`). The classic
+`jpeg_mem_dest` path was renumbered with the bump; this path never carried a
+case number at all, so nothing regressed — but the 3.2 delta table's
+`jdatadst*.c` row is true of the classic destination only, and says so.
+
+**Acceptance criteria.**
+
+1. The TurboJPEG compress and transform entry points report an output-buffer
+   allocation failure with libjpeg's `JERR_OUT_OF_MEMORY` text and 3.2.0's
+   case number (12 growth, 13 overflow), matching what `tj3GetErrorStr`
+   returns upstream.
+2. Pinned by an allocation-failure injection test in the P4-120 style: the C
+   side cannot be made to fail `malloc` on cue, so the contract is read from
+   `jdatadst-tj.c` and pinned rather than measured differentially.
+
+**Why deferred.** Reachable only under allocator failure, visible to no
+differential leg, and the divergence pre-dates the bump.

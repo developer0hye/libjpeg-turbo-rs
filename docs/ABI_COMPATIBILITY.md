@@ -6,7 +6,7 @@
 
 ## Why this document exists
 
-Upstream libjpeg-turbo's CMake build supports three `JPEG_LIB_VERSION` settings (`references/libjpeg-turbo/CMakeLists.txt:264-384`):
+Upstream libjpeg-turbo's CMake build supports three `JPEG_LIB_VERSION` settings (`references/libjpeg-turbo/CMakeLists.txt:273-393`):
 
 | `WITH_JPEG7` | `WITH_JPEG8` | `JPEG_LIB_VERSION` | Default SONAME (Linux) | Notes                             |
 |--------------|--------------|--------------------|------------------------|-----------------------------------|
