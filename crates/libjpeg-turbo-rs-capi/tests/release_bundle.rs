@@ -9,9 +9,9 @@
 //! artifact a packager downloads is the artifact the downstream harnesses
 //! test. A second, quietly divergent path inside the packaging script would
 //! satisfy every "the tarball has a `libjpeg.so.8` in it" check ever written,
-//! which is why the last test here compares the bundle against a direct
-//! `install_capi.sh` run file by file rather than against a list of expected
-//! names.
+//! which is why `release_bundle_is_exactly_what_install_capi_sh_stages`
+//! compares the bundle against a direct `install_capi.sh` run file by file
+//! rather than against a list of expected names.
 //!
 //! Covered:
 //!
@@ -25,10 +25,15 @@
 //!    directory it was downloaded into — the manifest names the bare archive,
 //!    not a build-machine path.
 //! 4. The bundle contents equal a direct `install_capi.sh` staging run.
+//! 5. `--sbom` writes a checksummed CycloneDX SBOM of the capi crate beside
+//!    the archive, and `release.yml` attests both archive and SBOM in the job
+//!    that built them and attaches them (P4-131 criterion 4 — see the section
+//!    banner further down).
 //!
 //! Skip-with-reason cases mirror `install_layout.rs`: Windows (the scripts are
 //! bash, and a Windows bundle is still open under P4-131), and hosts without
-//! `bash` or `tar`.
+//! `bash` or `tar`; the SBOM test also skips without `cargo-cyclonedx`. The
+//! three workflow-shape tests read YAML only and run everywhere.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -687,14 +692,45 @@ fn have_cargo_cyclonedx() -> bool {
         .unwrap_or(false)
 }
 
+fn root_manifest() -> String {
+    std::fs::read_to_string(workspace_root().join("Cargo.toml")).expect("read root Cargo.toml")
+}
+
+/// The root crate's version, read from its `[package]` table specifically: a
+/// `version =` in some other table above it must not retarget the assertion.
 fn root_crate_version() -> String {
-    let manifest: String =
-        std::fs::read_to_string(workspace_root().join("Cargo.toml")).expect("read root Cargo.toml");
-    manifest
+    root_manifest()
         .lines()
+        .skip_while(|line| line.trim() != "[package]")
+        .skip(1)
+        .take_while(|line| !line.starts_with('['))
         .find_map(|line| line.strip_prefix("version = "))
         .map(|v| v.trim().trim_matches('"').to_string())
-        .expect("root Cargo.toml declares a version")
+        .expect("root Cargo.toml declares a version under [package]")
+}
+
+/// Every workspace member's directory, from the root manifest's `members`
+/// list — so a crate added later is checked for stray SBOMs without anyone
+/// remembering to extend a hard-coded list here.
+fn workspace_member_dirs() -> Vec<PathBuf> {
+    let manifest: String = root_manifest();
+    let members: &str = manifest
+        .split_once("members = [")
+        .map(|(_, rest)| rest)
+        .and_then(|rest| rest.split_once(']'))
+        .map(|(list, _)| list)
+        .expect("root Cargo.toml declares workspace members");
+    let dirs: Vec<PathBuf> = members
+        .split(',')
+        .map(|m| m.trim().trim_matches('"'))
+        .filter(|m| !m.is_empty())
+        .map(|m| workspace_root().join(m))
+        .collect();
+    assert!(
+        dirs.len() >= 2,
+        "expected several workspace members, parsed {dirs:?}"
+    );
+    dirs
 }
 
 /// The Sigstore bundle, once verified, only proves what the SBOM *said* at
@@ -758,15 +794,11 @@ fn release_bundle_ships_a_cyclonedx_sbom_beside_the_archive() {
     // cargo-cyclonedx writes one document per workspace member. Only the capi
     // crate's belongs in the bundle, and none may be left in the source tree
     // where the next `cargo publish --allow-dirty` would ship it.
-    let strays: Vec<PathBuf> = [
-        "",
-        "crates/libjpeg-turbo-rs-capi",
-        "crates/libjpeg-turbo-rs-image",
-    ]
-    .iter()
-    .map(|dir| root.join(dir).join(&sbom_name))
-    .filter(|p| p.exists())
-    .collect();
+    let strays: Vec<PathBuf> = workspace_member_dirs()
+        .into_iter()
+        .map(|dir| dir.join(&sbom_name))
+        .filter(|p| p.exists())
+        .collect();
     assert!(
         strays.is_empty(),
         "the SBOM generator left documents in the source tree: {strays:?}"
@@ -797,18 +829,28 @@ fn release_bundle_ships_a_cyclonedx_sbom_beside_the_archive() {
     );
 }
 
+/// A workflow file's text with line endings normalised. The Windows leg of
+/// `capi-abi-checks` checks out with `core.autocrlf`, so the file on disk is
+/// CRLF there; every anchor below is written against `\n`.
+fn workflow_text(name: &str) -> String {
+    std::fs::read_to_string(workspace_root().join(".github/workflows").join(name))
+        .unwrap_or_else(|e| panic!("read {name}: {e}"))
+        .replace("\r\n", "\n")
+}
+
 /// Reads `.github/workflows/release.yml` and returns the text of one job:
 /// from its key to the next top-level job key.
 fn release_workflow_job(job: &str) -> String {
-    let workflow: String =
-        std::fs::read_to_string(workspace_root().join(".github/workflows/release.yml"))
-            .expect("read release.yml");
-    let header: String = format!("  {job}:\n");
+    let workflow: String = workflow_text("release.yml");
+    // Anchored to a line start, so a deeper-indented `job:` (a step id, a
+    // matrix key) cannot match first.
+    let header: String = format!("\n  {job}:\n");
     let start: usize = workflow
         .find(&header)
         .unwrap_or_else(|| panic!("release.yml has no `{job}` job"));
     let rest: &str = &workflow[start + header.len()..];
-    // The next job: a line indented exactly two spaces that names a key.
+    // The next job: a line indented exactly two spaces that names a key and
+    // is not a comment.
     let end: usize = rest
         .lines()
         .scan(0usize, |offset, line| {
@@ -817,11 +859,20 @@ fn release_workflow_job(job: &str) -> String {
             Some((at, line))
         })
         .find(|(_, line)| {
-            line.starts_with("  ") && !line.starts_with("   ") && line.trim_end().ends_with(':')
+            line.starts_with("  ")
+                && !line.starts_with("   ")
+                && !line.trim_start().starts_with('#')
+                && line.trim_end().ends_with(':')
         })
         .map(|(at, _)| at)
         .unwrap_or(rest.len());
     rest[..end].to_string()
+}
+
+/// Whether a step block carries its own `if:` key — at the step's key
+/// indentation, so a comment mentioning `if:` does not count.
+fn step_is_conditional(step: &str) -> bool {
+    step.lines().any(|line| line.starts_with("        if:"))
 }
 
 /// The steps of a job's text, each as its own block.
@@ -874,7 +925,7 @@ fn release_workflow_attests_provenance_and_sbom_in_the_bundle_job() {
              packaged into dist/:\n{step}"
         );
         assert!(
-            !step.contains("if:"),
+            !step_is_conditional(step),
             "the {what} attestation is conditional, so a dispatch rehearsal \
              would not exercise it:\n{step}"
         );
@@ -904,19 +955,32 @@ fn release_workflow_attests_provenance_and_sbom_in_the_bundle_job() {
 #[test]
 fn release_workflow_attaches_the_sbom_and_sigstore_bundles() {
     let job: String = release_workflow_job("github-release");
-    for glob in [
-        "dist/*.cdx.json",
-        "dist/*.cdx.json.sha256",
-        "dist/*.sigstore.json",
-    ] {
-        let mentions: usize = job.matches(glob).count();
-        // Twice: `gh release create` for a new release and `gh release
-        // upload` for a release someone drafted by hand.
-        assert!(
-            mentions >= 2,
-            "github-release names `{glob}` {mentions} time(s); both the create \
-             and the upload path must attach it:\n{job}"
-        );
+    // Two paths attach files: `gh release create` for a new release and `gh
+    // release upload` for one somebody drafted by hand. Each is one shell
+    // command continued over several lines; join the continuations so the
+    // globs are whole tokens, and match tokens rather than substrings —
+    // `dist/*.cdx.json` is a prefix of `dist/*.cdx.json.sha256`, and a
+    // substring count would stay satisfied with the SBOM itself removed.
+    let joined: String = job.replace("\\\n", " ");
+    for command in ["gh release create", "gh release upload"] {
+        let line: &str = joined
+            .lines()
+            .find(|l| l.contains(command))
+            .unwrap_or_else(|| panic!("github-release has no `{command}` command:\n{job}"));
+        let tokens: Vec<&str> = line.split_whitespace().collect();
+        for glob in [
+            "dist/*.tar.gz",
+            "dist/*.tar.gz.sha256",
+            "dist/*.cdx.json",
+            "dist/*.cdx.json.sha256",
+            "dist/*.sigstore.json",
+            "dist/SHA256SUMS",
+        ] {
+            assert!(
+                tokens.contains(&glob),
+                "`{command}` does not attach `{glob}`:\n{line}"
+            );
+        }
     }
     assert!(
         job.contains("./*.cdx.json.sha256"),
@@ -931,11 +995,9 @@ fn release_workflow_attaches_the_sbom_and_sigstore_bundles() {
 /// nothing about the release.
 #[test]
 fn sbom_generator_is_pinned_to_one_version_across_workflows() {
-    let root: PathBuf = workspace_root();
     let mut pins: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for name in ["ci.yml", "release.yml"] {
-        let text: String = std::fs::read_to_string(root.join(".github/workflows").join(name))
-            .unwrap_or_else(|e| panic!("read {name}: {e}"));
+        let text: String = workflow_text(name);
         for line in text
             .lines()
             .filter(|l| l.contains("cargo install cargo-cyclonedx"))

@@ -386,7 +386,16 @@ jobs:
           set -o pipefail
           bash scripts/package_capi_release.sh \
             --outdir dist --target ${{ matrix.target }} --build --sbom 2>&1 | tee package.log
-          stem="$(basename dist/*.tar.gz .tar.gz)"
+          # Exactly one archive: the attest steps name it by this stem, and
+          # an unmatched or doubled glob must fail here, not as a wrong
+          # `sbom-path` two steps later.
+          shopt -s nullglob
+          archives=(dist/*.tar.gz)
+          if [ "${#archives[@]}" -ne 1 ]; then
+            echo "::error::expected exactly one archive in dist/, found ${#archives[@]}: ${archives[*]}"
+            exit 1
+          fi
+          stem="$(basename "${archives[0]}" .tar.gz)"
           echo "stem=${stem}" >> "$GITHUB_OUTPUT"
       # The GNU symbol-version nodes come from a relink that also degrades to
       # a warning when its prerequisites are missing (P4-81). A published
@@ -463,7 +472,7 @@ jobs:
       # which is also what that bundle's own BUNDLE.txt tells them to run.
       # The SBOMs are attached artifacts too, so the manifest covers them; the
       # Sigstore bundles are not listed, because they are the signatures over
-      # everything else and verify on their own.
+      # the archive and its SBOM and verify on their own.
       #
       # `set -euo pipefail` and `failglob` because GitHub's default shell is
       # `bash -e` with no pipefail: an unmatched glob would otherwise pass the
@@ -482,6 +491,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
         run: |
+          # `failglob` for the same reason as the manifest step above: an
+          # unmatched attach glob must fail the job, not reach `gh` as a
+          # literal.
+          set -euo pipefail
+          shopt -s failglob
           # A pre-existing release keeps its notes — but it must still get
           # the binaries, or the P4-131 download links silently go missing
           # for exactly the releases someone drafted by hand.

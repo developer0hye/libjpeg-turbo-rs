@@ -110,6 +110,9 @@ ARCHIVE="${BUNDLE}.tar.gz"
 # unwritable `--outdir` costs a shell error rather than a full release build.
 mkdir -p "$OUTDIR"
 OUTDIR="$(cd "$OUTDIR" && pwd)"
+# And the root, so paths derived from it compare against absolute ones
+# (the SBOM cleanup below excludes the output directory by identity).
+ROOT="$(cd "$ROOT" && pwd)"
 
 # The names the bundle carries. Recorded in BUNDLE.txt rather than assumed by
 # the reader: `install_capi.sh` takes a `--soname` override, and a bundle whose
@@ -222,12 +225,16 @@ release: SHA256SUMS covers every bundle in it, the .sha256 covers this one.
 
   sha256sum -c ${ARCHIVE}.sha256      # macOS: shasum -a 256 -c
 
-A checksum proves the bytes arrived intact, not where they came from. A
-release also attests each archive with Sigstore build provenance and a
-CycloneDX SBOM (${BUNDLE}.cdx.json), signed by the release workflow's
-identity; verify either with the GitHub CLI:
+A checksum proves the bytes arrived intact, not where they came from. An
+archive attached to a GitHub release is also attested — Sigstore build
+provenance, and a CycloneDX SBOM attached beside it as ${BUNDLE}.cdx.json —
+signed by the release workflow's own identity. Verify with the GitHub CLI,
+pinning the workflow and the tag you downloaded from (a rehearsal build of
+the same workflow from a branch is attested too, and names that branch):
 
-  gh attestation verify ${ARCHIVE} --repo developer0hye/libjpeg-turbo-rs
+  gh attestation verify ${ARCHIVE} --repo developer0hye/libjpeg-turbo-rs \\
+      --signer-workflow developer0hye/libjpeg-turbo-rs/.github/workflows/release.yml \\
+      --source-ref refs/tags/<release tag>
   gh attestation verify ${ARCHIVE} --repo developer0hye/libjpeg-turbo-rs \\
       --predicate-type https://cyclonedx.org/bom
 
@@ -280,7 +287,10 @@ if [[ "$DO_SBOM" -eq 1 ]]; then
         --target "$TARGET" \
         --override-filename "${BUNDLE}.cdx" -q)
     mv "$ROOT/crates/libjpeg-turbo-rs-capi/${SBOM}" "$OUTDIR/$SBOM"
-    find "$ROOT" -maxdepth 3 -name "$SBOM" -not -path "$OUTDIR/*" -delete
+    # `-samefile` rather than a path comparison: the one just moved into
+    # `--outdir` is excluded by identity, so a relative `--root` or an
+    # `--outdir` inside the tree cannot delete it or spare the strays.
+    find "$ROOT" -maxdepth 3 -name "$SBOM" ! -samefile "$OUTDIR/$SBOM" -delete
     write_checksum "$SBOM"
     PRODUCED+=("${OUTDIR}/${SBOM}" "${OUTDIR}/${SBOM}.sha256")
 fi

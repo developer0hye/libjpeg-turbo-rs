@@ -917,7 +917,7 @@ jobs:
       # without it that test skips with a reason and the release's SBOM step
       # is exercised only by a dispatch rehearsal. Same pin as release.yml —
       # `sbom_generator_is_pinned_to_one_version_across_workflows` holds the
-      # two together. Not on Windows, where the bundle suite skips anyway.
+      # two together. Not on Windows, where the SBOM test skips anyway.
       - name: Install the SBOM generator (P4-131)
         if: runner.os != 'Windows'
         run: cargo install cargo-cyclonedx --locked --version 0.5.9
