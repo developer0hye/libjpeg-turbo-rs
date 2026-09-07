@@ -207,14 +207,21 @@ while true; do
   # the same issue.
   #
   # The phrase test alone is still a heuristic over prose, so it is gated on
-  # the harness's own verdict: a run whose JSON envelope says
-  # `"subtype":"success"` completed, whatever its summary mentions. On
-  # 2026-09-07 an agent that had merged its pull request wrote that *codex*
-  # was unavailable "because of a usage limit", and the older, unguarded
-  # pattern parked the loop for an hour and re-queued the finished issue.
+  # the harness's own verdict. That verdict is `is_error`, not `subtype`: a
+  # limit hit comes back as `"subtype":"success","is_error":true,
+  # "terminal_reason":"api_error"` with the message in `result`, so keying
+  # on `subtype` (as this guard first did) would have hidden every real
+  # limit. A run whose envelope says `"is_error":false` completed, whatever
+  # its summary mentions — on 2026-09-07 an agent that had merged its pull
+  # request wrote that *codex* was unavailable "because of a usage limit",
+  # and the older, unguarded pattern parked the loop for an hour and
+  # re-queued the finished issue. Later that day three runs died in ninety
+  # seconds on "You've hit your session limit · resets 11:30pm", a wording
+  # none of the phrases matched, so the loop counted them as failures,
+  # mislabelled an issue and tripped its own circuit breaker.
   run_succeeded=0
-  grep -q '"subtype":"success"' "$log" && run_succeeded=1
-  if (( ! run_succeeded )) && tail -c 4000 "$log" | grep -qiE "usage limit reached|reached your .{0,40} limit|/usage-credits"; then
+  grep -q '"is_error":false' "$log" && run_succeeded=1
+  if (( ! run_succeeded )) && tail -c 4000 "$log" | grep -qiE "usage limit|session limit|(hit|reached) your .{0,40}limit|/usage-credits"; then
     processed=$((processed - 1))
     echo "usage limit reached — sleeping $((USAGE_LIMIT_SLEEP / 60))m, then retrying this issue."
     sleep "$USAGE_LIMIT_SLEEP"
