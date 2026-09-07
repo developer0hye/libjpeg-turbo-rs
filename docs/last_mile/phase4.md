@@ -6696,7 +6696,23 @@ criterion 3 met for FMA, not yet for the Huffman tier.**
   previous Zen 4 run (`+bmi2` 1.3–1.9 %, portable/C 1.09–1.10×) that is
   inside cross-run variance — a different host on a different hour — so this
   run cannot say whether the BMI2 tier pays; the harness now builds a
-  same-run `main-portable` variant to settle it (result below once it runs).
+  same-run `main-portable` variant to settle it.
+- **Same-run `main` vs branch** (run 34159737624, the harness re-run on
+  the PR, Intel Xeon 6973P-C with AVX-512 — a noisy box, bracket 0.3–11.7 %).
+  **Float DCT: settled.** `main-portable / stock` is 1.12–1.27 on all eleven
+  cases — `main` 12–27 % slower than the branch, above that run's noise in
+  every row but the two widest brackets — and compile-time `+fma` over the
+  branch is noise (0.91–1.04). **Integer DCT: still open.** `main-portable /
+  stock` at 1080p is 1.03 / 1.07 / 1.09, but the compile-time `+bmi2` binary
+  timed between them swung the other way by as much (1.09 at 1080p 4:2:2
+  against a 0.5 % bracket), so the box drifted more than the bracket shows
+  and no 1–3 % claim survives it. The same-run column is what a quiet Zen
+  runner needs to answer it; until then the BMI2 tier is kept on the
+  assembly evidence and byte-identity, not on a measured percentage. A third
+  dispatch (run 34161016801) drew the same Xeon model and repeated the
+  picture — float `main / branch` 1.16–1.36 on every row, integer inside a
+  1–12 % bracket — so measurement stopped there; the column stays in the
+  harness for the next quiet host.
 - Rosetta on the aarch64 host reports neither FMA nor BMI2, so locally every
   new test ran its fallback branch and still had to pass; the elevated
   branches are exercised by CI's x86_64 runners and by the A/B above.
