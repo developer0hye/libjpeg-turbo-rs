@@ -2749,7 +2749,7 @@ const UNPAIRED_ORACLE_JOBS: [(&str, &str, &str); 3] = [
          times our encoder built portable, per-feature and native against the \
          C reference on one runner, and the C column is a target, not an \
          expectation. The reference is current upstream stable alone because \
-         a second C release would double a dispatch-only job's wall clock to \
+         a second C release would double this job's wall clock to \
          measure a codec that does not change between the two.",
     ),
 ];
