@@ -6357,7 +6357,46 @@ of `capi-abi-checks` now installs `patchelf`, as the release leg does: the
 libturbojpeg copy's `DT_SONAME` comes only from it, and the suite now asserts
 that identity rather than the chain's mere existence.
 
-*Proof.* <!-- P4-131-WINDOWS-PROOF -->
+*Proof.* The release path was rehearsed by dispatching `release.yml` on the
+branch: run
+[34126576196](https://github.com/developer0hye/libjpeg-turbo-rs/actions/runs/34126576196)
+(commit `afd1e74`, the scripts as merged) built all five bundles — the
+Windows leg under Git for Windows' bash, finding `dumpbin`/`lib.exe` through
+`vswhere` — attested each, and published nothing (every publish job and
+`github-release` reported `skipped`). The first dispatch, run 34125407045,
+failed in exactly the place the tests could not reach from a Mac: with the
+`.pdb` beside the DLL, `dumpbin` prints `name = symbol` rows, and the
+four-field parser read zero exports and refused. Verified on 2026-09-07 from
+the run's `native-x86_64-pc-windows-msvc` artifact, with `gh` 2.92.0:
+
+```
+shasum -a 256 -c *.sha256                        # archive OK, SBOM OK
+tar -xzf libjpeg-turbo-rs-capi-0.1.2-x86_64-pc-windows-msvc.tar.gz
+# bin/jpeg8.dll bin/turbojpeg.dll lib/jpeg.lib lib/turbojpeg.lib, plus the
+# same include/, lib/pkgconfig/, lib/cmake/JPEG/, share/doc/ and BUNDLE.txt
+# (prefix: C:/libjpeg-turbo-rs64, soname: jpeg8.dll) as the Unix bundles
+strings lib/jpeg.lib | grep '\.dll$' | sort -u   # jpeg8.dll — and nothing else
+strings lib/turbojpeg.lib | grep '\.dll$' | sort -u   # turbojpeg.dll
+gh attestation verify <bundle>.tar.gz -R developer0hye/libjpeg-turbo-rs \
+    --signer-workflow developer0hye/libjpeg-turbo-rs/.github/workflows/release.yml \
+    --source-ref refs/heads/feat/p4-131-windows-bundle    # exit 0
+gh attestation verify <bundle>.tar.gz -R developer0hye/libjpeg-turbo-rs \
+    --source-ref refs/tags/v0.8.0                         # exit 1 (rejected)
+gh attestation verify <bundle>.tar.gz -R developer0hye/libjpeg-turbo-rs \
+    --predicate-type https://cyclonedx.org/bom --format json  # predicate ==
+                                                          # attached .cdx.json,
+                                                          # 7 components
+gh attestation verify <bundle>.tar.gz -R developer0hye/libjpeg-turbo-rs \
+    --bundle <bundle>.tar.gz.provenance.sigstore.json     # exit 0 (offline)
+```
+
+The pull-request half is the Windows leg of `capi-abi-checks` on
+[#595](https://github.com/developer0hye/libjpeg-turbo-rs/pull/595):
+`install_layout` and `release_bundle` run there for real — the staged and
+bundled `jpeg8.dll` loads and resolves both APIs, the regenerated import
+libraries bind to the shipped names and carry the exports — and the leg is
+green at merge, together with the Linux and macOS legs that now also assert
+the libturbojpeg identity.
 
 *What is deliberately not claimed.* No C program is compiled against
 `jpeg.lib` in CI: the import library's binding is asserted by its strings and

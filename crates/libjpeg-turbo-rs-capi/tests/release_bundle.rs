@@ -579,8 +579,13 @@ fn release_bundle_checksum_verifies_from_the_download_directory() {
         .unwrap_or_else(|e| panic!("the archive has no checksum manifest at {manifest:?}: {e}"));
 
     let archive_name: String = archive.file_name().unwrap().to_string_lossy().into_owned();
+    // `<hash>  <name>`, or `<hash> *<name>`: GNU coreutils on Windows hashes
+    // in binary mode and marks it with the asterisk, which `sha256sum -c` and
+    // `shasum -c` read back the same way and the release's `SHA256SUMS` fold
+    // keeps verbatim.
     assert!(
-        body.trim_end().ends_with(&format!("  {archive_name}")),
+        body.trim_end().ends_with(&format!("  {archive_name}"))
+            || body.trim_end().ends_with(&format!(" *{archive_name}")),
         "the manifest must name the bare archive so `{checker} -c` works in \
          the directory it was downloaded into; it says:\n{body}"
     );
