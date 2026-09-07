@@ -12,7 +12,7 @@
 //! consulted only by `realize_virt_arrays` during `jpeg_start_decompress`,
 //! and whole-image coefficient arrays exist only for multi-scan streams
 //! (progressive *or* non-interleaved sequential — `has_multiple_scans`,
-//! `jdinput.c:153-156`) and for buffered-image mode (`jdmaster.c:709`). A
+//! `jdinput.c:153-156`) and for buffered-image mode (`jdmaster.c:720`). A
 //! 1000-byte budget therefore passes a *baseline* 64×64 decode untouched
 //! and fails the multi-scan/buffered ones at `jpeg_start_decompress` with
 //! `JERR_NO_BACKING_STORE` (51) — except the class whose arrays all fit
@@ -417,7 +417,7 @@ fn budget_refusal_fires_standalone() {
         run_case("bb", SrcKind::Baseline, 1000, true),
         refusal("bb"),
         "buffered-image mode realizes whole-image arrays for any stream \
-         (jdmaster.c:709) — a tiny budget must refuse even baseline"
+         (jdmaster.c:720) — a tiny budget must refuse even baseline"
     );
     assert_eq!(
         run_case("b", SrcKind::Baseline, 1000, false),

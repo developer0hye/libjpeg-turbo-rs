@@ -142,7 +142,7 @@ pub unsafe extern "C" fn tjCompress2(
         // for caller-owned storage once P4-145 made that path release it.
         // Validate *before* touching instance state. Upstream rejects a NULL
         // `jpegSize` and out-of-range quality/subsampling with "Invalid
-        // argument" before `processFlags` runs (`turbojpeg.c:1274-1280`), and
+        // argument" before `processFlags` runs (`turbojpeg.c:1277-1283`), and
         // the ordering is observable: setting `TJPARAM_NOREALLOC` and then
         // failing would leave the handle's ownership behaviour changed by a
         // call that returned -1, so the *next* call could free caller-owned
@@ -188,7 +188,7 @@ pub unsafe extern "C" fn tjCompress2(
         //
         // Upstream resolves it the same way: `size = *jpegSize;` then, under
         // NOREALLOC, `size = tj3JPEGBufSize(width, height, subsamp)`
-        // (`turbojpeg.c:1282-1284`) — the worst case the caller was told to
+        // (`turbojpeg.c:1285-1287`) — the worst case the caller was told to
         // allocate.
         // SAFETY: non-NULL, checked above.
         let mut size: usize = unsafe { *jpeg_size };
@@ -319,7 +319,7 @@ pub unsafe extern "C" fn tjDecompressHeader3(
 /// destinations with `tjTransformBufSize()` may leave them at zero: under
 /// `TJFLAG_NOREALLOC` each slot is filled from the transformed image's
 /// geometry before the call and overwritten with the produced size afterwards
-/// (P4-151), matching `turbojpeg.c:3118-3132`. Without the flag they are
+/// (P4-151), matching `turbojpeg.c:3133-3147`. Without the flag they are
 /// forwarded unchanged, since the reallocating path derives its own capacity.
 ///
 /// The substituted capacity comes from geometry alone — never from metadata —
@@ -376,7 +376,7 @@ pub unsafe extern "C" fn tjTransform(
         // buffers with `tjTransformBufSize()` may leave them at zero — and TJ3
         // reads that slot as a capacity. Upstream bridges the gap by filling a
         // temporary array with each transformed image's worst case
-        // (`turbojpeg.c:3118-3132`) and copying the real sizes back afterwards.
+        // (`turbojpeg.c:3133-3147`) and copying the real sizes back afterwards.
         //
         // P4-151. Two earlier attempts were rejected in review, and both
         // constraints they exposed are load-bearing here:
@@ -454,8 +454,8 @@ pub unsafe extern "C" fn tjTransform(
             // Upstream's legacy NOREALLOC path drops *every* marker on a
             // *cold* handle, not by policy but by ordering: the wrapper
             // pre-reads the header to derive these same capacities
-            // (`turbojpeg.c:3112-3134`), so when `tj3Transform` later calls
-            // `jcopy_markers_setup` (`turbojpeg.c:2976-2979`) the header is
+            // (`turbojpeg.c:3127-3149`), so when `tj3Transform` later calls
+            // `jcopy_markers_setup` (`turbojpeg.c:2991-2994`) the header is
             // already parsed, the guarded re-read is skipped, and nothing was
             // registered — `jcopy_markers_execute` copies nothing, ICC
             // included. Registration is per-handle and permanent, though, so
@@ -533,7 +533,7 @@ pub unsafe extern "C" fn tjTransform(
                     )
                 };
                 // Upstream copies the produced sizes back unconditionally
-                // (`turbojpeg.c:3136-3137`), so a caller reading `dstSizes`
+                // (`turbojpeg.c:3151-3152`), so a caller reading `dstSizes`
                 // after a partial failure sees what was written.
                 for (index, size) in sizes.iter().enumerate() {
                     // SAFETY: `dst_sizes` has `n` entries per the contract.
@@ -647,8 +647,8 @@ pub unsafe extern "C" fn tjEncodeYUV3(
                 height,
                 pixel_format,
                 dst_buf,
-                // Forwarded raw, as upstream does (`turbojpeg.c:1798-1799`,
-                // `:2775-2776`): the TJ3 entry validates `align` (>= 1, power
+                // Forwarded raw, as upstream does (`turbojpeg.c:1806-1807`,
+                // `:2788-2789`): the TJ3 entry validates `align` (>= 1, power
                 // of two), and clamping here masked the `align < 1` half of
                 // that check — a silent accept where upstream refuses
                 // (#539 re-review).
@@ -697,8 +697,8 @@ pub unsafe extern "C" fn tjDecodeYUV(
             crate::yuv::tj3DecodeYUV8(
                 handle,
                 src_buf,
-                // Forwarded raw, as upstream does (`turbojpeg.c:1798-1799`,
-                // `:2775-2776`): the TJ3 entry validates `align` (>= 1, power
+                // Forwarded raw, as upstream does (`turbojpeg.c:1806-1807`,
+                // `:2788-2789`): the TJ3 entry validates `align` (>= 1, power
                 // of two), and clamping here masked the `align < 1` half of
                 // that check — a silent accept where upstream refuses
                 // (#539 re-review).

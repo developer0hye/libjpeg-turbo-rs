@@ -834,7 +834,7 @@ fn legacy_transform_case(label: &str) -> String {
 /// sufficient: the first version of this fix allocated when the flag was set
 /// and the slot was NULL, which every self-consistent assertion accepted.
 /// Upstream refuses — the flag is a request *not to allocate*
-/// (`jdatadst-tj.c:184-192`) — and this is what says so.
+/// (`jdatadst-tj.c:198-206`) — and this is what says so.
 #[test]
 fn norealloc_contract_matches_upstream_turbojpeg() {
     let Some(oracle) = helpers::build_oracle("norealloc_oracle") else {
@@ -1143,7 +1143,7 @@ fn legacy_tj_compress2_honours_tjflag_norealloc() {
 
 /// `TJXOPT_NOOUTPUT` produces no output, so it needs no destination.
 ///
-/// Upstream skips destination setup entirely for it (`turbojpeg.c:3007`), which
+/// Upstream skips destination setup entirely for it (`turbojpeg.c:3022`), which
 /// means a NULL slot is fine and a non-NULL slot is left alone. Requiring a
 /// buffer here — as the first version of the NOREALLOC work did — rejects a
 /// call upstream accepts.
@@ -1197,7 +1197,7 @@ fn transform_with_no_output_needs_no_destination() {
 /// to TJ3 — where the same field *is* an input capacity — turned that valid
 /// call into "buffer too small". Upstream substitutes
 /// `tj3JPEGBufSize(width, height, subsamp)` under the flag
-/// (`turbojpeg.c:1282-1284`).
+/// (`turbojpeg.c:1285-1287`).
 ///
 /// The distinguishing input is `size = 0`, which the previous test could not
 /// catch because it passed a real capacity.
@@ -1257,7 +1257,7 @@ fn legacy_tj_compress2_treats_the_size_slot_as_an_output() {
 /// destination with `tjTransformBufSize()` and left the slot at zero now gets a
 /// transform rather than "buffer too small". A nonzero slot is *not* honoured
 /// as a capacity — upstream replaces every slot with the geometry bound under
-/// NOREALLOC (`turbojpeg.c:3122-3132`), and so does the bridge; this case pins
+/// NOREALLOC (`turbojpeg.c:3137-3147`), and so does the bridge; this case pins
 /// that a caller passing one is served identically.
 #[test]
 fn legacy_tj_transform_maps_the_flag_with_a_nonzero_size_slot() {
@@ -1310,7 +1310,7 @@ fn legacy_tj_transform_maps_the_flag_with_a_nonzero_size_slot() {
 /// Mapping `TJFLAG_NOREALLOC` before validating meant a call that returned -1
 /// still altered `TJPARAM_NOREALLOC` — so the *next* call could free
 /// caller-owned storage because of a call that failed. Upstream validates
-/// first (`turbojpeg.c:1274-1280`).
+/// first (`turbojpeg.c:1277-1283`).
 #[test]
 fn legacy_invalid_arguments_do_not_change_ownership_state() {
     use libjpeg_turbo_rs_capi::{tj3Get, tjCompress2};
@@ -1411,7 +1411,7 @@ fn legacy_null_size_pointer_is_rejected() {
 /// *outputs* there, so a caller that sized its buffer with
 /// `tjTransformBufSize()` has no reason to fill them in. Upstream fills a
 /// temporary capacity array from the transformed geometry
-/// (`turbojpeg.c:3118-3132`); before P4-151 this port passed the zeros straight
+/// (`turbojpeg.c:3133-3147`); before P4-151 this port passed the zeros straight
 /// through and TJ3 read them as capacities.
 ///
 /// The destination is sized with `tj3TransformBufSize`, which is what a legacy

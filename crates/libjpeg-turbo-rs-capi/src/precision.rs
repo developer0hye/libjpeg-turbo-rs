@@ -103,7 +103,7 @@ impl SampleGrid {
     ///
     /// The final row's padding is deliberately excluded — upstream indexes
     /// `&srcBuf[i * pitch]` and copies `width * components` samples
-    /// (`turbojpeg-mp.c:130` compressing, `:242` decompressing), so a caller
+    /// (`turbojpeg-mp.c:132` compressing, `:246` decompressing), so a caller
     /// is not required to allocate past the last row's pixels. Sizing the
     /// slice at `pitch * height` claimed memory such a caller never had.
     fn total_samples(&self) -> usize {
@@ -562,14 +562,14 @@ pub unsafe extern "C" fn tj3Compress16(
 
             // P4-155 (#539): the "must be specified" gates precede the whole
             // precision/lossless-parameter chain (`turbojpeg-mp.c:95-98` runs
-            // before `:107-121`), and a lossless compress consults neither.
+            // before `:109-123`), and a lossless compress consults neither.
             if !crate::tj3::require_lossy_compress_params(inst, "tj3Compress16") {
                 return -1;
             }
 
             // Which precision the encode will actually use. Upstream honours
             // `TJPARAM_PRECISION` only when lossless is set and only inside
-            // `BITS_IN_JSAMPLE - 3 ..= BITS_IN_JSAMPLE` (`turbojpeg-mp.c:111-115`),
+            // `BITS_IN_JSAMPLE - 3 ..= BITS_IN_JSAMPLE` (`turbojpeg-mp.c:113-117`),
             // and *silently ignores* anything else, falling back to 16 rather
             // than erroring — so a caller who set an out-of-range value still
             // gets a stream.
@@ -589,7 +589,7 @@ pub unsafe extern "C" fn tj3Compress16(
             // This runs *before* the destination preflight below because
             // upstream reaches it first: `setCompDefaults` — which calls
             // `jpeg_enable_lossless` — precedes `jpeg_mem_dest_tj`
-            // (`turbojpeg-mp.c:117-120`). Measured, since the two errors are
+            // (`turbojpeg-mp.c:121-123`). Measured, since the two errors are
             // otherwise indistinguishable from the call site: with `PRECISION=13`,
             // `LOSSLESSPT=13`, `NOREALLOC` and an empty slot, TurboJPEG 3 reports
             // the lossless-parameter error, not the buffer one.
@@ -606,9 +606,9 @@ pub unsafe extern "C" fn tj3Compress16(
             }
 
             // Upstream sets the destination up *before* `jpeg_start_compress`
-            // (`turbojpeg-mp.c:118-120`), so a `TJPARAM_NOREALLOC` slot that
+            // (`turbojpeg-mp.c:123-125`), so a `TJPARAM_NOREALLOC` slot that
             // cannot be used at all is reported before the precision rule is
-            // ever consulted: `jdatadst-tj.c:184-192` raises `JERR_BUFFER_SIZE`
+            // ever consulted: `jdatadst-tj.c:198-206` raises `JERR_BUFFER_SIZE`
             // when the slot is NULL, or its capacity is zero, and `alloc` is
             // false.
             //
@@ -643,7 +643,7 @@ pub unsafe extern "C" fn tj3Compress16(
             // P4-150: 16-bit samples are legal only for a *lossless* compress.
             //
             // Upstream imposes no precision rule of its own here — it sets
-            // `cinfo->data_precision = 16` (`turbojpeg-mp.c:107`) and lets
+            // `cinfo->data_precision = 16` (`turbojpeg-mp.c:111`) and lets
             // `jpeg_start_compress` decide, where `jcmaster.c:199-208` admits
             // 2..=16 for a lossless compress and only 8 or 12 for a lossy one.
             // Reading `turbojpeg-mp.c` alone therefore suggests 16-bit lossy is
@@ -653,7 +653,7 @@ pub unsafe extern "C" fn tj3Compress16(
             //
             // The gate is the lossless flag, not `TJPARAM_PRECISION`: that
             // parameter is read only when the flag is set
-            // (`turbojpeg-mp.c:111-115`), so requesting 12 bits here leaves the
+            // (`turbojpeg-mp.c:113-117`), so requesting 12 bits here leaves the
             // effective precision at 16 and the call still fails.
             if !is_lossless {
                 // libjpeg's own `JERR_BAD_PRECISION` text. An error raised

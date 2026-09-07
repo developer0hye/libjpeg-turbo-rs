@@ -1,6 +1,6 @@
 //! Individual cjpeg/djpeg/jpegtran tests from CMakeLists.txt add_bittest() calls.
 //!
-//! C reference: references/libjpeg-turbo/CMakeLists.txt lines 1533-1845
+//! C reference: references/libjpeg-turbo/CMakeLists.txt lines 1538-1850
 //!
 //! These tests cover specific encode/decode/transform invocations that are NOT
 //! part of the parametrized matrix tests (tjcomptest, tjdecomptest, tjtrantest,

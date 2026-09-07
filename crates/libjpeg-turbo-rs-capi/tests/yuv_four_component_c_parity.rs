@@ -9,7 +9,7 @@
 //! to agree on accept-vs-reject for both entry points.
 //!
 //! Upstream's guard lives in `tj3DecompressToYUVPlanes8`
-//! (`references/libjpeg-turbo/src/turbojpeg.c:2229-2230`); its
+//! (`references/libjpeg-turbo/src/turbojpeg.c:2238-2239`); its
 //! `tj3DecompressToYUV8` inherits it by delegating. This port does not
 //! delegate, so both of our entry points carry the check.
 

@@ -862,7 +862,7 @@ fn tj3_transform_buf_size_includes_icc_size() {
 /// must silently fall back to the entry-point's natural precision
 /// (BITS_IN_JSAMPLE), matching upstream
 /// `references/libjpeg-turbo/src/turbojpeg-mp.c::tj3Compress*` lines
-/// 109-117. The previous implementation raised `TJERR_FATAL` on
+/// 111-119. The previous implementation raised `TJERR_FATAL` on
 /// out-of-range precision; this regression guards against that
 /// divergence by setting precision values that fall outside each
 /// entry-point's lossless range and asserting the encode succeeds with
@@ -912,7 +912,7 @@ fn tj3_compress_silently_falls_back_on_out_of_range_precision() {
         assert_eq!(
             rc, 0,
             "tj3Compress8 must silently fall back when TJPARAM_PRECISION is out of range \
-             (matches upstream turbojpeg-mp.c lines 109-117); got rc={rc}"
+             (matches upstream turbojpeg-mp.c lines 111-119); got rc={rc}"
         );
         assert!(!buf.is_null() && size > 4);
 

@@ -3,7 +3,7 @@
 //!
 //! Upstream reads the header, then applies every check — maxPixels, subsampling,
 //! the `dstPlanes` NULL test, and `num_components > 3` — before any
-//! decompression (`references/libjpeg-turbo/src/turbojpeg.c:2214-2230`). This
+//! decompression (`references/libjpeg-turbo/src/turbojpeg.c:2223-2239`). This
 //! port decoded the whole frame first and only then applied P4-125's component
 //! guard, so an attacker-supplied frame still cost a full decode and every plane
 //! allocation before being thrown away, and `TJPARAM_MAXPIXELS` never reached
@@ -183,7 +183,7 @@ fn null_plane_pointer_leaves_all_caller_buffers_untouched() {
 
 /// P4-127 criterion 2: when two rules are violated at once, the *precedence*
 /// must match C. Upstream validates `align` at function entry
-/// (`turbojpeg.c:2395-2397`, `"Invalid argument"`) — before the header is even
+/// (`turbojpeg.c:2406-2408`, `"Invalid argument"`) — before the header is even
 /// read — so a CMYK frame with `align = 0` is an argument error, not a
 /// component error. Checking align inside `pack_yuv_planes` put it after
 /// P4-125's guard and flipped the order.

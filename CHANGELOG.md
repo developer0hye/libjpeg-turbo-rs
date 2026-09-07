@@ -26,6 +26,16 @@ and `git log` between tags.
 
 ### Changed
 
+- **The C reference submodule is libjpeg-turbo 3.2.0** (P4-130, #461).
+  `references/libjpeg-turbo` moved from 3.1.90 (3.2 beta1) to the 3.2.0 tag,
+  so the classic-ABI trace oracle built from it and every `j*.c:NNN` citation
+  in this repository now quote current upstream stable; the 207 citations the
+  tag's diff moved were remapped with it, and `docs/oracle_versions.tsv`
+  records the new row. One behaviour delta came with the sources: the classic
+  memory destination now reports a failed buffer doubling as
+  `JERR_OUT_OF_MEMORY` case 12 (3.2.0's number; it was 10) and a doubling that
+  would overflow `size_t` as case 13, matching `jdatadst.c` in the tree the
+  shim cites.
 - **Transcode header markers follow the colorspace classification, not the
   source's Adobe byte** (P4-181, #581). `write_coefficients` and its
   progressive/arithmetic/optimized siblings, and therefore
@@ -50,7 +60,7 @@ and `git log` between tags.
   negative `pitch` instead of reading it as "tightly packed", and
   `tj3LoadImage8` now requires `align` to be a positive power of two instead
   of clamping it with `align.max(1)` (P4-139, #478). Both match upstream,
-  which rejects the same values (`turbojpeg-mp.c:511-513` and `:317-321`);
+  which rejects the same values (`turbojpeg-mp.c:515-517` and `:321-325`);
   `pitch == 0` still means dense and `align == 1` still means no padding.
   A caller passing `-1` or `0` previously got a success return and a buffer
   whose row stride they could not have predicted.

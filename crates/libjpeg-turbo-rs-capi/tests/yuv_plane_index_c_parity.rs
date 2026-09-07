@@ -2,7 +2,7 @@
 //! way stock libjpeg-turbo does, across *every* `TJSAMP_*`.
 //!
 //! Upstream applies the bound once, in `tj3YUVPlaneWidth` /
-//! `tj3YUVPlaneHeight` (`references/libjpeg-turbo/src/turbojpeg.c:1115`):
+//! `tj3YUVPlaneHeight` (`references/libjpeg-turbo/src/turbojpeg.c:1118`):
 //!
 //! ```c
 //!   nc = (subsamp == TJSAMP_GRAY ? 1 : 3);
