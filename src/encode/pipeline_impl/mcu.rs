@@ -148,26 +148,6 @@ pub(super) fn encode_single_block(
     HuffmanEncoder::encode_block(writer, &quantized, prev_dc, dc_table, ac_table);
 }
 
-/// Whether an ISLOW-only fused SIMD FDCT can replace the requested transform.
-///
-/// Only the x86_64 fused AVX2 kernels consult this, and they are gated the
-/// same way — without the gate this is dead code on every other architecture,
-/// which fails `cargo clippy -- -D warnings` on an aarch64 host even though
-/// the ubuntu-x86_64 CI job stays green.
-#[cfg(all(target_arch = "x86_64", feature = "simd"))]
-#[inline]
-pub(super) fn can_use_fused_islow(
-    fdct_quantize_fn: fn(&mut [i16; 64], &QuantDivisors, &mut [i16; 64]),
-) -> bool {
-    !core::ptr::eq(
-        fdct_quantize_fn as *const (),
-        crate::simd::scalar::scalar_fdct_ifast_quantize as *const (),
-    ) && !core::ptr::eq(
-        fdct_quantize_fn as *const (),
-        crate::simd::scalar::scalar_fdct_float_quantize as *const (),
-    )
-}
-
 /// Encode a full color MCU (multiple Y blocks + Cb + Cr blocks).
 #[allow(clippy::too_many_arguments)]
 #[inline]
@@ -877,8 +857,7 @@ pub(super) fn fdct_quantize_chroma_h2v1(
     out: &mut [i16; 64],
 ) {
     // Fused path: downsample + FDCT + quantize in one pass (AVX2)
-    if can_use_fused_islow(fdct_quantize_fn)
-        && block_x + 16 <= plane_width
+    if block_x + 16 <= plane_width
         && block_y + 8 <= plane_height
         && crate::cpu_has!("avx2")
         && may_use_islow_simd_kernel(fdct_quantize_fn)
@@ -951,7 +930,7 @@ pub(super) fn encode_mcu_444_x86_64(
     let has_avx2: bool = crate::cpu_has!("avx2") && may_use_islow_simd_kernel(fdct_quantize_fn);
     let interior: bool = x0 + 8 <= width && y0 + 8 <= height;
 
-    if can_use_fused_islow(fdct_quantize_fn) && interior && has_avx2 {
+    if interior && has_avx2 {
         unsafe {
             crate::simd::x86_64::avx2_extract_fdct_quantize(
                 y_plane.as_ptr().add(y0 * width + x0),
@@ -1070,7 +1049,7 @@ pub(super) fn encode_mcu_422_x86_64(
     // Interior check: 2 Y blocks (16 wide) + H2V1 chroma (16 wide, 8 tall)
     let interior: bool = x0 + 16 <= width && y0 + 8 <= height;
 
-    if can_use_fused_islow(fdct_quantize_fn) && interior && has_avx2 {
+    if interior && has_avx2 {
         unsafe {
             let y_ptr: *const u8 = y_plane.as_ptr().add(y0 * width + x0);
             crate::simd::x86_64::avx2_extract_fdct_quantize(y_ptr, width, luma_quant, &mut q[0]);
@@ -1216,7 +1195,7 @@ pub(super) fn encode_mcu_420_x86_64(
     // For 1080p with 16x16 MCUs, only edge MCUs fail this check.
     let interior: bool = x0 + 16 <= width && y0 + 16 <= height;
 
-    let use_fused_islow: bool = can_use_fused_islow(fdct_quantize_fn);
+    let use_fused_islow: bool = may_use_islow_simd_kernel(fdct_quantize_fn);
 
     if use_fused_islow && interior && has_avx2 {
         // Fast path: all blocks are interior, use fused SIMD for everything
@@ -1385,7 +1364,7 @@ pub(super) fn encode_mcu_420_half_chroma(
     let y_interior: bool = y_x0 + 16 <= y_stride && y_y0 + 16 <= 16;
     let c_interior: bool = chroma_x0 + 8 <= chroma_stride && chroma_y0 + 8 <= 8;
 
-    let use_fused_islow: bool = can_use_fused_islow(fdct_quantize_fn);
+    let use_fused_islow: bool = may_use_islow_simd_kernel(fdct_quantize_fn);
 
     if use_fused_islow && y_interior && c_interior && has_avx2 {
         unsafe {

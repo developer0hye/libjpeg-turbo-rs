@@ -141,7 +141,7 @@ pub fn compress_with_params(params: &CompressParams<'_>) -> Result<Vec<u8>> {
     let fdct_quantize_fn: fn(&mut [i16; 64], &QuantDivisors, &mut [i16; 64]) = match dct_method {
         DctMethod::IsLow => enc_simd.fdct_quantize,
         DctMethod::IsFast => crate::simd::scalar::scalar_fdct_ifast_quantize,
-        DctMethod::Float => crate::simd::scalar::scalar_fdct_float_quantize,
+        DctMethod::Float => enc_simd.fdct_float_quantize,
     };
 
     // Entropy encode all MCUs
@@ -1243,7 +1243,7 @@ fn compress_direct_planar(params: &CompressParams<'_>, spec: &DirectPlanarSpec) 
     let fdct_quantize_fn: fn(&mut [i16; 64], &QuantDivisors, &mut [i16; 64]) = match dct_method {
         DctMethod::IsLow => enc_simd.fdct_quantize,
         DctMethod::IsFast => crate::simd::scalar::scalar_fdct_ifast_quantize,
-        DctMethod::Float => crate::simd::scalar::scalar_fdct_float_quantize,
+        DctMethod::Float => enc_simd.fdct_float_quantize,
     };
 
     let layout = PlanarLayout {

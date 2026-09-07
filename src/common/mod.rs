@@ -120,7 +120,11 @@ impl FloatCompat for f32 {
             crate::common::float_compat::round_f32(self)
         }
     }
-    #[inline]
+    // `always`: the x86_64 FMA twin of the float FDCT (P4-133, #464) only
+    // reaches `vfmadd` if this call site is inlined into its
+    // `target_feature(enable = "fma")` body; a merely-`#[inline]` copy that
+    // LLVM declined to inline would silently be a libm `fmaf` call again.
+    #[inline(always)]
     fn __mul_add_compat(self, b: f32, c: f32) -> f32 {
         #[cfg(feature = "std")]
         {

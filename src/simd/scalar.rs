@@ -71,6 +71,7 @@ pub fn encoder_routines() -> EncoderSimdRoutines {
     EncoderSimdRoutines {
         rgb_to_ycbcr_row: scalar_rgb_to_ycbcr_row_enc,
         fdct_quantize: scalar_fdct_quantize,
+        fdct_float_quantize: scalar_fdct_float_quantize,
     }
 }
 
@@ -123,11 +124,23 @@ pub fn scalar_fdct_float_quantize(
     quant: &QuantDivisors,
     output: &mut [i16; 64],
 ) {
+    fdct_float_quantize_body(input, quant, output);
+}
+
+/// The body of [`scalar_fdct_float_quantize`], `#[inline(always)]` so the
+/// x86_64 FMA twin (`simd::x86_64::fma_fdct`, P4-133 / #464) re-emits the
+/// whole FDCT + quantise chain under `target_feature(enable = "fma")`.
+#[inline(always)]
+pub(crate) fn fdct_float_quantize_body(
+    input: &mut [i16; 64],
+    quant: &QuantDivisors,
+    output: &mut [i16; 64],
+) {
     let mut workspace: [f32; 64] = [0.0f32; 64];
     for i in 0..64 {
         workspace[i] = input[i] as f32;
     }
-    fdct::fdct_float_workspace(&mut workspace);
+    fdct::fdct_float_workspace_body(&mut workspace);
     let zigzag = &crate::common::tables::ZIGZAG_ORDER;
     for zz in 0..64 {
         let natural_idx: usize = zigzag[zz];

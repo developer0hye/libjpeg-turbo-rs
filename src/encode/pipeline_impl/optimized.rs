@@ -94,7 +94,8 @@ pub fn compress_optimized_with_params(params: &CompressParams<'_>) -> Result<Vec
     // chosen FDCT — ifast pre-applies AA&N scaling so its divisors fold the
     // AA&N constants in (paired with `fdct_ifast_raw`); islow/float keep
     // the simple `quant * 8` divisors, with the float path routing through
-    // the embedded `float_divisors` field via `scalar_fdct_float_quantize`.
+    // the embedded `float_divisors` field via the plan's `fdct_float_quantize`
+    // kernel (scalar, or its FMA twin on x86_64 CPUs that have FMA).
     let luma_quant: [u16; 64] = match custom_quant.and_then(|tables| tables[0]) {
         Some(table) => table,
         None => tables::quality_scale_quant_table(&tables::STD_LUMINANCE_QUANT_TABLE, quality),
@@ -124,7 +125,7 @@ pub fn compress_optimized_with_params(params: &CompressParams<'_>) -> Result<Vec
     let fdct_quantize_fn: fn(&mut [i16; 64], &QuantDivisors, &mut [i16; 64]) = match dct_method {
         DctMethod::IsLow => enc_simd.fdct_quantize,
         DctMethod::IsFast => crate::simd::scalar::scalar_fdct_ifast_quantize,
-        DctMethod::Float => crate::simd::scalar::scalar_fdct_float_quantize,
+        DctMethod::Float => enc_simd.fdct_float_quantize,
     };
 
     // Determine MCU dimensions

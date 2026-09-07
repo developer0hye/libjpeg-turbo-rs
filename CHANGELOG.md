@@ -48,6 +48,21 @@ and `git log` between tags.
 
 ### Changed
 
+- **Portable x86_64 builds reach the BMI2 Huffman tier and the FMA float
+  FDCT by runtime detection** (P4-133, #464). The 2026-09-08 portable-vs-native
+  A/B found only two wins a `target-cpu=native` build had over a stock
+  `cargo build --release`: BMI2's `SHLX`-family shifts in the Huffman bit
+  packer (1.3–2.9 % of a 1080p encode) and FMA in the `-dct float` FDCT
+  (18–23 %, because `f32::mul_add` is a libm call on a baseline build). Both
+  are now compiled as `target_feature` twins of the same bodies and selected
+  with the crate's `cpu_has!` pattern — the FMA twin once per encode in
+  `EncoderSimdRoutines::fdct_float_quantize`, the Huffman tier once per
+  process and cached — so a packaged library gets them on the CPUs that have
+  them. Output is unchanged: `mul_add` rounds once either way, and
+  the three Huffman tiers are one body, both asserted by new tests.
+  `EncoderSimdRoutines` gained a public `fdct_float_quantize` field; the type
+  has a private field and cannot be constructed outside the crate, so this is
+  additive.
 - **The C reference submodule is libjpeg-turbo 3.2.0** (P4-130, #461).
   `references/libjpeg-turbo` moved from 3.1.90 (3.2 beta1) to the 3.2.0 tag,
   so the classic-ABI trace oracle built from it and every `j*.c:NNN` citation

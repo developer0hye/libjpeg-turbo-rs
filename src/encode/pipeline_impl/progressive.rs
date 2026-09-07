@@ -240,7 +240,7 @@ fn compress_progressive_with_scans(
     let fdct_quantize_fn: fn(&mut [i16; 64], &QuantDivisors, &mut [i16; 64]) = match dct_method {
         DctMethod::IsLow => enc_simd.fdct_quantize,
         DctMethod::IsFast => crate::simd::scalar::scalar_fdct_ifast_quantize,
-        DctMethod::Float => crate::simd::scalar::scalar_fdct_float_quantize,
+        DctMethod::Float => enc_simd.fdct_float_quantize,
     };
     let use_simd_fdct: bool = dct_method == DctMethod::IsLow;
 

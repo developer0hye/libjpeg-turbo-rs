@@ -10,6 +10,7 @@ pub mod avx2_idct;
 pub mod avx2_merged;
 pub mod avx2_upsample;
 pub mod color;
+pub(crate) mod fma_fdct;
 pub mod idct;
 pub mod upsample;
 
@@ -44,13 +45,18 @@ pub fn routines() -> SimdRoutines {
 
 /// Return x86_64 encoder SIMD routines.
 pub fn encoder_routines() -> EncoderSimdRoutines {
+    let mut routines: EncoderSimdRoutines = crate::simd::scalar::encoder_routines();
     if crate::cpu_has!("avx2") {
-        return EncoderSimdRoutines {
-            rgb_to_ycbcr_row: avx2_color_encode::avx2_rgb_to_ycbcr_row,
-            fdct_quantize: avx2_fdct_quantize,
-        };
+        routines.rgb_to_ycbcr_row = avx2_color_encode::avx2_rgb_to_ycbcr_row;
+        routines.fdct_quantize = avx2_fdct_quantize;
     }
-    crate::simd::scalar::encoder_routines()
+    // Resolved here, once per kernel set, so a portable build reaches the
+    // FMA float FDCT on the CPUs that have it (P4-133, #464). Independent of
+    // the AVX2 check above: FMA3 shipped before AVX2 on AMD (Piledriver).
+    if crate::cpu_has!("fma") {
+        routines.fdct_float_quantize = fma_fdct::fma_fdct_float_quantize;
+    }
+    routines
 }
 
 /// AVX2 fused FDCT + quantize + zigzag.
