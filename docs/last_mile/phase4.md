@@ -506,7 +506,7 @@ No further action. `jpeg12_*_raw_data` parity remains satisfied by P3-2 (closed 
 
 ## P4-16. Per-`cinfo` Private State Lives in Thread-Local Side Tables — **CLOSED 2026-05-19**
 
-**Status (2026-05-19): closed via Option B (document the per-thread ownership contract).** A new "Threading contract" section in `docs/ABI_COMPATIBILITY.md` (inside the "Our policy" tree, between the safe-SONAME matrix and the `libjpeg.so.62` opt-in path) now states the contract authoritatively: a `jpeg_decompress_struct` / `jpeg_compress_struct` allocated through our cdylib must be used (and freed) on the thread that created it. The "Why this contract" paragraph cites the v8 byte-for-byte ABI mirror at `jpeglib.rs:3900-3970` as the reason private state lives in TLS rather than appended to the public struct, and links the implementation pointers (`DECOMPRESS_PRIVATE_STATE` at `jpeglib.rs:368-372` + compress equivalent at `:3492-3505`). The "Divergence from upstream" paragraph names the upstream contract verbatim ("single-threaded per `cinfo`, but ownership transfer between threads is OK") and points at P4-16 Option A as the migration path if a named consumer ever needs cross-thread transfer (FFmpeg's frame-thread JPEG path is flagged as the canonical example).
+**Superseded 2026-09-08 by [P4-132](#p4-132-classic-c-abi-per-cinfo-state-is-thread-affine-p4-16-option-a--closed-2026-09-08)** — the per-thread ownership contract this closure documented no longer exists; the state moved onto the object. **Status (2026-05-19): closed via Option B (document the per-thread ownership contract).** A new "Threading contract" section in `docs/ABI_COMPATIBILITY.md` (inside the "Our policy" tree, between the safe-SONAME matrix and the `libjpeg.so.62` opt-in path) now states the contract authoritatively: a `jpeg_decompress_struct` / `jpeg_compress_struct` allocated through our cdylib must be used (and freed) on the thread that created it. The "Why this contract" paragraph cites the v8 byte-for-byte ABI mirror at `jpeglib.rs:3900-3970` as the reason private state lives in TLS rather than appended to the public struct, and links the implementation pointers (`DECOMPRESS_PRIVATE_STATE` at `jpeglib.rs:368-372` + compress equivalent at `:3492-3505`). The "Divergence from upstream" paragraph names the upstream contract verbatim ("single-threaded per `cinfo`, but ownership transfer between threads is OK") and points at P4-16 Option A as the migration path if a named consumer ever needs cross-thread transfer (FFmpeg's frame-thread JPEG path is flagged as the canonical example).
 
 Option A (migrate to `OnceLock<RwLock<HashMap<usize, …>>>` + multi-thread ownership-transfer test) remains tracked here for the day a downstream consumer surfaces the need, but is **not** required for T3 readiness — Option B closes the documentation gap that was the actual divergence ("neither `ABI_COMPATIBILITY.md` nor `README.md` document the divergence") flagged by the cold review.
 
@@ -5142,8 +5142,9 @@ release notes):
 
 - **Per-instance SIMD dispatch replaces thread-local storage** (beta1 note 2):
   upstream explicitly "eliminat[ed] the need for thread-local storage in the
-  libjpeg API library." Our shim's private state is still TLS-keyed — see
-  **[P4-132](#p4-132-classic-c-abi-per-cinfo-state-is-thread-affine-p4-16-option-a--open)**.
+  libjpeg API library." Our shim's private state was TLS-keyed until
+  2026-09-08 — see
+  **[P4-132](#p4-132-classic-c-abi-per-cinfo-state-is-thread-affine-p4-16-option-a--closed-2026-09-08)**.
   Upstream moving off TLS weakens the "upstream is single-threaded too" framing.
 - **RISC-V Vector (RVV) SIMD** (beta1 note 6): +149-246% compress, +48-180%
   decompress vs 3.1.x on RVV hardware. See
@@ -5581,7 +5582,7 @@ was filed with:
 
 | # | 3.2 change | Disposition |
 | --- | --- | --- |
-| beta1-2 | Per-instance SIMD dispatch replaces thread-local storage | **Tracked — [P4-132](#p4-132-classic-c-abi-per-cinfo-state-is-thread-affine-p4-16-option-a--open).** Upstream removing TLS from its libjpeg API is that item's central evidence. |
+| beta1-2 | Per-instance SIMD dispatch replaces thread-local storage | **Closed 2026-09-08 — [P4-132](#p4-132-classic-c-abi-per-cinfo-state-is-thread-affine-p4-16-option-a--closed-2026-09-08).** Upstream removing TLS from its libjpeg API is that item's central evidence. |
 | beta1-6 | RISC-V Vector (RVV) SIMD | **Tracked — [P4-134](#p4-134-no-risc-v-rvv-simd-backend--upstream-32-ships-one--open)**, and it expires [P4-60](#p4-60-scalar-kernels-are-25x-slower-than-cs-scalar-kernels--open)'s premise that riscv64 was scalar-vs-scalar. |
 | beta1-8 | 8-bit lossy JPEG decompressed to 12-bit output | **New — [P4-171](#p4-171-8-bit-lossy-jpeg-cannot-be-decompressed-to-12-bit-output-32-beta1-note-8--open).** Measured: `src/api/precision.rs:865` refuses any stream whose precision is not 12, so we reject where 3.2 decodes. |
 | beta1-10 | TurboJPEG: `TJCS_DEFAULT`, repeated `tj3GetICCProfile`, ICC from a compression instance, 4:1:0 and 2:4 subsampling | **Split.** 4:1:0 and 2:4 are implemented (`TJSAMP_410`/`TJSAMP_24`) and covered by the subsampling matrices; the ICC and `TJCS_DEFAULT` additions are **new — [P4-172](#p4-172-turbojpeg-32-icc-and-tjcs_default-additions-are-unimplemented-32-beta1-note-10--open)**. |
@@ -6409,7 +6410,79 @@ but a dependency viewer will show it.
 *What remains under this item:* the deb/rpm decision (3) and the two
 `capi-v*` / naming policy questions (4, 5) above.
 
-## P4-132. Classic C-ABI Per-`cinfo` State Is Thread-Affine (P4-16 Option A) — **OPEN**
+## P4-132. Classic C-ABI Per-`cinfo` State Is Thread-Affine (P4-16 Option A) — **CLOSED 2026-09-08**
+
+**Status (2026-09-08): closed.** Both `thread_local!` tables are gone from
+`crates/libjpeg-turbo-rs-capi/src/jpeglib.rs`; a `cinfo` created on one
+thread is driven and destroyed on another with its state intact and released.
+Proof: `cargo test -p libjpeg-turbo-rs-capi --test capi_thread_affinity`
+(5 tests — decompress and compress ownership transfer with the live-state
+count back to baseline after the cross-thread destroy, destroy-then-recreate
+at the same address, eight independent `cinfo`s on eight threads — the moved
+decode cross-validated byte for byte against `djpeg` where installed, and the
+moved and eight-thread runs compared to the same-thread reference
+unconditionally — and the moved decode sequence
+under Miri on a 1×1 fixture, which `.github/workflows/ci.yml`'s Miri leg
+now runs: the first draft of this fix read the private-state slot through
+the raw `cinfo` while the entry point held a `&mut` to the same struct, a
+Stacked Borrows violation nothing else in CI could see), plus
+`cargo test -p libjpeg-turbo-rs-capi --no-fail-fast` (79 sections, 345
+passed, 0 failed on macOS aarch64) and the benchmark in
+`experiments/capi_thread_affinity_2026-09-08.md`.
+
+**How it closed against the criteria as written.** The criteria assumed the
+fix would be a process-global map behind a lock and listed what such a map
+needs to be correct. The shipped design has no map. `DecompressPrivate` is
+boxed behind `jpeg_decompress_struct::master` — the opaque slot upstream's
+own `jdmaster.c` uses for per-instance state and no consumer dereferences —
+exactly as `CompressPrivate` has always sat behind
+`jpeg_compress_struct::master`; the 12/16-bit scanline slot that keyed the
+second table on the box address moved inside the box. Against the numbered
+criteria:
+
+1. Both tables migrated off `thread_local!`. No lock was needed because
+   there is no shared structure left to guard; a field on the object moves
+   with the object.
+2. Benchmark (min µs/iteration over three alternating runs, baseline →
+   fix): `tj3Decompress8` 640×480 1148.97 → 1145.09 (−0.34 %), 64×64
+   28.71 → 28.66 (−0.17 %); `tj3Compress8` 640×480 863.43 → 865.19
+   (+0.20 %), 64×64 13.46 → 13.37 (−0.67 %). All inside the 1 % bar; the
+   TurboJPEG paths share no code with the change. The classic
+   create-to-destroy decode loop, which does, went from 36.52 → 35.92 µs at
+   64×64 (−1.64 %) and 1167.40 → 1163.92 µs at 640×480 (−0.30 %).
+3. Pointer reuse: with no key there is nothing to collide.
+   `jpeg_destroy_decompress` is the single release point — it drops the box
+   and nulls `master` before any later create can fill it — and
+   `decompress_private_raw` also gates on `mem`, the one field a rejected
+   create leaves null (P4-110), so an object that was never created is not
+   trusted for its `master` bit pattern. The generation counter and magic
+   value the criterion specified would have disambiguated map entries; with
+   no map they would be dead fields and were not added. The test the
+   criterion demands exists and passes:
+   `reallocated_cinfo_at_the_same_address_does_not_inherit_the_old_state`
+   (a `jpeg_save_markers` request from lifecycle 1, destroyed on another
+   thread, is provably absent from lifecycle 2 in the same allocation).
+4. `capi_thread_affinity.rs` as above. Leak-freedom is measured, not
+   inferred: `live_decompress_private_count_for_tests` /
+   `live_compress_private_count_for_tests` are non-exported test hooks
+   counted at construction and in `Drop`. Concurrent use of one `cinfo`
+   from two threads is documented as undefined, matching upstream's
+   `libjpeg.txt` (3.2.0, lines 2222-2225); it is a data race on both
+   libraries and has no observable contract to assert.
+5. The `tjhandle` half that P4-137's criterion 6 deferred here is decided the
+   same way: one handle, one thread at a time, concurrent use undefined as
+   upstream's TurboJPEG documents it, no error returned for it because
+   upstream returns none. `docs/ABI_COMPATIBILITY.md`'s "Threading contract" section is rewritten
+   to the new contract (supported / supported / undefined, how it works,
+   history); the "Divergence from upstream" paragraph is gone because there
+   is no divergence left to state.
+
+The tests call the same `extern "C"` functions the cdylib exports, in
+process, rather than through a compiled C harness; the property is in those
+functions, not in the linker.
+
+Original (OPEN) entry preserved below for institutional memory.
+
 
 **GitHub:** [#463](https://github.com/developer0hye/libjpeg-turbo-rs/issues/463) — under the [#470](https://github.com/developer0hye/libjpeg-turbo-rs/issues/470) umbrella.
 
@@ -7206,7 +7279,7 @@ and for the decision to be recorded either way. **Declined**, for three reasons:
    belief that the rest is checked too.
 2. **It costs a process-global lock on every entry point.** A registry lookup
    per call serialises otherwise-independent instances — the exact property
-   [P4-132](#p4-132-classic-c-abi-per-cinfo-state-is-thread-affine-p4-16-option-a--open)
+   [P4-132](#p4-132-classic-c-abi-per-cinfo-state-is-thread-affine-p4-16-option-a--closed-2026-09-08)
    exists to *improve*. Upstream 3.2 moved the other way, removing TLS from its
    libjpeg API. (The criterion says "weigh against P4-131's threading work";
    P4-131 is native binary distribution — the threading item is P4-132.)
@@ -7216,8 +7289,11 @@ and for the decision to be recorded either way. **Declined**, for three reasons:
 
 The *concurrency* half has merit and is not dropped: "a concurrent same-handle
 call returns an error rather than aliasing `&mut`" is a real hazard, and it is
-P4-132's subject, where the per-`cinfo` threading contract is being decided as a
-whole. It is recorded there rather than solved twice.
+P4-132's subject, where the per-`cinfo` threading contract was decided as a
+whole (closed 2026-09-08). It is recorded there rather than solved twice — and
+decided the same way for a `tjhandle`: one handle, one thread at a time, with
+concurrent use undefined as upstream's TurboJPEG documents it, and no error
+returned for it because upstream returns none.
 
 **A note on the tripwire that fired.** The previous status predicted that when
 criterion 1 landed, the NULL-handle call sites in `handle_borrow_scope.rs` would

@@ -387,6 +387,7 @@
 - [x] Memory-to-memory compress (`Vec<u8>` output)
 - [x] Memory-to-memory decompress (byte slice → `Image`)
 - [x] Classic `jpeg_CreateCompress` / `jpeg_CreateDecompress` version/size guards — P4-110 (closed 2026-08-11; `JERR_BAD_LIB_VERSION` / `JERR_BAD_STRUCT_SIZE` compared against a real libjpeg by `capi_create_abi_guards.rs`)
+- [x] Classic `cinfo` ownership transfer between threads — private state travels with the struct (behind the opaque `master` slot), so create on one thread, use and destroy on another, as upstream allows; concurrent use of one `cinfo` stays undefined, as upstream — P4-132 (closed 2026-09-08; `capi_thread_affinity.rs`)
 - [x] Full classic `jpeg_stdio_dest()` contract — short writes, `fflush`, and `ferror` raise `JERR_FILE_WRITE`; foreign-manager reuse raises `JERR_BUFFER_SIZE` (P4-108)
 - [x] Full classic `jpeg_stdio_src()` contract — chunked `fread` through the caller's `FILE *`, trace-compared vs stock (P4-109, 2026-08-14)
 - [x] Full classic `jpeg_mem_dest()` ownership/reallocation contract — caller capacity honoured, caller buffers never freed, doubling growth into library memory (P4-108)
@@ -508,7 +509,7 @@ named explicitly rather than implied complete:
 
 Two parallel workers shipped **36 new `#[no_mangle] extern "C"` symbols** in `crates/libjpeg-turbo-rs-capi/src/jpeglib.rs`:
 
-- **Decode extensions (C1, 12 symbols)**: `jpeg_skip_scanlines`, `jpeg_crop_scanline`, `jpeg_save_markers`, `jpeg_set_marker_processor`, `jpeg_read_icc_profile`, `jpeg_read_coefficients`, `jpeg_copy_critical_parameters`, `jpeg_core_output_dimensions`, `jpeg12_read_scanlines`, `jpeg12_skip_scanlines`, `jpeg12_crop_scanline`, `jpeg16_read_scanlines`. High-precision state lives in a `thread_local!` side table keyed by the cinfo pointer.
+- **Decode extensions (C1, 12 symbols)**: `jpeg_skip_scanlines`, `jpeg_crop_scanline`, `jpeg_save_markers`, `jpeg_set_marker_processor`, `jpeg_read_icc_profile`, `jpeg_read_coefficients`, `jpeg_copy_critical_parameters`, `jpeg_core_output_dimensions`, `jpeg12_read_scanlines`, `jpeg12_skip_scanlines`, `jpeg12_crop_scanline`, `jpeg16_read_scanlines`. High-precision state lives inside the cinfo's private state (it sat in a `thread_local!` side table keyed by the cinfo pointer until P4-132 closed on 2026-09-08).
 - **Encode side + utilities (C2, 24 symbols)**: `jpeg_CreateCompress`/`jpeg_destroy_compress`, `jpeg_stdio_dest`/`jpeg_mem_dest`, `jpeg_set_defaults`/`jpeg_set_colorspace`/`jpeg_default_colorspace`, `jpeg_set_quality`, `jpeg_start_compress`/`jpeg_write_scanlines`/`jpeg_finish_compress`, `jpeg_quality_scaling`, `jpeg_add_quant_table`, `jpeg_default_qtables`, `jpeg_simple_progression`, `jpeg_enable_lossless`, `jpeg_suppress_tables`, `jpeg_write_marker`/`jpeg_write_m_header`/`jpeg_write_m_byte`, `jpeg_write_icc_profile`, `jpeg_write_tables`, `jpeg12_write_scanlines`/`jpeg16_write_scanlines`, `jpeg_write_coefficients`, `jpeg_resync_to_restart`, `jcopy_block_row`, `jdiv_round_up`.
 - **Test count**: 38 (decode) + 15 (encode) new dlopen-and-exercise tests, all green on main.
 

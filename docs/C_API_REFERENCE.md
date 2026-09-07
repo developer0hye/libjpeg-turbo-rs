@@ -170,7 +170,7 @@
 |---|---|---|---|
 | `jpeg_std_error(err)` | Create default error manager | `JpegError` enum | ✅ |
 | `jpeg_create_compress(cinfo)` | Create compression struct | `Encoder` / `ScanlineEncoder`; version/size guards enforced as upstream (P4-110 closed 2026-08-11) | 🔶 |
-| `jpeg_create_decompress(cinfo)` | Create decompression struct | `Decoder::new()` / `ScanlineDecoder::new()`; version/size guards enforced as upstream (P4-110 closed 2026-08-11) | 🔶 |
+| `jpeg_create_decompress(cinfo)` | Create decompression struct | `Decoder::new()` / `ScanlineDecoder::new()`; version/size guards enforced as upstream (P4-110 closed 2026-08-11); private state boxed behind `master`, so the struct may change threads between calls (P4-132 closed 2026-09-08) | 🔶 |
 | `jpeg_destroy_compress(cinfo)` | Destroy compressor | RAII / `Drop` | ✅ |
 | `jpeg_destroy_decompress(cinfo)` | Destroy decompressor | RAII / `Drop` | ✅ |
 | `jpeg_abort_compress(cinfo)` | Abort compression | N/A (RAII) | N/A |
