@@ -6760,12 +6760,17 @@ bytes through a writer pinned to each available tier, on both dispatchers) and
 x86_64 CI runner. Each dispatch test skips a tier this CPU cannot run, so on
 the Rosetta host — no BMI2, as the second milestone recorded — the elevated
 arms are proven on CI's x86_64 runners, not locally. Same-run A/B on the branch
-(`perf-portable-vs-native.yml` run 34166439144, Intel Xeon 6973P-C, C 3.2.0;
-`experiments/portable_vs_native_x86_64_2026-09-08.md` run 6 and the
-`67f672d` row of `experiments/encode.tsv`): `main-portable / stock` is
-0.96–1.01 on both DCT paths, inside that host's 0.2–6.3 % drift — the
-expected neutral result for a field load in place of a relaxed atomic load;
-no regression above the bracket, no win claimed.
+(`perf-portable-vs-native.yml`, runs 6–7 in
+`experiments/portable_vs_native_x86_64_2026-09-08.md` and the `67f672d` row
+of `experiments/encode.tsv`; `main-portable` is `origin/main` with #602 in,
+so the column isolates this change): run 34166439144 (Intel Xeon 6973P-C)
+could not resolve it — `main-portable / stock` 0.96–1.01 inside that host's
+0.2–6.3 % drift; run 34167658277 (AMD EPYC 7763 / Zen 3, brackets ≤ 0.6 %)
+puts `main` 3.2–3.9 % slower than the branch on every 4:2:0 case and within
+0.5 % on 4:2:2/4:4:4, and compile-time `+bmi2` over the dispatched build at
+0.991–1.011 (noise) on the CPU model where it was worth 1.3–2.9 % before the
+tier existed. The tier is reached, and moving it onto the writer cost
+nothing and gained a measured 3–4 % on the row-hoisted 4:2:0 paths.
 
 ## P4-134. No RISC-V RVV SIMD Backend — Upstream 3.2 Ships One — **OPEN**
 

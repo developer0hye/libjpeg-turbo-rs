@@ -492,8 +492,8 @@ What it shows:
   `main-portable / stock` is 0.960–1.005 with `fma / stock` at 0.95–1.04;
   portable / C 1.28–1.46× (P4-187's gap, unchanged).
 - No regression above the host's drift, and no win was expected or is
-  claimed. Re-dispatched (run 7 below, if a quieter host drew) so the
-  neutrality has a bracket that can resolve 1–2 %.
+  claimed from this run. Re-dispatched (run 7 below) for a host whose
+  bracket can resolve 1–2 %.
 
 ### Integer DCT (islow) — µs, ratio to portable build, ratio to C 3.2.0
 
@@ -540,6 +540,86 @@ fma
 popcnt
 sse4_2
 Model name:                              Intel(R) Xeon(R) 6973P-C
+rustc 1.98.1 (48a229cea 2026-09-01)
+libjpeg-turbo version 3.2.0 (build 20260630)
+```
+
+## Run 7 — same branch (`67f672d`), second dispatch: a quiet Zen 3 host
+
+[Run 34167658277](https://github.com/developer0hye/libjpeg-turbo-rs/actions/runs/34167658277),
+AMD EPYC 7763 (Zen 3 — run 1's model), rustc 1.98.1, C 3.2.0. Integer
+brackets 0.0–0.6 %, `stock-again / stock` 0.999–1.006, so this host resolves
+1 %. Same trees as run 6: `main-portable` is `origin/main` at `6261348`, the
+only difference the tier's home.
+
+What it shows:
+
+- **Integer DCT, 4:2:0: the branch is 3.2–3.9 % faster than `main`.**
+  `main-portable / stock` is 1.032 / 1.039 / 1.035 / 1.034 / 1.035 on the
+  five 4:2:0 cases (64×64 up to 1080p) against brackets of ≤ 0.6 %, and
+  0.995–1.008 on every 4:2:2 and 4:4:4 case (neutral). The 4:2:0 encode is
+  the one whose Huffman stage runs through the row-hoisted fast path in
+  `baseline.rs` and the per-MCU `encode_mcu_420_*` loops, where the tier is
+  now read once per row / MCU and handed to an `#[inline(always)]` callee —
+  a value the compiler can keep in a register and unswitch on, where the
+  relaxed atomic load it replaced had to be re-issued per block. That is the
+  plausible mechanism; it is not separately measured. Portable / C at 1080p:
+  1.067 / 1.064 / 1.044 (run 1 on this model, before any of P4-133's
+  dispatch: 1.07 / 1.08 / 1.05).
+- **Compile-time `+bmi2` over the dispatched portable build is noise:**
+  `bmi2 / stock` 0.991–1.011 across the matrix, 1.000 / 0.991 / 0.998 at
+  1080p. On this same CPU model before the tier existed (run 1) it was
+  1.3–2.9 % at 1080p. Two runs on two days, so a cross-run comparison — but
+  the same model and a ≤ 0.6 % bracket on each, which is the measurement the
+  README carried the BMI2 tier without until now.
+- **Float DCT: the branch is 0–2 % faster** (`main-portable / stock`
+  1.000–1.021, the 4:2:0 cases 1.016–1.021 against 0.2–1.0 % brackets);
+  `fma / stock` 0.980–0.997, portable / C 1.36–1.45× (P4-187).
+
+### Integer DCT (islow) — µs, ratio to portable build, ratio to C 3.2.0
+
+| Case | noise (pair spread) | stock (µs) | stock / baseline | stock / reference | main-portable (µs) | main-portable / baseline | main-portable / reference | bmi1-lzcnt (µs) | bmi1-lzcnt / baseline | bmi1-lzcnt / reference | bmi2 (µs) | bmi2 / baseline | bmi2 / reference | fma (µs) | fma / baseline | fma / reference | readme-set (µs) | readme-set / baseline | readme-set / reference | avx2 (µs) | avx2 / baseline | avx2 / reference | native (µs) | native / baseline | native / reference | stock-again (µs) | stock-again / baseline | stock-again / reference | C (µs) | C / baseline | C / reference | C-again (µs) | C-again / baseline | C-again / reference |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 64x64_420 | 0.0% | 18.8 | 1.000 (noise) | 0.817 | 19.4 | 1.032 | 0.843 | 18.8 | 1.000 (noise) | 0.817 | 19.0 | 1.011 | 0.826 | 18.6 | 0.989 | 0.809 | 18.5 | 0.984 | 0.804 | 18.2 | 0.968 | 0.791 | 17.9 | 0.952 | 0.778 | 18.8 | 1.000 (noise) | 0.817 | 23.0 | 1.223 | 1.000 | 22.6 | 1.202 | 0.983 |
+| 320x240_420 | 0.6% | 294.6 | 1.000 (noise) | 1.033 | 306.2 | 1.039 | 1.073 | 295.2 | 1.002 (noise) | 1.035 | 295.4 | 1.003 (noise) | 1.035 | 294.7 | 1.000 (noise) | 1.033 | 294.1 | 0.998 (noise) | 1.031 | 292.2 | 0.992 | 1.024 | 290.3 | 0.985 | 1.018 | 296.5 | 1.006 (noise) | 1.039 | 285.3 | 0.968 | 1.000 | 285.5 | 0.969 | 1.001 |
+| 320x240_422 | 0.1% | 375.1 | 1.000 (noise) | 1.041 | 375.5 | 1.001 | 1.042 | 371.2 | 0.990 | 1.031 | 372.7 | 0.994 | 1.035 | 372.9 | 0.994 | 1.035 | 377.6 | 1.007 | 1.048 | 370.8 | 0.989 | 1.029 | 366.6 | 0.977 | 1.018 | 374.8 | 0.999 (noise) | 1.041 | 360.2 | 0.960 | 1.000 | 363.2 | 0.968 | 1.008 |
+| 320x240_444 | 0.0% | 561.1 | 1.000 (noise) | 0.998 | 560.3 | 0.999 | 0.996 | 556.1 | 0.991 | 0.989 | 560.5 | 0.999 | 0.997 | 556.7 | 0.992 | 0.990 | 549.9 | 0.980 | 0.978 | 552.9 | 0.985 | 0.983 | 547.0 | 0.975 | 0.973 | 561.3 | 1.000 (noise) | 0.998 | 562.4 | 1.002 | 1.000 | 562.3 | 1.002 | 1.000 |
+| 640x480_420 | 0.0% | 1063.6 | 1.000 (noise) | 1.038 | 1101.3 | 1.035 | 1.075 | 1068.2 | 1.004 | 1.043 | 1064.3 | 1.001 | 1.039 | 1064.0 | 1.000 (noise) | 1.039 | 1059.0 | 0.996 | 1.034 | 1057.8 | 0.995 | 1.033 | 1048.4 | 0.986 | 1.024 | 1064.0 | 1.000 (noise) | 1.039 | 1024.2 | 0.963 | 1.000 | 1023.8 | 0.963 | 1.000 |
+| 640x480_422 | 0.6% | 1316.0 | 1.000 (noise) | 1.034 | 1326.0 | 1.008 | 1.042 | 1309.7 | 0.995 (noise) | 1.029 | 1313.0 | 0.998 (noise) | 1.032 | 1314.2 | 0.999 (noise) | 1.033 | 1331.3 | 1.012 | 1.046 | 1301.3 | 0.989 | 1.022 | 1295.2 | 0.984 | 1.018 | 1323.4 | 1.006 (noise) | 1.040 | 1272.8 | 0.967 | 1.000 | 1274.3 | 0.968 | 1.001 |
+| 640x480_444 | 0.1% | 1903.6 | 1.000 (noise) | 1.009 | 1910.1 | 1.003 | 1.013 | 1883.3 | 0.989 | 0.998 | 1896.8 | 0.996 | 1.006 | 1887.1 | 0.991 | 1.000 | 1858.6 | 0.976 | 0.985 | 1858.5 | 0.976 | 0.985 | 1862.1 | 0.978 | 0.987 | 1906.4 | 1.001 (noise) | 1.011 | 1886.2 | 0.991 | 1.000 | 1887.6 | 0.992 | 1.001 |
+| 1280x720_420 | 0.2% | 3614.0 | 1.000 (noise) | 1.040 | 3735.6 | 1.034 | 1.075 | 3629.3 | 1.004 | 1.045 | 3608.2 | 0.998 (noise) | 1.039 | 3603.4 | 0.997 | 1.037 | 3592.8 | 0.994 | 1.034 | 3595.5 | 0.995 | 1.035 | 3568.8 | 0.987 | 1.027 | 3622.0 | 1.002 (noise) | 1.043 | 3473.4 | 0.961 | 1.000 | 3486.3 | 0.965 | 1.004 |
+| 1920x1080_420 | 0.4% | 8133.3 | 1.000 (noise) | 1.067 | 8420.4 | 1.035 | 1.105 | 8169.4 | 1.004 | 1.072 | 8131.3 | 1.000 (noise) | 1.067 | 8137.0 | 1.000 (noise) | 1.067 | 8092.4 | 0.995 | 1.061 | 8094.4 | 0.995 | 1.062 | 8050.2 | 0.990 | 1.056 | 8164.6 | 1.004 (noise) | 1.071 | 7623.7 | 0.937 | 1.000 | 7644.4 | 0.940 | 1.003 |
+| 1920x1080_422 | 0.0% | 10284.7 | 1.000 (noise) | 1.064 | 10253.3 | 0.997 | 1.061 | 10187.2 | 0.991 | 1.054 | 10196.8 | 0.991 | 1.055 | 10248.6 | 0.996 | 1.060 | 10393.2 | 1.011 | 1.075 | 10138.9 | 0.986 | 1.049 | 10092.7 | 0.981 | 1.044 | 10288.6 | 1.000 (noise) | 1.065 | 9664.1 | 0.940 | 1.000 | 9678.7 | 0.941 | 1.002 |
+| 1920x1080_444 | 0.1% | 15390.1 | 1.000 (noise) | 1.044 | 15311.8 | 0.995 | 1.038 | 15179.3 | 0.986 | 1.029 | 15353.6 | 0.998 | 1.041 | 15225.6 | 0.989 | 1.032 | 15077.5 | 0.980 | 1.022 | 14994.0 | 0.974 | 1.017 | 14969.2 | 0.973 | 1.015 | 15372.2 | 0.999 (noise) | 1.042 | 14747.2 | 0.958 | 1.000 | 14777.6 | 0.960 | 1.002 |
+
+### Float DCT — µs, ratio to portable build, ratio to C 3.2.0
+
+| Case | noise (pair spread) | stock (µs) | stock / baseline | stock / reference | main-portable (µs) | main-portable / baseline | main-portable / reference | fma (µs) | fma / baseline | fma / reference | readme-set (µs) | readme-set / baseline | readme-set / reference | native (µs) | native / baseline | native / reference | stock-again (µs) | stock-again / baseline | stock-again / reference | C (µs) | C / baseline | C / reference | C-again (µs) | C-again / baseline | C-again / reference |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 64x64_420 | 1.2% | 25.1 | 1.000 (noise) | 1.068 | 25.1 | 1.000 (noise) | 1.068 | 24.6 | 0.980 | 1.047 | 24.5 | 0.976 | 1.043 | 25.9 | 1.032 | 1.102 | 25.4 | 1.012 (noise) | 1.081 | 23.5 | 0.936 | 1.000 | 22.9 | 0.912 | 0.974 |
+| 320x240_420 | 0.8% | 420.9 | 1.000 (noise) | 1.384 | 423.9 | 1.007 (noise) | 1.393 | 415.6 | 0.987 | 1.366 | 413.8 | 0.983 | 1.360 | 450.1 | 1.069 | 1.480 | 417.4 | 0.992 (noise) | 1.372 | 304.2 | 0.723 | 1.000 | 301.1 | 0.715 | 0.990 |
+| 320x240_422 | 0.2% | 536.6 | 1.000 (noise) | 1.405 | 543.6 | 1.013 | 1.424 | 530.3 | 0.988 | 1.389 | 532.9 | 0.993 | 1.396 | 575.0 | 1.072 | 1.506 | 537.5 | 1.002 (noise) | 1.408 | 381.8 | 0.712 | 1.000 | 380.6 | 0.709 | 0.997 |
+| 320x240_444 | 0.7% | 791.9 | 1.000 (noise) | 1.356 | 796.0 | 1.005 (noise) | 1.363 | 782.7 | 0.988 | 1.340 | 781.2 | 0.986 | 1.338 | 860.4 | 1.087 | 1.473 | 797.7 | 1.007 (noise) | 1.366 | 584.0 | 0.737 | 1.000 | 583.2 | 0.736 | 0.999 |
+| 640x480_420 | 1.0% | 1545.1 | 1.000 (noise) | 1.406 | 1577.4 | 1.021 | 1.436 | 1540.1 | 0.997 (noise) | 1.402 | 1532.5 | 0.992 (noise) | 1.395 | 1683.7 | 1.090 | 1.533 | 1560.2 | 1.010 (noise) | 1.420 | 1098.6 | 0.711 | 1.000 | 1095.8 | 0.709 | 0.997 |
+| 640x480_422 | 1.6% | 1954.6 | 1.000 (noise) | 1.447 | 1981.0 | 1.014 (noise) | 1.466 | 1937.6 | 0.991 (noise) | 1.434 | 1945.2 | 0.995 (noise) | 1.440 | 2122.7 | 1.086 | 1.571 | 1985.2 | 1.016 (noise) | 1.470 | 1350.9 | 0.691 | 1.000 | 1349.6 | 0.690 | 0.999 |
+| 640x480_444 | 1.2% | 2833.5 | 1.000 (noise) | 1.440 | 2856.3 | 1.008 (noise) | 1.452 | 2796.9 | 0.987 | 1.422 | 2780.2 | 0.981 | 1.413 | 3116.9 | 1.100 | 1.585 | 2866.9 | 1.012 (noise) | 1.457 | 1967.1 | 0.694 | 1.000 | 1963.5 | 0.693 | 0.998 |
+| 1280x720_420 | 0.2% | 5076.7 | 1.000 (noise) | 1.375 | 5155.7 | 1.016 | 1.396 | 5042.7 | 0.993 | 1.366 | 5029.4 | 0.991 | 1.362 | 5481.0 | 1.080 | 1.484 | 5065.7 | 0.998 (noise) | 1.372 | 3692.5 | 0.727 | 1.000 | 3689.3 | 0.727 | 0.999 |
+| 1920x1080_420 | 0.0% | 11483.7 | 1.000 (noise) | 1.417 | 11692.6 | 1.018 | 1.443 | 11440.9 | 0.996 | 1.412 | 11400.3 | 0.993 | 1.407 | 12529.0 | 1.091 | 1.546 | 11479.1 | 1.000 (noise) | 1.417 | 8101.9 | 0.706 | 1.000 | 8104.1 | 0.706 | 1.000 |
+| 1920x1080_422 | 0.7% | 14615.9 | 1.000 (noise) | 1.431 | 14715.0 | 1.007 (noise) | 1.441 | 14475.8 | 0.990 | 1.418 | 14571.3 | 0.997 (noise) | 1.427 | 15682.1 | 1.073 | 1.536 | 14724.6 | 1.007 (noise) | 1.442 | 10211.8 | 0.699 | 1.000 | 10179.1 | 0.696 | 0.997 |
+| 1920x1080_444 | 0.2% | 21616.2 | 1.000 (noise) | 1.413 | 21671.8 | 1.003 | 1.417 | 21337.4 | 0.987 | 1.395 | 21280.3 | 0.984 | 1.391 | 23452.5 | 1.085 | 1.533 | 21666.9 | 1.002 (noise) | 1.416 | 15296.5 | 0.708 | 1.000 | 15339.0 | 0.710 | 1.003 |
+
+### Runner
+
+```
+abm
+avx
+avx2
+bmi1
+bmi2
+fma
+popcnt
+sse4_2
+Model name:                              AMD EPYC 7763 64-Core Processor
 rustc 1.98.1 (48a229cea 2026-09-01)
 libjpeg-turbo version 3.2.0 (build 20260630)
 ```
