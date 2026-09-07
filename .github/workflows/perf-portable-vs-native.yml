@@ -13,11 +13,21 @@ name: Perf A/B (portable vs native, x86_64 encode)
 # against the C reference built from upstream's official package, so every
 # per-benchmark delta is a measurement from a single machine and a single hour.
 #
-# Manual, or on a change to the harness: the deltas being measured are a few
-# percent, and a shared runner's noise floor is of the same order. The job therefore runs the
-# portable binary twice, first and last, and reports that pair alongside the
-# variants — a variant inside the stock/stock spread is noise, not a win.
-# Record the outcome in experiments/encode.tsv per the keep/discard protocol.
+# Manual, or on a change to the harness. The deltas being measured are a few
+# percent and a shared runner's noise floor is of the same order: the CPU
+# governor and turbo cannot be pinned here the way CLAUDE.md's benchmark rule
+# asks, and the box is shared. So the job times the portable binary twice,
+# first and last, and the C reference twice the same way, and the summariser
+# marks any variant whose delta sits inside that stock/stock spread as
+# `(noise)` — that column is drift, not a win. One sample per cell otherwise;
+# repeats would put the run past a PR-sized wall clock. Record the outcome in
+# experiments/encode.tsv per the keep/discard protocol.
+#
+# Expect the float-DCT `fma` column to move by a lot rather than a little:
+# the float FDCT is written with `f32::mul_add` for parity with clang's
+# contraction, and on a baseline x86_64 build that is a libm call per rotator
+# rather than one instruction. A large number there is the measurement, not
+# a mistake. The integer default never touches that path.
 #
 # The C oracle here is a target, not an expectation: nothing is compared
 # byte-for-byte, so this job answers at current upstream stable only and is
@@ -47,10 +57,17 @@ jobs:
     timeout-minutes: 90
     env:
       LIBJPEG_TURBO_PREFIX: /opt/libjpeg-turbo
+    defaults:
+      run:
+        # GitHub's default is `bash -e`, without pipefail: every measurement
+        # below goes through `| tee`, and a bench that died mid-matrix or a
+        # summariser that refused an empty run would otherwise exit 0 with a
+        # partial file. `shell: bash` is `bash -eo pipefail`.
+        shell: bash
     steps:
+      # No submodules: the job builds against the deb and reads neither
+      # reference tree; the fixtures are in-tree under tests/fixtures.
       - uses: actions/checkout@v7
-        with:
-          submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
       - name: Install libjpeg-turbo 3.2.0 from official release
         run: |
@@ -77,14 +94,16 @@ jobs:
       # The CPU decides which variants can differ at all: a runner without
       # FMA makes the `fma` column meaningless, and `target-cpu=native` means
       # whatever this box is. Both go into the artifact next to the numbers.
+      # A runner with none of the listed flags is a valid (if useless) box, so
+      # the flag grep is not allowed to fail the job.
       - name: Record the runner
         run: |
           mkdir -p out
           { lscpu; echo; rustc -vV; echo; cat /tmp/oracle-version.txt; } | tee out/runner.txt
           grep -m1 '^flags' /proc/cpuinfo | tr ' ' '\n' \
-            | grep -Ex 'avx|avx2|avx512f|bmi1|bmi2|fma|abm|lzcnt|popcnt|sse4_2' \
+            | { grep -Ex 'avx|avx2|avx512f|bmi1|bmi2|fma|abm|lzcnt|popcnt|sse4_2' || true; } \
             | sort | tee out/cpu-flags.txt
-      - name: Build and time the C reference encoder
+      - name: Build the C reference encoder
         run: |
           LIB=/opt/libjpeg-turbo/lib64
           [ -d "$LIB" ] || LIB=/opt/libjpeg-turbo/lib
@@ -92,19 +111,31 @@ jobs:
             -I/opt/libjpeg-turbo/include -L"$LIB" -ljpeg -Wl,-rpath,"$LIB"
           ldd out/bench_c_encode_linux | grep libjpeg | tee -a out/runner.txt
           ldd out/bench_c_encode_linux | grep -q /opt/libjpeg-turbo/
-          out/bench_c_encode_linux        | tee out/islow_C.txt
-          out/bench_c_encode_linux float  | tee out/float_C.txt
       # One target directory per variant: RUSTFLAGS is part of cargo's
       # fingerprint, but a shared directory would rebuild the world on every
       # switch and make it impossible to tell afterwards which binary came
       # from which flags. Each binary is copied out under its variant name.
+      #
+      # The portable row unsets RUSTFLAGS rather than setting it empty: a set
+      # but empty RUSTFLAGS also suppresses any `[build] rustflags` a future
+      # .cargo/config.toml might carry, and "portable" has to mean exactly
+      # what `cargo build --release` does. `stock-again` is a copy of the
+      # portable binary, not a rebuild — the bracket measures the machine.
+      #
+      # `readme-set` is the feature list README recommends for x86_64, not the
+      # x86-64-v3 level (which also carries AVX, AVX2, F16C and MOVBE).
       - name: Build every Rust variant
         run: |
           mkdir -p out/bin
           while IFS='|' read -r NAME FLAGS; do
             echo "::group::build $NAME (RUSTFLAGS='$FLAGS')"
-            RUSTFLAGS="$FLAGS" CARGO_TARGET_DIR="/tmp/ab/$NAME" \
-              cargo build --release --example bench_encode_matrix
+            if [ -z "$FLAGS" ]; then
+              env -u RUSTFLAGS CARGO_TARGET_DIR="/tmp/ab/$NAME" \
+                cargo build --release --example bench_encode_matrix < /dev/null
+            else
+              RUSTFLAGS="$FLAGS" CARGO_TARGET_DIR="/tmp/ab/$NAME" \
+                cargo build --release --example bench_encode_matrix < /dev/null
+            fi
             cp "/tmp/ab/$NAME/release/examples/bench_encode_matrix" "out/bin/$NAME"
             echo "::endgroup::"
           done <<'VARIANTS'
@@ -112,71 +143,83 @@ jobs:
           bmi1-lzcnt|-C target-feature=+bmi1,+lzcnt
           bmi2|-C target-feature=+bmi2
           fma|-C target-feature=+fma
-          v3-set|-C target-feature=+bmi1,+lzcnt,+bmi2,+fma
+          readme-set|-C target-feature=+bmi1,+lzcnt,+bmi2,+fma
           avx2|-C target-feature=+avx2
           native|-C target-cpu=native
           VARIANTS
+          cp out/bin/stock out/bin/stock-again
       # Sequential on purpose: two benchmarks at once share cache and memory
-      # bandwidth and neither number means anything. `stock` runs first and
-      # `stock-again` last so the run's own drift brackets the variants.
+      # bandwidth and neither number means anything. The C reference and the
+      # portable binary run first and again last, so the run's own drift
+      # brackets everything between.
       - name: Time the matrix, integer DCT (the default)
         run: |
-          for NAME in stock bmi1-lzcnt bmi2 fma v3-set avx2 native; do
+          echo "::group::islow C"
+          out/bench_c_encode_linux | tee out/islow_C.txt
+          echo "::endgroup::"
+          for NAME in stock bmi1-lzcnt bmi2 fma readme-set avx2 native stock-again; do
             echo "::group::islow $NAME"
             "out/bin/$NAME" | tee "out/islow_$NAME.txt"
             echo "::endgroup::"
           done
-          cp out/bin/stock out/bin/stock-again
-          echo "::group::islow stock-again"
-          out/bin/stock-again | tee out/islow_stock-again.txt
+          echo "::group::islow C-again"
+          out/bench_c_encode_linux | tee out/islow_C-again.txt
           echo "::endgroup::"
-      # The float DCT is the one encode path with `mul_add` in it, so it is
-      # where FMA codegen can matter; the integer default never touches it.
       - name: Time the matrix, float DCT
         env:
           BENCH_DCT_METHOD: float
         run: |
-          for NAME in stock fma v3-set native stock-again; do
+          echo "::group::float C"
+          out/bench_c_encode_linux float | tee out/float_C.txt
+          echo "::endgroup::"
+          for NAME in stock fma readme-set native stock-again; do
             echo "::group::float $NAME"
             "out/bin/$NAME" | tee "out/float_$NAME.txt"
             echo "::endgroup::"
           done
+          echo "::group::float C-again"
+          out/bench_c_encode_linux float | tee out/float_C-again.txt
+          echo "::endgroup::"
       - name: Summarise
         run: |
           {
             echo "## Integer DCT (islow) — µs, ratio to portable build, ratio to C 3.2.0"
             echo
             python3 scripts/perf_ab_summary.py --baseline stock --reference C \
+              --noise-pair stock,stock-again \
               stock=out/islow_stock.txt \
               bmi1-lzcnt=out/islow_bmi1-lzcnt.txt \
               bmi2=out/islow_bmi2.txt \
               fma=out/islow_fma.txt \
-              v3-set=out/islow_v3-set.txt \
+              readme-set=out/islow_readme-set.txt \
               avx2=out/islow_avx2.txt \
               native=out/islow_native.txt \
               stock-again=out/islow_stock-again.txt \
-              C=out/islow_C.txt
+              C=out/islow_C.txt \
+              C-again=out/islow_C-again.txt
             echo
             echo "## Float DCT — µs, ratio to portable build, ratio to C 3.2.0"
             echo
             python3 scripts/perf_ab_summary.py --baseline stock --reference C \
+              --noise-pair stock,stock-again \
               stock=out/float_stock.txt \
               fma=out/float_fma.txt \
-              v3-set=out/float_v3-set.txt \
+              readme-set=out/float_readme-set.txt \
               native=out/float_native.txt \
               stock-again=out/float_stock-again.txt \
-              C=out/float_C.txt
+              C=out/float_C.txt \
+              C-again=out/float_C-again.txt
             echo
             echo "## Runner"
             echo
             echo '```'
             cat out/cpu-flags.txt
-            grep -E 'Model name|^rustc|version 3' out/runner.txt
+            { grep -E 'Model name|^rustc|version 3' out/runner.txt || true; }
             echo '```'
           } | tee out/summary.md >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: perf-portable-vs-native-x86_64
           path: out/
-          if-no-files-found: error
+          if-no-files-found: warn

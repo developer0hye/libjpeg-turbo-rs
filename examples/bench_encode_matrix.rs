@@ -19,6 +19,9 @@ fn main() {
         DctMethod::IsFast => "ifast",
         DctMethod::Float => "float",
     };
+    // Quality stays 75 on purpose: below 50 the builder takes the
+    // force_baseline-aware quantization path that `compress()` never did,
+    // and the numbers stop being comparable with experiments/encode.tsv.
     let encode = |pixels: &[u8], width: usize, height: usize, subsampling: Subsampling| {
         Encoder::new(pixels, width, height, PixelFormat::Rgb)
             .quality(75)
