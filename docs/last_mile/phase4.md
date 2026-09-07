@@ -10048,3 +10048,44 @@ case number at all, so nothing regressed — but the 3.2 delta table's
 
 **Why deferred.** Reachable only under allocator failure, visible to no
 differential leg, and the divergence pre-dates the bump.
+
+## P4-186. Miri Covers Only the Classic Decode Sequence; the Transcode and Resync Paths' Raw `cinfo` Reads Are Verified by Reading, Not by the Gate — **OPEN**
+
+**GitHub:** [#598](https://github.com/developer0hye/libjpeg-turbo-rs/issues/598) — follow-up from the P4-132 review (PR #597).
+
+**Motivation.** P4-132's first draft read `mem`/`master` through the raw
+`cinfo` while every decompress entry point held a `&mut` to the same struct —
+a Stacked Borrows violation that native tests, clippy and ASan all passed and
+only Miri saw. The fix added
+`capi_thread_affinity::moved_decode_sequence_is_sound_under_miri` to the CI
+Miri leg, proven discriminating by swapping one site back to the raw read.
+That test drives `jpeg_save_markers` → `jpeg_mem_src` → `jpeg_read_header` →
+`jpeg_start_decompress` → `jpeg_read_scanlines` → `jpeg_finish_decompress` →
+`jpeg_destroy_decompress` and nothing else. The remaining raw reads of the
+public struct — `decompress_private_raw` in `decompress_private_remove`,
+`with_decompress_private` (from `store_resync_discarded` /
+`jpeg_resync_to_restart`), the stdio callbacks `stdio_init_source` /
+`stdio_fill_input_buffer`, `jpeg_has_multiple_scans` — and the
+`jpeg_read_coefficients` / `jpeg_abort_decompress` /
+`jpeg_copy_critical_parameters` entry points were verified sound *by
+reading* (before any reference is formed, or a child access of the outer
+frame's reference), and that reasoning is recorded only in the PR #597 review.
+
+**Acceptance criteria.**
+
+1. A second Miri-run test drives a transcode-shaped sequence on a fixture
+   that stays off the SIMD kernels: `jpeg_read_header` →
+   `jpeg_read_coefficients` → `jpeg_copy_critical_parameters` →
+   `jpeg_abort_decompress` → reuse → `jpeg_destroy_decompress`.
+2. A third reaches `stdio_fill_input_buffer` through `jpeg_stdio_src` over a
+   `FILE *` (Miri supports it with `-Zmiri-disable-isolation`) and a
+   `jpeg_resync_to_restart` path — or records why Miri cannot reach one of
+   them.
+3. Each new test is shown discriminating the way the existing one was:
+   reintroduce a parent-tag read at one site it covers, confirm Miri rejects
+   it, restore.
+
+**Why deferred.** Not blocking P4-132: every remaining site was checked by
+hand with the reason recorded, and the defect class the gate exists for is
+already caught on the primary decode path. This makes the remaining checks
+mechanical rather than reviewed.

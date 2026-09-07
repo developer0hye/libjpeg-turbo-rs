@@ -385,17 +385,17 @@ fn djpeg_rgb(jpeg: &[u8]) -> Option<Vec<u8>> {
 
 fn assert_pixels_match_oracle(pixels: &[u8], jpeg: &[u8], what: &str) {
     if let Some(oracle) = djpeg_rgb(jpeg) {
+        assert_eq!(
+            pixels.len(),
+            oracle.len(),
+            "{what}: pixel count differs from djpeg"
+        );
         let max_diff: u8 = pixels
             .iter()
             .zip(oracle.iter())
             .map(|(a, b)| a.abs_diff(*b))
             .max()
             .unwrap_or(0);
-        assert_eq!(
-            pixels.len(),
-            oracle.len(),
-            "{what}: pixel count differs from djpeg"
-        );
         assert_eq!(
             max_diff, 0,
             "{what}: pixels differ from djpeg (max diff {max_diff})"
