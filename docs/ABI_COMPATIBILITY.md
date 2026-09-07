@@ -350,7 +350,7 @@ one who unpacks a `.so` does not. The T3 classic-ABI gaps are open, the bundle
 says so in its own `BUNDLE.txt`, and the tiers above still govern whether it
 may replace a system library.
 
-Three parts of **P4-131 (#462)** remain open, which is why it is PARTIAL rather
+Two parts of **P4-131 (#462)** remain open, which is why it is PARTIAL rather
 than closed.
 
 ### Windows — open
@@ -359,19 +359,18 @@ No DLL or import library. `install_capi.sh` handles Linux and macOS only, and
 the Windows layout is a separate decision (no SONAME chain, an import library,
 a toolchain-dependent `.pc` convention) rather than another matrix row.
 
-### Signing and SBOM — a recorded gap
+### Signing and SBOM — attested since 2026-09-07
 
-The bundles are checksummed but **not signed**, and no SBOM is published.
-Upstream libjpeg-turbo ships signed source tarballs with published verification
-instructions; a project asking distributions to swap out their JPEG library is
-asking for a higher bar than that, not a lower one.
-
-The reason recorded here previously was sequencing — nothing to sign yet — and
-that reason is now spent. What remains is that a checksum published beside the
-file it covers proves integrity, not origin, and that closing the difference
-(Sigstore provenance or detached signatures) is only observable on a real
-tagged run. [`RELEASE_ARTIFACTS.md`](RELEASE_ARTIFACTS.md) states the residual
-risk to a downloader.
+Every bundle a release attaches carries Sigstore build provenance and a
+CycloneDX SBOM, both signed by the release workflow's own identity in the job
+that built the bytes. `gh attestation verify <bundle> --repo
+developer0hye/libjpeg-turbo-rs` checks origin, which the checksum beside the
+file never could. Upstream libjpeg-turbo ships GPG-signed source tarballs; the
+mechanism differs (keyless Sigstore, bound to a workflow rather than to a
+maintainer's key) but the question it answers — *did this come from the
+project?* — is the same. [`RELEASE_ARTIFACTS.md`](RELEASE_ARTIFACTS.md) has
+the verification commands and what a verified attestation does and does not
+prove.
 
 ### Distro packaging (deb/rpm) — undecided
 

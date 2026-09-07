@@ -21,8 +21,18 @@ and `git log` between tags.
   which is what P4-124 needs before the downstream harnesses can test the tree
   you download; today they still stage the raw cargo cdylib. See
   [`docs/RELEASE_ARTIFACTS.md`](docs/RELEASE_ARTIFACTS.md) for verification and
-  install steps, and for what is still missing: no Windows bundle, no
-  signature or SBOM, and no first-party deb/rpm.
+  install steps, and for what is still missing: no Windows bundle and no
+  first-party deb/rpm.
+- **Every native bundle is attested** (P4-131, #462). The job that builds a
+  bundle signs it through Sigstore with its own identity: SLSA build
+  provenance from `actions/attest-build-provenance`, and a CycloneDX SBOM of
+  the capi crate for the bundle's target — `<bundle>.cdx.json`, written by
+  `scripts/package_capi_release.sh --sbom` and attached with its checksum —
+  from `actions/attest`. `gh attestation verify <bundle> --repo
+  developer0hye/libjpeg-turbo-rs` checks where a download came from, which a
+  checksum beside the file never could; the Sigstore bundles are attached as
+  `<bundle>.tar.gz.{provenance,sbom}.sigstore.json` for offline use, and
+  `SHA256SUMS` now covers the SBOMs as well as the archives.
 
 ### Changed
 

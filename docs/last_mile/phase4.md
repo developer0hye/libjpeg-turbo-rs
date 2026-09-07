@@ -6071,7 +6071,7 @@ installs the 3.1.4.1 deb at `/opt/libjpeg-turbo` and the runner carries no other
 libjpeg-turbo, so the list resolves to the intended install by absence rather
 than by choice.
 
-## P4-131. No Native Binary Distribution — Releases Ship crates.io and npm Only — **PARTIAL: Unix bundles ship and are gated; Windows, signing/SBOM and the deb/rpm decision remain**
+## P4-131. No Native Binary Distribution — Releases Ship crates.io and npm Only — **PARTIAL: Unix bundles ship, gated and attested; Windows and the deb/rpm decision remain**
 
 **GitHub:** [#462](https://github.com/developer0hye/libjpeg-turbo-rs/issues/462) — under the [#470](https://github.com/developer0hye/libjpeg-turbo-rs/issues/470) umbrella.
 
@@ -6118,6 +6118,10 @@ binary of a library that is not yet a general drop-in increases the blast
 radius of the gaps rather than reducing it. Sequenced in Stage C, after the
 export surface (P4-129) and the shipped-artifact test path (P4-124) are settled,
 since both change what a release artifact should contain.
+
+**Status (2026-09-07): PARTIAL** — criteria 2, 3 and 4 are met, criterion 1 is
+met for Unix and open for Windows, criterion 5 remains. The 2026-09-07
+milestone is recorded after the 2026-08-18 one below.
 
 **Status (2026-08-18): PARTIAL** — criteria 2 and 3 are met, criterion 1 is met
 for Unix and open for Windows, criteria 4 and 5 remain.
@@ -6176,21 +6180,18 @@ before. The Linux release legs additionally install `patchelf` and fail if the
 packaging log lacks `P4-81: relinked`, so neither of `install_capi.sh`'s two
 warn-and-continue degradations can ship silently in a published bundle.
 
-*What remains.*
+*What remained after 2026-08-18* (item 2 closed on 2026-09-07, below; the
+rest stand).
 
 1. **Windows (criterion 1).** No DLL or import library. `install_capi.sh` is
    Linux/macOS-only and the packaging script refuses to run elsewhere rather
    than emit an unverified shape. Windows needs its own layout decision — no
    SONAME chain, an import library, a toolchain-dependent `.pc` convention —
    so it is separate work, not another matrix row.
-2. **Signing and SBOM (criterion 4).** Still a recorded gap, but the recorded
-   *reason* changed: "nothing to sign yet" is spent. A checksum published
-   beside the file it covers proves integrity, not origin. Closing it means
-   Sigstore provenance (`actions/attest-build-provenance`) or detached
-   signatures, and neither is observable from a pull request — it needs a
-   dispatch run and then a real tag to verify, which is why it was not wired
-   into the release path blind. `docs/RELEASE_ARTIFACTS.md` states the residual
-   risk to a downloader.
+2. **Signing and SBOM (criterion 4).** *Closed 2026-09-07 — see the milestone
+   below.* As recorded on 2026-08-18: "nothing to sign yet" was spent, a
+   checksum beside the file proves integrity not origin, and the fix was not
+   observable from a pull request — it needed a dispatch run.
 3. **deb/rpm (criterion 5).** Unchanged and deliberately so: `ABI_COMPATIBILITY.md`
    already records it as a maintainer decision rather than a technical one, and
    an unattended session is not the place to make it. The tarballs do remove
@@ -6212,6 +6213,84 @@ warn-and-continue degradations can ship silently in a published bundle.
    so an unpacked bundle is identifiable; a downloads directory holding both is
    not. Fixing it means putting the release tag in the name, which changes the
    name a packager scripts against, so it belongs with (4).
+
+**Milestone (2026-09-07): criterion 4 met — every bundle is attested for
+provenance and SBOM, and the release path was rehearsed end to end.**
+
+*What landed.* `native-artifacts` signs what it built, in the job that built
+it: `actions/attest-build-provenance` records SLSA v1 provenance for the
+archive, and `actions/attest` records a CycloneDX SBOM of the capi crate for
+the bundle's *target* — written by `scripts/package_capi_release.sh --sbom`
+with `cargo-cyclonedx`, checksummed, and attached beside the archive. Both are
+signed through Sigstore with the job's OIDC identity and stored under this
+repository; `gh attestation verify <bundle> --repo developer0hye/libjpeg-turbo-rs`
+checks origin. The two Sigstore bundles are attached as
+`<bundle>.tar.gz.{provenance,sbom}.sigstore.json` so a host that cannot ask
+GitHub can still verify from the files. `SHA256SUMS` covers the SBOMs too,
+because criterion 2 says *every* attached artifact. The job's permissions are
+now explicit — `contents: read`, `id-token: write`, `attestations: write` —
+and the attest steps carry no `if:`, so a `workflow_dispatch` exercises them.
+
+*Why in that job and not in `github-release`.* Provenance generated where the
+bytes are downloaded rather than built would attest a download. The signing
+also had to be unconditional: gated on `push`, every rehearsal would pass and
+the tag would be the first run.
+
+*What holds it.* `release_bundle.rs` gained four tests: the packaging script's
+SBOM is a CycloneDX document whose subject is the capi crate at the archive's
+version and which lists the root crate it compiles against (not merely a file
+that parses — an SBOM naming some other crate would attest and verify just as
+cleanly); the bundle job grants the two permissions and attests both
+predicates against `dist/*.tar.gz` without an `if:`; `github-release` attaches
+the SBOMs and Sigstore bundles on both its create and its upload path and
+folds the SBOM checksums into `SHA256SUMS`; and `cargo-cyclonedx` is pinned to
+one version in both workflows. `capi-abi-checks` installs the generator so the
+SBOM test runs on every Linux and macOS pull request rather than skipping.
+
+*Proof.* The attestation half cannot run on a pull request; it was proved by
+dispatching `release.yml` on the branch before merge — run
+[34115284733](https://github.com/developer0hye/libjpeg-turbo-rs/actions/runs/34115284733)
+— which built all four bundles, attested each, and published nothing (every
+publish job and `github-release` reported `skipped`). Verified on 2026-09-07
+from the run's artifacts, on every target, with `gh` 2.92.0:
+
+```
+# each of the four bundles, from its download directory
+shasum -a 256 -c *.sha256                                   # archive OK, SBOM OK
+gh attestation verify <bundle>.tar.gz -R developer0hye/libjpeg-turbo-rs \
+    --signer-workflow developer0hye/libjpeg-turbo-rs/.github/workflows/release.yml \
+    --source-ref refs/heads/feat/p4-131-release-provenance   # exit 0
+gh attestation verify <bundle>.tar.gz -R developer0hye/libjpeg-turbo-rs \
+    --source-ref refs/tags/v0.8.0                            # rejected: "expected
+                                                             # SourceRepositoryRef to be
+                                                             # refs/tags/v0.8.0, got refs/heads/…"
+gh attestation verify <bundle>.tar.gz -R developer0hye/libjpeg-turbo-rs \
+    --predicate-type https://cyclonedx.org/bom --format json  # CycloneDX 1.5,
+                                                             # subject libjpeg-turbo-rs-capi@0.1.2,
+                                                             # 7 components; predicate == attached .cdx.json
+gh attestation verify <bundle>.tar.gz -R developer0hye/libjpeg-turbo-rs \
+    --bundle <bundle>.tar.gz.provenance.sigstore.json \
+    --custom-trusted-root trusted_root.jsonl                 # exit 0 (offline)
+gh attestation verify <bundle>.tar.gz -R developer0hye/libjpeg-turbo-rs \
+    --bundle <bundle>.tar.gz.sbom.sigstore.json \
+    --predicate-type https://cyclonedx.org/bom \
+    --custom-trusted-root trusted_root.jsonl                 # exit 0 (offline)
+```
+
+The provenance statement names `.github/workflows/release.yml`, the branch
+ref, commit `f80ac7a` and the run above as its invocation; the negative case
+is what shows `--source-ref` is checked rather than merely accepted.
+
+*What is deliberately not claimed.* A dispatch proves the bundle job, not
+`github-release`, which still only runs on a `v*` tag: the attach globs there
+are pinned by test but have not executed. Keyless Sigstore bound to a workflow
+identity is not a maintainer-held GPG key, which is what upstream uses; a
+downloader whose root of trust must be a person rather than GitHub's OIDC
+issuer is not served. Rehearsal attestations from a branch are stored like a
+tag's, so verification instructions pin `--source-ref` to the tag.
+
+*What remains under this item:* Windows (1), the deb/rpm decision (3), and the
+two `capi-v*` / naming policy questions (4, 5) above.
 
 ## P4-132. Classic C-ABI Per-`cinfo` State Is Thread-Affine (P4-16 Option A) — **OPEN**
 

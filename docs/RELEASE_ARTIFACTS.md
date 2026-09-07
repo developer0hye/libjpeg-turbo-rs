@@ -12,7 +12,7 @@ is about delivery, not about whether the thing delivered fits.
 | --- | --- |
 | crates.io | `libjpeg-turbo-rs`, `libjpeg-turbo-rs-capi`, `libjpeg-turbo-rs-image` |
 | npm | `libjpeg-turbo-rs-wasm` |
-| GitHub release | native bundles, one per target, each with its own `.sha256`, plus one `SHA256SUMS` covering all of them |
+| GitHub release | native bundles, one per target, each with its own `.sha256`, a CycloneDX SBOM (`.cdx.json`, with its own `.sha256`) and two Sigstore bundles (`.provenance.sigstore.json`, `.sbom.sigstore.json`), plus one `SHA256SUMS` covering every archive and SBOM |
 
 The native bundles are new in P4-131. Before them the only way to get a
 `libjpeg.so.8` out of this project was to clone the repository, install a Rust
@@ -60,8 +60,16 @@ direct install run, and it runs on every pull request on Linux and macOS.
 ## Verifying and installing
 
 ```bash
-# 1. Verify. SHA256SUMS covers every bundle in the release.
+# 1. Verify integrity. SHA256SUMS covers every archive and SBOM in the release.
 sha256sum -c SHA256SUMS          # macOS: shasum -a 256 -c SHA256SUMS
+
+# 1b. Verify origin. The attestation is looked up by the archive's digest and
+#     checked against Sigstore's transparency log; --source-ref pins it to
+#     the tag, so a rehearsal build from a branch cannot pass for a release.
+gh attestation verify libjpeg-turbo-rs-capi-<version>-<target>.tar.gz \
+    --repo developer0hye/libjpeg-turbo-rs \
+    --signer-workflow developer0hye/libjpeg-turbo-rs/.github/workflows/release.yml \
+    --source-ref refs/tags/<tag>
 
 # 2. Unpack.
 tar -xzf libjpeg-turbo-rs-capi-<version>-<target>.tar.gz
@@ -84,7 +92,7 @@ PKG_CONFIG_PATH=<prefix>/lib/pkgconfig pkg-config --define-prefix --cflags --lib
 ```
 
 Building a bundle yourself runs the same script the release does, which adds
-only `--target <triple>` for its cross-built legs:
+only `--target <triple>` and `--sbom`:
 
 ```bash
 scripts/package_capi_release.sh --outdir dist --build
@@ -102,27 +110,68 @@ toolchain), so it is a separate piece of work rather than a flag. Tracked
 under **P4-131** ([#462](https://github.com/developer0hye/libjpeg-turbo-rs/issues/462)),
 which stays PARTIAL until it lands.
 
-### Signing and SBOM — a recorded gap
+### Signing and SBOM — attested
 
-Bundles are checksummed but **not signed**, and no SBOM is published.
+A checksum published beside the file it covers, on the same host, proves the
+download arrived intact and nothing about where it came from. So every bundle
+is also **attested**: the `native-artifacts` job that built it signs two
+statements about it through [Sigstore](https://www.sigstore.dev/), using the
+job's own OIDC identity rather than a key anyone holds, and GitHub stores them
+under this repository:
 
-The reason recorded before P4-131 was sequencing — signing is only meaningful
-once there is an artifact to sign, and there was not one. That reason is now
-spent. What replaces it is narrower: a checksum published beside the file it
-covers, on the same host, proves integrity of the download and nothing about
-its origin. Closing that means Sigstore build provenance
-(`actions/attest-build-provenance`, verified with `gh attestation verify`) or
-detached signatures, and either one is only observable on a real tagged run —
-there is no way to prove it works from a pull request. Wiring an unverifiable
-step into the path that creates releases is how a release breaks at the worst
-moment, so it is left for a change that can be dispatched and checked
-end-to-end first. `workflow_dispatch` on the release workflow exists for
-exactly that.
+- **Build provenance** (`actions/attest-build-provenance`, SLSA v1): which
+  workflow, at which commit, on which runner produced the archive with this
+  digest.
+- **SBOM** (`actions/attest`, predicate `https://cyclonedx.org/bom`): the
+  CycloneDX document `scripts/package_capi_release.sh --sbom` wrote for the
+  bundle's target with `cargo-cyclonedx` — the capi crate, the root crate it
+  compiles against, and their dependencies, resolved for that target rather
+  than for the packaging host.
 
-Until then: **a downloaded bundle's authenticity rests on GitHub's transport
-and account security, not on a signature you can check offline.** Upstream
-libjpeg-turbo ships signed tarballs; this is a real gap against them, not a
-difference of opinion.
+The attestations are made in the job that produced the bytes, not in
+`github-release`, because provenance generated anywhere else would attest a
+download rather than a build. They are made unconditionally, so a
+`workflow_dispatch` rehearsal exercises the signing path and a tag is never
+the first time it runs; the rehearsal that proved it is cited in
+[`last_mile/phase4.md` § P4-131](last_mile/phase4.md#p4-131-no-native-binary-distribution--releases-ship-cratesio-and-npm-only--partial-unix-bundles-ship-gated-and-attested-windows-and-the-debrpm-decision-remain).
+
+Verify with the GitHub CLI. The lookup is by the archive's digest, so the file
+name does not matter and a renamed download still verifies:
+
+```bash
+# Provenance (the default predicate). --signer-workflow pins the workflow
+# that signed; --source-ref pins the tag, because a dispatch rehearsal from
+# a branch also produces valid attestations and they name the branch.
+gh attestation verify <bundle>.tar.gz --repo developer0hye/libjpeg-turbo-rs \
+    --signer-workflow developer0hye/libjpeg-turbo-rs/.github/workflows/release.yml \
+    --source-ref refs/tags/<tag>
+
+# The SBOM attestation, and the SBOM it signed, without trusting the
+# attached .cdx.json copy.
+gh attestation verify <bundle>.tar.gz --repo developer0hye/libjpeg-turbo-rs \
+    --predicate-type https://cyclonedx.org/bom \
+    --format json --jq '.[0].verificationResult.statement.predicate' > sbom.cdx.json
+
+# Offline, from the attached Sigstore bundle. The trusted root can be fetched
+# once (`gh attestation trusted-root > trusted_root.jsonl`) and reused.
+gh attestation verify <bundle>.tar.gz --repo developer0hye/libjpeg-turbo-rs \
+    --bundle <bundle>.tar.gz.provenance.sigstore.json \
+    --custom-trusted-root trusted_root.jsonl
+```
+
+What a verified attestation proves: the archive with this digest was built by
+`release.yml` in this repository at the recorded commit, on a GitHub-hosted
+runner, and the SBOM is what that build said its dependency graph was. What it
+does not prove: that the source at that commit is trustworthy, or that the
+library fits your consumer — the tiers in [`LAST_MILE.md`](LAST_MILE.md)
+answer that. The attached `.cdx.json` is a convenience copy; the signed
+document is the one inside the attestation, which is why the second command
+above extracts it from there.
+
+Upstream libjpeg-turbo signs its source tarballs with a maintainer's GPG key.
+This is keyless signing bound to a workflow identity instead; a downloader
+who needs a maintainer-held key rather than GitHub's OIDC issuer as the root
+of trust does not get that here.
 
 ### Distro packaging (deb/rpm) — undecided
 
@@ -139,11 +188,13 @@ it.
 `.github/workflows/release.yml`, on a `v*` tag:
 
 1. `changelog-check` — the tag must have a CHANGELOG section.
-2. `native-artifacts` — the bundles, one job per target.
+2. `native-artifacts` — the bundles, one job per target, each with its SBOM,
+   attested for provenance and SBOM in the same job.
 3. `publish`, `publish-capi`, `publish-image` — crates.io.
 4. `publish-wasm` — npm.
 5. `github-release` — creates the release from the CHANGELOG notes and
-   attaches the bundles, their `.sha256` files and a merged `SHA256SUMS`.
+   attaches the bundles, the SBOMs, their `.sha256` files, the Sigstore
+   bundles and a merged `SHA256SUMS`.
 
 Both validations come before the first irreversible step: a registry upload
 cannot be withdrawn, so a bundle that fails to build fails ahead of it. The
@@ -154,4 +205,7 @@ leave a public release whose downloads are missing.
 `github.event_name == 'push'`, so a dispatch builds the bundles, uploads them as
 workflow artifacts, and publishes nothing — from any ref, including a tag. That
 is how to exercise the packaging matrix, including the cross-built
-`x86_64-apple-darwin` leg, before a tag makes the output public.
+`x86_64-apple-darwin` leg, before a tag makes the output public. The one thing
+a dispatch does leave behind is the attestations for its rehearsal bundles,
+stored like a tag's and naming the dispatched ref as their source — which is
+why the verification commands above pin `--source-ref`.
