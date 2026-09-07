@@ -34,6 +34,11 @@
 #   --root DIR        Repository root (default: this script's parent).
 #   --build           Force a cdylib build. Passed through; without it, a
 #                     missing cdylib is still built by the install script.
+#   --sbom            Also write a CycloneDX SBOM of the capi crate for the
+#                     target, plus its checksum. Needs `cargo cyclonedx`
+#                     (`cargo install cargo-cyclonedx --locked`); refuses to
+#                     run without it rather than ship a bundle without the
+#                     SBOM the release advertises (P4-131 criterion 4).
 #
 # Env:
 #   CAPI_TARGET_DIR   Passed through to install_capi.sh — the exact
@@ -43,6 +48,9 @@
 # Produces, for version X.Y.Z and target T:
 #   ${OUTDIR}/libjpeg-turbo-rs-capi-X.Y.Z-T.tar.gz
 #   ${OUTDIR}/libjpeg-turbo-rs-capi-X.Y.Z-T.tar.gz.sha256
+# and with --sbom:
+#   ${OUTDIR}/libjpeg-turbo-rs-capi-X.Y.Z-T.cdx.json
+#   ${OUTDIR}/libjpeg-turbo-rs-capi-X.Y.Z-T.cdx.json.sha256
 #
 # The archive unpacks into a single directory named after the archive stem,
 # holding the staged prefix (`lib/`, `include/`) plus `BUNDLE.txt`.
@@ -54,6 +62,7 @@ PREFIX="/usr/local"
 TARGET=""
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DO_BUILD=0
+DO_SBOM=0
 CARGO_BIN="${CARGO:-cargo}"
 
 while [[ $# -gt 0 ]]; do
@@ -63,6 +72,7 @@ while [[ $# -gt 0 ]]; do
         --target)  TARGET="$2"; shift 2 ;;
         --root)    ROOT="$2"; shift 2 ;;
         --build)   DO_BUILD=1; shift ;;
+        --sbom)    DO_SBOM=1; shift ;;
         -h|--help)
             sed -n '2,/^set -euo/p' "$0" | sed 's/^# *//'
             exit 0
@@ -72,6 +82,16 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$OUTDIR" ]] || { echo "--outdir is required" >&2; exit 1; }
+
+# Probe the SBOM generator before the build, for the same reason the output
+# directory is resolved before it: a missing tool should cost a shell error,
+# not a full release build. Refusing rather than degrading is deliberate —
+# the release attests the SBOM, and a bundle that ships without one would
+# verify cleanly and simply have nothing to say about its dependencies.
+if [[ "$DO_SBOM" -eq 1 ]] && ! "$CARGO_BIN" cyclonedx --version >/dev/null 2>&1; then
+    echo "ERROR: --sbom needs cargo-cyclonedx (cargo install cargo-cyclonedx --locked)" >&2
+    exit 1
+fi
 
 if [[ -z "$TARGET" ]]; then
     TARGET="$("$CARGO_BIN" -vV | sed -n 's/^host: //p')"
@@ -202,6 +222,15 @@ release: SHA256SUMS covers every bundle in it, the .sha256 covers this one.
 
   sha256sum -c ${ARCHIVE}.sha256      # macOS: shasum -a 256 -c
 
+A checksum proves the bytes arrived intact, not where they came from. A
+release also attests each archive with Sigstore build provenance and a
+CycloneDX SBOM (${BUNDLE}.cdx.json), signed by the release workflow's
+identity; verify either with the GitHub CLI:
+
+  gh attestation verify ${ARCHIVE} --repo developer0hye/libjpeg-turbo-rs
+  gh attestation verify ${ARCHIVE} --repo developer0hye/libjpeg-turbo-rs \\
+      --predicate-type https://cyclonedx.org/bom
+
 Extract with --no-same-owner if you unpack as root; the archive is written
 0:0, but a tarball from elsewhere may not be.
 
@@ -214,22 +243,47 @@ EOF
 # survives the round trip. Do not add --dereference.
 tar "${TAR_IDENTITY[@]}" -czf "$OUTDIR/$ARCHIVE" -C "$STAGE" "$BUNDLE"
 
-# `<hash>  <bare name>` so `sha256sum -c` works in the directory the archive
+# `<hash>  <bare name>` so `sha256sum -c` works in the directory the file
 # was downloaded into, not only where it was built.
-(
-    cd "$OUTDIR"
-    if command -v sha256sum >/dev/null 2>&1; then
-        sha256sum "$ARCHIVE" >"${ARCHIVE}.sha256"
-    elif command -v shasum >/dev/null 2>&1; then
-        shasum -a 256 "$ARCHIVE" >"${ARCHIVE}.sha256"
-    else
-        echo "ERROR: neither sha256sum nor shasum is available; every attached artifact must be checksummed (P4-131 criterion 2)" >&2
-        exit 1
-    fi
-)
+write_checksum() {
+    local file="$1"
+    (
+        cd "$OUTDIR"
+        if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$file" >"${file}.sha256"
+        elif command -v shasum >/dev/null 2>&1; then
+            shasum -a 256 "$file" >"${file}.sha256"
+        else
+            echo "ERROR: neither sha256sum nor shasum is available; every attached artifact must be checksummed (P4-131 criterion 2)" >&2
+            exit 1
+        fi
+    )
+}
+write_checksum "$ARCHIVE"
 
-cat <<EOF
-Packaged ${BUNDLE}:
-  ${OUTDIR}/${ARCHIVE}
-  ${OUTDIR}/${ARCHIVE}.sha256
-EOF
+PRODUCED=("${OUTDIR}/${ARCHIVE}" "${OUTDIR}/${ARCHIVE}.sha256")
+
+if [[ "$DO_SBOM" -eq 1 ]]; then
+    SBOM="${BUNDLE}.cdx.json"
+    # `--target` resolves the dependency graph for the bundle's platform, not
+    # the packaging host's — the cross-built legs would otherwise describe
+    # the wrong library. No toolchain for the target is needed for that.
+    #
+    # cargo-cyclonedx has no package selector: given a member's manifest it
+    # still writes `<name>.json` beside the Cargo.toml of *every* workspace
+    # member. The capi crate's is the one the bundle describes; the others are
+    # removed so they cannot be left in the source tree for the next
+    # `cargo publish --allow-dirty` to ship.
+    (cd "$ROOT" && "$CARGO_BIN" cyclonedx \
+        --manifest-path crates/libjpeg-turbo-rs-capi/Cargo.toml \
+        --format json --spec-version 1.5 \
+        --target "$TARGET" \
+        --override-filename "${BUNDLE}.cdx" -q)
+    mv "$ROOT/crates/libjpeg-turbo-rs-capi/${SBOM}" "$OUTDIR/$SBOM"
+    find "$ROOT" -maxdepth 3 -name "$SBOM" -not -path "$OUTDIR/*" -delete
+    write_checksum "$SBOM"
+    PRODUCED+=("${OUTDIR}/${SBOM}" "${OUTDIR}/${SBOM}.sha256")
+fi
+
+echo "Packaged ${BUNDLE}:"
+printf '  %s\n' "${PRODUCED[@]}"

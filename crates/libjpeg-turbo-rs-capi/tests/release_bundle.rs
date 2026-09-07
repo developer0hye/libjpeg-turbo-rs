@@ -663,3 +663,307 @@ fn release_bundle_is_exactly_what_install_capi_sh_stages() {
         differing.join("\n")
     );
 }
+
+// ---------------------------------------------------------------------------
+// P4-131 criterion 4: signing and SBOM.
+//
+// A checksum published beside the file it covers proves integrity, not
+// origin. The release job therefore attests each bundle with Sigstore build
+// provenance and a CycloneDX SBOM, both signed by the job's OIDC identity and
+// stored under this repository, so `gh attestation verify` can check where a
+// download came from. The attestation itself is only observable on a real run
+// of `release.yml` — a `workflow_dispatch` exercises it without publishing —
+// so what this file pins is the two halves that *can* be checked from a pull
+// request: the SBOM the packaging script produces, and the workflow shape
+// that signs it. The dispatch run that proved the whole path is cited in
+// `docs/last_mile/phase4.md` § P4-131.
+// ---------------------------------------------------------------------------
+
+fn have_cargo_cyclonedx() -> bool {
+    Command::new("cargo")
+        .args(["cyclonedx", "--version"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+fn root_crate_version() -> String {
+    let manifest: String =
+        std::fs::read_to_string(workspace_root().join("Cargo.toml")).expect("read root Cargo.toml");
+    manifest
+        .lines()
+        .find_map(|line| line.strip_prefix("version = "))
+        .map(|v| v.trim().trim_matches('"').to_string())
+        .expect("root Cargo.toml declares a version")
+}
+
+/// The Sigstore bundle, once verified, only proves what the SBOM *said* at
+/// signing time. This pins what it says: a CycloneDX document whose subject is
+/// the capi crate at the version the archive is named after, listing the root
+/// crate it compiles against — a document naming some other crate, or an
+/// empty component list, would attest and verify just as cleanly.
+#[test]
+fn release_bundle_ships_a_cyclonedx_sbom_beside_the_archive() {
+    if let Some(reason) = unsupported_host() {
+        eprintln!("SKIP: {reason}");
+        return;
+    }
+    if !have_cargo_cyclonedx() {
+        eprintln!("SKIP: cargo-cyclonedx is not installed (cargo install cargo-cyclonedx)");
+        return;
+    }
+    let root: PathBuf = workspace_root();
+    let cdylib: PathBuf = cdylib_support::cargo_built_cdylib_path()
+        .unwrap_or_else(|e| panic!("could not locate the cdylib under test: {e}"));
+    let cdylib_dir: &Path = cdylib.parent().expect("Cargo artifact directory");
+    let out: tempfile::TempDir = tempfile::tempdir().expect("mkdir outdir");
+
+    let run = Command::new("bash")
+        .arg(root.join("scripts/package_capi_release.sh"))
+        .args(["--outdir", &out.path().to_string_lossy()])
+        .args(["--prefix", TEST_PREFIX])
+        .args(["--root", &root.to_string_lossy()])
+        .arg("--sbom")
+        .env("CAPI_TARGET_DIR", cdylib_dir)
+        .output()
+        .expect("invoke package_capi_release.sh");
+    assert!(
+        run.status.success(),
+        "package_capi_release.sh --sbom failed:\n--- stdout ---\n{}\n--- stderr ---\n{}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+
+    let mut names: Vec<String> = std::fs::read_dir(out.path())
+        .expect("read outdir")
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    let archive: &String = names
+        .iter()
+        .find(|n| n.ends_with(".tar.gz"))
+        .expect("the archive is present");
+    let stem: &str = archive.trim_end_matches(".tar.gz");
+    let sbom_name: String = format!("{stem}.cdx.json");
+    assert!(
+        names.contains(&sbom_name),
+        "no {sbom_name} beside the archive; outdir holds {names:?}"
+    );
+    // The SBOM is an attached artifact, so criterion 2 applies to it too.
+    assert!(
+        names.contains(&format!("{sbom_name}.sha256")),
+        "the SBOM has no checksum manifest; outdir holds {names:?}"
+    );
+    // cargo-cyclonedx writes one document per workspace member. Only the capi
+    // crate's belongs in the bundle, and none may be left in the source tree
+    // where the next `cargo publish --allow-dirty` would ship it.
+    let strays: Vec<PathBuf> = [
+        "",
+        "crates/libjpeg-turbo-rs-capi",
+        "crates/libjpeg-turbo-rs-image",
+    ]
+    .iter()
+    .map(|dir| root.join(dir).join(&sbom_name))
+    .filter(|p| p.exists())
+    .collect();
+    assert!(
+        strays.is_empty(),
+        "the SBOM generator left documents in the source tree: {strays:?}"
+    );
+
+    let body: String = std::fs::read_to_string(out.path().join(&sbom_name)).expect("read the SBOM");
+    // Enough of the document to know it is *our* SBOM, without a JSON
+    // dependency: CycloneDX's JSON encoding is stable for these keys.
+    assert!(
+        body.contains("\"bomFormat\": \"CycloneDX\"")
+            || body.contains("\"bomFormat\":\"CycloneDX\""),
+        "{sbom_name} is not a CycloneDX document:\n{}",
+        &body[..body.len().min(400)]
+    );
+    let capi_version: String = capi_version();
+    let subject_purl: String = format!("pkg:cargo/libjpeg-turbo-rs-capi@{capi_version}");
+    assert!(
+        body.contains(&subject_purl),
+        "{sbom_name} does not describe {subject_purl} — the crate the archive is \
+         named after:\n{}",
+        &body[..body.len().min(1200)]
+    );
+    let root_purl: String = format!("pkg:cargo/libjpeg-turbo-rs@{}", root_crate_version());
+    assert!(
+        body.contains(&root_purl),
+        "{sbom_name} does not list {root_purl}, the crate the shim compiles \
+         against, so it is not the dependency graph of the shipped library"
+    );
+}
+
+/// Reads `.github/workflows/release.yml` and returns the text of one job:
+/// from its key to the next top-level job key.
+fn release_workflow_job(job: &str) -> String {
+    let workflow: String =
+        std::fs::read_to_string(workspace_root().join(".github/workflows/release.yml"))
+            .expect("read release.yml");
+    let header: String = format!("  {job}:\n");
+    let start: usize = workflow
+        .find(&header)
+        .unwrap_or_else(|| panic!("release.yml has no `{job}` job"));
+    let rest: &str = &workflow[start + header.len()..];
+    // The next job: a line indented exactly two spaces that names a key.
+    let end: usize = rest
+        .lines()
+        .scan(0usize, |offset, line| {
+            let at: usize = *offset;
+            *offset += line.len() + 1;
+            Some((at, line))
+        })
+        .find(|(_, line)| {
+            line.starts_with("  ") && !line.starts_with("   ") && line.trim_end().ends_with(':')
+        })
+        .map(|(at, _)| at)
+        .unwrap_or(rest.len());
+    rest[..end].to_string()
+}
+
+/// The steps of a job's text, each as its own block.
+fn workflow_steps(job_text: &str) -> Vec<String> {
+    let steps_at: usize = match job_text.find("    steps:\n") {
+        Some(at) => at + "    steps:\n".len(),
+        None => return Vec::new(),
+    };
+    let mut steps: Vec<String> = Vec::new();
+    for line in job_text[steps_at..].lines() {
+        if line.starts_with("      - ") {
+            steps.push(String::new());
+        }
+        if let Some(current) = steps.last_mut() {
+            current.push_str(line);
+            current.push('\n');
+        }
+    }
+    steps
+}
+
+/// The bundle job signs what it built, in the job that built it, on every
+/// event that runs it — so a `workflow_dispatch` rehearsal exercises the
+/// signing path and a tag cannot be the first time it runs. A step gated on
+/// `push` would pass every rehearsal and fail on the release.
+#[test]
+fn release_workflow_attests_provenance_and_sbom_in_the_bundle_job() {
+    let job: String = release_workflow_job("native-artifacts");
+    for grant in ["id-token: write", "attestations: write"] {
+        assert!(
+            job.contains(grant),
+            "native-artifacts does not grant `{grant}`, so the attest steps \
+             cannot obtain a Sigstore identity or store the result:\n{job}"
+        );
+    }
+
+    let steps: Vec<String> = workflow_steps(&job);
+    let provenance: &String = steps
+        .iter()
+        .find(|s| s.contains("uses: actions/attest-build-provenance@"))
+        .expect("native-artifacts has an actions/attest-build-provenance step");
+    let sbom: &String = steps
+        .iter()
+        .find(|s| s.contains("uses: actions/attest@"))
+        .expect("native-artifacts has an actions/attest step for the SBOM");
+    for (what, step) in [("provenance", provenance), ("SBOM", sbom)] {
+        assert!(
+            step.contains("subject-path: dist/*.tar.gz"),
+            "the {what} attestation's subject is not the archive the job \
+             packaged into dist/:\n{step}"
+        );
+        assert!(
+            !step.contains("if:"),
+            "the {what} attestation is conditional, so a dispatch rehearsal \
+             would not exercise it:\n{step}"
+        );
+    }
+    assert!(
+        sbom.contains("sbom-path: dist/") && sbom.contains(".cdx.json"),
+        "the SBOM attestation does not attest the CycloneDX document the \
+         packaging script wrote beside the archive:\n{sbom}"
+    );
+
+    // The packaging step must ask for the SBOM, or the attest step has
+    // nothing to sign and the failure surfaces one step late.
+    let package: &String = steps
+        .iter()
+        .find(|s| s.contains("scripts/package_capi_release.sh"))
+        .expect("native-artifacts runs the packaging script");
+    assert!(
+        package.contains("--sbom"),
+        "the packaging step does not pass --sbom:\n{package}"
+    );
+}
+
+/// What the release attaches is what a downloader can verify offline: the
+/// Sigstore bundles beside the archive, the SBOM and its checksum, and a
+/// `SHA256SUMS` that covers the SBOM as well as the archives (criterion 2
+/// applies to every attached artifact).
+#[test]
+fn release_workflow_attaches_the_sbom_and_sigstore_bundles() {
+    let job: String = release_workflow_job("github-release");
+    for glob in [
+        "dist/*.cdx.json",
+        "dist/*.cdx.json.sha256",
+        "dist/*.sigstore.json",
+    ] {
+        let mentions: usize = job.matches(glob).count();
+        // Twice: `gh release create` for a new release and `gh release
+        // upload` for a release someone drafted by hand.
+        assert!(
+            mentions >= 2,
+            "github-release names `{glob}` {mentions} time(s); both the create \
+             and the upload path must attach it:\n{job}"
+        );
+    }
+    assert!(
+        job.contains("./*.cdx.json.sha256"),
+        "SHA256SUMS is folded from the archive checksums only; the SBOM is an \
+         attached artifact and must be covered too:\n{job}"
+    );
+}
+
+/// `cargo-cyclonedx` is pinned wherever a workflow installs it, and to one
+/// version: the release job that ships the SBOM and the CI job that tests the
+/// script producing it must run the same generator, or the test proves
+/// nothing about the release.
+#[test]
+fn sbom_generator_is_pinned_to_one_version_across_workflows() {
+    let root: PathBuf = workspace_root();
+    let mut pins: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for name in ["ci.yml", "release.yml"] {
+        let text: String = std::fs::read_to_string(root.join(".github/workflows").join(name))
+            .unwrap_or_else(|e| panic!("read {name}: {e}"));
+        for line in text
+            .lines()
+            .filter(|l| l.contains("cargo install cargo-cyclonedx"))
+        {
+            let version: &str = line
+                .split_whitespace()
+                .skip_while(|w| *w != "--version")
+                .nth(1)
+                .unwrap_or_else(|| {
+                    panic!("{name} installs cargo-cyclonedx without --version: {line}")
+                });
+            assert!(
+                line.contains("--locked"),
+                "{name} installs cargo-cyclonedx without --locked: {line}"
+            );
+            pins.entry(version.to_string())
+                .or_default()
+                .push(name.to_string());
+        }
+    }
+    assert!(
+        pins.values().flatten().any(|n| n == "release.yml")
+            && pins.values().flatten().any(|n| n == "ci.yml"),
+        "cargo-cyclonedx must be installed by both release.yml and ci.yml; found {pins:?}"
+    );
+    assert_eq!(
+        pins.len(),
+        1,
+        "cargo-cyclonedx is pinned to more than one version: {pins:?}"
+    );
+}
