@@ -30,3 +30,9 @@ wrong most often; they do not replace those documents.
 - Anything you discover mid-work that is not already tracked gets filed as its
   own gap, and its own issue, before the pull request that surfaced it merges.
 - Never weaken, skip, or `#[ignore]` a test to make CI green.
+- You are one headless turn. Run the reviewer and docs-drift-auditor agents
+  the repository asks for as *blocking* calls and act on their reports before
+  you commit; never end your turn while any agent or background task is still
+  running. The harness terminates background work 600 s after the turn ends
+  and nothing resumes it — on 2026-09-07 a run stopped to "wait for the drift
+  audit" and its entire session, worktree edits and all, was lost.

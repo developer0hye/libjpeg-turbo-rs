@@ -102,15 +102,26 @@ pick_issue() {
 # issue — is the progress signal, because a large issue is often advanced one
 # milestone per run. Both fields count: a title-only citation read as no
 # progress would block an issue that was in fact being advanced.
+#
+# A citation is `#N` at the start of a line or after whitespace or the
+# punctuation prose puts before it — not the `>#N</a>` a rendered link leaves
+# behind. On 2026-09-07 dependabot's changelog for actions/download-artifact
+# linked *that* repository's issue 461 and the loop credited it to ours,
+# resetting the failure counter for a run that had merged nothing. Bots
+# (`app/*` logins) never advance an issue here, so their PRs are skipped too.
+cites_issue_filter() {
+  printf '((.author.login // "") | startswith("app/") | not) and (((.body // "") + " " + (.title // "")) | test("(^|[[:space:](\\\\[,;:])#%s\\\\b"))' "$1"
+}
+
 merged_refs() {
-  gh pr list --state merged --limit 30 --json body,title \
-    --jq "[.[] | select((.body // \"\") + \" \" + (.title // \"\") | test(\"#$1\\\\b\"))] | length" \
+  gh pr list --state merged --limit 30 --json author,body,title \
+    --jq "[.[] | select($(cites_issue_filter "$1"))] | length" \
     2>/dev/null || echo 0
 }
 
 open_ref_pr() {
-  gh pr list --state open --limit 30 --json number,body,title \
-    --jq "[.[] | select((.body // \"\") + \" \" + (.title // \"\") | test(\"#$1\\\\b\"))][0].number // empty" \
+  gh pr list --state open --limit 30 --json author,number,body,title \
+    --jq "[.[] | select($(cites_issue_filter "$1"))][0].number // empty" \
     2>/dev/null
 }
 
