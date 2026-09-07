@@ -1758,6 +1758,7 @@ const ORACLE_PREFIX_VARS: [&str; 2] = ["LIBJPEG_TURBO_PREFIX", "LIBJPEG_TURBO_RE
 #[derive(Debug, Default)]
 struct Step {
     script: String,
+    has_execution_override: bool,
     prefixes: BTreeSet<String>,
     environment: BTreeMap<String, String>,
 }
@@ -1809,6 +1810,17 @@ fn steps_in(job_block: &str) -> Vec<Step> {
         let Some(step) = current.as_mut() else {
             continue;
         };
+        // A complete-inventory gate requires an unconditional, fatal step
+        // using the runner's default shell and checkout directory.
+        if indent == step_indent + 2 || (indent == step_indent && trimmed.starts_with("- ")) {
+            let key = trimmed.trim_start_matches("- ");
+            if ["if:", "continue-on-error:", "working-directory:", "shell:"]
+                .iter()
+                .any(|prefix| key.starts_with(prefix))
+            {
+                step.has_execution_override = true;
+            }
+        }
         for variable in ORACLE_PREFIX_VARS {
             if let Some(rest) = trimmed.strip_prefix(&format!("{variable}:")) {
                 step.prefixes
@@ -3895,4 +3907,133 @@ fn submodule_version(cmake: &Path) -> String {
         }
     }
     panic!("no `set(VERSION ...)` line in {SUBMODULE_CMAKE}");
+}
+
+// P4-175 (#565): an unnamed C-ABI suite must not disappear from CI. The
+// complete package selection delegates enumeration to Cargo, including future
+// integration targets, instead of maintaining another list of test filenames.
+const COMPLETE_CAPI_COMMAND: &str =
+    "cargo test -p libjpeg-turbo-rs-capi --tests --features png --no-fail-fast";
+
+fn has_complete_capi_run(job: &str, prefix: &str) -> bool {
+    if job.lines().any(|line| {
+        ["    if:", "    continue-on-error:", "    defaults:"]
+            .iter()
+            .any(|key| line.starts_with(key))
+    }) {
+        return false;
+    }
+    steps_in(job).iter().any(|step| {
+        !step.has_execution_override
+            && step
+                .script
+                .split_whitespace()
+                .eq(COMPLETE_CAPI_COMMAND.split_whitespace())
+            && step
+                .environment
+                .get("LIBJPEG_TURBO_PREFIX")
+                .map(String::as_str)
+                == Some(prefix)
+            && step
+                .environment
+                .get("LIBJPEG_TURBO_REFERENCE_DIR")
+                .map(String::as_str)
+                == Some(prefix)
+    })
+}
+
+#[test]
+fn every_capi_test_target_runs_on_both_oracle_legs() {
+    if !repository_tree_is_readable() {
+        eprintln!("SKIP: repository tree not readable; see the sibling test.");
+        return;
+    }
+    let workflow: String = workflow_text(CI_WORKFLOW);
+    assert!(
+        !workflow.lines().any(|line| line.starts_with("defaults:")),
+        "workflow-level execution defaults require auditing the complete C-ABI command"
+    );
+    let inventory: Vec<String> = std::fs::read_dir(repo_root().join(CAPI_TEST_DIR))
+        .expect("C-ABI test inventory")
+        .map(|entry| entry.expect("test directory entry").path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "rs"))
+        .map(|path| path.file_stem().unwrap().to_string_lossy().into_owned())
+        .collect();
+    assert!(!inventory.is_empty(), "empty C-ABI test inventory");
+    for (job, prefix) in [
+        (BASELINE_LEG_JOB, "/tmp/ljt8/prefix"),
+        (CURRENT_LEG_JOB, "/tmp/ljt320v8/prefix"),
+    ] {
+        assert!(
+            has_complete_capi_run(&job_block(&workflow_text(CI_WORKFLOW), job, CI_WORKFLOW), prefix),
+            "{job} must execute `{COMPLETE_CAPI_COMMAND}` with both oracle prefixes set to {prefix}; \
+             named selections alone leave new targets unexecuted. Inventory: {inventory:?}"
+        );
+    }
+}
+
+#[test]
+fn complete_capi_coverage_rejects_compilation_filters_and_wrong_oracles() {
+    let step = |command: &str, prefix: &str| {
+        format!(
+        "  job:\n    steps:\n      - run: {command}\n        env:\n          LIBJPEG_TURBO_PREFIX: /oracle\n          LIBJPEG_TURBO_REFERENCE_DIR: {prefix}\n"
+    )
+    };
+    assert!(has_complete_capi_run(
+        &step(COMPLETE_CAPI_COMMAND, "/oracle"),
+        "/oracle"
+    ));
+    for command in [
+        format!("echo {COMPLETE_CAPI_COMMAND}"),
+        format!("{COMPLETE_CAPI_COMMAND} --no-run"),
+        format!("{COMPLETE_CAPI_COMMAND} some_filter"),
+        format!("{COMPLETE_CAPI_COMMAND} -- --list"),
+        format!("{COMPLETE_CAPI_COMMAND} -- --ignored"),
+        format!("{COMPLETE_CAPI_COMMAND} || true"),
+        COMPLETE_CAPI_COMMAND.replace("--tests", "--lib"),
+        COMPLETE_CAPI_COMMAND.replace("libjpeg-turbo-rs-capi", "libjpeg-turbo-rs"),
+    ] {
+        assert!(
+            !has_complete_capi_run(&step(&command, "/oracle"), "/oracle"),
+            "{command}"
+        );
+    }
+    assert!(!has_complete_capi_run(
+        &step(COMPLETE_CAPI_COMMAND, "/other"),
+        "/oracle"
+    ));
+    for variable in ["LIBJPEG_TURBO_PREFIX", "LIBJPEG_TURBO_REFERENCE_DIR"] {
+        let missing = step(COMPLETE_CAPI_COMMAND, "/oracle")
+            .lines()
+            .filter(|line| !line.contains(variable))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !has_complete_capi_run(&missing, "/oracle"),
+            "missing {variable}"
+        );
+    }
+    for override_line in [
+        "if: false",
+        "continue-on-error: true",
+        "working-directory: other",
+        "shell: echo {0}",
+    ] {
+        let disabled = step(COMPLETE_CAPI_COMMAND, "/oracle").replace(
+            "        env:",
+            &format!("        {override_line}\n        env:"),
+        );
+        assert!(
+            !has_complete_capi_run(&disabled, "/oracle"),
+            "{override_line}"
+        );
+    }
+    for override_line in ["if: false", "continue-on-error: true", "defaults:"] {
+        let disabled = step(COMPLETE_CAPI_COMMAND, "/oracle")
+            .replace("    steps:", &format!("    {override_line}\n    steps:"));
+        assert!(
+            !has_complete_capi_run(&disabled, "/oracle"),
+            "job {override_line}"
+        );
+    }
 }

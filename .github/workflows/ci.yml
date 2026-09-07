@@ -352,9 +352,11 @@ jobs:
         run: >
           cargo test -p libjpeg-turbo-rs-capi
           --test capi_jpeglib_encode -- --nocapture
-      # P4-139's span guards. Named explicitly for the reason the P4-81 note
-      # below records from experience: tests in this crate are selected by
-      # name, so a suite nothing names never runs and reports green forever.
+      # P4-139's span guards, named explicitly as an early, focused failure
+      # signal. Every capi suite — this one included — also executes in the
+      # complete P4-175 inventory step later in this job, so a suite nothing
+      # names no longer reports green forever (the failure mode the P4-81
+      # note below records from experience).
       - name: Classic C-ABI span overflow guards (P4-139)
         run: >
           cargo test -p libjpeg-turbo-rs-capi
@@ -529,6 +531,20 @@ jobs:
           # development install.
           LIBJPEG_TURBO_PREFIX: /opt/libjpeg-turbo
 
+      # P4-175: Cargo discovers every C-ABI test target, including new files,
+      # so nothing has to be named to run. The focused steps around it stay
+      # as earlier signals; --no-fail-fast reports every failing suite at once.
+      # `tests/oracle_version_pins.rs` requires this exact command, with both
+      # prefixes, on both oracle legs. Measured 2m21s on the PR that added it;
+      # the bound is sized from that, not guessed (P4-179).
+      - name: Complete C-ABI integration inventory (P4-175)
+        run: >
+          cargo test -p libjpeg-turbo-rs-capi --tests --features png --no-fail-fast
+        env:
+          LIBJPEG_TURBO_PREFIX: /tmp/ljt8/prefix
+          LIBJPEG_TURBO_REFERENCE_DIR: /tmp/ljt8/prefix
+        timeout-minutes: 15
+
       - name: Classic C-ABI create guards (P4-110)
         run: >
           cargo test -p libjpeg-turbo-rs-capi
@@ -679,18 +695,20 @@ jobs:
       # whole contract is "what stock libjpeg does", and therefore the half
       # with the most to say about a new upstream release.
       #
-      # Which suites belong here is not a judgement call maintained in prose:
-      # `tests/oracle_version_pins.rs` reads each baseline-leg suite's own
-      # source for a C-oracle marker and fails if one of them is missing from
-      # this job. What stays behind is everything self-contained: the four capi
-      # steps duplicated nowhere here — the span-overflow guards, the
-      # error-code and message-rendering gates, the crate's unit tests, the ELF
-      # symbol-version leg — plus the self-contained suites riding inside the
+      # Which suites get a focused step here is not a judgement call maintained
+      # in prose: `tests/oracle_version_pins.rs` reads each baseline-leg suite's
+      # own source for a C-oracle marker and fails if one of them is missing
+      # from this job's focused selections. Not repeated as focused steps: the
+      # four capi steps the baseline leg runs alone — the span-overflow guards,
+      # the error-code and message-rendering gates, the crate's unit tests, the
+      # ELF symbol-version leg — and the self-contained suites riding inside the
       # mixed steps above (capi_input_complete_contract, capi_suspended_body_cap,
       # norealloc_buffer_capacity, yuv_packed_length_overflow and the three
       # yuv_*_guard/validate suites). All of them compare against constants, our
-      # own generated files, or the pinned headers, so a second run at another
-      # upstream release would measure the same thing twice.
+      # own generated files, or the pinned headers, so a focused second run at
+      # another upstream release would measure the same thing twice. They do
+      # still *execute* on this leg, inside the complete P4-175 inventory step
+      # below, which is what guarantees no suite is left unrun anywhere.
       - name: C-ABI TurboJPEG and stock-tool oracles (3.2.0)
         run: >
           cargo test -p libjpeg-turbo-rs-capi
@@ -757,6 +775,17 @@ jobs:
           --test capi_resync_suspend -- --nocapture
         env:
           LIBJPEG_TURBO_PREFIX: /tmp/ljt320v8/prefix
+
+      # P4-175: the same complete inventory at the current-parity oracle —
+      # see the baseline leg's step for the rationale. Measured 3m51s on the
+      # PR that added it; the bound is sized from that (P4-179).
+      - name: Complete C-ABI integration inventory (P4-175)
+        run: >
+          cargo test -p libjpeg-turbo-rs-capi --tests --features png --no-fail-fast
+        env:
+          LIBJPEG_TURBO_PREFIX: /tmp/ljt320v8/prefix
+          LIBJPEG_TURBO_REFERENCE_DIR: /tmp/ljt320v8/prefix
+        timeout-minutes: 15
 
       - name: Classic destination ownership + stdio I/O parity (3.2.0)
         env:

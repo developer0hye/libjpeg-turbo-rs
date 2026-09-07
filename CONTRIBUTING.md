@@ -15,6 +15,23 @@ documentation lives in [README.md](README.md) and on
   `jpegtran` where a C contract exists — see `CLAUDE.md` for the full
   testing rules, and `docs/LAST_MILE.md` for the live release gate.
 
+## C-ABI regression coverage
+
+Both integration oracle jobs run every C-ABI test target, with PNG support:
+
+```sh
+LIBJPEG_TURBO_PREFIX=/path/to/v8/install \
+LIBJPEG_TURBO_REFERENCE_DIR=/path/to/v8/install \
+cargo test -p libjpeg-turbo-rs-capi --tests --features png --no-fail-fast
+```
+
+Cargo discovers new test targets automatically. `oracle_version_pins` guards
+this complete selection on both jobs; a named subset or compile-only command
+cannot replace it. The explicit v8 prefix makes the shared classic/TurboJPEG
+oracle helpers mandatory. Some older downstream harnesses still have their
+own prerequisite skips; executing every target does not prove every external
+consumer was available. `--no-fail-fast` collects failures across test binaries.
+
 ## Issues worked on unattended
 
 `scripts/issue_loop.sh` can work through the open issues without supervision,

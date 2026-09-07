@@ -9064,7 +9064,7 @@ supports PNG or does not, and a consumer cannot see a cargo feature.
 load-bearing for the replacement gate — PNG interchange is a convenience
 surface around the codec, not the codec.
 
-## P4-175. `capi_classic_decode_budget` Is Never Named by a Workflow, So It Has Never Run in CI — **OPEN**
+## P4-175. `capi_classic_decode_budget` Is Never Named by a Workflow, So It Has Never Run in CI — **CLOSED 2026-09-07**
 
 **GitHub:** [#565](https://github.com/developer0hye/libjpeg-turbo-rs/issues/565) — found 2026-08-17 while auditing which oracle each gate uses for P4-130.
 
@@ -9104,18 +9104,21 @@ warn about it in prose. Prose has now failed to prevent it twice.
 
 **Acceptance criteria.**
 
-1. `capi_classic_decode_budget` and `capi_yuv_gray` are named in a CI step,
+1. `capi_classic_decode_budget` and `capi_yuv_gray` execute in a CI step,
    each with the `LIBJPEG_TURBO_PREFIX` its oracle needs so it fails rather
    than soft-skips.
 2. Each passes there, or the failure it surfaces is filed.
-3. A mechanism, not another comment: an enumeration test comparing
-   `crates/libjpeg-turbo-rs-capi/tests/*.rs` against the suites named in
-   `.github/workflows/*.yml`, with an explicit opt-out list for suites that are
-   deliberately local-only. Criterion 3 is the valuable half.
+3. A mechanism, not another comment: require coverage for every target under
+   `crates/libjpeg-turbo-rs-capi/tests/`. Either compare the inventory against
+   workflow selections with explicit local-only opt-outs, or require an
+   unfiltered complete-package run that lets Cargo enumerate every target.
+   Criterion 3 is the valuable half; a hand-maintained list alone is insufficient.
 
 **Why deferred.** Unrelated to the oracle-currency work that found it, and
 criterion 3 is a gate of its own — it needs the opt-out list triaged across
 every capi suite, not just this one.
+
+**Status (2026-09-07): closed.** Both integration oracle jobs (`test-integration` on the 3.1.4.1 baseline SDK, `test-integration-current-oracle` on 3.2.0) now run `cargo test -p libjpeg-turbo-rs-capi --tests --features png --no-fail-fast` as the step `Complete C-ABI integration inventory (P4-175)`, with `LIBJPEG_TURBO_PREFIX` and `LIBJPEG_TURBO_REFERENCE_DIR` both naming the leg's SDK so an oracle suite fails rather than soft-skips. Cargo enumerates the inventory, so a new test file is executed from its first pull request without anyone naming it — which is why no opt-out list exists: no C-ABI integration target is excluded. Proof is the pull request's own CI ([run 34044740931](https://github.com/developer0hye/libjpeg-turbo-rs/actions/runs/34044740931)): on the baseline leg the step executed **77 test binaries, 335 passed, 0 failed, 0 ignored**, `capi_classic_decode_budget` and `capi_yuv_gray` among them, in 2m21s; the 3.2.0 leg ran the same inventory green in 3m51s. Criterion 3 is `tests/oracle_version_pins.rs::every_capi_test_target_runs_on_both_oracle_legs`, which requires that unfiltered command with both prefixes on each leg, plus `complete_capi_coverage_rejects_compilation_filters_and_wrong_oracles`, whose negative controls reject an `echo`, `--no-run`, a positional filter, `--list`/`--ignored`, `|| true`, `--lib`, the wrong package, a missing or wrong prefix, and `if:` / `continue-on-error:` / `working-directory:` / `shell:` / `defaults:` overrides at step or job level. The inventory assertion failed against the previous workflow before the steps were added. The focused named steps stay as earlier failure signals; the two legs cost 6→7 and 4→9 minutes for the whole inventory. Older external-consumer harnesses keep their own prerequisite skips, so this closes *execution* of every target, not availability of every downstream consumer (P2-G).
 
 ## P4-176. Every C Oracle Is Fetched by a Moveable Name, With Nothing Verifying What Arrived — **OPEN**
 
