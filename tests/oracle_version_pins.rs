@@ -129,6 +129,11 @@ const CAPI_TEST_DIR: &str = "crates/libjpeg-turbo-rs-capi/tests";
 const PACKAGE_SELECTOR: &str = "-p ";
 const ROOT_TEST_DIR: &str = "tests";
 
+/// The one implementation of "which C libjpeg-turbo install does this
+/// repository mean?", shared by the test helpers and by the corpus harness in
+/// `examples/`.
+const SHARED_ORACLE_LOOKUP: &str = "tests/helpers/oracle_prefix.rs";
+
 /// Source markers that mean "what this suite asserts depends on the C
 /// libjpeg-turbo it ran against": the environment variables that name an
 /// oracle prefix, the helpers that compile and run one, and the stock tools a
@@ -1592,8 +1597,9 @@ fn oracle_install_on(line: &str) -> Option<OracleInstall> {
 /// those as jobs would ask [`job_block`] for a block that is not one.
 ///
 /// Checked against a real YAML parser whenever a job is added: the scanner's
-/// list is identical to PyYAML's for all 45 jobs in the nine workflows, name
-/// for name (re-checked when the cross-arch pairs took it from 42 to 45). The
+/// list is identical to PyYAML's for all 46 jobs in the nine workflows, name
+/// for name (re-checked when the cross-arch pairs took it from 42 to 45, and
+/// again at 46 when the corpus leg gained its twin). The
 /// standing protection is the sibling test —
 /// a workflow this returns nothing for is a workflow every gate here passes
 /// vacuously.
@@ -2193,7 +2199,7 @@ fn reaches_the_oracle(script: &str) -> bool {
 /// Where a shell line runs `cargo`: `(index the command starts at, index of
 /// the `cargo` token)`, once per invocation in command position.
 ///
-/// Shared by [`runs_cargo_in`] and [`cargo_test_commands_in`] rather than
+/// Shared by [`runs_cargo_in`] and [`measurement_commands_in`] rather than
 /// written twice. The second was a substring split when it was first
 /// written, and a review's mutation found what that costs: with a twin's real
 /// `cargo test --tests` replaced by `echo cargo test --tests`, the echoed text
@@ -2715,7 +2721,7 @@ const CURRENT_ORACLE_SUFFIX: &str = "-current-oracle";
 /// Each entry is a decision with a reason, not a silent omission — and the
 /// list is checked in both directions, so pairing a leg means deleting its row
 /// here and leaving one behind is a failure rather than a stale paragraph.
-const UNPAIRED_ORACLE_JOBS: [(&str, &str, &str); 4] = [
+const UNPAIRED_ORACLE_JOBS: [(&str, &str, &str); 3] = [
     (
         "ci.yml",
         "mutants-in-diff",
@@ -2730,12 +2736,6 @@ const UNPAIRED_ORACLE_JOBS: [(&str, &str, &str); 4] = [
         "the macOS aarch64 leg. Upstream ships no macOS package, so a twin \
          means a second source build of libjpeg-turbo on every pull request \
          on top of the 3.1.4.1 one this leg already builds.",
-    ),
-    (
-        "ci.yml",
-        "test-corpus",
-        "the real-world corpus comparison, a 3.1.4.1 source build at \
-         /usr/local. A twin is a second source build per pull request.",
     ),
     (
         "fuzz-smoke.yml",
@@ -2770,21 +2770,32 @@ fn oracle_leg_pairs() -> Vec<(String, String, String)> {
     pairs
 }
 
-/// The `cargo test` commands a step's script runs, normalised for comparison
-/// against another step's.
+/// The commands a step's script runs that can reach the C oracle, normalised
+/// for comparison against another step's.
 ///
 /// One entry per invocation, from where its command starts to where the shell
 /// takes the line back, so a script running two of them yields two commands
 /// rather than one that contains the other. Only invocations in *command
 /// position* count: `echo cargo test --tests` prints a string, and reading it
 /// as a run would let a twin satisfy the pairing gate while executing nothing.
-fn cargo_test_commands_in(script: &str) -> BTreeSet<String> {
+///
+/// Any cargo subcommand that can reach an oracle counts, not `test` alone —
+/// the same deny list [`runs_cargo_in`] uses, so the two rules cannot disagree
+/// about what a step does. `test-corpus` measures with
+/// `cargo run --release --example corpus_test`, and while this read `test` only
+/// that leg's whole measurement was invisible here: its pair would have been
+/// compared against an empty set of commands, which is the shape the gate
+/// refuses rather than passes.
+fn measurement_commands_in(script: &str) -> BTreeSet<String> {
     let mut commands: BTreeSet<String> = BTreeSet::new();
     for line in logical_lines(script) {
         let tokens: Vec<&str> = line.split_whitespace().collect();
         for (start, at) in cargo_invocations_in(&tokens) {
-            if cargo_subcommand_after(&tokens, at) != Some("test") {
-                continue;
+            match cargo_subcommand_after(&tokens, at) {
+                // `cargo` alone prints help; nothing runs.
+                None => continue,
+                Some(name) if CARGO_SUBCOMMANDS_WITHOUT_AN_ORACLE.contains(&name) => continue,
+                Some(_) => {}
             }
             // The command word and everything before it — an environment
             // prefix, a `sudo` — then the arguments, which end where the shell
@@ -2793,6 +2804,12 @@ fn cargo_test_commands_in(script: &str) -> BTreeSet<String> {
             let Some(subcommand) = cargo_subcommand_index_after(&tokens, at) else {
                 continue;
             };
+            // A run whose failure the shell absorbs is not a measurement:
+            // `cmd || true` normalises to `cmd` below, and a twin written that
+            // way would compare equal to a baseline that fails on it.
+            if failure_is_swallowed(&tokens, subcommand) {
+                continue;
+            }
             let mut words: Vec<&str> = tokens[start..=subcommand].to_vec();
             // An operator glued to the command word is the shell's, not the
             // command's: `cargo test; echo done` runs `cargo test`.
@@ -2806,7 +2823,33 @@ fn cargo_test_commands_in(script: &str) -> BTreeSet<String> {
     commands
 }
 
-/// One `cargo test` a job runs, with the environment it runs under.
+/// Whether the shell absorbs the failure of the invocation whose subcommand
+/// sits at `subcommand`: a `||` is reached before the command list ends.
+///
+/// The scan runs to a `;`, a keyword that closes a compound command, or the
+/// end of the logical line — not to `&&` or `|`, since `a && b || c` runs `c`
+/// when `a` fails and a pipeline's `||` covers the whole pipeline. A `||`
+/// glued to the subcommand word (`cargo test||true`) counts too. Reading a
+/// quoted `||` as one over-approximates in the direction that fails closed.
+fn failure_is_swallowed(tokens: &[&str], subcommand: usize) -> bool {
+    for token in tokens.iter().skip(subcommand) {
+        if token.contains("||") {
+            return true;
+        }
+        if token.ends_with(';')
+            || matches!(
+                shell_word(token),
+                "then" | "do" | "else" | "elif" | "fi" | "done" | "esac"
+            )
+        {
+            return false;
+        }
+    }
+    false
+}
+
+/// One oracle-reaching command a job runs, with the environment it runs
+/// under.
 ///
 /// The two travel together because either alone is half an answer: the same
 /// command under a different `RUSTFLAGS` compiles a different backend, and a
@@ -2823,12 +2866,19 @@ fn test_runs_in(job_block: &str) -> BTreeSet<TestRun> {
     let job_environment: BTreeMap<String, String> = job_level_env_in(job_block);
     let mut runs: BTreeSet<TestRun> = BTreeSet::new();
     for step in steps_in(job_block) {
+        // A step that may not run (`if:`), may not fail
+        // (`continue-on-error:`), or runs under another shell or directory
+        // is not the measurement its command string names, so it earns no
+        // credit; the complete-inventory gate reads the same flag.
+        if step.has_execution_override {
+            continue;
+        }
         let mut environment: BTreeMap<String, String> = job_environment.clone();
         environment.extend(step.environment.iter().map(|(k, v)| (k.clone(), v.clone())));
         for name in ORACLE_PREFIX_VARS {
             environment.remove(name);
         }
-        for command in cargo_test_commands_in(&step.script) {
+        for command in measurement_commands_in(&step.script) {
             runs.insert(TestRun {
                 command,
                 environment: environment.clone(),
@@ -3107,6 +3157,15 @@ fn runs_the_root_integration_matrix(command: &str) -> bool {
     let Some(subcommand) = cargo_subcommand_index_after(&tokens, at) else {
         return false;
     };
+    // Only `cargo test` runs tests. Now that the scanner above reads every
+    // oracle-reaching subcommand, a bare `cargo run` reaches this with no
+    // argument to give it away — and crediting it would vouch for every root
+    // oracle suite over a pair that runs none of them, which is the
+    // `cargo test --lib` finding arriving through the subcommand instead of
+    // through a target selector.
+    if shell_word(tokens[subcommand]) != "test" {
+        return false;
+    }
     let arguments: Vec<&str> = arguments_of(&tokens, subcommand);
     let mut names_the_integration_matrix: bool = true;
     let mut expecting_a_value: bool = false;
@@ -3498,7 +3557,7 @@ fn a_second_cargo_test_does_not_swallow_the_first() {
     // differently look unequal, and any twin that appends a run look like it
     // changed the first.
     assert_eq!(
-        cargo_test_commands_in("cargo test --tests\ncargo test --release --lib"),
+        measurement_commands_in("cargo test --tests\ncargo test --release --lib"),
         BTreeSet::from([
             "cargo test --tests".to_string(),
             "cargo test --release --lib".to_string(),
@@ -3506,13 +3565,13 @@ fn a_second_cargo_test_does_not_swallow_the_first() {
     );
     // A backslash continuation is one command.
     assert_eq!(
-        cargo_test_commands_in("cargo test --tests \\\n  --no-fail-fast"),
+        measurement_commands_in("cargo test --tests \\\n  --no-fail-fast"),
         BTreeSet::from(["cargo test --tests --no-fail-fast".to_string()])
     );
     // A pipeline ends the invocation: the `tee` belongs to the shell, and a
     // twin that adds one is running the same tests.
     assert_eq!(
-        cargo_test_commands_in("cargo test --tests 2>&1 | tee /tmp/log"),
+        measurement_commands_in("cargo test --tests 2>&1 | tee /tmp/log"),
         BTreeSet::from(["cargo test --tests".to_string()])
     );
     // The shape a review's mutation found. With a twin's real command replaced
@@ -3520,29 +3579,29 @@ fn a_second_cargo_test_does_not_swallow_the_first() {
     // text as the invocation the pair requires, and all 45 gates stayed green
     // while that leg executed no tests at all.
     assert_eq!(
-        cargo_test_commands_in("echo cargo test --tests"),
+        measurement_commands_in("echo cargo test --tests"),
         BTreeSet::new()
     );
     assert_eq!(
-        cargo_test_commands_in("echo \"cargo test --tests\""),
+        measurement_commands_in("echo \"cargo test --tests\""),
         BTreeSet::new()
     );
     // A substitution runs wherever it appears, though, and the environment
     // prefix and wrapper in front of a command are part of the invocation
     // rather than something before it.
-    assert!(!cargo_test_commands_in("echo \"$(cargo test --tests)\"").is_empty());
+    assert!(!measurement_commands_in("echo \"$(cargo test --tests)\"").is_empty());
     assert_eq!(
-        cargo_test_commands_in("RUSTFLAGS=-Copt-level=1 sudo -E cargo test --tests"),
+        measurement_commands_in("RUSTFLAGS=-Copt-level=1 sudo -E cargo test --tests"),
         BTreeSet::from(["RUSTFLAGS=-Copt-level=1 sudo -E cargo test --tests".to_string()])
     );
     // A cargo run that is not a test run is not one, and a toolchain qualifier
     // does not hide one.
     assert_eq!(
-        cargo_test_commands_in("cargo build --tests"),
+        measurement_commands_in("cargo build --tests"),
         BTreeSet::new()
     );
     assert_eq!(
-        cargo_test_commands_in("cargo +nightly test --tests"),
+        measurement_commands_in("cargo +nightly test --tests"),
         BTreeSet::from(["cargo +nightly test --tests".to_string()])
     );
 }
@@ -3835,14 +3894,14 @@ fn a_control_operator_glued_to_an_argument_does_not_eat_it() {
         Some(&Selection::All)
     );
     assert_eq!(
-        cargo_test_commands_in("cargo test --tests; echo done"),
+        measurement_commands_in("cargo test --tests; echo done"),
         BTreeSet::from(["cargo test --tests".to_string()])
     );
     // The operator can be glued to the command word itself, and then there are
     // no arguments to read — scanning past it would take `echo` for a
     // positional filter and reject a leg that runs the whole matrix.
     assert_eq!(
-        cargo_test_commands_in("cargo test; echo done"),
+        measurement_commands_in("cargo test; echo done"),
         BTreeSet::from(["cargo test".to_string()])
     );
     assert!(runs_the_root_integration_matrix("cargo test; echo done"));
@@ -3872,7 +3931,7 @@ fn a_folded_block_is_one_command_and_a_literal_block_is_many() {
                         \x20         --test capi_compress_precision\n";
     let script: String = steps_in(folded).remove(0).script;
     assert_eq!(
-        cargo_test_commands_in(&script),
+        measurement_commands_in(&script),
         BTreeSet::from([
             "cargo test -p libjpeg-turbo-rs-capi --test capi_jpeglib_encode \
              --test capi_compress_precision"
@@ -3888,7 +3947,7 @@ fn a_folded_block_is_one_command_and_a_literal_block_is_many() {
                          \x20         cargo test --tests\n";
     let script: String = steps_in(literal).remove(0).script;
     assert_eq!(
-        cargo_test_commands_in(&script),
+        measurement_commands_in(&script),
         BTreeSet::from(["cargo test --tests".to_string()])
     );
 }
@@ -4034,6 +4093,196 @@ fn complete_capi_coverage_rejects_compilation_filters_and_wrong_oracles() {
         assert!(
             !has_complete_capi_run(&disabled, "/oracle"),
             "job {override_line}"
+        );
+    }
+}
+
+#[test]
+fn a_measurement_is_any_cargo_command_that_can_reach_the_oracle() {
+    // `test-corpus` does not measure with `cargo test`. It generates a corpus
+    // with C `cjpeg` and compares every file against `djpeg`/`cjpeg`/`jpegtran`
+    // from two `cargo run --example` invocations — and a comparison that models
+    // only `cargo test` sees neither, so the pair would be compared against an
+    // empty set. That is the same class as "an echo is not a run", one
+    // subcommand over: the scanner decides what a leg measures, and a shape it
+    // cannot see is a shape the pairing gate never asks about.
+    let corpus: &str = "cargo run --release --example corpus_test -- --corpus-dir tests/corpus/";
+    assert_eq!(
+        measurement_commands_in(corpus),
+        BTreeSet::from([corpus.to_string()])
+    );
+    // The spelling `ci.yml` really uses: introduced by `if !`, ended by the
+    // redirect the shell takes back. It has to normalise to the same string as
+    // the bare form, or a twin written either way would compare unequal to a
+    // baseline written the other.
+    assert_eq!(
+        measurement_commands_in(&format!(
+            "if ! {corpus} > corpus-test.tsv 2>&1; then\ntail -200 corpus-test.tsv\nexit 1\nfi"
+        )),
+        BTreeSet::from([corpus.to_string()])
+    );
+    assert_eq!(
+        measurement_commands_in("cargo run --release --example generate_corpus"),
+        BTreeSet::from(["cargo run --release --example generate_corpus".to_string()])
+    );
+    // Everything the broadened scanner must still refuse. An echoed run runs
+    // nothing; a `cargo build --example` compiles the harness and never
+    // executes it, so it reaches no oracle and is on the deny list.
+    for not_a_measurement in [
+        "echo cargo run --release --example corpus_test",
+        "echo \"cargo run --example corpus_test\"",
+        "cargo build --release --example corpus_test",
+        "cargo check --examples",
+    ] {
+        assert_eq!(
+            measurement_commands_in(not_a_measurement),
+            BTreeSet::new(),
+            "{not_a_measurement:?} measures nothing"
+        );
+    }
+    // A `cargo run` is not the root crate's integration matrix, however few
+    // arguments it carries. The whole-matrix credit vouches for every root
+    // oracle suite, so a bare `cargo run` reading as one would credit a pair
+    // that runs no test at all — the `cargo test --lib` finding, arriving
+    // through the subcommand instead of through a target selector.
+    for command in [
+        "cargo run",
+        "cargo run --release --example generate_corpus",
+        "cargo run --release --example corpus_test -- --corpus-dir tests/corpus/",
+    ] {
+        assert!(
+            !runs_the_root_integration_matrix(command),
+            "{command:?} runs no integration test"
+        );
+    }
+}
+
+#[test]
+fn the_corpus_harness_resolves_its_oracle_through_the_shared_rule() {
+    if !repository_tree_is_readable() {
+        eprintln!("SKIP: repository tree not readable; see the sibling test.");
+        return;
+    }
+    // The corpus legs name their oracle with `LIBJPEG_TURBO_PREFIX` and nothing
+    // else, so a harness that does not read that variable measures whatever the
+    // runner happens to carry while the step reports the release it installed.
+    // Both corpus examples carried a private `c_tool_path` that read
+    // `/opt/homebrew/bin` and then PATH — the same residual private lookup the
+    // review of #569 found in `capi_classic_lifecycle_pathological`, which had
+    // a 3.2.0-labelled step comparing against homebrew's 3.1.4.1.
+    //
+    // They are *examples*, so no `#[test]` in this crate can call into them.
+    // What is checkable is that they have no lookup of their own: both include
+    // the same module the differential suites resolve through, so the rule they
+    // follow is the one `helpers_smoke.rs` asserts both branches of.
+    let root: PathBuf = repo_root();
+    let read = |relative: &str| -> String {
+        std::fs::read_to_string(root.join(relative))
+            .unwrap_or_else(|e| panic!("{relative} must be readable: {e}"))
+    };
+    let helpers: String = read("tests/helpers/mod.rs");
+    assert!(
+        helpers.contains("pub mod oracle_prefix;")
+            && helpers.contains("pub use oracle_prefix::{c_tool_path, c_tool_path_under};"),
+        "tests/helpers/mod.rs must re-export the shared lookup rather than \
+         carry a second copy of it"
+    );
+    let shared: String = read(SHARED_ORACLE_LOOKUP);
+    assert!(
+        shared.contains("LIBJPEG_TURBO_PREFIX"),
+        "{SHARED_ORACLE_LOOKUP} is the file that reads the oracle prefix; \
+         without that read every consumer of it resolves by lookup order"
+    );
+    for example in ["examples/corpus_test.rs", "examples/generate_corpus.rs"] {
+        let text: String = read(example);
+        assert!(
+            text.contains(&format!("#[path = \"../{SHARED_ORACLE_LOOKUP}\"]")),
+            "{example} must resolve its C tools through {SHARED_ORACLE_LOOKUP}"
+        );
+        assert!(
+            !text.contains("fn c_tool_path("),
+            "{example} defines its own C-tool lookup. A private copy is how a \
+             leg labelled with one release measures another: it cannot be \
+             pointed at an oracle prefix, and it falls back to any djpeg on \
+             the machine rather than failing"
+        );
+    }
+}
+
+#[test]
+fn a_run_whose_failure_the_shell_swallows_is_not_a_measurement() {
+    // `cmd || true` normalises to `cmd`: the arguments end where the shell
+    // takes the line back, and `||` is where it does. A twin written that way
+    // compares equal to a baseline that fails on the same command while never
+    // being able to go red itself — the swallowed-failure shape the
+    // version-check gate already refuses, arriving at the measurement. Found
+    // by the review of the corpus pairing, the first pair whose whole
+    // measurement is a `cargo run`.
+    let corpus: &str = "cargo run --release --example corpus_test -- --corpus-dir tests/corpus/";
+    for swallowed in [
+        format!("{corpus} || true"),
+        format!("{corpus}|| true"),
+        format!("{corpus} 2>&1 | tee log || true"),
+        // `a && b || c`: when `a` fails, `c` runs and the step exits with its
+        // status, so the `&&` does not close the swallow.
+        format!("{corpus} && echo compared || echo ignored"),
+        "cargo test --tests || true".to_string(),
+        "cargo test||true".to_string(),
+    ] {
+        assert_eq!(
+            measurement_commands_in(&swallowed),
+            BTreeSet::new(),
+            "{swallowed:?} cannot fail, so it measures nothing"
+        );
+    }
+    // A `||` after a hard separator or on the next line belongs to the next
+    // command, and `if !` is how `test-corpus` introduces its run: all of
+    // these are the measurement.
+    for kept in [
+        format!("{corpus}; tail -5 log || true"),
+        format!("{corpus}\ntail -5 log || true"),
+        format!(
+            "if ! {corpus} > corpus-test.tsv 2>&1; then\n  exit 1\nfi\ntail -5 corpus-test.tsv || true"
+        ),
+    ] {
+        assert_eq!(
+            measurement_commands_in(&kept),
+            BTreeSet::from([corpus.to_string()]),
+            "{kept:?}"
+        );
+    }
+}
+
+#[test]
+fn a_step_that_may_not_run_or_may_not_fail_contributes_no_run() {
+    // `continue-on-error: true` keeps the job green when the step fails, and
+    // `if:` can keep it from running at all; either way the twin's command
+    // string is identical to its baseline's while the measurement is not. The
+    // step scanner already records these for the complete-inventory gate
+    // (`has_execution_override`); the pairing comparison has to read it too,
+    // or a twin that cannot go red runs what its baseline runs.
+    let plain: String = job_around("      - run: cargo test --tests\n");
+    assert_eq!(
+        test_runs_in(&plain),
+        BTreeSet::from([TestRun {
+            command: "cargo test --tests".to_string(),
+            environment: BTreeMap::new(),
+        }])
+    );
+    for override_line in [
+        "if: false",
+        "continue-on-error: true",
+        "working-directory: other",
+        "shell: echo {0}",
+    ] {
+        let overridden: String = job_around(&format!(
+            "      - run: cargo test --tests\n        {override_line}\n"
+        ));
+        assert_eq!(
+            test_runs_in(&overridden),
+            BTreeSet::new(),
+            "a step with `{override_line}` may not run, may not fail, or runs \
+             elsewhere — none of which is the baseline's measurement"
         );
     }
 }
