@@ -30,10 +30,11 @@
 //!    that built them and attaches them (P4-131 criterion 4 — see the section
 //!    banner further down).
 //!
-//! Skip-with-reason cases mirror `install_layout.rs`: Windows (the scripts are
-//! bash, and a Windows bundle is still open under P4-131), and hosts without
-//! `bash` or `tar`; the SBOM test also skips without `cargo-cyclonedx`. The
-//! three workflow-shape tests read YAML only and run everywhere.
+//! Skip-with-reason cases mirror `install_layout.rs`: hosts without `bash`
+//! (on Windows, without Git for Windows) or `tar`; the SBOM test also skips
+//! without `cargo-cyclonedx`. The workflow-shape tests read YAML only and run
+//! everywhere. The Windows leg runs the bundle tests for real since P4-131's
+//! Windows milestone, against the MSVC layout (`bin/jpeg8.dll` + `lib/jpeg.lib`).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -41,6 +42,8 @@ use std::process::Command;
 
 #[path = "support/cdylib.rs"]
 mod cdylib_support;
+#[path = "support/shell.rs"]
+mod shell;
 
 /// The prefix the bundles are staged with in these tests. Deliberately not
 /// the script default, so a script that ignored `--prefix` and always baked
@@ -67,16 +70,28 @@ fn have(tool: &str) -> bool {
 /// `None` with a printed reason when this host cannot exercise the packaging
 /// script at all.
 fn unsupported_host() -> Option<&'static str> {
-    if cfg!(windows) {
-        return Some("the packaging scripts are bash; a Windows bundle is still open under P4-131");
+    if let Err(reason) = shell::bash() {
+        return Some(reason);
     }
-    if !have("bash") {
-        return Some("bash not on PATH");
-    }
-    if !have("tar") {
-        return Some("tar not on PATH");
+    if let Err(reason) = shell::tar() {
+        return Some(reason);
     }
     None
+}
+
+/// A command running one of the staging scripts through the host's bash,
+/// with the repository root and the cdylib under test already supplied.
+fn script_command(script: &str) -> Command {
+    let root: PathBuf = workspace_root();
+    let cdylib: PathBuf = cdylib_support::cargo_built_cdylib_path()
+        .unwrap_or_else(|e| panic!("could not locate the cdylib under test: {e}"));
+    let cdylib_dir: &Path = cdylib.parent().expect("Cargo artifact directory");
+    let mut command = Command::new(shell::bash().expect("checked by unsupported_host"));
+    command
+        .arg(shell::script_arg(&root.join("scripts").join(script)))
+        .args(["--root", &shell::script_arg(&root)])
+        .env("CAPI_TARGET_DIR", shell::script_arg(cdylib_dir));
+    command
 }
 
 /// Runs `scripts/package_capi_release.sh` into `outdir` and returns the
@@ -85,17 +100,9 @@ fn unsupported_host() -> Option<&'static str> {
 /// Failure is fatal, never a skip: reaching here means the host *can* run the
 /// script, so a non-zero exit is a defect in the thing under test.
 fn package_into(outdir: &Path) -> PathBuf {
-    let root: PathBuf = workspace_root();
-    let cdylib: PathBuf = cdylib_support::cargo_built_cdylib_path()
-        .unwrap_or_else(|e| panic!("could not locate the cdylib under test: {e}"));
-    let cdylib_dir: &Path = cdylib.parent().expect("Cargo artifact directory");
-
-    let run = Command::new("bash")
-        .arg(root.join("scripts/package_capi_release.sh"))
-        .args(["--outdir", &outdir.to_string_lossy()])
+    let run = script_command("package_capi_release.sh")
+        .args(["--outdir", &shell::script_arg(outdir)])
         .args(["--prefix", TEST_PREFIX])
-        .args(["--root", &root.to_string_lossy()])
-        .env("CAPI_TARGET_DIR", cdylib_dir)
         .output()
         .expect("invoke package_capi_release.sh");
     assert!(
@@ -125,7 +132,7 @@ fn package_into(outdir: &Path) -> PathBuf {
 /// contains — upstream's convention for a binary tarball, and the reason an
 /// unpack cannot scatter files over the user's working directory.
 fn extract(archive: &Path, into: &Path) -> PathBuf {
-    let untar = Command::new("tar")
+    let untar = Command::new(shell::tar().expect("checked by unsupported_host"))
         .args(["-xzf", &archive.to_string_lossy()])
         .args(["-C", &into.to_string_lossy()])
         .output()
@@ -174,16 +181,23 @@ fn capi_version() -> String {
         .expect("capi Cargo.toml declares a version")
 }
 
+/// The name a consumer binds to: the major SONAME on Linux/macOS, and on
+/// Windows the DLL file name, which is what an import table records.
 fn libjpeg_major() -> &'static str {
-    if cfg!(target_os = "macos") {
+    if cfg!(windows) {
+        "jpeg8.dll"
+    } else if cfg!(target_os = "macos") {
         "libjpeg.8.dylib"
     } else {
         "libjpeg.so.8"
     }
 }
 
+/// What `-ljpeg` resolves to: the dev symlink, or the MSVC import library.
 fn libjpeg_dev() -> &'static str {
-    if cfg!(target_os = "macos") {
+    if cfg!(windows) {
+        "jpeg.lib"
+    } else if cfg!(target_os = "macos") {
         "libjpeg.dylib"
     } else {
         "libjpeg.so"
@@ -191,7 +205,9 @@ fn libjpeg_dev() -> &'static str {
 }
 
 fn libturbojpeg_major() -> &'static str {
-    if cfg!(target_os = "macos") {
+    if cfg!(windows) {
+        "turbojpeg.dll"
+    } else if cfg!(target_os = "macos") {
         "libturbojpeg.0.dylib"
     } else {
         "libturbojpeg.so.0"
@@ -199,11 +215,114 @@ fn libturbojpeg_major() -> &'static str {
 }
 
 fn libturbojpeg_dev() -> &'static str {
-    if cfg!(target_os = "macos") {
+    if cfg!(windows) {
+        "turbojpeg.lib"
+    } else if cfg!(target_os = "macos") {
         "libturbojpeg.dylib"
     } else {
         "libturbojpeg.so"
     }
+}
+
+/// A file that is a shared library on this platform: ELF, Mach-O (including
+/// the universal wrapper) or a PE image — and long enough to be one.
+///
+/// Existence is not enough. Staging races and truncated links both leave a
+/// *present* file, and every other check — the script's own `-e` probe
+/// included — passes on a zero-length one.
+fn assert_is_shared_library(path: &Path) {
+    let head: Vec<u8> = std::fs::read(path).expect("read the staged library");
+    assert!(
+        head.len() > 4096,
+        "{path:?} is {} bytes — a truncated or empty library, not a shared object",
+        head.len()
+    );
+    let is_elf: bool = head.starts_with(b"\x7fELF");
+    // Mach-O 64-bit, little-endian (`MH_MAGIC_64` on disk) and the
+    // universal-binary wrapper `cafebabe`.
+    let is_macho: bool =
+        head.starts_with(&[0xcf, 0xfa, 0xed, 0xfe]) || head.starts_with(&[0xca, 0xfe, 0xba, 0xbe]);
+    let is_pe: bool = head.starts_with(b"MZ");
+    assert!(
+        is_elf || is_macho || is_pe,
+        "{path:?} does not start with an ELF, Mach-O or PE magic; first four bytes are {:02x?}",
+        &head[..4]
+    );
+}
+
+/// The library for one API, as the unpacked bundle ships it.
+///
+/// Linux/macOS: `install_capi.sh` stages `libjpeg.so → libjpeg.so.8 →
+/// libjpeg.so.8.X.Y`; an archive that dereferenced the links would install
+/// three unrelated copies and leave `ldconfig` with nothing to chain, so both
+/// links must still be links and resolve inside the bundle.
+///
+/// Windows (P4-131): there is no chain. The DLL sits in `bin/` under the name
+/// consumers load, and `lib/` holds an import library that must bind to that
+/// name — cargo's own import library binds to `libjpeg_turbo_rs_capi.dll`,
+/// and a bundle that shipped it would link consumers to a file the bundle
+/// does not contain.
+fn assert_bundled_library(bundle: &Path, bundle_root: &Path, major: &str, dev: &str) {
+    if cfg!(windows) {
+        let dll: PathBuf = bundle.join("bin").join(major);
+        assert!(
+            dll.is_file(),
+            "{dll:?} is not a file in the unpacked bundle"
+        );
+        assert_is_shared_library(&dll);
+        let import_library: PathBuf = bundle.join("lib").join(dev);
+        let bytes: Vec<u8> = std::fs::read(&import_library)
+            .unwrap_or_else(|e| panic!("{import_library:?} missing from the bundle: {e}"));
+        let mut needle: Vec<u8> = major.as_bytes().to_vec();
+        needle.push(0);
+        assert!(
+            shell::contains_bytes(&bytes, &needle),
+            "{import_library:?} does not bind its imports to {major}"
+        );
+        assert!(
+            !shell::contains_bytes(&bytes, b"libjpeg_turbo_rs_capi.dll"),
+            "{import_library:?} binds to cargo's libjpeg_turbo_rs_capi.dll, which the \
+             bundle does not ship"
+        );
+        for symbol in cdylib_support::REQUIRED_EXPORTS {
+            let mut name: Vec<u8> = symbol.as_bytes().to_vec();
+            name.push(0);
+            assert!(
+                shell::contains_bytes(&bytes, &name),
+                "{import_library:?} does not export {symbol}"
+            );
+        }
+        // The DLL survived the GNU-tar-writes / bsdtar-reads round trip only
+        // if it still loads. (No containment check against `bundle_root`
+        // here: with no symlinks, a regular file cannot point outside.)
+        cdylib_support::assert_library_exports(&dll, cdylib_support::REQUIRED_EXPORTS);
+        return;
+    }
+
+    let lib: PathBuf = bundle.join("lib");
+    let dev_path: PathBuf = lib.join(dev);
+    let major_path: PathBuf = lib.join(major);
+    assert!(
+        dev_path.is_symlink(),
+        "{dev_path:?} is not a symlink in the unpacked bundle"
+    );
+    assert!(
+        major_path.is_symlink(),
+        "{major_path:?} is not a symlink in the unpacked bundle"
+    );
+    let resolved: PathBuf = std::fs::canonicalize(&dev_path)
+        .unwrap_or_else(|e| panic!("{dev_path:?} does not resolve inside the bundle: {e}"));
+    assert!(
+        resolved.starts_with(bundle_root),
+        "{dev_path:?} resolves to {resolved:?}, outside the bundle — the \
+         archive is not self-contained"
+    );
+    assert!(
+        resolved.is_file(),
+        "{dev_path:?} → {resolved:?} is not a file"
+    );
+    assert_is_shared_library(&resolved);
+    cdylib_support::assert_library_exports(&resolved, cdylib_support::REQUIRED_EXPORTS);
 }
 
 /// One entry of a staged tree: a relative path and what is at it.
@@ -221,10 +340,9 @@ enum Entry {
 
 /// Permission bits, or 0 on a platform that has none.
 ///
-/// Every test here skips on Windows — the bundle is a Unix artifact — but the
-/// file still has to *compile* there: `cargo test --workspace --no-run` and
-/// the `capi-abi-checks` matrix both build it on `windows-latest`, ahead of any
-/// runtime skip. `std::os::unix` does not exist for the MSVC target.
+/// On Windows both trees compare `0 == 0`, so the mode half of the comparison
+/// is inert there and the byte comparison carries it; `std::os::unix` does
+/// not exist for the MSVC target.
 #[cfg(unix)]
 fn permission_bits(meta: &std::fs::Metadata) -> u32 {
     use std::os::unix::fs::PermissionsExt;
@@ -264,15 +382,41 @@ fn walk(root: &Path, dir: &Path, out: &mut BTreeMap<PathBuf, Entry>) {
         } else if meta.is_dir() {
             walk(root, &path, out);
         } else {
+            let bytes: Vec<u8> = std::fs::read(&path).expect("read file");
             out.insert(
                 relative,
                 Entry::File {
                     mode: permission_bits(&meta),
-                    bytes: std::fs::read(&path).expect("read file"),
+                    bytes: comparable_bytes(&path, bytes),
                 },
             );
         }
     }
+}
+
+/// The bytes of a staged file as they take part in the tree comparison.
+///
+/// Everything is compared verbatim except an MSVC import library, which is
+/// compared by what it binds. `lib.exe` writes the current time into every
+/// archive member it emits, so two stagings of the same DLL a second apart
+/// differ in bytes while binding the same symbols to the same DLL name — and
+/// that binding is the whole content of an import library. The comparable
+/// form is the sorted set of its NUL-terminated strings: every symbol name and
+/// the DLL name, with the timestamps left out. (`install_capi.sh` passes
+/// `-Brepro`, which removes the stamps on toolchains that honour it; the
+/// comparison does not depend on that.)
+fn comparable_bytes(path: &Path, bytes: Vec<u8>) -> Vec<u8> {
+    let is_import_library: bool = cfg!(windows) && path.extension().is_some_and(|ext| ext == "lib");
+    if !is_import_library {
+        return bytes;
+    }
+    let mut strings: Vec<&[u8]> = bytes
+        .split(|&b| b == 0)
+        .filter(|run| run.len() >= 2 && run.iter().all(|b| b.is_ascii_graphic()))
+        .collect();
+    strings.sort_unstable();
+    strings.dedup();
+    strings.join(&b'\n')
 }
 
 #[test]
@@ -302,59 +446,14 @@ fn release_bundle_carries_the_complete_installed_prefix() {
     // unresolved root never prefixes anything `canonicalize` returns.
     let bundle_root: PathBuf = std::fs::canonicalize(&bundle).expect("canonicalize bundle root");
 
-    // Both SONAME chains, with the links intact. `install_capi.sh` stages
-    // `libjpeg.so → libjpeg.so.8 → libjpeg.so.8.X.Y`; an archive that
-    // dereferenced them would install three unrelated copies and leave
-    // `ldconfig` with nothing to chain.
-    for (dev, major) in [
-        (libjpeg_dev(), libjpeg_major()),
-        (libturbojpeg_dev(), libturbojpeg_major()),
-    ] {
-        let dev_path: PathBuf = lib.join(dev);
-        let major_path: PathBuf = lib.join(major);
-        assert!(
-            dev_path.is_symlink(),
-            "{dev_path:?} is not a symlink in the unpacked bundle"
-        );
-        assert!(
-            major_path.is_symlink(),
-            "{major_path:?} is not a symlink in the unpacked bundle"
-        );
-        let resolved: PathBuf = std::fs::canonicalize(&dev_path)
-            .unwrap_or_else(|e| panic!("{dev_path:?} does not resolve inside the bundle: {e}"));
-        assert!(
-            resolved.starts_with(&bundle_root),
-            "{dev_path:?} resolves to {resolved:?}, outside the bundle — the \
-             archive is not self-contained"
-        );
-        assert!(
-            resolved.is_file(),
-            "{dev_path:?} → {resolved:?} is not a file"
-        );
-
-        // Existence is not enough. Staging races and truncated links both
-        // leave a *present* file at the end of a resolving chain, and every
-        // other check here — the script's own `-e` probe included — passes on
-        // a zero-length one. Assert it is actually a shared library.
-        let head: Vec<u8> = std::fs::read(&resolved).expect("read the staged library");
-        assert!(
-            head.len() > 4096,
-            "{resolved:?} is {} bytes — a truncated or empty library, not a \
-             shared object",
-            head.len()
-        );
-        let is_elf: bool = head.starts_with(b"\x7fELF");
-        // Mach-O 64-bit, little-endian (`MH_MAGIC_64` on disk) and the
-        // universal-binary wrapper `cafebabe`.
-        let is_macho: bool = head.starts_with(&[0xcf, 0xfa, 0xed, 0xfe])
-            || head.starts_with(&[0xca, 0xfe, 0xba, 0xbe]);
-        assert!(
-            is_elf || is_macho,
-            "{resolved:?} does not start with an ELF or Mach-O magic; first \
-             four bytes are {:02x?}",
-            &head[..4]
-        );
-    }
+    // Both libraries, in the shape the platform's consumers bind to.
+    assert_bundled_library(&bundle, &bundle_root, libjpeg_major(), libjpeg_dev());
+    assert_bundled_library(
+        &bundle,
+        &bundle_root,
+        libturbojpeg_major(),
+        libturbojpeg_dev(),
+    );
 
     for pc in ["libjpeg.pc", "libturbojpeg.pc"] {
         let path: PathBuf = lib.join("pkgconfig").join(pc);
@@ -421,7 +520,23 @@ fn release_bundle_checksum_verifies_from_the_download_directory() {
     // Both probes assert the tool *ran*, not merely that it spawned: an
     // `is_ok()` probe is true for any binary that starts, so a broken one
     // would turn this into a silent skip.
-    let checker: &str = if have("sha256sum") {
+    //
+    // On Windows the verifier is the `sha256sum` inside Git for Windows, which
+    // is what BUNDLE.txt tells a Windows user to run and is not on the PATH
+    // the test process inherited; it is reached through the same bash that
+    // ran the packaging script.
+    let checker: &str = if cfg!(windows) {
+        let probe = Command::new(shell::bash().expect("checked by unsupported_host"))
+            .args(["-c", "sha256sum --version"])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !probe {
+            eprintln!("SKIP: Git for Windows' bash has no sha256sum");
+            return;
+        }
+        "sha256sum"
+    } else if have("sha256sum") {
         "sha256sum"
     } else if Command::new("shasum")
         .arg("-v")
@@ -433,6 +548,28 @@ fn release_bundle_checksum_verifies_from_the_download_directory() {
     } else {
         eprintln!("SKIP: neither sha256sum nor shasum is on PATH");
         return;
+    };
+    // `<checker> -c <manifest>` run from `dir`, the way a user does it.
+    let verify_in = |dir: &Path, manifest: &str| -> std::process::Output {
+        let mut verify: Command = if cfg!(windows) {
+            let mut through_bash =
+                Command::new(shell::bash().expect("checked by unsupported_host"));
+            through_bash.args(["-c", "sha256sum -c \"$1\"", "sha256sum"]);
+            through_bash
+        } else {
+            let mut direct = Command::new(checker);
+            if checker == "shasum" {
+                direct.args(["-a", "256", "-c"]);
+            } else {
+                direct.arg("-c");
+            }
+            direct
+        };
+        verify
+            .arg(manifest)
+            .current_dir(dir)
+            .output()
+            .expect("invoke the checksum verifier")
     };
 
     let out: tempfile::TempDir = tempfile::tempdir().expect("mkdir outdir");
@@ -447,22 +584,13 @@ fn release_bundle_checksum_verifies_from_the_download_directory() {
         "the manifest must name the bare archive so `{checker} -c` works in \
          the directory it was downloaded into; it says:\n{body}"
     );
+    let manifest_name: String = manifest.file_name().unwrap().to_string_lossy().into_owned();
 
     // Verify the way a user does: from the download directory, by the manifest.
-    let mut verify = Command::new(checker);
-    if checker == "shasum" {
-        verify.args(["-a", "256"]);
-    }
-    let verified = verify
-        .arg("-c")
-        .arg(manifest.file_name().unwrap())
-        .current_dir(out.path())
-        .output()
-        .expect("invoke the checksum verifier");
+    let verified = verify_in(out.path(), &manifest_name);
     assert!(
         verified.status.success(),
-        "`{checker} -c {}` rejected the archive it was generated for:\n{}\n{}",
-        manifest.file_name().unwrap().to_string_lossy(),
+        "`{checker} -c {manifest_name}` rejected the archive it was generated for:\n{}\n{}",
         String::from_utf8_lossy(&verified.stdout),
         String::from_utf8_lossy(&verified.stderr)
     );
@@ -474,21 +602,64 @@ fn release_bundle_checksum_verifies_from_the_download_directory() {
     let last: usize = bytes.len() - 1;
     bytes[last] ^= 0xff;
     std::fs::write(&archive, &bytes).expect("rewrite archive");
-    let mut reverify = Command::new(checker);
-    if checker == "shasum" {
-        reverify.args(["-a", "256"]);
-    }
-    let rejected = reverify
-        .arg("-c")
-        .arg(manifest.file_name().unwrap())
-        .current_dir(out.path())
-        .output()
-        .expect("invoke the checksum verifier");
+    let rejected = verify_in(out.path(), &manifest_name);
     assert!(
         !rejected.status.success(),
         "a corrupted archive passed `{checker} -c`, so the manifest is not \
          bound to the bytes it ships with"
     );
+}
+
+/// The release runs the packaging script with no `--prefix`, so the platform
+/// default — `C:/libjpeg-turbo-rs64` on Windows, with the drive-stripping
+/// DESTDIR arithmetic both scripts must agree on — is what a published
+/// bundle records. Every other test here passes an explicit POSIX prefix.
+#[test]
+fn release_bundle_records_the_platform_default_prefix() {
+    if let Some(reason) = unsupported_host() {
+        eprintln!("SKIP: {reason}");
+        return;
+    }
+    let out: tempfile::TempDir = tempfile::tempdir().expect("mkdir outdir");
+    let run = script_command("package_capi_release.sh")
+        .args(["--outdir", &shell::script_arg(out.path())])
+        .output()
+        .expect("invoke package_capi_release.sh");
+    assert!(
+        run.status.success(),
+        "package_capi_release.sh failed without --prefix:\n--- stdout ---\n{}\n--- stderr ---\n{}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let archive: PathBuf = std::fs::read_dir(out.path())
+        .expect("read outdir")
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .find(|p| p.to_string_lossy().ends_with(".tar.gz"))
+        .expect("the archive is present");
+    let unpacked: tempfile::TempDir = tempfile::tempdir().expect("mkdir unpack dir");
+    let bundle: PathBuf = extract(&archive, unpacked.path());
+    let bundle_root: PathBuf = std::fs::canonicalize(&bundle).expect("canonicalize bundle root");
+
+    let expected_prefix: &str = if cfg!(windows) {
+        "C:/libjpeg-turbo-rs64"
+    } else {
+        "/usr/local"
+    };
+    let info: String = std::fs::read_to_string(bundle.join("BUNDLE.txt")).expect("BUNDLE.txt");
+    assert!(
+        info.contains(&format!("prefix: {expected_prefix}")),
+        "BUNDLE.txt does not record the default prefix {expected_prefix}:\n{info}"
+    );
+    let pc: String = std::fs::read_to_string(bundle.join("lib/pkgconfig/libjpeg.pc"))
+        .expect("libjpeg.pc in the bundle");
+    assert!(
+        pc.contains(&format!("prefix={expected_prefix}")),
+        "the bundled libjpeg.pc does not carry the default prefix {expected_prefix}:\n{pc}"
+    );
+    // And the prefix was found below DESTDIR at all: a disagreement between
+    // the two scripts' drive-stripping would have packaged an empty tree.
+    assert_bundled_library(&bundle, &bundle_root, libjpeg_major(), libjpeg_dev());
 }
 
 /// The release job passes `--target <triple>`, which the other tests here do
@@ -508,15 +679,19 @@ fn package_capi_release_sh_threads_target_through_to_the_build() {
         eprintln!("SKIP: {reason}");
         return;
     }
-    let root: PathBuf = workspace_root();
     let out: tempfile::TempDir = tempfile::tempdir().expect("mkdir outdir");
-    const FAKE_TARGET: &str = "x86_64-unknown-nonesuch-elf";
+    // On Windows the scripts refuse any target but the MSVC one they stage a
+    // layout for, so the nonexistent triple has to keep that shape to get
+    // as far as the build — which is the step this test is about.
+    const FAKE_TARGET: &str = if cfg!(windows) {
+        "x86_64-nonesuch-windows-msvc"
+    } else {
+        "x86_64-unknown-nonesuch-elf"
+    };
 
-    let run = Command::new("bash")
-        .arg(root.join("scripts/package_capi_release.sh"))
-        .args(["--outdir", &out.path().to_string_lossy()])
+    let run = script_command("package_capi_release.sh")
+        .args(["--outdir", &shell::script_arg(out.path())])
         .args(["--prefix", TEST_PREFIX])
-        .args(["--root", &root.to_string_lossy()])
         .args(["--target", FAKE_TARGET])
         // Deliberately no CAPI_TARGET_DIR: that is what forces install_capi.sh
         // to derive the release directory from the target, exactly as the
@@ -540,6 +715,14 @@ fn package_capi_release_sh_threads_target_through_to_the_build() {
         "the failure never mentions {FAKE_TARGET:?}, so `--target` did not \
          reach the staging path and the release's cross-built legs would \
          package the host library:\n{output}"
+    );
+    // cargo's own diagnostic, not one of the scripts' target guards: a guard
+    // that rejected the triple up front would also fail and also name it,
+    // and the test would hold with `--target` never reaching the build.
+    assert!(
+        output.contains("error: "),
+        "the failure came from a script guard rather than from cargo, so the \
+         nested build never saw {FAKE_TARGET:?}:\n{output}"
     );
     let leftovers: Vec<PathBuf> = std::fs::read_dir(out.path())
         .expect("read outdir")
@@ -567,11 +750,6 @@ fn release_bundle_is_exactly_what_install_capi_sh_stages() {
         eprintln!("SKIP: {reason}");
         return;
     }
-    let root: PathBuf = workspace_root();
-    let cdylib: PathBuf = cdylib_support::cargo_built_cdylib_path()
-        .unwrap_or_else(|e| panic!("could not locate the cdylib under test: {e}"));
-    let cdylib_dir: &Path = cdylib.parent().expect("Cargo artifact directory");
-
     let out: tempfile::TempDir = tempfile::tempdir().expect("mkdir outdir");
     let archive: PathBuf = package_into(out.path());
     let unpacked: tempfile::TempDir = tempfile::tempdir().expect("mkdir unpack dir");
@@ -579,12 +757,9 @@ fn release_bundle_is_exactly_what_install_capi_sh_stages() {
 
     // The reference: the staging path itself, same inputs, same prefix.
     let staged_root: tempfile::TempDir = tempfile::tempdir().expect("mkdir staging dir");
-    let install = Command::new("bash")
-        .arg(root.join("scripts/install_capi.sh"))
-        .args(["--destdir", &staged_root.path().to_string_lossy()])
+    let install = script_command("install_capi.sh")
+        .args(["--destdir", &shell::script_arg(staged_root.path())])
         .args(["--prefix", TEST_PREFIX])
-        .args(["--root", &root.to_string_lossy()])
-        .env("CAPI_TARGET_DIR", cdylib_dir)
         .output()
         .expect("invoke install_capi.sh");
     assert!(
@@ -748,19 +923,12 @@ fn release_bundle_ships_a_cyclonedx_sbom_beside_the_archive() {
         eprintln!("SKIP: cargo-cyclonedx is not installed (cargo install cargo-cyclonedx)");
         return;
     }
-    let root: PathBuf = workspace_root();
-    let cdylib: PathBuf = cdylib_support::cargo_built_cdylib_path()
-        .unwrap_or_else(|e| panic!("could not locate the cdylib under test: {e}"));
-    let cdylib_dir: &Path = cdylib.parent().expect("Cargo artifact directory");
     let out: tempfile::TempDir = tempfile::tempdir().expect("mkdir outdir");
 
-    let run = Command::new("bash")
-        .arg(root.join("scripts/package_capi_release.sh"))
-        .args(["--outdir", &out.path().to_string_lossy()])
+    let run = script_command("package_capi_release.sh")
+        .args(["--outdir", &shell::script_arg(out.path())])
         .args(["--prefix", TEST_PREFIX])
-        .args(["--root", &root.to_string_lossy()])
         .arg("--sbom")
-        .env("CAPI_TARGET_DIR", cdylib_dir)
         .output()
         .expect("invoke package_capi_release.sh");
     assert!(
@@ -838,16 +1006,16 @@ fn workflow_text(name: &str) -> String {
         .replace("\r\n", "\n")
 }
 
-/// Reads `.github/workflows/release.yml` and returns the text of one job:
-/// from its key to the next top-level job key.
-fn release_workflow_job(job: &str) -> String {
-    let workflow: String = workflow_text("release.yml");
+/// The text of one job of a workflow file: from its key to the next
+/// top-level job key.
+fn workflow_job(file: &str, job: &str) -> String {
+    let workflow: String = workflow_text(file);
     // Anchored to a line start, so a deeper-indented `job:` (a step id, a
     // matrix key) cannot match first.
     let header: String = format!("\n  {job}:\n");
     let start: usize = workflow
         .find(&header)
-        .unwrap_or_else(|| panic!("release.yml has no `{job}` job"));
+        .unwrap_or_else(|| panic!("{file} has no `{job}` job"));
     let rest: &str = &workflow[start + header.len()..];
     // The next job: a line indented exactly two spaces that names a key and
     // is not a comment.
@@ -867,6 +1035,10 @@ fn release_workflow_job(job: &str) -> String {
         .map(|(at, _)| at)
         .unwrap_or(rest.len());
     rest[..end].to_string()
+}
+
+fn release_workflow_job(job: &str) -> String {
+    workflow_job("release.yml", job)
 }
 
 /// Whether a step block carries its own `if:` key — at the step's key
@@ -986,6 +1158,77 @@ fn release_workflow_attaches_the_sbom_and_sigstore_bundles() {
         job.contains("./*.cdx.json.sha256"),
         "SHA256SUMS is folded from the archive checksums only; the SBOM is an \
          attached artifact and must be covered too:\n{job}"
+    );
+}
+
+/// The matrix rows of a job's `strategy`, each as its own text block.
+fn workflow_matrix_rows(job_text: &str) -> Vec<String> {
+    let include_at: usize = match job_text.find("        include:\n") {
+        Some(at) => at + "        include:\n".len(),
+        None => return Vec::new(),
+    };
+    let mut rows: Vec<String> = Vec::new();
+    for line in job_text[include_at..].lines() {
+        // A comment at row indentation introduces the *next* row; grouping
+        // it with the previous one would let a triple named in a comment
+        // satisfy a lookup for that row.
+        if line.starts_with("          - ") || line.starts_with("          #") {
+            rows.push(String::new());
+        } else if !line.starts_with("            ") && !line.trim_start().starts_with('#') {
+            break;
+        }
+        if let Some(current) = rows.last_mut() {
+            current.push_str(line);
+            current.push('\n');
+        }
+    }
+    rows
+}
+
+/// P4-131 criterion 1, Windows: the release builds the MSVC bundle on a
+/// Windows runner, and runs its steps under bash there — the job's steps are
+/// bash (`set -o pipefail`, `shopt`, `[ ]`), and a Windows runner's default
+/// shell is PowerShell, which would fail the first of them.
+#[test]
+fn release_workflow_builds_the_windows_bundle_under_bash() {
+    let job: String = release_workflow_job("native-artifacts");
+    let rows: Vec<String> = workflow_matrix_rows(&job);
+    let windows: &String = rows
+        .iter()
+        .find(|row| row.contains("target: x86_64-pc-windows-msvc"))
+        .unwrap_or_else(|| {
+            panic!("native-artifacts has no x86_64-pc-windows-msvc matrix row:\n{job}")
+        });
+    assert!(
+        windows.contains("os: windows-latest"),
+        "the x86_64-pc-windows-msvc bundle is not built on a Windows runner:\n{windows}"
+    );
+    let defaults_at: usize = job
+        .find("    defaults:\n")
+        .unwrap_or_else(|| panic!("native-artifacts sets no job-level defaults:\n{job}"));
+    let defaults: &str = &job[defaults_at..];
+    assert!(
+        defaults.contains("      run:\n        shell: bash\n"),
+        "native-artifacts does not default its run steps to bash, so the \
+         Windows leg would run them under PowerShell:\n{job}"
+    );
+}
+
+/// The SBOM test can only run where the generator is installed. `capi-abi-checks`
+/// installs it on every leg — a Windows-gated step would leave the Windows
+/// bundle's SBOM path exercised by nothing but a dispatch rehearsal.
+#[test]
+fn sbom_generator_is_installed_on_every_capi_abi_checks_leg() {
+    let job: String = workflow_job("ci.yml", "capi-abi-checks");
+    let steps: Vec<String> = workflow_steps(&job);
+    let install: &String = steps
+        .iter()
+        .find(|step| step.contains("cargo install cargo-cyclonedx"))
+        .expect("capi-abi-checks installs cargo-cyclonedx");
+    assert!(
+        !step_is_conditional(install),
+        "capi-abi-checks gates the cargo-cyclonedx install, so the SBOM test skips \
+         on that leg:\n{install}"
     );
 }
 

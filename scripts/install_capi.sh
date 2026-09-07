@@ -15,7 +15,11 @@
 #
 # Required env vs CLI flags (CLI wins):
 #   --destdir DIR     Stage root (defaults to "")
-#   --prefix DIR      Install prefix (defaults to "/usr/local")
+#   --prefix DIR      Install prefix (defaults to "/usr/local"; on Windows
+#                     "C:/libjpeg-turbo-rs64", beside upstream's
+#                     "c:/libjpeg-turbo64" convention). With --destdir, a
+#                     drive-lettered prefix is staged below DESTDIR without
+#                     its drive.
 #   --soname NAME     libjpeg "major" SONAME on Linux (default
 #                     "libjpeg.so.8"; pass "libjpeg.so.62" to opt into
 #                     the v6b SONAME — docs/ABI_COMPATIBILITY.md flags
@@ -25,8 +29,13 @@
 #                     filename is derived as
 #                     "${soname}.${version}" (Linux) or
 #                     "${soname%.dylib}.${version}.dylib" (macOS).
+#                     On Windows it is the DLL file name (default
+#                     "jpeg8.dll", upstream's WITH_JPEG8 name; "jpeg62.dll"
+#                     is the v6b opt-in) — there is no SONAME, the file name
+#                     is what a consumer's import table records.
 #   --soname-tj NAME  libturbojpeg "major" SONAME (default
-#                     "libturbojpeg.so.0" / "libturbojpeg.0.dylib").
+#                     "libturbojpeg.so.0" / "libturbojpeg.0.dylib" /
+#                     "turbojpeg.dll").
 #   --build           Force a cdylib build. Without it, a missing cdylib is
 #                     still built automatically.
 #   CAPI_TARGET_DIR   Exact target-qualified Cargo release directory containing
@@ -53,15 +62,34 @@
 #   include/jmorecfg.h             from references/libjpeg-turbo/src/
 #   include/jconfig.h              generated (matches build.rs's v8 defaults)
 #   include/turbojpeg.h            from references/libjpeg-turbo/src/
+#
+# On Windows (x86_64-pc-windows-msvc only, run from Git for Windows' bash),
+# the library part is upstream's MSVC layout instead — P4-131:
+#   bin/jpeg8.dll                  the DLL, under the name consumers load
+#   lib/jpeg.lib                   import library, bound to jpeg8.dll
+#   bin/turbojpeg.dll              the same DLL under the TurboJPEG name
+#   lib/turbojpeg.lib              import library, bound to turbojpeg.dll
+# with the same pkgconfig/, cmake/, share/doc/ and include/ entries.
 
 set -euo pipefail
 
+# Path shapes. Under Git for Windows' bash this script receives Windows paths
+# (`C:\...`, from `cargo test` or a PowerShell caller) and must hand POSIX
+# ones to coreutils and Windows ones to cargo and the MSVC tools; `cygpath`
+# exists exactly there. Everywhere else both are the identity.
+posix_path() {
+    if command -v cygpath >/dev/null 2>&1; then cygpath -u "$1"; else printf '%s\n' "$1"; fi
+}
+native_path() {
+    if command -v cygpath >/dev/null 2>&1; then cygpath -m "$1"; else printf '%s\n' "$1"; fi
+}
+
 DESTDIR=""
-PREFIX="/usr/local"
+PREFIX=""
 SONAME=""
 SONAME_TJ=""
 DO_BUILD=0
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT="$(cd "$(dirname "$(posix_path "$0")")/.." && pwd)"
 CARGO_BIN="${CARGO:-cargo}"
 
 resolve_build_target() {
@@ -70,7 +98,7 @@ resolve_build_target() {
     elif [[ -n "${CARGO_BUILD_TARGET:-}" ]]; then
         printf '%s\n' "$CARGO_BUILD_TARGET"
     else
-        "$CARGO_BIN" -vV | sed -n 's/^host: //p'
+        "$CARGO_BIN" -vV | tr -d '\r' | sed -n 's/^host: //p'
     fi
 }
 
@@ -95,12 +123,42 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+if [[ -n "$DESTDIR" ]]; then DESTDIR="$(posix_path "$DESTDIR")"; fi
+ROOT="$(posix_path "$ROOT")"
+if [[ -n "${CAPI_TARGET_DIR:-}" ]]; then CAPI_TARGET_DIR="$(posix_path "$CAPI_TARGET_DIR")"; fi
+CARGO_BIN="$(posix_path "$CARGO_BIN")"
+
 OS_NAME="$(uname -s)"
 case "$OS_NAME" in
     Linux*)  PLATFORM=linux ;;
     Darwin*) PLATFORM=macos ;;
+    # Git for Windows' bash reports MINGW64_NT-<version>; MSYS2 and Cygwin
+    # shells can run the same script.
+    MINGW*|MSYS*|CYGWIN*) PLATFORM=windows ;;
     *) echo "unsupported platform: $OS_NAME" >&2; exit 1 ;;
 esac
+
+if [[ "$PLATFORM" == "windows" ]] && ! command -v cygpath >/dev/null 2>&1; then
+    # Without it every path helper above is the identity and `C:\...` gets
+    # `/lib` appended — directories in surprising places rather than a failure.
+    echo "ERROR: cygpath not found; run this from Git for Windows' bash (C:\\Program Files\\Git\\bin\\bash.exe)." >&2
+    exit 1
+fi
+
+if [[ -z "$PREFIX" ]]; then
+    case "$PLATFORM" in
+        windows) PREFIX="C:/libjpeg-turbo-rs64" ;;
+        *)       PREFIX="/usr/local" ;;
+    esac
+fi
+# A PowerShell caller spells the prefix `C:\libjpeg-turbo-rs64`; the `.pc`
+# and CMake files want forward slashes (CMake reads `\l` as an escape), and
+# so does the DESTDIR arithmetic below.
+PREFIX="${PREFIX//\\//}"
+if [[ "$PLATFORM" == "windows" && ! "$PREFIX" =~ ^([A-Za-z]:)?/ ]]; then
+    echo "prefix must be absolute (C:/... or /...): ${PREFIX}" >&2
+    exit 1
+fi
 
 BUILD_TARGET=""
 case "${CAPI_TARGET_DIR:-}" in
@@ -139,6 +197,26 @@ case "$PLATFORM" in
         DEFAULT_LIBTJ_MAJOR="libturbojpeg.0.dylib"
         DEFAULT_LIBTJ_DEV="libturbojpeg.dylib"
         ;;
+    windows)
+        CDYLIB_FILE="$RELEASE_DIR/libjpeg_turbo_rs_capi.dll"
+        # Upstream's MSVC names (sharedlib/CMakeLists.txt, RUNTIME_OUTPUT_NAME
+        # jpeg${SO_MAJOR_VERSION}): the DLL carries the ABI major, the import
+        # library does not. A consumer built against upstream's v8 build has
+        # `jpeg8.dll` in its import table, so the name is the identity.
+        DEFAULT_LIBJPEG_MAJOR="jpeg8.dll"
+        DEFAULT_LIBJPEG_DEV="jpeg.lib"
+        DEFAULT_LIBTJ_MAJOR="turbojpeg.dll"
+        DEFAULT_LIBTJ_DEV="turbojpeg.lib"
+        # One target, one layout. MinGW names its DLLs `libjpeg-8.dll` and
+        # links through `libjpeg.dll.a`, and `-ljpeg` in the staged `.pc`
+        # means a different file under each toolchain; the bundle P4-131
+        # ships is the MSVC one, so refuse to stage another under its name.
+        BUILD_TARGET="${BUILD_TARGET:-$(resolve_build_target)}"
+        if [[ "$BUILD_TARGET" != x86_64-*-windows-msvc ]]; then
+            echo "unsupported Windows target for install staging: ${BUILD_TARGET} (P4-131 stages the x86_64-pc-windows-msvc layout only)" >&2
+            exit 1
+        fi
+        ;;
 esac
 
 # Honor --soname / --soname-tj overrides.
@@ -169,6 +247,16 @@ case "$PLATFORM" in
         LIBJPEG_DEV="$(echo "$LIBJPEG_MAJOR" | sed 's/\.[0-9][0-9]*\.dylib$/.dylib/')"
         LIBTJ_DEV="$(echo "$LIBTJ_MAJOR" | sed 's/\.[0-9][0-9]*\.dylib$/.dylib/')"
         ;;
+    windows)
+        # No versioned file and no chain: the DLL is installed under the
+        # major name itself, and the "dev" entry is the import library, whose
+        # name upstream keeps constant across ABI majors (`jpeg.lib` for both
+        # jpeg62.dll and jpeg8.dll).
+        LIBJPEG_REAL="$LIBJPEG_MAJOR"
+        LIBTJ_REAL="$LIBTJ_MAJOR"
+        LIBJPEG_DEV="$DEFAULT_LIBJPEG_DEV"
+        LIBTJ_DEV="$DEFAULT_LIBTJ_DEV"
+        ;;
 esac
 
 # Replace the now-unused defaults with the resolved names so the
@@ -190,7 +278,8 @@ if [[ "$DO_BUILD" -eq 1 || ! -f "$CDYLIB_FILE" ]]; then
         exit 1
     fi
     CARGO_TARGET_ROOT="$(dirname "$(dirname "$RELEASE_DIR")")"
-    (cd "$ROOT" && CARGO_TARGET_DIR="$CARGO_TARGET_ROOT" \
+    # cargo is a native program: on Windows it needs `C:/...`, not `/c/...`.
+    (cd "$ROOT" && CARGO_TARGET_DIR="$(native_path "$CARGO_TARGET_ROOT")" \
         "$CARGO_BIN" build -p libjpeg-turbo-rs-capi --release --target "$BUILD_TARGET")
 fi
 [[ -f "$CDYLIB_FILE" ]] || { echo "cdylib not found: $CDYLIB_FILE" >&2; exit 1; }
@@ -274,24 +363,168 @@ if [[ "$PLATFORM" == "linux" && "${CAPI_SKIP_SYMBOL_VERSIONS:-0}" != "1" ]]; the
     fi
 fi
 
-# Stage roots.
-LIBDIR="${DESTDIR}${PREFIX}/lib"
-INCDIR="${DESTDIR}${PREFIX}/include"
+# ---------------------------------------------------------------------------
+# Windows (P4-131): upstream's MSVC layout — `bin/jpeg8.dll` with the import
+# library `lib/jpeg.lib`, `bin/turbojpeg.dll` with `lib/turbojpeg.lib`.
+#
+# There is no SONAME chain. A consumer's import table records the DLL's file
+# name, so the name *is* the identity, and `jpeg8.dll` is what an executable
+# built against upstream's v8 (WITH_JPEG8) MSVC build asks the loader for.
+# cargo emits `libjpeg_turbo_rs_capi.dll`, and copying it under the upstream
+# name is only half of the job: the import library cargo writes beside it
+# binds every symbol to *that* file name, so a consumer linked through it
+# would load `libjpeg_turbo_rs_capi.dll` and fail on a host that has only the
+# bundle. The import library is therefore regenerated from the DLL's own
+# export table under the shipped name — `dumpbin` lists what the DLL exports,
+# `lib /DEF` binds those names to `jpeg8.dll` — which is the Windows
+# counterpart of the `patchelf --set-soname` below. The DLL's bytes are
+# cargo's, unchanged; only its file name and the import library differ. (Its
+# export directory still records the original name; the loader never reads
+# it.) Both tools live beside the `link.exe` rustc needed to build the DLL,
+# so a host that built it has them; they are found the way rustc finds the
+# linker when no developer shell put them on PATH.
+#
+# `-Brepro` makes the import library reproducible: without it lib.exe stamps
+# the current time into every archive member, and the release bundle would
+# differ from a second staging run of the same DLL — which is exactly the
+# comparison `release_bundle.rs` makes to hold the one-staging-path rule.
+# ---------------------------------------------------------------------------
+
+# The MSVC tool named by $1: from PATH (a developer shell) or the newest
+# Visual Studio toolset that vswhere reports (rustc's own fallback). A
+# candidate counts only if it identifies itself as Microsoft's — a stub of
+# the same name on PATH (a package-manager shim, Strawberry Perl's bin) would
+# otherwise win and fail later with a message about the wrong program.
+# Prints nothing and fails when there is none.
+msvc_tool() {
+    local tool="$1" vswhere install_dir candidate banner
+    local -a candidates=()
+    if command -v "$tool" >/dev/null 2>&1; then
+        candidates+=("$(command -v "$tool")")
+    fi
+    for vswhere in "/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe" \
+                   "$(command -v vswhere.exe 2>/dev/null || true)"; do
+        [[ -n "$vswhere" && -f "$vswhere" ]] || continue
+        install_dir="$("$vswhere" -latest -products '*' \
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 \
+            -property installationPath 2>/dev/null | tr -d '\r' | awk 'NR == 1')"
+        [[ -n "$install_dir" ]] || continue
+        # The toolset layout is fixed; a glob costs one directory listing
+        # where `find` would stat the whole toolset tree on every call.
+        # Newest toolset first.
+        while IFS= read -r candidate; do
+            [[ -f "$candidate" ]] && candidates+=("$candidate")
+        done < <(printf '%s\n' "$(posix_path "$install_dir")"/VC/Tools/MSVC/*/bin/Hostx64/x64/"$tool" | sort -rV)
+    done
+    for candidate in ${candidates[@]+"${candidates[@]}"}; do
+        banner="$(MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' "$candidate" 2>&1 | head -3 || true)"
+        case "$banner" in
+            *Microsoft*) printf '%s\n' "$candidate"; return 0 ;;
+        esac
+    done
+    return 1
+}
+
+# Writes a `.def` naming every export of $1 (the DLL) under the DLL name $2,
+# and an import library bound to that name at $3.
+write_import_library() {
+    local dll="$1" dll_name="$2" import_library="$3"
+    local work exports def count
+    work="$(mktemp -d)"
+    # shellcheck disable=SC2064
+    trap "rm -rf '$work'" RETURN
+    exports="$work/exports.txt"
+    def="$work/${dll_name%.dll}.def"
+    # `-` rather than `/` for the options, and native paths for the files:
+    # the MSYS runtime rewrites arguments that look like POSIX paths before
+    # a native program sees them, and `/EXPORTS` looks like one. The env
+    # vars switch that rewriting off for the call as well. The tools' own
+    # directory goes on PATH for the call: they load `mspdbcore.dll` and
+    # friends from beside themselves, which a developer shell arranges and a
+    # plain invocation by absolute path may not.
+    if ! MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' PATH="$(dirname "$DUMPBIN"):$PATH" \
+            "$DUMPBIN" -NOLOGO -EXPORTS "$(native_path "$dll")" > "$work/dumpbin.txt" 2>&1; then
+        echo "ERROR: dumpbin could not read ${dll}:" >&2
+        cat "$work/dumpbin.txt" >&2
+        exit 1
+    fi
+    # The export table rows: `ordinal hint RVA name`. Every export of this
+    # crate is a `#[no_mangle] extern "C" fn`; a `#[no_mangle] static` would
+    # need the `DATA` keyword here, which dumpbin's listing does not reveal,
+    # so one must not be added to the crate without extending this writer.
+    tr -d '\r' < "$work/dumpbin.txt" \
+        | awk 'NF == 4 && $1 ~ /^[0-9]+$/ && $3 ~ /^[0-9A-Fa-f]+$/ { print $4 }' \
+        > "$exports"
+    count="$(wc -l < "$exports" | tr -d ' ')"
+    # Both API surfaces and a plausible count: a parse that dropped most rows
+    # would still produce a valid import library that links nothing.
+    if ! grep -qx 'jpeg_std_error' "$exports" || ! grep -qx 'tj3Init' "$exports" || [[ "$count" -lt 100 ]]; then
+        echo "ERROR: parsed only ${count} exports from ${dll}; expected the full jpeg_*/tj* surface. dumpbin said:" >&2
+        head -40 "$work/dumpbin.txt" >&2
+        exit 1
+    fi
+    {
+        echo "LIBRARY ${dll_name}"
+        echo "EXPORTS"
+        sed 's/^/    /' "$exports"
+    } > "$def"
+    if ! MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' PATH="$(dirname "$LIB_TOOL"):$PATH" \
+            "$LIB_TOOL" -NOLOGO -MACHINE:X64 -Brepro \
+            -DEF:"$(native_path "$def")" -OUT:"$(native_path "$work/out.lib")"; then
+        echo "ERROR: lib.exe could not build the import library for ${dll_name} from ${def}." >&2
+        exit 1
+    fi
+    install -m 0644 "$work/out.lib" "$import_library"
+}
+
+# Resolve the Windows tools before anything is created below DESTDIR, so a
+# host without them is told so and left clean.
+if [[ "$PLATFORM" == "windows" ]]; then
+    DUMPBIN="$(msvc_tool dumpbin.exe)" || {
+        echo "ERROR: dumpbin.exe not found. Run from a Visual Studio developer shell, or install the VC++ build tools rustc needs for x86_64-pc-windows-msvc." >&2
+        exit 1
+    }
+    LIB_TOOL="$(msvc_tool lib.exe)" || {
+        echo "ERROR: lib.exe not found. Run from a Visual Studio developer shell, or install the VC++ build tools rustc needs for x86_64-pc-windows-msvc." >&2
+        exit 1
+    }
+fi
+
+# Stage roots. A drive-lettered prefix (`C:/libjpeg-turbo-rs64`) cannot be
+# appended to DESTDIR as-is; below DESTDIR it loses its drive, the way CMake's
+# DESTDIR handling does on Windows.
+if [[ -n "$DESTDIR" && "$PREFIX" =~ ^[A-Za-z]: ]]; then
+    STAGE_ROOT="${DESTDIR}${PREFIX:2}"
+else
+    STAGE_ROOT="${DESTDIR}${PREFIX}"
+fi
+LIBDIR="${STAGE_ROOT}/lib"
+BINDIR="${STAGE_ROOT}/bin"
+INCDIR="${STAGE_ROOT}/include"
 PKGCFGDIR="${LIBDIR}/pkgconfig"
 CMAKEDIR="${LIBDIR}/cmake/JPEG"
-DOCDIR="${DESTDIR}${PREFIX}/share/doc/libjpeg-turbo-rs-capi"
+DOCDIR="${STAGE_ROOT}/share/doc/libjpeg-turbo-rs-capi"
 mkdir -p "$LIBDIR" "$INCDIR" "$PKGCFGDIR" "$CMAKEDIR" "$DOCDIR"
 
-# Install cdylib + symlink chains.
-install -m 0755 "$JPEG_LIB_SOURCE" "${LIBDIR}/${DEFAULT_LIBJPEG_REAL}"
-ln -sf "$DEFAULT_LIBJPEG_REAL" "${LIBDIR}/${DEFAULT_LIBJPEG_MAJOR}"
-ln -sf "$DEFAULT_LIBJPEG_MAJOR" "${LIBDIR}/${DEFAULT_LIBJPEG_DEV}"
-# libturbojpeg shares the same binary (we export both APIs).
-# Same binary: our map has no catch-all node, so the tj* surface stays
-# unversioned exactly as before (P4-81).
-install -m 0755 "$JPEG_LIB_SOURCE" "${LIBDIR}/${DEFAULT_LIBTJ_REAL}"
-ln -sf "$DEFAULT_LIBTJ_REAL" "${LIBDIR}/${DEFAULT_LIBTJ_MAJOR}"
-ln -sf "$DEFAULT_LIBTJ_MAJOR" "${LIBDIR}/${DEFAULT_LIBTJ_DEV}"
+if [[ "$PLATFORM" == "windows" ]]; then
+    mkdir -p "$BINDIR"
+    install -m 0755 "$JPEG_LIB_SOURCE" "${BINDIR}/${DEFAULT_LIBJPEG_REAL}"
+    write_import_library "$JPEG_LIB_SOURCE" "$DEFAULT_LIBJPEG_MAJOR" "${LIBDIR}/${DEFAULT_LIBJPEG_DEV}"
+    # libturbojpeg is the same binary under the TurboJPEG name, as below.
+    install -m 0755 "$JPEG_LIB_SOURCE" "${BINDIR}/${DEFAULT_LIBTJ_REAL}"
+    write_import_library "$JPEG_LIB_SOURCE" "$DEFAULT_LIBTJ_MAJOR" "${LIBDIR}/${DEFAULT_LIBTJ_DEV}"
+else
+    # Install cdylib + symlink chains.
+    install -m 0755 "$JPEG_LIB_SOURCE" "${LIBDIR}/${DEFAULT_LIBJPEG_REAL}"
+    ln -sf "$DEFAULT_LIBJPEG_REAL" "${LIBDIR}/${DEFAULT_LIBJPEG_MAJOR}"
+    ln -sf "$DEFAULT_LIBJPEG_MAJOR" "${LIBDIR}/${DEFAULT_LIBJPEG_DEV}"
+    # libturbojpeg shares the same binary (we export both APIs).
+    # Same binary: our map has no catch-all node, so the tj* surface stays
+    # unversioned exactly as before (P4-81).
+    install -m 0755 "$JPEG_LIB_SOURCE" "${LIBDIR}/${DEFAULT_LIBTJ_REAL}"
+    ln -sf "$DEFAULT_LIBTJ_REAL" "${LIBDIR}/${DEFAULT_LIBTJ_MAJOR}"
+    ln -sf "$DEFAULT_LIBTJ_MAJOR" "${LIBDIR}/${DEFAULT_LIBTJ_DEV}"
+fi
 
 # Rewrite each installed cdylib's identity (macOS install_name /
 # Linux DT_SONAME) so it matches the SONAME the script was told
@@ -410,11 +643,17 @@ if(NOT TARGET JPEG::JPEG)
 endif()
 EOF
 
-cat <<EOF
-Installed libjpeg-turbo-rs-capi ${CDYLIB_VERSION} into ${DESTDIR}${PREFIX}:
-  lib/${DEFAULT_LIBJPEG_REAL}    (cdylib)
+if [[ "$PLATFORM" == "windows" ]]; then
+    LIBRARY_SUMMARY="  bin/${DEFAULT_LIBJPEG_REAL}, bin/${DEFAULT_LIBTJ_REAL}    (DLLs)
+  lib/${DEFAULT_LIBJPEG_DEV}, lib/${DEFAULT_LIBTJ_DEV}    (import libraries)"
+else
+    LIBRARY_SUMMARY="  lib/${DEFAULT_LIBJPEG_REAL}    (cdylib)
   lib/${DEFAULT_LIBJPEG_MAJOR}, lib/${DEFAULT_LIBJPEG_DEV}    (symlinks)
-  lib/${DEFAULT_LIBTJ_REAL}, lib/${DEFAULT_LIBTJ_MAJOR}, lib/${DEFAULT_LIBTJ_DEV}
+  lib/${DEFAULT_LIBTJ_REAL}, lib/${DEFAULT_LIBTJ_MAJOR}, lib/${DEFAULT_LIBTJ_DEV}"
+fi
+cat <<EOF
+Installed libjpeg-turbo-rs-capi ${CDYLIB_VERSION} into ${STAGE_ROOT}:
+${LIBRARY_SUMMARY}
   lib/pkgconfig/{libjpeg,libturbojpeg}.pc
   lib/cmake/JPEG/JPEGConfig.cmake
   share/doc/libjpeg-turbo-rs-capi/LICENSE-{MIT,APACHE}

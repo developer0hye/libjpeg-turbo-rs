@@ -26,11 +26,15 @@
 #   --outdir DIR      Where the archive and its checksum are written
 #                     (required; created if absent).
 #   --prefix DIR      Prefix baked into the staged `.pc` and CMake files
-#                     (default "/usr/local"). Absolute by nature — the bundle
-#                     records it in BUNDLE.txt so a packager who unpacks
-#                     somewhere else knows what to relocate.
+#                     (default "/usr/local"; "C:/libjpeg-turbo-rs64" on
+#                     Windows — the same defaults as install_capi.sh).
+#                     Absolute by nature — the bundle records it in
+#                     BUNDLE.txt so a packager who unpacks somewhere else
+#                     knows what to relocate.
 #   --target TRIPLE   Cargo target triple, used both for the nested build and
 #                     as the bundle's platform label (default: Cargo's host).
+#                     On Windows only x86_64-pc-windows-msvc is accepted:
+#                     the staged layout is upstream's MSVC one (P4-131).
 #   --root DIR        Repository root (default: this script's parent).
 #   --build           Force a cdylib build. Passed through; without it, a
 #                     missing cdylib is still built by the install script.
@@ -53,14 +57,22 @@
 #   ${OUTDIR}/libjpeg-turbo-rs-capi-X.Y.Z-T.cdx.json.sha256
 #
 # The archive unpacks into a single directory named after the archive stem,
-# holding the staged prefix (`lib/`, `include/`) plus `BUNDLE.txt`.
+# holding the staged prefix (`lib/`, `include/`, and on Windows `bin/`) plus
+# `BUNDLE.txt`.
 
 set -euo pipefail
 
+# Same helper as install_capi.sh: under Git for Windows' bash the script may
+# receive `C:\...` paths and must hand POSIX ones to coreutils; `cygpath`
+# exists exactly there and the function is the identity elsewhere.
+posix_path() {
+    if command -v cygpath >/dev/null 2>&1; then cygpath -u "$1"; else printf '%s\n' "$1"; fi
+}
+
 OUTDIR=""
-PREFIX="/usr/local"
+PREFIX=""
 TARGET=""
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT="$(cd "$(dirname "$(posix_path "$0")")/.." && pwd)"
 DO_BUILD=0
 DO_SBOM=0
 CARGO_BIN="${CARGO:-cargo}"
@@ -94,7 +106,7 @@ if [[ "$DO_SBOM" -eq 1 ]] && ! "$CARGO_BIN" cyclonedx --version >/dev/null 2>&1;
 fi
 
 if [[ -z "$TARGET" ]]; then
-    TARGET="$("$CARGO_BIN" -vV | sed -n 's/^host: //p')"
+    TARGET="$("$CARGO_BIN" -vV | tr -d '\r' | sed -n 's/^host: //p')"
     [[ -n "$TARGET" ]] || { echo "could not resolve Cargo host target" >&2; exit 1; }
 fi
 
@@ -108,41 +120,73 @@ ARCHIVE="${BUNDLE}.tar.gz"
 
 # Resolve the output directory *before* the build, so a misspelled or
 # unwritable `--outdir` costs a shell error rather than a full release build.
+OUTDIR="$(posix_path "$OUTDIR")"
 mkdir -p "$OUTDIR"
 OUTDIR="$(cd "$OUTDIR" && pwd)"
 # And the root, so paths derived from it compare against absolute ones
 # (the SBOM cleanup below excludes the output directory by identity).
-ROOT="$(cd "$ROOT" && pwd)"
+ROOT="$(cd "$(posix_path "$ROOT")" && pwd)"
 
 # The names the bundle carries. Recorded in BUNDLE.txt rather than assumed by
 # the reader: `install_capi.sh` takes a `--soname` override, and a bundle whose
 # chain is not the v8 default must say so where a packager will look.
-#
+case "$(uname -s)" in
+    Linux*)
+        PLATFORM=linux
+        SONAME="libjpeg.so.8"
+        SONAME_DEV="libjpeg.so"
+        SONAME_TJ="libturbojpeg.so.0"
+        SONAME_TJ_DEV="libturbojpeg.so"
+        ;;
+    Darwin*)
+        PLATFORM=macos
+        SONAME="libjpeg.8.dylib"
+        SONAME_DEV="libjpeg.dylib"
+        SONAME_TJ="libturbojpeg.0.dylib"
+        SONAME_TJ_DEV="libturbojpeg.dylib"
+        ;;
+    MINGW*|MSYS*|CYGWIN*)
+        # P4-131: upstream's MSVC layout. The DLL name is the identity a
+        # consumer's import table records, so it stands in for the SONAME;
+        # the "dev" entry is the import library. install_capi.sh refuses any
+        # other Windows target, but say so here, before a build.
+        PLATFORM=windows
+        if [[ "$TARGET" != x86_64-*-windows-msvc ]]; then
+            echo "unsupported Windows target for packaging: ${TARGET} (P4-131 ships the x86_64-pc-windows-msvc layout only)" >&2
+            exit 1
+        fi
+        SONAME="jpeg8.dll"
+        SONAME_DEV="jpeg.lib"
+        SONAME_TJ="turbojpeg.dll"
+        SONAME_TJ_DEV="turbojpeg.lib"
+        ;;
+    *) echo "unsupported platform for packaging: $(uname -s)" >&2; exit 1 ;;
+esac
+
+# Same defaults as install_capi.sh, which also records the prefix in the
+# staged `.pc` and CMake files; keep the two in step.
+if [[ -z "$PREFIX" ]]; then
+    case "$PLATFORM" in
+        windows) PREFIX="C:/libjpeg-turbo-rs64" ;;
+        *)       PREFIX="/usr/local" ;;
+    esac
+fi
+PREFIX="${PREFIX//\\//}"
+
 # TAR_IDENTITY forces uid/gid 0 into the archive. Without it the tarball
 # records the *build runner's* account, and GNU tar extracting as root honours
 # it — so the documented `sudo cp -a` install would leave `/usr/local/lib`
 # owned by whatever local user happens to hold uid 1001 on the target host,
 # who could then replace a library that root-run programs load.
-case "$(uname -s)" in
-    Linux*)
-        SONAME="libjpeg.so.8"
-        SONAME_DEV="libjpeg.so"
-        SONAME_TJ="libturbojpeg.so.0"
-        SONAME_TJ_DEV="libturbojpeg.so"
-        TAR_IDENTITY=(--owner=0 --group=0 --numeric-owner)
-        ;;
-    Darwin*)
-        SONAME="libjpeg.8.dylib"
-        SONAME_DEV="libjpeg.dylib"
-        SONAME_TJ="libturbojpeg.0.dylib"
-        SONAME_TJ_DEV="libturbojpeg.dylib"
-        # bsdtar spells it differently, and needs the *names* blanked too —
-        # it writes uname/gname and a GNU tar extraction resolves those first.
-        TAR_IDENTITY=(--uid 0 --gid 0 --uname "" --gname "")
-        ;;
-    # Windows (DLL + import library) is still open under P4-131. Fail here
-    # rather than emit a bundle whose shape nothing has verified.
-    *) echo "unsupported platform for packaging: $(uname -s) (P4-131 tracks Windows)" >&2; exit 1 ;;
+#
+# Chosen by the tar on PATH rather than by platform: Linux and Git for
+# Windows carry GNU tar, macOS carries bsdtar, which spells it differently
+# and needs the *names* blanked too — it writes uname/gname and a GNU tar
+# extraction resolves those first.
+TAR_BANNER="$(tar --version 2>/dev/null | head -1 || true)"
+case "$TAR_BANNER" in
+    *"GNU tar"*) TAR_IDENTITY=(--owner=0 --group=0 --numeric-owner) ;;
+    *)           TAR_IDENTITY=(--uid 0 --gid 0 --uname "" --gname "") ;;
 esac
 
 STAGE="$(mktemp -d)"
@@ -152,7 +196,13 @@ INSTALL_ARGS=(--destdir "$STAGE/destdir" --prefix "$PREFIX" --root "$ROOT")
 [[ "$DO_BUILD" -eq 1 ]] && INSTALL_ARGS+=(--build)
 CAPI_BUILD_TARGET="$TARGET" bash "$ROOT/scripts/install_capi.sh" "${INSTALL_ARGS[@]}"
 
-STAGED="$STAGE/destdir${PREFIX}"
+# Where install_capi.sh put the prefix below its DESTDIR: a drive-lettered
+# prefix is staged without its drive (see the script).
+if [[ "$PREFIX" =~ ^[A-Za-z]: ]]; then
+    STAGED="$STAGE/destdir${PREFIX:2}"
+else
+    STAGED="$STAGE/destdir${PREFIX}"
+fi
 [[ -d "$STAGED" ]] || { echo "install_capi.sh staged nothing at ${STAGED}" >&2; exit 1; }
 mv "$STAGED" "$STAGE/$BUNDLE"
 
@@ -164,11 +214,17 @@ mv "$STAGED" "$STAGE/$BUNDLE"
 # Both chains and both dev links, not just the libjpeg major: the dev link is
 # what `JPEGConfig.cmake` names as `JPEG_LIBRARY`, so a bundle missing it
 # resolves `find_package(JPEG)` to a path that does not exist, and the
-# libturbojpeg chain is half of what BUNDLE.txt advertises.
+# libturbojpeg chain is half of what BUNDLE.txt advertises. On Windows the
+# loadable file is the DLL in `bin/` and the dev entry the import library.
+if [[ "$PLATFORM" == "windows" ]]; then
+    LOADABLE_DIR="bin"
+else
+    LOADABLE_DIR="lib"
+fi
 REQUIRED=(
-    "lib/${SONAME}"
+    "${LOADABLE_DIR}/${SONAME}"
     "lib/${SONAME_DEV}"
-    "lib/${SONAME_TJ}"
+    "${LOADABLE_DIR}/${SONAME_TJ}"
     "lib/${SONAME_TJ_DEV}"
     "lib/pkgconfig/libjpeg.pc"
     "lib/pkgconfig/libturbojpeg.pc"
@@ -195,6 +251,19 @@ fi
 
 COMMIT="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
 
+# The library lines of the contents list, and the platform's checksum
+# command. `soname:` is kept as the key on every platform — on Windows it is
+# the DLL name, the closest thing a PE consumer has to one.
+if [[ "$PLATFORM" == "windows" ]]; then
+    LIBRARY_CONTENTS="  bin/                 ${SONAME}, ${SONAME_TJ} (one DLL under both names)
+  lib/                 ${SONAME_DEV}, ${SONAME_TJ_DEV} — MSVC import libraries bound to those DLLs"
+    VERIFY_COMMAND="  sha256sum -c ${ARCHIVE}.sha256      # from Git for Windows' bash; or
+  certutil -hashfile ${ARCHIVE} SHA256    # and compare by eye"
+else
+    LIBRARY_CONTENTS="  lib/                 both SONAME chains (libjpeg and libturbojpeg)"
+    VERIFY_COMMAND="  sha256sum -c ${ARCHIVE}.sha256      # macOS: shasum -a 256 -c"
+fi
+
 cat >"$STAGE/$BUNDLE/BUNDLE.txt" <<EOF
 libjpeg-turbo-rs C ABI shim — prebuilt native library
 
@@ -208,7 +277,7 @@ commit: ${COMMIT}
 Staged by scripts/install_capi.sh and packaged by
 scripts/package_capi_release.sh. Contents:
 
-  lib/                 both SONAME chains (libjpeg and libturbojpeg)
+${LIBRARY_CONTENTS}
   lib/pkgconfig/       libjpeg.pc, libturbojpeg.pc
   lib/cmake/JPEG/      JPEGConfig.cmake for find_package(JPEG)
   share/doc/           LICENSE-MIT, LICENSE-APACHE
@@ -223,7 +292,7 @@ either rewrite those paths or let pkg-config do it:
 Verify the download before installing. Both files are attached to a GitHub
 release: SHA256SUMS covers every bundle in it, the .sha256 covers this one.
 
-  sha256sum -c ${ARCHIVE}.sha256      # macOS: shasum -a 256 -c
+${VERIFY_COMMAND}
 
 A checksum proves the bytes arrived intact, not where they came from. An
 archive attached to a GitHub release is also attested — Sigstore build

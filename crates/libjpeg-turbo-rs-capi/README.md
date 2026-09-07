@@ -35,9 +35,10 @@ in the repository root.
 ## Building
 
 Tagged releases attach prebuilt bundles — libraries, headers, `.pc` files and
-CMake config for x86_64/aarch64 Linux and macOS, checksummed — so building
-from source is not the only way to get one. There is no Windows bundle and no
-signature yet;
+CMake config for x86_64/aarch64 Linux and macOS and for x86_64 Windows
+(MSVC: `jpeg8.dll` + `jpeg.lib`), checksummed and attested with Sigstore
+provenance and a CycloneDX SBOM — so building from source is not the only way
+to get one.
 [`docs/RELEASE_ARTIFACTS.md`](https://github.com/developer0hye/libjpeg-turbo-rs/blob/main/docs/RELEASE_ARTIFACTS.md)
 covers what ships, how to verify it, and what is missing.
 

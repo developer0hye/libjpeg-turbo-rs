@@ -6071,7 +6071,7 @@ installs the 3.1.4.1 deb at `/opt/libjpeg-turbo` and the runner carries no other
 libjpeg-turbo, so the list resolves to the intended install by absence rather
 than by choice.
 
-## P4-131. No Native Binary Distribution — Releases Ship crates.io and npm Only — **PARTIAL: Unix bundles ship, gated and attested; Windows and the deb/rpm decision remain**
+## P4-131. No Native Binary Distribution — Releases Ship crates.io and npm Only — **PARTIAL: Unix and Windows bundles ship, gated and attested; the deb/rpm decision remains**
 
 **GitHub:** [#462](https://github.com/developer0hye/libjpeg-turbo-rs/issues/462) — under the [#470](https://github.com/developer0hye/libjpeg-turbo-rs/issues/470) umbrella.
 
@@ -6119,9 +6119,12 @@ radius of the gaps rather than reducing it. Sequenced in Stage C, after the
 export surface (P4-129) and the shipped-artifact test path (P4-124) are settled,
 since both change what a release artifact should contain.
 
-**Status (2026-09-07): PARTIAL** — criteria 2, 3 and 4 are met, criterion 1 is
-met for Unix and open for Windows, criterion 5 remains. The 2026-09-07
-milestone is recorded after the 2026-08-18 one below.
+**Status (2026-09-07): PARTIAL** — criteria 1, 2, 3 and 4 are met, criterion 5
+remains. The 2026-09-07 (Windows) and 2026-09-07 (attestation) milestones are
+recorded after the 2026-08-18 one below.
+
+**Status (2026-09-07, superseded above): PARTIAL** — criteria 2, 3 and 4 are
+met, criterion 1 is met for Unix and open for Windows, criterion 5 remains.
 
 **Status (2026-08-18): PARTIAL** — criteria 2 and 3 are met, criterion 1 is met
 for Unix and open for Windows, criteria 4 and 5 remain.
@@ -6171,23 +6174,23 @@ its own, so every install gets them and not only the archive.
 
 *Where it runs.* `capi-abi-checks` in `ci.yml` gained a step naming
 `--test install_layout --test release_bundle`, so the gate runs on
-`ubuntu-latest` and `macos-latest` (and skips with a reason on
-`windows-latest`) for every pull request. That step is also the first CI
-coverage `install_layout` has ever had: it has existed since P2-8 and no
-workflow named it, so the layout gate that closed P2-8 ran on no pull request —
-the same "a suite nothing names never runs" shape P4-81 and P4-61 each hit
-before. The Linux release legs additionally install `patchelf` and fail if the
-packaging log lacks `P4-81: relinked`, so neither of `install_capi.sh`'s two
-warn-and-continue degradations can ship silently in a published bundle.
+`ubuntu-latest` and `macos-latest` (and, until the 2026-09-07 Windows
+milestone below, skipped with a reason on `windows-latest`) for every pull
+request. That step is also the first CI coverage `install_layout` has ever
+had: it has existed since P2-8 and no workflow named it, so the layout gate
+that closed P2-8 ran on no pull request — the same "a suite nothing names
+never runs" shape P4-81 and P4-61 each hit before. The Linux release legs
+additionally install `patchelf` and fail if the packaging log lacks
+`P4-81: relinked`, so neither of `install_capi.sh`'s two warn-and-continue
+degradations can ship silently in a published bundle.
 
 *What remained after 2026-08-18* (item 2 closed on 2026-09-07, below; the
 rest stand).
 
-1. **Windows (criterion 1).** No DLL or import library. `install_capi.sh` is
-   Linux/macOS-only and the packaging script refuses to run elsewhere rather
-   than emit an unverified shape. Windows needs its own layout decision — no
-   SONAME chain, an import library, a toolchain-dependent `.pc` convention —
-   so it is separate work, not another matrix row.
+1. **Windows (criterion 1).** *Closed 2026-09-07 — see the second milestone
+   below.* As recorded on 2026-08-18: no DLL or import library, the scripts
+   were Linux/macOS-only, and Windows needed its own layout decision — no
+   SONAME chain, an import library, a toolchain-dependent `.pc` convention.
 2. **Signing and SBOM (criterion 4).** *Closed 2026-09-07 — see the milestone
    below.* As recorded on 2026-08-18: "nothing to sign yet" was spent, a
    checksum beside the file proves integrity not origin, and the fix was not
@@ -6245,7 +6248,8 @@ predicates against `dist/*.tar.gz` without an `if:`; `github-release` attaches
 the SBOMs and Sigstore bundles on both its create and its upload path and
 folds the SBOM checksums into `SHA256SUMS`; and `cargo-cyclonedx` is pinned to
 one version in both workflows. `capi-abi-checks` installs the generator so the
-SBOM test runs on every Linux and macOS pull request rather than skipping.
+SBOM test runs on every Linux and macOS pull request rather than skipping (and
+on the Windows leg too since the milestone below).
 
 *Proof.* The attestation half cannot run on a pull request; it was proved by
 dispatching `release.yml` on the branch before merge — run
@@ -6289,8 +6293,82 @@ downloader whose root of trust must be a person rather than GitHub's OIDC
 issuer is not served. Rehearsal attestations from a branch are stored like a
 tag's, so verification instructions pin `--source-ref` to the tag.
 
-*What remains under this item:* Windows (1), the deb/rpm decision (3), and the
-two `capi-v*` / naming policy questions (4, 5) above.
+**Milestone (2026-09-07): criterion 1 met for Windows — the MSVC bundle
+ships, staged by the same path and held by the same suites.**
+
+*The layout decision.* The bundle mirrors what upstream libjpeg-turbo's own
+Visual C++ build installs (`sharedlib/CMakeLists.txt`, `RUNTIME_OUTPUT_NAME
+jpeg${SO_MAJOR_VERSION}`; `BUILDING.md` "Visual C++"): `bin/jpeg8.dll` with
+the import library `lib/jpeg.lib`, and `bin/turbojpeg.dll` with
+`lib/turbojpeg.lib`, plus the same `include/`, `lib/pkgconfig/`,
+`lib/cmake/JPEG/` and `share/doc/` entries as the Unix bundles. The name is
+not a free choice: a Windows consumer's import table records the DLL's file
+name, so an executable built against upstream's v8 build asks the loader for
+`jpeg8.dll` and nothing else will do — the name *is* the SONAME. The default
+prefix is `C:/libjpeg-turbo-rs64`, beside upstream's `c:/libjpeg-turbo64`.
+The `.pc` files keep `-ljpeg`, which is `jpeg.lib` under MSVC pkg-config
+(`--msvc-syntax`) and `libjpeg.dll.a` under MinGW; that toolchain dependence
+is resolved by shipping **MSVC only** — the scripts accept an
+`x86_64-*-windows-msvc` triple and nothing else on Windows, so a MinGW layout
+(`libjpeg-8.dll`) is never staged under this bundle's name. The DLL links the dynamic Visual C++
+runtime, as upstream's DLL does (`MultiThreadedDLL` in the same CMake file);
+a host needs the VC++ redistributable it already needs for upstream.
+
+*What landed.* `install_capi.sh` gained a `windows` platform, run from Git
+for Windows' bash: it copies cargo's `libjpeg_turbo_rs_capi.dll` under both
+shipped names and **regenerates** each import library from the DLL's export
+table — `dumpbin -EXPORTS` lists the exports, a `.def` names them under
+`LIBRARY jpeg8.dll`, `lib -DEF` binds them. Copying cargo's own
+`libjpeg_turbo_rs_capi.dll.lib` would have shipped an import library that
+links every consumer to a file the bundle does not contain; the regeneration
+is the Windows counterpart of `patchelf --set-soname`. The two tools are found
+on PATH (a developer shell) or through `vswhere`, the way rustc finds
+`link.exe`, since any host that built the DLL has them. `--soname jpeg62.dll`
+is the v6b opt-in there, with the same documented risk. `package_capi_release.sh`
+accepts the platform, picks the archive owner flags by the `tar` on PATH
+rather than by OS (Git for Windows carries GNU tar), and lists `bin/` entries
+in `BUNDLE.txt`. Both scripts normalise the `C:\…` paths a Windows caller
+hands them with `cygpath`, and `install_capi.sh` hands cargo a `C:/…`
+`CARGO_TARGET_DIR`, since a native program reads `/c/…` as a path on the
+current drive. A
+`.gitattributes` pins `*.sh` to LF: the Windows runner checks out with
+`core.autocrlf=true`, and bash reads the `\r` as part of every command name.
+`release.yml`'s `native-artifacts` gained the `x86_64-pc-windows-msvc` /
+`windows-latest` row and `defaults.run.shell: bash` — its steps use
+`pipefail`, `shopt` and `[ ]`, and the runner's default shell is PowerShell.
+
+*What holds it.* `install_layout` and `release_bundle` no longer skip on
+Windows: `tests/support/shell.rs` resolves Git for Windows' bash by install
+location (a bare `bash` can be the WSL launcher in `System32`) and the
+bsdtar Windows ships, and the suites assert the Windows shape — a PE image
+under each shipped name, an import library that contains `jpeg8.dll\0` and
+not `libjpeg_turbo_rs_capi.dll`, `JPEG_LIBRARY` naming `lib/jpeg.lib` — and,
+on every platform now, that the staged library *loads* and resolves
+`jpeg_std_error` and `tj3Init`. The bundle-equals-staging comparison treats
+an import library by what it binds (its sorted NUL-terminated strings)
+because `lib.exe` stamps a build time into each archive member; `-Brepro` is
+passed but not relied on. Both suites also stage once with *no* `--prefix`,
+since that is how the release runs them, so the platform default and the
+drive-stripping DESTDIR arithmetic are exercised on pull requests rather
+than first on a tag. Two workflow-shape tests pin the matrix row with its
+bash default and keep `capi-abi-checks`' `cargo-cyclonedx` install
+unconditional, so the SBOM test runs on the Windows leg too. The Linux leg
+of `capi-abi-checks` now installs `patchelf`, as the release leg does: the
+libturbojpeg copy's `DT_SONAME` comes only from it, and the suite now asserts
+that identity rather than the chain's mere existence.
+
+*Proof.* <!-- P4-131-WINDOWS-PROOF -->
+
+*What is deliberately not claimed.* No C program is compiled against
+`jpeg.lib` in CI: the import library's binding is asserted by its strings and
+the DLL by loading it, not by a downstream link — that is P4-124's programme,
+which on Windows now has an artifact to point at. No MinGW bundle, no
+installer, no `.pdb`. The DLL's export directory still records
+`libjpeg_turbo_rs_capi.dll` as its original name; the loader never reads it,
+but a dependency viewer will show it.
+
+*What remains under this item:* the deb/rpm decision (3) and the two
+`capi-v*` / naming policy questions (4, 5) above.
 
 ## P4-132. Classic C-ABI Per-`cinfo` State Is Thread-Affine (P4-16 Option A) — **OPEN**
 
