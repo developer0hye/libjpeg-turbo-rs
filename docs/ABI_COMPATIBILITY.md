@@ -101,25 +101,17 @@ both variables at build time; they are honored by
 
 ### Threading contract
 
-A `jpeg_decompress_struct` / `jpeg_compress_struct` allocated through our C ABI shim **must be used (and freed) on the thread that created it.** Our shim stores per-`cinfo` private state in thread-local side tables keyed by the `cinfo` pointer; transferring `cinfo` ownership across threads silently breaks lookups and leaks the original-thread entry.
+Upstream's rule, and ours since P4-132 closed on 2026-09-08: **a `jpeg_decompress_struct` / `jpeg_compress_struct` may be used from any thread, one thread at a time.** Create it on one thread, hand it to another, drive and destroy it there — the private state the shim keeps for the object travels with the object. It is the object that travels, not a copy of it: a `jpeg_decompress_struct` copied by value aliases its private state, exactly as it does upstream, and destroying both is a double free on both libraries. What is *not* allowed is the same as upstream: two threads inside calls on one `cinfo` at once is a data race, and the application, not the library, enforces the hand-off (a join, a channel, a mutex — anything that orders thread A's last call before thread B's first). Distinct `cinfo`s are independent and need no synchronisation.
 
 Concretely:
 
-- **Safe:** thread A calls `jpeg_create_decompress(cinfo)`, drives the full decode lifecycle through `jpeg_destroy_decompress(cinfo)` on thread A. Likewise for the compress side.
-- **Unsafe:** thread A calls `jpeg_create_decompress(cinfo)`; the application then passes `cinfo` (by value or pointer) to thread B; thread B calls `jpeg_read_header(cinfo, …)`. The shim's private-state lookup on thread B returns `None`, and observable behaviour ranges from `JERR_BAD_STATE` to silent miscompilation. `jpeg_destroy_decompress(cinfo)` on thread B will **not** free thread A's entry — the entry leaks until thread A exits.
+- **Supported:** thread A calls `jpeg_create_decompress(cinfo)`; the application passes `cinfo` to thread B; thread B calls `jpeg_read_header(cinfo, …)` through `jpeg_destroy_decompress(cinfo)`. Likewise for the compress side. Pinned by `crates/libjpeg-turbo-rs-capi/tests/capi_thread_affinity.rs`, which also counts live private state through the crate's non-exported test hooks, so a leak on the destroying thread is a number rather than a guess.
+- **Supported:** several threads each running their own `cinfo` from create to destroy with no lock between them (same suite, eight threads).
+- **Undefined:** two threads inside calls on the same `cinfo` at once. Upstream's `libjpeg.txt` (3.2.0, lines 2222-2225) says the same — *"the JPEG library currently is not thread-safe. You must not call jpeg_consume_input() from one thread of control if a different library routine is working on the same JPEG object in another thread"* — and there is nothing observable to assert about a data race, so it is stated here rather than tested.
 
-**Why this contract.** The v8 `struct jpeg_decompress_struct` is ABI-mirrored byte-for-byte (`crates/libjpeg-turbo-rs-capi/src/jpeglib.rs:3900-3970` pins the offsets). There is no room to append a `priv_ptr` field without breaking offset compatibility with upstream-compiled consumers, so private state lives in TLS instead. Implementation pointers: `DECOMPRESS_PRIVATE_STATE` at `jpeglib.rs:368-372` (decompress side) + compress equivalent at `:3492-3505`.
+**How it works.** The v8 `struct jpeg_decompress_struct` is ABI-mirrored byte-for-byte, so there is no room to append a private pointer. Upstream itself keeps per-instance internal state behind the opaque `struct jpeg_decomp_master *master` slot, which no consumer dereferences; the shim boxes `DecompressPrivate` there (`crates/libjpeg-turbo-rs-capi/src/jpeglib.rs`, `decompress_private_raw`), as it has always boxed `CompressPrivate` behind `jpeg_compress_struct::master`. `jpeg_destroy_*` is the single release point: it drops the box and nulls the slot, so an object destroyed and re-created at the same address starts clean (also pinned in the suite). `jpeg_abort_*` keeps the state, as upstream's `jpeg_abort` keeps its master. The private state has no registry and no lock (the coefficient-array table behind `jpeg_read_coefficients` is a separate, unchanged global mutex), so the change is not measurable on a single-threaded benchmark (`experiments/capi_thread_affinity_2026-09-08.md`).
 
-**Divergence from upstream.** Upstream libjpeg-turbo's contract is "single-threaded per `cinfo`, but ownership transfer between threads is OK provided the application enforces non-concurrent access." We are stricter: ownership stays on the creating thread.
-
-**Status (2026-08-09): the reopen trigger has fired, and the gap has widened.** This paragraph used to end by inviting an issue and promising to "prioritise based on adoption signal". That signal arrived — the constraint is now tracked as **P4-132 (#463)**, which reopens P4-16 Option A — so the invitation is no longer the current state and is not repeated here.
-
-Two things changed since P4-16 measured this in 2026-05:
-
-- **Upstream moved off thread-local storage.** libjpeg-turbo 3.2 beta1 overhauled its SIMD dispatchers to initialise per instance rather than per thread, explicitly *"eliminating the need for thread-local storage in the libjpeg API library."* P4-16's comparison was written against the older upstream implementation; our TLS-keyed side tables are now a wider divergence than when the trade-off was accepted.
-- **Nothing here has measured 3.2's threading behaviour.** Since 2026-08-17 the oracle CI does run against 3.2.0 as well as 3.1.4.1 (P4-130 / #461), so the premise this bullet was written on — that every gate was one minor behind — no longer holds. The conclusion does: no differential suite on either leg exercises a `cinfo` crossing threads, so the release the oracle is at cannot settle this one.
-
-The migration remains a global map keyed by `cinfo` pointer, but a `Mutex<HashMap>` alone is not sufficient: a freed and reallocated `cinfo` can land at the same address and collide with a stale entry, so the private state needs a generation counter and a single release point. That requirement is recorded on **#463**, not here.
+**History.** Until 2026-09-08 the decompressor's state lived in a `thread_local!` map keyed by the `cinfo` address, with a second one holding the 12/16-bit scanline state, which kept ownership on the creating thread and dropped the state when that thread exited. P4-16 (closed 2026-05-19) documented that as a deliberate divergence and named FFmpeg's frame-threaded path as the trigger to fix it; P4-132 (#463) was that trigger, sharpened by upstream 3.2 removing thread-local storage from its libjpeg API entirely. Nothing about the current layout is stricter than upstream.
 
 ### Legacy TurboJPEG 1.x/2.x aliases — partial coverage (P4-18)
 
@@ -299,11 +291,11 @@ v7+ extensions (NOT in v6b):
   output_gamma      offset  80
   buffered_image    offset  88
   raw_data_out      offset  92
-  ... (continued — see jpeglib.rs:3900-3970)
+  ... (continued — see jpeglib.rs:226-338)
 
 v8+ extensions (NOT in v6b or v7):
   is_baseline       offset 312   (boolean, JPEG_LIB_VERSION >= 80)
-  ... (block_size etc. — see jpeglib.rs:3946+)
+  ... (block_size etc. — see jpeglib.rs:318+)
 ```
 
 For the full enumeration of v6b → v7 → v8 differences, see the `#if JPEG_LIB_VERSION >= 70` and `>= 80` blocks in `references/libjpeg-turbo/src/jpeglib.h:191,371,393,419,465,498,654,697,742,1003`.

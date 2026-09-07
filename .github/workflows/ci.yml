@@ -293,12 +293,22 @@ jobs:
       # tests that spawn a process (C oracle, abort-in-child) carry
       # `cfg_attr(miri, ignore)`.
       #
+      # P4-132: `capi_thread_affinity` adds the classic decode sequence
+      # itself — create on one thread, `jpeg_mem_src` through
+      # `jpeg_destroy_decompress` on another, on a 1×1 fixture that stays
+      # off the SIMD kernels Miri cannot interpret. Its first draft read the
+      # private-state slot through the raw `cinfo` while the entry point
+      # held a `&mut` to the same struct; only Miri saw that. The tests that
+      # need the SIMD encoder or a spawned `djpeg` carry
+      # `cfg_attr(miri, ignore)`.
+      #
       # Its own `env`/`timeout-minutes`: a step's settings belong to the step
       # above them in YAML, so appending a bare `run` here would have silently
       # taken both from the library run.
       - run: >
           cargo miri test -p libjpeg-turbo-rs-capi
           --test capi_create_abi_guards
+          --test capi_thread_affinity
         env:
           MIRIFLAGS: -Zmiri-disable-isolation
         timeout-minutes: 25
