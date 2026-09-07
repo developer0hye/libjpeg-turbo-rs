@@ -28,3 +28,8 @@ fuzz/Cargo.lock
 
 # Python bytecode from the scripts/ helpers and their tests.
 __pycache__/
+# cargo-cyclonedx writes one SBOM beside every workspace member's Cargo.toml;
+# package_capi_release.sh --sbom moves the capi crate's out and deletes the
+# rest, but a run killed in between would leave them for `cargo publish
+# --allow-dirty` to ship (P4-131).
+*.cdx.json

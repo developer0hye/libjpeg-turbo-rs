@@ -399,7 +399,9 @@ replacement-tier framing and its readiness status live in
 
 Tagged releases attach prebuilt bundles of those shims — libraries, headers,
 `.pc` files and CMake config for x86_64/aarch64 Linux and macOS, with a
-`SHA256SUMS` manifest. There is no Windows bundle and no signature yet.
+`SHA256SUMS` manifest, and each bundle carries Sigstore build provenance and
+a CycloneDX SBOM that `gh attestation verify` checks. There is no Windows
+bundle yet.
 [`docs/RELEASE_ARTIFACTS.md`](docs/RELEASE_ARTIFACTS.md) covers what ships,
 how to verify and install it, and what is still missing. Downloading a bundle
 does not change the tiers above.

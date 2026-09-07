@@ -911,6 +911,16 @@ jobs:
       # for the reason the P4-81 step in Integration Tests records from
       # experience: in this crate suites are selected by name, and one that
       # nothing names never runs and reports green forever.
+      #
+      # `release_bundle` also runs `package_capi_release.sh --sbom`, which
+      # needs the generator release.yml's `native-artifacts` job installs;
+      # without it that test skips with a reason and the release's SBOM step
+      # is exercised only by a dispatch rehearsal. Same pin as release.yml —
+      # `sbom_generator_is_pinned_to_one_version_across_workflows` holds the
+      # two together. Not on Windows, where the SBOM test skips anyway.
+      - name: Install the SBOM generator (P4-131)
+        if: runner.os != 'Windows'
+        run: cargo install cargo-cyclonedx --locked --version 0.5.9
       - name: Shipped install layout and release bundle (P2-8, P4-131)
         run: >
           cargo test -p libjpeg-turbo-rs-capi --release

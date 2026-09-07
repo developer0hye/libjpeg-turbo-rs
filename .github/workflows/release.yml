@@ -20,7 +20,11 @@ on:
     tags: ['v*', 'wasm-v*', 'capi-v*']
   # P4-131: build the native bundles without publishing anything, so the
   # packaging matrix — including the cross-built legs — can be exercised
-  # before a tag makes the result public.
+  # before a tag makes the result public. The one thing a dispatch does
+  # record is the attestations for its rehearsal bundles, stored under this
+  # repository like a tag's; they name the dispatched ref as their source,
+  # which is why the verification instructions in docs/RELEASE_ARTIFACTS.md
+  # pin `--source-ref` to the release tag.
   #
   # Every publish job below additionally requires `github.event_name ==
   # 'push'`. The tag-shape test alone would not be enough: `gh workflow run
@@ -314,10 +318,29 @@ jobs:
   # the one job a dispatch may run. Skipped on `wasm-v*`, which ships no
   # native library. Windows (DLL + import library) is still open; P4-131
   # stays PARTIAL until it lands.
+  #
+  # Each leg also signs what it built (P4-131 criterion 4): a checksum beside
+  # the file it covers proves integrity, not origin. `attest-build-provenance`
+  # records the SLSA provenance — this workflow, this commit, this runner —
+  # and `actions/attest` records the CycloneDX SBOM the packaging script
+  # wrote, both signed with the job's OIDC identity through Sigstore and
+  # stored under this repository for `gh attestation verify`. They run in the
+  # job that produced the bytes, not in `github-release`, because provenance
+  # generated anywhere else would attest a download rather than a build; and
+  # they run unconditionally, so a dispatch rehearsal exercises the signing
+  # path and a tag is never the first time it runs. The Sigstore bundles are
+  # kept beside the archive so the release can attach them for offline
+  # verification.
   native-artifacts:
     name: Native bundle (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
     if: ${{ !cancelled() && ((github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/wasm-v')) || github.event_name == 'workflow_dispatch') }}
+    permissions:
+      contents: read
+      # Sigstore signs with the job's OIDC token; the attestations API stores
+      # the result. Nothing else — this job publishes no release.
+      id-token: write
+      attestations: write
     strategy:
       fail-fast: false
       matrix:
@@ -351,11 +374,29 @@ jobs:
       - name: Install patchelf (Linux SONAME patching)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y patchelf
+      # Pinned, and to the version ci.yml's capi-abi-checks installs for the
+      # `release_bundle` suite — a test there holds the two together, so the
+      # SBOM the pull-request gate checks is produced by the generator the
+      # release runs.
+      - name: Install the SBOM generator
+        run: cargo install cargo-cyclonedx --locked --version 0.5.9
       - name: Package the installed prefix
+        id: package
         run: |
           set -o pipefail
           bash scripts/package_capi_release.sh \
-            --outdir dist --target ${{ matrix.target }} --build 2>&1 | tee package.log
+            --outdir dist --target ${{ matrix.target }} --build --sbom 2>&1 | tee package.log
+          # Exactly one archive: the attest steps name it by this stem, and
+          # an unmatched or doubled glob must fail here, not as a wrong
+          # `sbom-path` two steps later.
+          shopt -s nullglob
+          archives=(dist/*.tar.gz)
+          if [ "${#archives[@]}" -ne 1 ]; then
+            echo "::error::expected exactly one archive in dist/, found ${#archives[@]}: ${archives[*]}"
+            exit 1
+          fi
+          stem="$(basename "${archives[0]}" .tar.gz)"
+          echo "stem=${stem}" >> "$GITHUB_OUTPUT"
       # The GNU symbol-version nodes come from a relink that also degrades to
       # a warning when its prerequisites are missing (P4-81). A published
       # bundle is exactly where that silent downgrade must not happen:
@@ -369,6 +410,32 @@ jobs:
             cat package.log
             exit 1
           fi
+      - name: Attest build provenance
+        id: provenance
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: dist/*.tar.gz
+      - name: Attest the SBOM
+        id: sbom-attestation
+        uses: actions/attest@v4
+        with:
+          subject-path: dist/*.tar.gz
+          sbom-path: dist/${{ steps.package.outputs.stem }}.cdx.json
+      # `gh attestation verify --bundle <file>` checks a download without
+      # asking GitHub for the attestation, which is what an air-gapped or
+      # distro build host needs; the release attaches these beside the
+      # archive. Named after the archive so `dist/*.sigstore.json` and the
+      # archive's own stem both find them.
+      - name: Keep the Sigstore bundles beside the archive
+        env:
+          STEM: ${{ steps.package.outputs.stem }}
+          PROVENANCE_BUNDLE: ${{ steps.provenance.outputs.bundle-path }}
+          SBOM_BUNDLE: ${{ steps.sbom-attestation.outputs.bundle-path }}
+        run: |
+          set -euo pipefail
+          cp "$PROVENANCE_BUNDLE" "dist/${STEM}.tar.gz.provenance.sigstore.json"
+          cp "$SBOM_BUNDLE" "dist/${STEM}.tar.gz.sbom.sigstore.json"
+          ls -l dist
       - uses: actions/upload-artifact@v7
         with:
           name: native-${{ matrix.target }}
@@ -403,6 +470,9 @@ jobs:
       # `SHA256SUMS` verifies a complete download set in one command, and the
       # per-bundle file is what someone who took a single tarball can use —
       # which is also what that bundle's own BUNDLE.txt tells them to run.
+      # The SBOMs are attached artifacts too, so the manifest covers them; the
+      # Sigstore bundles are not listed, because they are the signatures over
+      # the archive and its SBOM and verify on their own.
       #
       # `set -euo pipefail` and `failglob` because GitHub's default shell is
       # `bash -e` with no pipefail: an unmatched glob would otherwise pass the
@@ -413,7 +483,7 @@ jobs:
           set -euo pipefail
           shopt -s failglob
           cd dist
-          cat ./*.tar.gz.sha256 | sort -k 2 > SHA256SUMS
+          cat ./*.tar.gz.sha256 ./*.cdx.json.sha256 | sort -k 2 > SHA256SUMS
           sha256sum -c SHA256SUMS
           cat SHA256SUMS
       - name: Create release with CHANGELOG notes
@@ -421,12 +491,20 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
         run: |
+          # `failglob` for the same reason as the manifest step above: an
+          # unmatched attach glob must fail the job, not reach `gh` as a
+          # literal.
+          set -euo pipefail
+          shopt -s failglob
           # A pre-existing release keeps its notes — but it must still get
           # the binaries, or the P4-131 download links silently go missing
           # for exactly the releases someone drafted by hand.
           if gh release view "$TAG" > /dev/null 2>&1; then
             echo "release for $TAG already exists (drafted manually?); leaving its notes alone and uploading the native bundles"
-            gh release upload "$TAG" --clobber dist/*.tar.gz dist/*.tar.gz.sha256 dist/SHA256SUMS
+            gh release upload "$TAG" --clobber \
+              dist/*.tar.gz dist/*.tar.gz.sha256 \
+              dist/*.cdx.json dist/*.cdx.json.sha256 \
+              dist/*.sigstore.json dist/SHA256SUMS
             exit 0
           fi
           VERSION="${TAG#v}"
@@ -436,4 +514,6 @@ jobs:
             grab { print }
           ' CHANGELOG.md > /tmp/notes.md
           gh release create "$TAG" --verify-tag --title "$TAG" --notes-file /tmp/notes.md \
-            dist/*.tar.gz dist/*.tar.gz.sha256 dist/SHA256SUMS
+            dist/*.tar.gz dist/*.tar.gz.sha256 \
+            dist/*.cdx.json dist/*.cdx.json.sha256 \
+            dist/*.sigstore.json dist/SHA256SUMS
