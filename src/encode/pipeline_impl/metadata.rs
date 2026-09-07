@@ -120,7 +120,7 @@ pub fn inject_comment(base: &[u8], text: &str) -> Vec<u8> {
 /// Markers are inserted after SOI and the header markers the encoder wrote
 /// itself — a JFIF APP0 and/or an Adobe APP14 — which is where
 /// `jpegtran` places them: `write_file_header` (`jcmarker.c:475`) emits
-/// SOI + JFIF/Adobe, then `jcopy_markers_execute` (`transupp.c:2487`)
+/// SOI + JFIF/Adobe, then `jcopy_markers_execute` (`transupp.c:2493`)
 /// appends every saved marker before the first table segment.
 pub fn inject_saved_markers(base: &[u8], markers: &[SavedMarker]) -> Vec<u8> {
     if markers.is_empty() {

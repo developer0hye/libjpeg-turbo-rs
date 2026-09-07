@@ -206,7 +206,7 @@ fn write_coefficient_colorspace_marker(output: &mut Vec<u8>, coeffs: &JpegCoeffi
     }
 }
 
-/// `jcopy_markers_execute` (`transupp.c:2487`) skips a saved JFIF APP0 when
+/// `jcopy_markers_execute` (`transupp.c:2493`) skips a saved JFIF APP0 when
 /// the encoder writes its own JFIF, and a saved Adobe APP14 when the encoder
 /// writes its own Adobe marker. Every other saved marker — including
 /// non-JFIF APP0 segments and Adobe markers the encoder does not replace —
@@ -671,7 +671,7 @@ pub fn write_coefficients(coeffs: &JpegCoefficients) -> Result<Vec<u8>> {
 /// Returns the largest whole number of iMCUs that fits in `extent`, or `extent`
 /// unchanged when fewer than one iMCU fits — mirroring the `MCU_cols > 0` /
 /// `MCU_rows > 0` guards in `trim_right_edge` / `trim_bottom_edge`
-/// (transupp.c:1570-1592). Dropping the guard turns "there is nothing to trim"
+/// (transupp.c:1576-1598). Dropping the guard turns "there is nothing to trim"
 /// into "trim everything", which is how P4-117 rejected valid 4:4:1 images.
 fn trim_to_whole_imcus(extent: usize, imcu: usize, trim: bool) -> usize {
     if !trim || imcu == 0 {
@@ -798,7 +798,7 @@ pub fn transform_jpeg_with_options(data: &[u8], options: &TransformOptions) -> R
 
         // Trim to whole iMCUs, but only when at least one whole iMCU exists on
         // that axis. Upstream guards each edge the same way — `trim_right_edge`
-        // and `trim_bottom_edge` (transupp.c:1570-1592) both begin
+        // and `trim_bottom_edge` (transupp.c:1576-1598) both begin
         // `if (MCU_cols > 0 && ...)` / `if (MCU_rows > 0 && ...)`, so an image
         // narrower or shorter than one iMCU is simply left alone.
         //
@@ -1124,7 +1124,7 @@ pub fn transform_jpeg_with_options(data: &[u8], options: &TransformOptions) -> R
             (crop.height + remainder_y).min(coeffs.height as usize - (crop.y - remainder_y));
         // Compute block dimensions in iMCU units first, then multiply by sampling
         // factor. This guarantees block counts are always multiples of max_h/max_v,
-        // matching C libjpeg-turbo's transupp.c:1805-1822 approach.
+        // matching C libjpeg-turbo's transupp.c:1811-1828 approach.
         let crop_w_blocks: usize = out_w.div_ceil(imcu_w) * post_max_h;
         let crop_h_blocks: usize = out_h.div_ceil(imcu_h) * post_max_v;
 

@@ -29,7 +29,8 @@ std::thread_local! {
 /// under memory pressure would — `0` fails the very next allocation.
 /// Disarms itself once it fires. Everything the shim allocates for the
 /// classic dest managers funnels through `libc_malloc`, so without this the
-/// `JERR_OUT_OF_MEMORY` paths (`jdatadst.c`'s `ERREXIT1(…, 10)` twins) were
+/// `JERR_OUT_OF_MEMORY` paths (`jdatadst.c`'s `ERREXIT1(…, 10)` initial
+/// allocation and `ERREXIT1(…, 12)` growth failure) were
 /// unreachable from any test. Not part of the C ABI: the symbol is not
 /// `extern "C"` and is not exported from the cdylib.
 pub fn fail_nth_allocation_for_tests(countdown: u32) {
@@ -105,7 +106,7 @@ pub(crate) enum OutputDelivery {
     /// `TJPARAM_NOREALLOC` is set and the caller supplied no buffer at all.
     ///
     /// Upstream treats this as the same refusal rather than a licence to
-    /// allocate: `jdatadst-tj.c:184-192` takes the `*outbuffer == NULL` branch
+    /// allocate: `jdatadst-tj.c:198-206` takes the `*outbuffer == NULL` branch
     /// and, with `alloc` false, raises `JERR_BUFFER_SIZE`. The flag is a
     /// request *not to allocate*, so honouring it half-way — refusing to grow
     /// a buffer but conjuring one when none was given — is the one behaviour
@@ -130,9 +131,9 @@ pub(crate) enum OutputDelivery {
 ///
 /// - **`NOREALLOC` set** — write in place. `*jpeg_size` is an *input* carrying
 ///   the buffer's capacity; too small is `JERR_BUFFER_SIZE`, not a resize
-///   (`jdatadst-tj.c:92`). The caller keeps its pointer, so the slot is
+///   (`jdatadst-tj.c:95`). The caller keeps its pointer, so the slot is
 ///   neither swapped nor freed. A **NULL** slot is the same refusal, not a
-///   licence to allocate (`jdatadst-tj.c:184-192`).
+///   licence to allocate (`jdatadst-tj.c:198-206`).
 /// - **Otherwise** — allocate, store, and free the previous pointee. Upstream
 ///   reaches the same state by `realloc`, which also consumes it.
 ///

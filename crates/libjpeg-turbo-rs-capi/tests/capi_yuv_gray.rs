@@ -363,7 +363,7 @@ fn case_encode_yuv_planes8(geo: &Geometry) -> String {
     // which walks all three planes writes here instead of running off the end
     // of a one-element array. Upstream accepts either for GRAY: its NULL check
     // is `subsamp != TJSAMP_GRAY && (!dstPlanes[1] || !dstPlanes[2])`
-    // (`turbojpeg.c:1589-1590`).
+    // (`turbojpeg.c:1594-1595`).
     let mut chroma0: Vec<u8> = vec![GUARD_BYTE; geo.chroma_capacity()];
     let mut chroma1: Vec<u8> = vec![GUARD_BYTE; geo.chroma_capacity()];
     let mut planes: [*mut u8; 3] = [

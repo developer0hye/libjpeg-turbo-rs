@@ -1,6 +1,6 @@
 //! P4-108: classic destination-manager buffer ownership and stdio I/O errors.
 //!
-//! `jpeg_mem_dest` has a documented ownership contract (jdatadst.c:222-234):
+//! `jpeg_mem_dest` has a documented ownership contract (jdatadst.c:236-248):
 //! the caller may supply its own initial buffer, `*outsize` is that buffer's
 //! **capacity** (not a payload length), and *"the library does not free such
 //! buffer when allocating a larger buffer"*. `jpeg_stdio_dest` has an equally
@@ -707,7 +707,7 @@ static int check_payload(const char *tag, const unsigned char *buf,
 static unsigned char static_sink[65536];
 
 /* Scenarios 1 + 2: a caller buffer big enough for the whole stream is used in
- * place. libjpeg must not move it and must not free it (jdatadst.c:231-233).
+ * place. libjpeg must not move it and must not free it (jdatadst.c:245-247).
  * Passing stack and static storage makes an erroneous free() an immediate
  * allocator abort rather than a silent heap corruption. */
 static int scn_mem_sufficient(int use_static)
@@ -815,7 +815,7 @@ static int scn_mem_grow(void)
 }
 
 /* Scenario 4b: NULL out-parameters are a caller bug, not a request to
- * allocate. Upstream rejects them before touching anything (jdatadst.c:242). */
+ * allocate. Upstream rejects them before touching anything (jdatadst.c:256). */
 static int scn_mem_null_args(void)
 {
   struct jpeg_compress_struct cinfo;
@@ -837,7 +837,7 @@ static int scn_mem_null_args(void)
 }
 
 /* Scenario 4: `*outbuffer == NULL` — libjpeg allocates immediately inside
- * jpeg_mem_dest and publishes the capacity in `*outsize` (jdatadst.c:267-273),
+ * jpeg_mem_dest and publishes the capacity in `*outsize` (jdatadst.c:281-287),
  * long before any compression happens. */
 static int scn_mem_null_alloc(void)
 {
@@ -988,7 +988,7 @@ static int scn_mem_reuse(void)
 
 /* Scenario 7: an already-installed destination manager that jpeg_mem_dest did
  * not create cannot be reinterpreted as a memory destination — its private
- * area may be a different size (jdatadst.c:252-257). */
+ * area may be a different size (jdatadst.c:266-271). */
 static int scn_dest_switch(const char *dir)
 {
   struct jpeg_compress_struct cinfo;

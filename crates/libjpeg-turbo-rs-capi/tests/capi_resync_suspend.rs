@@ -4,7 +4,7 @@
 //! The upstream contracts under test (`jdmarker.c` `resync_to_restart` /
 //! `next_marker`, libjpeg.txt "Decompression suspension", measured by
 //! `examples/classic_resync_suspend_oracle.c` against stock libjpeg —
-//! 3.1.4.1 locally, and in CI the pinned 3.1.90 submodule build the step
+//! 3.1.4.1 locally, and in CI the pinned 3.2.0 submodule build the step
 //! points `LIBJPEG_TURBO_PREFIX` at; see `docs/oracle_versions.tsv`):
 //!
 //! * the decision table over `unread_marker` (desired RST / prior RST /

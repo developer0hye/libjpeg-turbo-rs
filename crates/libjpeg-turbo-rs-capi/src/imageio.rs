@@ -141,7 +141,7 @@ fn align_to(v: usize, align: usize) -> usize {
 /// `align` is the minimum row stride alignment in bytes; we honour
 /// it by padding each row out to a multiple of `align`. It must be a
 /// positive power of two, as upstream requires
-/// (`turbojpeg-mp.c:317-321`); `align == 1` means dense (no padding),
+/// (`turbojpeg-mp.c:321-325`); `align == 1` means dense (no padding),
 /// and `0`, a negative or a non-power-of-two is an error.
 ///
 /// # Safety
@@ -185,7 +185,7 @@ pub unsafe extern "C" fn tj3LoadImage8(
             // `align` is a row-stride quantum, so only a positive power of two
             // describes one. Upstream refuses anything else — `align < 1` with
             // "Invalid argument" and a non-power-of-two with "Alignment must be
-            // a power of 2" (`turbojpeg-mp.c:317-321`) — while this port used
+            // a power of 2" (`turbojpeg-mp.c:321-325`) — while this port used
             // to run `align.max(1)`, silently rounding 0 and negatives up to
             // "dense" and computing `div_ceil(3) * 3` for a nonsense quantum
             // like 3. Both then reported success on a buffer whose stride the
@@ -193,7 +193,7 @@ pub unsafe extern "C" fn tj3LoadImage8(
             //
             // Placed after the read so a missing file still wins, as it does
             // upstream: `tj3LoadImage8` opens the file before the helper that
-            // validates `align` (`turbojpeg-mp.c:459-464`).
+            // validates `align` (`turbojpeg-mp.c:463-468`).
             if align < 1 {
                 inst.set_error(
                     format!("tj3LoadImage8: align must be >= 1 (got {align})"),
@@ -330,7 +330,7 @@ pub unsafe extern "C" fn tj3LoadImage8(
             let row_stride: usize = align_to(row_dense, align as usize);
             // Deliberately `row_stride * height` and not the layout's strided
             // total: the returned buffer's documented length is `pitch *
-            // height` (`turbojpeg-mp.c:400-408` mallocs exactly that), padding
+            // height` (`turbojpeg-mp.c:404-412` mallocs exactly that), padding
             // past the final row included, and callers size their reads by the
             // same formula. Only the arithmetic is borrowed here, not the
             // last-row rule.
@@ -482,7 +482,7 @@ pub unsafe extern "C" fn tj3LoadImage16(
 ///
 /// `pitch` is bytes per row in the input buffer. `pitch == 0` means
 /// dense (`width * bytes_per_pixel`); a negative `pitch` is an error,
-/// as upstream requires (`turbojpeg-mp.c:511-513`).
+/// as upstream requires (`turbojpeg-mp.c:515-517`).
 ///
 /// # Safety
 ///
@@ -516,12 +516,12 @@ pub unsafe extern "C" fn tj3SaveImage8(
             }
             // Upstream rejects a negative pitch alongside the other argument
             // checks, before it opens the output file
-            // (`turbojpeg-mp.c:511-513`). This port instead folded it into the
+            // (`turbojpeg-mp.c:515-517`). This port instead folded it into the
             // "tight rows" default with `pitch <= 0`, so `-1` was quietly read
             // as "dense" and the caller got a file whose rows came from a
             // stride they had not asked for (P4-139). `pitch == 0` still means
             // dense — that is upstream's own convention
-            // (`turbojpeg-mp.c:587`).
+            // (`turbojpeg-mp.c:591`).
             if pitch < 0 {
                 inst.set_error(
                     format!("tj3SaveImage8: pitch must not be negative (got {pitch})"),
@@ -595,7 +595,7 @@ pub unsafe extern "C" fn tj3SaveImage8(
             // The pitched source the caller actually owns. Its extent is
             // `(h-1)*stride + row_dense` — upstream reads
             // `&buffer[scanline * pitch]` for `width * ps` bytes
-            // (`turbojpeg-mp.c:594-598`), so padding past the final row is not
+            // (`turbojpeg-mp.c:600-604`), so padding past the final row is not
             // the caller's to allocate.
             let src: ImageLayout =
                 match ImageLayout::strided(w, h, bpp, stride, "tj3SaveImage8 source") {

@@ -5,7 +5,7 @@
  * That is the right assertion, but on its own it only pins what *this* port
  * does — and the port's first version of this fix got a case wrong that no
  * amount of self-consistency would have shown: with the flag set and a **NULL**
- * output slot, it allocated. Upstream refuses (`jdatadst-tj.c:184-192` takes
+ * output slot, it allocated. Upstream refuses (`jdatadst-tj.c:198-206` takes
  * the `*outbuffer == NULL` branch and, with `alloc` false, raises
  * `JERR_BUFFER_SIZE`). Review caught it; this binary is what makes the next one
  * fail loudly instead.
@@ -257,7 +257,7 @@ static void transform_case(const char *label, size_t capacity)
 /* The **legacy** wrapper, whose `dstSizes` are *outputs* rather than
  * capacities. A caller that sized its destination with `tjTransformBufSize()`
  * has no reason to fill them in, so upstream fills a temporary capacity array
- * from the transformed geometry (`turbojpeg.c:3118-3132`). This port passed the
+ * from the transformed geometry (`turbojpeg.c:3133-3147`). This port passed the
  * zeros straight through until P4-151, and TJ3 read them as capacities of zero.
  *
  * `dstSizes[0]` starts at 0 deliberately — that is the case under test. The
@@ -331,8 +331,8 @@ static unsigned char *read_fixture(const char *path, size_t *out_size)
  * over the upstream corpus), so the size differences here are purely the
  * marker policy under test:
  *   - legacy NOREALLOC drops every marker — the ordering quirk: the wrapper's
- *     capacity pre-read (`turbojpeg.c:3112-3134`) parses the header before
- *     `jcopy_markers_setup` (`turbojpeg.c:2976-2979`) can register anything;
+ *     capacity pre-read (`turbojpeg.c:3127-3149`) parses the header before
+ *     `jcopy_markers_setup` (`turbojpeg.c:2991-2994`) can register anything;
  *   - legacy flags=0 and tj3Transform copy them (saveMarkers default ALL);
  *   - TJXOPT_COPYNONE drops them on every shape. */
 static void fixture_case(const char *label, const unsigned char *jpeg,

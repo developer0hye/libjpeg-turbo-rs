@@ -19,9 +19,11 @@
 //!   criterion is a *second running leg*, not a documented intention;
 //! * the submodule row is cross-checked against the submodule actually checked
 //!   out, which is how the split this manifest first recorded was found at all:
-//!   `references/libjpeg-turbo` is 3.1.90 (3.2 beta1), not the 3.1.4.1 the
-//!   workflows install, so the classic-ABI trace oracles were already running
-//!   against a different release than the tool oracles.
+//!   `references/libjpeg-turbo` was 3.1.90 (3.2 beta1), not the 3.1.4.1 the
+//!   workflows installed, so the classic-ABI trace oracles were already running
+//!   against a different release than the tool oracles. The submodule moved to
+//!   3.2.0 on 2026-09-07; the cross-check is what makes the next bump come
+//!   with a manifest edit rather than silently.
 //!
 //! Two further dimensions live in the back half of this file, each under its
 //! own banner:

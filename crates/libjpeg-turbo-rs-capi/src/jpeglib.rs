@@ -1057,8 +1057,9 @@ unsafe extern "C" fn default_output_message(cinfo: *mut c_void) {
 // Coverage is uneven: `tests/capi_classic_dest_ownership.rs` cross-checks
 // `JERR_BUFFER_SIZE` and `JERR_FILE_WRITE` against a reference v8 build,
 // `tests/capi_classic_lifecycle_pathological.rs` pins `JERR_CANT_SUSPEND`
-// against upstream's own enum, and `JERR_OUT_OF_MEMORY` is unpinned — no test
-// can force the `malloc` failure that reaches it.
+// against upstream's own enum, and `JERR_OUT_OF_MEMORY`'s memory-destination
+// cases (10, 12) are pinned by `tests/capi_alloc_failure_injection.rs`, which
+// forces the `malloc` failure that reaches them (P4-120).
 #[allow(dead_code)]
 /// "DCT coefficient (lossy) or spatial difference (lossless) out of range"
 const JERR_BAD_DCT_COEF: c_int = 6;
@@ -1165,6 +1166,16 @@ fn checked_staging_span(samples_per_row: usize, height: usize, elem_size: usize)
 /// (`jmemmgr.c:364-380`). `JERR_OUT_OF_MEMORY`'s message is
 /// "Insufficient memory (case %d)".
 const OOM_CASE_ALLOC_TOO_LARGE: c_int = 8;
+/// `jdatadst.c:285`: `jpeg_mem_dest`'s initial `OUTPUT_BUF_SIZE` allocation
+/// failed — `ERREXIT1(cinfo, JERR_OUT_OF_MEMORY, 10)`.
+const OOM_CASE_MEM_DEST_INITIAL: c_int = 10;
+/// `jdatadst.c:146`: `empty_mem_output_buffer`'s doubling allocation failed —
+/// `ERREXIT1(cinfo, JERR_OUT_OF_MEMORY, 12)`. Case 10 until 3.2.0 gave the
+/// growth failure its own number.
+const OOM_CASE_MEM_DEST_GROWTH: c_int = 12;
+/// `jdatadst.c:140-141`: the doubling itself would overflow `size_t` —
+/// `ERREXIT1(cinfo, JERR_OUT_OF_MEMORY, 13)`, new in 3.2.0.
+const OOM_CASE_MEM_DEST_GROWTH_OVERFLOW: c_int = 13;
 
 /// `JERR_OUT_OF_MEMORY` case for P4-13's 256 MiB suspended-body cap.
 ///
@@ -3851,7 +3862,7 @@ pub unsafe extern "C" fn jpeg_start_decompress(cinfo: *mut c_void) -> CBoolean {
         // `jpeg_start_decompress` with `JERR_NO_BACKING_STORE` — checked
         // before the precision dispatch below so 12/16-bit streams are
         // bounded the same way (upstream's 12-bit build shares
-        // `realize_virt_arrays`, `jdmaster.c:709-714`).
+        // `realize_virt_arrays`, `jdmaster.c:720-725`).
         if classic_budget_refuses_start(&bytes, classic_decode_budget(c), c.buffered_image != 0) {
             raise_classic_error(
                 cinfo,
@@ -4093,7 +4104,7 @@ fn coef_array_geometries(frame: &libjpeg_turbo_rs::FrameHeader) -> Vec<CoefArray
 /// Whole-image coefficient arrays exist only for multi-scan streams —
 /// progressive *or* non-interleaved sequential (`has_multiple_scans`,
 /// `jdinput.c:153-156`) — and for any stream in buffered-image mode
-/// (`jdmaster.c:709-714`, both precisions). Everything else is unbounded;
+/// (`jdmaster.c:720-725`, both precisions). Everything else is unbounded;
 /// bounding baseline would refuse what stock accepts (measured:
 /// classic_budget_oracle vs stock 3.1.4.1).
 ///
@@ -7080,7 +7091,7 @@ pub unsafe extern "C" fn jpeg_abort_compress(cinfo: *mut c_void) {
             p.pending_coef_arrays = std::ptr::null();
             // Upstream keeps the destination manager across abort so a second
             // image can be written without re-calling `jpeg_stdio_dest` /
-            // `jpeg_mem_dest` (jdatadst.c:196-198). Keep it — but clear any
+            // `jpeg_mem_dest` (jdatadst.c:211-213). Keep it — but clear any
             // failure it recorded, or the aborted image's I/O error would be
             // reported against the next one.
             if let Some(ref mut mgr) = p.dest_mgr {
@@ -7650,12 +7661,12 @@ const CSTATE_WRCOEFS: c_int = 103;
 // more than 4-component JPEGs.
 const MAX_COMPS_OWNED: usize = 4;
 
-/// libjpeg's `OUTPUT_BUF_SIZE` (jdatadst.c:38). It is the stdio staging size
+/// libjpeg's `OUTPUT_BUF_SIZE` (jdatadst.c:41). It is the stdio staging size
 /// *and* the initial allocation `jpeg_mem_dest` makes when the caller supplies
 /// no buffer, so the value is observable through `*outsize` and must match.
 const OUTPUT_BUF_SIZE: usize = 4096;
 
-/// Mirror of upstream `my_mem_destination_mgr` (jdatadst.c:43-51).
+/// Mirror of upstream `my_mem_destination_mgr` (jdatadst.c:46-54).
 ///
 /// The ownership split is the whole point: `buffer` is whatever we are
 /// currently filling — possibly memory the *application* owns — while
@@ -7672,7 +7683,7 @@ struct MemDestState {
     bufsize: usize,
 }
 
-/// Mirror of upstream `my_destination_mgr` (jdatadst.c:29-34).
+/// Mirror of upstream `my_destination_mgr` (jdatadst.c:32-37).
 struct StdioDestState {
     outfile: *mut c_void,
 }
@@ -8139,7 +8150,7 @@ pub unsafe extern "C" fn jpeg_destroy_compress(cinfo: *mut c_void) {
 // manager*, reachable only through `cinfo->dest`. Upstream does the same:
 // `my_mem_destination_mgr` embeds the public `jpeg_destination_mgr` as its
 // first member and every callback recovers itself with
-// `(my_mem_dest_ptr)cinfo->dest` (jdatadst.c:43-53, 125).
+// `(my_mem_dest_ptr)cinfo->dest` (jdatadst.c:46-56, 128).
 //
 // Keeping it there rather than in `CompressPrivate` is a soundness
 // requirement, not a stylistic echo. The callbacks run underneath a Rust frame
@@ -8153,13 +8164,13 @@ pub unsafe extern "C" fn jpeg_destroy_compress(cinfo: *mut c_void) {
 ///
 /// `pub_mgr` **must** stay the first field: `cinfo->dest` points at it and the
 /// callbacks cast straight back, mirroring upstream's `struct
-/// jpeg_destination_mgr pub` first member (jdatadst.c:30, 44).
+/// jpeg_destination_mgr pub` first member (jdatadst.c:33, 47).
 #[repr(C)]
 struct OwnedDestMgr {
     pub_mgr: JpegDestinationMgr,
     kind: JpegDest,
     /// stdio staging block; upstream's `JPOOL_IMAGE` `OUTPUT_BUF_SIZE` buffer
-    /// (jdatadst.c:67-69). The memory destination never uses it — like
+    /// (jdatadst.c:70-72). The memory destination never uses it — like
     /// upstream it fills the caller's buffer directly.
     staging: Vec<u8>,
     /// A failure detected inside a callback, as an upstream `JERR_*` code.
@@ -8173,7 +8184,8 @@ struct OwnedDestMgr {
     /// The C-visible behaviour is identical — `jpeg_finish_compress` still
     /// leaves through `error_exit` with the same `msg_code`.
     /// `(code, msg_parm.i[0])` — the parm carries upstream's `ERREXIT1`
-    /// payload where one exists (`jdatadst.c`'s OOM twins are case 10).
+    /// payload where one exists (`jdatadst.c`'s growth failure is case 12,
+    /// its overflow guard case 13).
     pending_error: Option<(c_int, Option<c_int>)>,
 }
 
@@ -8218,12 +8230,12 @@ unsafe fn owned_dest_mut<'a>(cinfo: *mut c_void) -> Option<&'a mut OwnedDestMgr>
     Some(unsafe { &mut *(dest as *mut OwnedDestMgr) })
 }
 
-/// Upstream `init_mem_destination` (jdatadst.c:75-79): deliberately empty.
+/// Upstream `init_mem_destination` (jdatadst.c:78-82): deliberately empty.
 /// `jpeg_mem_dest` has already published `next_output_byte` / `free_in_buffer`,
 /// and re-initialising here would discard bytes on a buffered-image restart.
 unsafe extern "C" fn mem_init_destination(_cinfo: *mut c_void) {}
 
-/// Upstream `empty_mem_output_buffer` (jdatadst.c:120-147): the current buffer
+/// Upstream `empty_mem_output_buffer` (jdatadst.c:123-161): the current buffer
 /// is full, so allocate a double-sized replacement, copy everything written so
 /// far into it, and free *only* a block we allocated ourselves.
 unsafe extern "C" fn mem_empty_output_buffer(cinfo: *mut c_void) -> CBoolean {
@@ -8246,26 +8258,29 @@ unsafe extern "C" fn mem_empty_output_buffer(cinfo: *mut c_void) -> CBoolean {
         return 0;
     }
 
-    // Exact doubling, as upstream (jdatadst.c:128). `bufsize` is never 0 here:
+    // Exact doubling, as upstream (jdatadst.c:142). `bufsize` is never 0 here:
     // `jpeg_mem_dest` replaces a zero-capacity caller buffer with its own
     // `OUTPUT_BUF_SIZE` allocation, so this cannot degenerate to `malloc(0)`.
     let old_bufsize: usize = state.bufsize;
     // `checked_mul`, not saturating: an overflow here must not turn into
-    // `usize::MAX`, which is the worst value to hand an allocator. Both arms
-    // land on upstream's `JERR_OUT_OF_MEMORY` anyway, so the error contract is
-    // unchanged — what changes is that the size is never a wrapped or
-    // saturated lie (P4-139 criterion 3).
+    // `usize::MAX`, which is the worst value to hand an allocator. Upstream
+    // guards the same doubling with `bufsize > SIZE_MAX / 2` and reports it as
+    // `JERR_OUT_OF_MEMORY` case 13 (jdatadst.c:140-141, new in 3.2.0), so the
+    // overflow arm carries that case rather than the allocation failure's.
+    // Either way the size is never a wrapped or saturated lie (P4-139
+    // criterion 3).
     let nextsize: usize = match old_bufsize.checked_mul(2) {
         Some(n) => n,
         None => {
-            owned.pending_error = Some((JERR_OUT_OF_MEMORY, Some(10)));
+            owned.pending_error =
+                Some((JERR_OUT_OF_MEMORY, Some(OOM_CASE_MEM_DEST_GROWTH_OVERFLOW)));
             return 0;
         }
     };
     let nextbuffer: *mut u8 = crate::alloc::libc_malloc(nextsize);
     if nextbuffer.is_null() {
-        // Upstream: ERREXIT1(cinfo, JERR_OUT_OF_MEMORY, 10).
-        owned.pending_error = Some((JERR_OUT_OF_MEMORY, Some(10)));
+        // Upstream: ERREXIT1(cinfo, JERR_OUT_OF_MEMORY, 12) (jdatadst.c:146).
+        owned.pending_error = Some((JERR_OUT_OF_MEMORY, Some(OOM_CASE_MEM_DEST_GROWTH)));
         return 0;
     }
     // SAFETY: `state.buffer` is a live `old_bufsize`-byte block (either the
@@ -8275,7 +8290,7 @@ unsafe extern "C" fn mem_empty_output_buffer(cinfo: *mut c_void) -> CBoolean {
         std::ptr::copy_nonoverlapping(state.buffer, nextbuffer, old_bufsize);
     }
     // Only ever free memory this library allocated. A caller-supplied buffer
-    // stays caller-owned (jdatadst.c:231-233) — freeing it would be a
+    // stays caller-owned (jdatadst.c:245-247) — freeing it would be a
     // free-of-stack/static or a double free once the caller frees it too.
     if !state.newbuffer.is_null() {
         crate::alloc::libc_free(state.newbuffer);
@@ -8290,7 +8305,7 @@ unsafe extern "C" fn mem_empty_output_buffer(cinfo: *mut c_void) -> CBoolean {
     1
 }
 
-/// Upstream `term_mem_destination` (jdatadst.c:176-183): publish the buffer
+/// Upstream `term_mem_destination` (jdatadst.c:190-197): publish the buffer
 /// actually in use and the number of bytes written into it.
 unsafe extern "C" fn mem_term_destination(cinfo: *mut c_void) {
     let owned: &mut OwnedDestMgr = match unsafe { owned_dest_mut(cinfo) } {
@@ -8311,7 +8326,7 @@ unsafe extern "C" fn mem_term_destination(cinfo: *mut c_void) {
     }
 }
 
-/// Upstream `init_destination` (jdatadst.c:61-73): hand the compressor an
+/// Upstream `init_destination` (jdatadst.c:64-76): hand the compressor an
 /// `OUTPUT_BUF_SIZE` staging block to fill.
 unsafe extern "C" fn stdio_init_destination(cinfo: *mut c_void) {
     let owned: &mut OwnedDestMgr = match unsafe { owned_dest_mut(cinfo) } {
@@ -8324,7 +8339,7 @@ unsafe extern "C" fn stdio_init_destination(cinfo: *mut c_void) {
     owned.pub_mgr.free_in_buffer = OUTPUT_BUF_SIZE;
 }
 
-/// Upstream `empty_output_buffer` (jdatadst.c:105-118): write the staging
+/// Upstream `empty_output_buffer` (jdatadst.c:108-121): write the staging
 /// block out and reset it. A short write is `JERR_FILE_WRITE`.
 unsafe extern "C" fn stdio_empty_output_buffer(cinfo: *mut c_void) -> CBoolean {
     let owned: &mut OwnedDestMgr = match unsafe { owned_dest_mut(cinfo) } {
@@ -8360,7 +8375,7 @@ unsafe extern "C" fn stdio_empty_output_buffer(cinfo: *mut c_void) -> CBoolean {
     1
 }
 
-/// Upstream `term_destination` (jdatadst.c:159-174): flush the tail, `fflush`,
+/// Upstream `term_destination` (jdatadst.c:173-188): flush the tail, `fflush`,
 /// and fail on any `ferror` the stream accumulated.
 unsafe extern "C" fn stdio_term_destination(cinfo: *mut c_void) {
     let owned: &mut OwnedDestMgr = match unsafe { owned_dest_mut(cinfo) } {
@@ -8428,7 +8443,7 @@ fn dest_mgr_is_ours(c: &JpegCompressPublic, priv_state: &CompressPrivate) -> boo
 
 /// Reject reusing a destination manager this function did not create.
 ///
-/// Upstream (jdatadst.c:204-212 / 252-257) compares `init_destination` against
+/// Upstream (jdatadst.c:218-226 / 266-271) compares `init_destination` against
 /// its own callback: the manager's private area behind the public struct may be
 /// a different size, so reinterpreting a foreign one would read and write out
 /// of bounds. We compare the manager's *address* against our own box and check
@@ -8501,7 +8516,7 @@ pub unsafe extern "C" fn jpeg_stdio_dest(cinfo: *mut c_void, outfile: *mut c_voi
 /// Install a destination manager that fills the caller's buffer, growing into
 /// library-allocated memory only when the caller's capacity runs out.
 ///
-/// Mirrors upstream `jpeg_mem_dest` (jdatadst.c:236-277) including its
+/// Mirrors upstream `jpeg_mem_dest` (jdatadst.c:250-291) including its
 /// ownership rule: `*outsize` is the caller buffer's **capacity**, and a
 /// caller-supplied buffer is never freed by this library.
 ///
@@ -8531,7 +8546,7 @@ pub unsafe extern "C" fn jpeg_mem_dest(
             None => return,
         };
         if outbuffer.is_null() || outsize.is_null() {
-            // Upstream: ERREXIT(cinfo, JERR_BUFFER_SIZE) (jdatadst.c:242-243).
+            // Upstream: ERREXIT(cinfo, JERR_BUFFER_SIZE) (jdatadst.c:256-257).
             invoke_error_exit(cinfo, JERR_BUFFER_SIZE);
             return;
         }
@@ -8556,11 +8571,11 @@ pub unsafe extern "C" fn jpeg_mem_dest(
         };
         if caller_buffer.is_null() || caller_capacity == 0 {
             // No usable caller buffer: allocate one and publish it right away,
-            // exactly as upstream does (jdatadst.c:267-273). Consumers such as
+            // exactly as upstream does (jdatadst.c:281-287). Consumers such as
             // libtiff read `*outbuffer` before any compression happens.
             let fresh: *mut u8 = crate::alloc::libc_malloc(OUTPUT_BUF_SIZE);
             if fresh.is_null() {
-                invoke_error_exit_parm(cinfo, JERR_OUT_OF_MEMORY, 10);
+                invoke_error_exit_parm(cinfo, JERR_OUT_OF_MEMORY, OOM_CASE_MEM_DEST_INITIAL);
                 return;
             }
             state.newbuffer = fresh;
@@ -8585,7 +8600,7 @@ pub unsafe extern "C" fn jpeg_mem_dest(
         );
         if let Some(ref mut mgr) = priv_state.dest_mgr {
             // Upstream publishes the write cursor from `jpeg_mem_dest` itself,
-            // not from `init_destination` (jdatadst.c:275-276).
+            // not from `init_destination` (jdatadst.c:289-290).
             mgr.pub_mgr.next_output_byte = buffer;
             mgr.pub_mgr.free_in_buffer = bufsize;
         }
@@ -9475,8 +9490,9 @@ fn finish_dest_flush(
         })
         .unwrap_or_default();
         priv_state.error_reported = true;
-        // The OOM twins carry upstream's `ERREXIT1` payload (`jdatadst.c`
-        // case 10) — reachable since P4-120's allocation-failure injection.
+        // The OOM cases carry upstream's `ERREXIT1` payload (`jdatadst.c`
+        // case 12 for the growth failure, 13 for an overflowing doubling);
+        // case 12 is reachable since P4-120's allocation-failure injection.
         match parm {
             Some(p) => invoke_error_exit_parm(c as *mut JpegCompressPublic as *mut c_void, code, p),
             None => invoke_error_exit(c as *mut JpegCompressPublic as *mut c_void, code),

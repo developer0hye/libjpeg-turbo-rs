@@ -371,7 +371,7 @@ fn our_trace() -> String {
     ));
     // Precedence against the *lossless parameters*, which upstream validates
     // earlier still: `setCompDefaults` calls `jpeg_enable_lossless` before
-    // `jpeg_mem_dest_tj` (`turbojpeg-mp.c:117-120`). A point transform that is
+    // `jpeg_mem_dest_tj` (`turbojpeg-mp.c:119-122`). A point transform that is
     // not less than the precision therefore wins over the buffer error even
     // though the slot is unusable — so the destination preflight cannot simply
     // be hoisted to the front of the function.
@@ -449,7 +449,7 @@ fn lossy_16bit_compress_is_refused() {
 }
 
 /// `TJPARAM_PRECISION` is read only when `TJPARAM_LOSSLESS` is set
-/// (`turbojpeg-mp.c:111-115`), so asking for 12 does not turn a lossy 16-bit
+/// (`turbojpeg-mp.c:113-117`), so asking for 12 does not turn a lossy 16-bit
 /// call into a legal one. This is the case a fix keyed off the requested
 /// precision rather than the lossless flag would get wrong.
 #[test]
@@ -495,7 +495,7 @@ fn lossless_16bit_compress_still_succeeds() {
     for (label, precision) in [
         ("c16_lossless", None),
         ("c16_lossless_prec13", Some(13)),
-        // Outside the 13..=16 window `turbojpeg-mp.c:114` honours: ignored,
+        // Outside the 13..=16 window `turbojpeg-mp.c:116` honours: ignored,
         // not an error.
         ("c16_lossless_prec12", Some(12)),
     ] {

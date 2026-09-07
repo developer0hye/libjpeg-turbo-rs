@@ -445,10 +445,10 @@ jobs:
           # The ABI is not the release. This prefix is a *second* oracle in
           # this job — the steps below point LIBJPEG_TURBO_PREFIX at it — so
           # the release it serves is asserted here, exactly as the deb's is.
-          # docs/oracle_versions.tsv declares the submodule row as 3.1.90, and
+          # docs/oracle_versions.tsv declares the submodule row as 3.2.0, and
           # a submodule bump therefore has to come through this line rather
           # than re-baselining the trace oracles silently (P4-130).
-          /tmp/ljt8/prefix/bin/djpeg -version 2>&1 | grep -q "version 3.1.90"
+          /tmp/ljt8/prefix/bin/djpeg -version 2>&1 | grep -q "version 3.2.0"
       # Ubuntu also provides /dev/full, so the fflush/ferror scenario runs for
       # real here instead of reporting itself unavailable as it does on macOS.
       # P4-104's transition work. Named for the same reason as the suites
@@ -729,13 +729,13 @@ jobs:
       # deb ships JPEG_LIB_VERSION 62, so the install above cannot serve them
       # however current it is; only a WITH_JPEG8=1 build of the sources can.
       #
-      # The baseline leg builds the *submodule* for this role — 3.1.90, the
-      # beta1 of the current line, per docs/oracle_versions.tsv, which is the
-      # release each row's version is declared in. Bumping that submodule is a
-      # separate change with its own drift audit, because it moves every
-      # `j*.c:NNN` citation in this repository at the same time. Building 3.2.0
-      # beside it moves the trace comparison to current upstream stable without
-      # touching a single citation.
+      # The baseline leg builds the *submodule* for this role, per
+      # docs/oracle_versions.tsv. This leg builds the tagged upstream release
+      # beside it, so the trace comparison follows current upstream stable the
+      # week it ships, while the submodule moves only through a change that
+      # re-audits every `j*.c:NNN` citation in this repository — the two were
+      # one beta apart until the submodule caught up on 2026-09-07, and they
+      # diverge again the next time upstream ships.
       - name: Build libjpeg-turbo 3.2.0 at the v8 ABI
         run: |
           sudo apt-get update

@@ -123,7 +123,7 @@ fn subsamp_from_tj(tjsamp: c_int) -> Option<Subsampling> {
 
 /// How many planes a TJ subsampling index describes — upstream's
 /// `nc = (subsamp == TJSAMP_GRAY ? 1 : 3)`
-/// (`references/libjpeg-turbo/src/turbojpeg.c:1038`).
+/// (`references/libjpeg-turbo/src/turbojpeg.c:1040`).
 ///
 /// This is the same rule `tj3YUVBufSize` sizes by, taken from the same
 /// predicate so the two cannot drift.
@@ -321,7 +321,7 @@ pub unsafe extern "C" fn tj3EncodeYUV8(
         let body = |inst: &mut TjInstance| -> c_int {
             // Upstream's packed wrapper validates dims, `align` (a power of
             // two) and the buffers before anything else
-            // (`turbojpeg.c:1745-1750`); the pixel-format range check lives in
+            // (`turbojpeg.c:1754-1759`); the pixel-format range check lives in
             // the `…Planes8` delegate, *downstream* of the subsampling gate.
             if src_buf.is_null()
                 || dst_buf.is_null()
@@ -383,7 +383,7 @@ pub unsafe extern "C" fn tj3EncodeYUV8(
             // works from the *pixel* format, so an RGB source yields three
             // planes whatever the subsampling; upstream instead sets
             // `jpeg_color_space = JCS_GRAYSCALE` and emits one
-            // (`turbojpeg.c:1756-1759`, which passes NULL for planes 1 and 2).
+            // (`turbojpeg.c:1765-1768`, which passes NULL for planes 1 and 2).
             // Plane 0 is already right: RGB→Y does not depend on the chroma
             // sampling that is being dropped.
             //
@@ -497,8 +497,8 @@ pub unsafe extern "C" fn tj3EncodeYUVPlanes8(
             };
             // GRAY writes plane 0 only (P4-165). Upstream never touches
             // `dstPlanes[1]`/`[2]` for it — its own packed wrapper passes NULL
-            // there (`turbojpeg.c:1756-1759`) and its NULL check exempts GRAY
-            // (`:1589-1590`) — so a caller may legally supply a one-element
+            // there (`turbojpeg.c:1765-1768`) and its NULL check exempts GRAY
+            // (`:1594-1595`) — so a caller may legally supply a one-element
             // array, and walking three slots reads past it.
             //
             // The `min` also covers the reverse mismatch — a grayscale source
@@ -579,7 +579,7 @@ pub unsafe extern "C" fn tj3CompressFromYUV8(
         // Defined outside the `unsafe` block below so the body's own `unsafe`
         // blocks stay meaningful rather than nesting inside a blanket one.
         let body = |inst: &mut TjInstance| -> c_int {
-            // Upstream validates dims and `align` first (`turbojpeg.c:1493-1496`).
+            // Upstream validates dims and `align` first (`turbojpeg.c:1498-1501`).
             if src_buf.is_null()
                 || jpeg_buf.is_null()
                 || jpeg_size.is_null()
@@ -592,9 +592,9 @@ pub unsafe extern "C" fn tj3CompressFromYUV8(
                 return -1;
             }
             // P4-155 (#539): this entry gates the *subsampling* itself — it
-            // needs it to size the packed planes (`turbojpeg.c:1497-1498`) —
+            // needs it to size the packed planes (`turbojpeg.c:1502-1503`) —
             // and the quality gate is reached only through the `…Planes8`
-            // delegate (`:1347-1350`), so with both unset upstream reports
+            // delegate (`:1350-1353`), so with both unset upstream reports
             // TJPARAM_SUBSAMP first. Order pinned by the oracle's
             // `p4155_fromyuv8_unset` line (#548-review round).
             let ss: Subsampling = match current_subsampling(inst) {
@@ -610,7 +610,7 @@ pub unsafe extern "C" fn tj3CompressFromYUV8(
                 }
             };
             // The delegate's unconditional quality gate — YUV compression is
-            // inherently lossy (`turbojpeg.c:1347-1350`).
+            // inherently lossy (`turbojpeg.c:1350-1353`).
             if !crate::tj3::require_specified(inst, "tj3CompressFromYUV8", true, false) {
                 return -1;
             }
@@ -753,7 +753,7 @@ pub unsafe extern "C" fn tj3CompressFromYUVPlanes8(
             }
             // P4-155 (#539): YUV compression is inherently lossy, so upstream
             // gates TJPARAM_QUALITY unconditionally, before the subsampling
-            // (`turbojpeg.c:1347-1350`).
+            // (`turbojpeg.c:1350-1353`).
             if !crate::tj3::require_specified(inst, "tj3CompressFromYUVPlanes8", true, false) {
                 return -1;
             }
@@ -781,8 +781,8 @@ pub unsafe extern "C" fn tj3CompressFromYUVPlanes8(
 
             // Collect dense per-plane slices, respecting caller strides. GRAY
             // reads `srcPlanes[0]` alone (P4-165): upstream's own packed
-            // wrapper passes NULL for slots 1 and 2 (`turbojpeg.c:1504-1507`)
-            // and its NULL check exempts GRAY (`:1344-1345`), so a caller may
+            // wrapper passes NULL for slots 1 and 2 (`turbojpeg.c:1509-1512`)
+            // and its NULL check exempts GRAY (`:1347-1348`), so a caller may
             // legally supply a one-element array.
             let plane_count: usize = current_plane_count(inst);
             // SAFETY: caller guarantees `plane_count` plane pointers + strides valid.
@@ -908,7 +908,7 @@ pub unsafe extern "C" fn tj3DecompressToYUV8(
         // blocks stay meaningful rather than nesting inside a blanket one.
         let body = |inst: &mut TjInstance| -> c_int {
             // Upstream validates every argument at function entry, before the
-            // header is read (turbojpeg.c:2395-2397, `"Invalid argument"`). `align`
+            // header is read (turbojpeg.c:2406-2408, `"Invalid argument"`). `align`
             // used to be discovered inside `pack_yuv_planes`, i.e. after the
             // component guard, which flipped the precedence C reports (P4-127).
             if jpeg_buf.is_null() || dst_buf.is_null() || jpeg_size < 2 {
@@ -1017,7 +1017,7 @@ pub unsafe extern "C" fn tj3DecompressToYUVPlanes8(
                 return -1;
             }
             // Upstream rejects a NULL chroma plane up front, so nothing is written
-            // when it fails (turbojpeg.c:2226-2227). Checking inside the copy loop
+            // when it fails (turbojpeg.c:2235-2236). Checking inside the copy loop
             // below meant planes 0 and 1 were already in caller memory by the time a
             // NULL plane 2 was noticed.
             let plane_count: usize = info.num_components.min(MAX_YUV_PLANES);
@@ -1106,7 +1106,7 @@ pub unsafe extern "C" fn tj3DecodeYUV8(
         // blocks stay meaningful rather than nesting inside a blanket one.
         let body = |inst: &mut TjInstance| -> c_int {
             // Upstream's packed wrapper validates dims, `align` and the
-            // buffers first (`turbojpeg.c:2721-2726`); the pixel-format range
+            // buffers first (`turbojpeg.c:2736-2741`); the pixel-format range
             // check lives in the `…Planes8` delegate, *downstream* of the
             // subsampling gate.
             if src_buf.is_null()
@@ -1170,7 +1170,7 @@ pub unsafe extern "C" fn tj3DecodeYUV8(
             // One plane means grayscale: `decode_yuv_planes` then writes
             // R = G = B = Y, which is what YCbCr→RGB collapses to at
             // Cb = Cr = 128 and what upstream's `setDecodeDefaults` produces
-            // under TJSAMP_GRAY (`turbojpeg.c:2502-2504`).
+            // under TJSAMP_GRAY (`turbojpeg.c:2513-2515`).
             let plane_refs: Vec<&[u8]> = planes.iter().map(|p| p.as_slice()).collect();
             let pixels: Vec<u8> = match decode_yuv_planes(&plane_refs, w, h, ss, pf) {
                 Ok(v) => v,
@@ -1266,8 +1266,8 @@ pub unsafe extern "C" fn tj3DecodeYUVPlanes8(
 
             // Gather dense per-plane slices. GRAY reads `srcPlanes[0]` alone
             // (P4-165): upstream's packed wrapper passes NULL for slots 1 and
-            // 2 (`turbojpeg.c:2732-2735`) and its NULL check exempts GRAY
-            // (`:2575-2576`), so a caller may legally supply a one-element
+            // 2 (`turbojpeg.c:2747-2750`) and its NULL check exempts GRAY
+            // (`:2586-2587`), so a caller may legally supply a one-element
             // array. One plane also selects `decode_yuv_planes`' grayscale
             // path, which writes R = G = B = Y.
             let plane_count: usize = current_plane_count(inst);

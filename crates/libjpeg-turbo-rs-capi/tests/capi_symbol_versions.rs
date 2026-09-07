@@ -63,7 +63,7 @@ fn version_script_matches_the_upstream_node_layout() {
 
     // Upstream puts the MEM_SRCDST pair in the TURBO node, not the reference
     // node (src/libjpeg.map.in + the MEM_SRCDST_FUNCTIONS expansion at
-    // CMakeLists.txt:349). Assigning them to LIBJPEG_8.0 would label two
+    // CMakeLists.txt:358). Assigning them to LIBJPEG_8.0 would label two
     // libjpeg-turbo extensions as reference v8 API.
     let turbo: &str = section(&script, "LIBJPEGTURBO_8.0");
     assert!(

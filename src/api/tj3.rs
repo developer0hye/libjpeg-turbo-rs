@@ -790,7 +790,7 @@ impl TjHandle {
     /// the decode that may never happen.
     ///
     /// This exists so C-ABI entry points can apply upstream's header-time
-    /// validation order (`turbojpeg.c:2214-2230`) instead of decoding first and
+    /// validation order (`turbojpeg.c:2223-2239`) instead of decoding first and
     /// rejecting after. The free functions `decompress_to_yuv_planes` and
     /// friends take no handle, so they cannot see these limits at all (P4-127).
     pub fn inspect_header(&self, data: &[u8]) -> Result<FrameInfo> {
@@ -798,7 +798,7 @@ impl TjHandle {
         let frame = decoder.header();
         let (width, height): (usize, usize) = (frame.width(), frame.height());
         // Upstream applies its maxPixels test right after reading the header
-        // and before anything else (turbojpeg.c:2219-2222).
+        // and before anything else (turbojpeg.c:2228-2231).
         decoder.limits().check_frame(width, height)?;
         Ok(FrameInfo {
             width,

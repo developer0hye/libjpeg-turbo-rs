@@ -13,7 +13,7 @@
 //! headers — which is how the first draft of this test, written against
 //! "Backing store not supported", was caught guessing from the macro name.
 //!
-//! Upstream ships this same no-backing-store design: `CMakeLists.txt:678`
+//! Upstream ships this same no-backing-store design: `CMakeLists.txt:687`
 //! compiles `src/jmemnobs.c` unconditionally. Our "never spills to disk" is
 //! not a divergence.
 
