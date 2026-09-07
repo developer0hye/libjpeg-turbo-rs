@@ -1597,9 +1597,10 @@ fn oracle_install_on(line: &str) -> Option<OracleInstall> {
 /// those as jobs would ask [`job_block`] for a block that is not one.
 ///
 /// Checked against a real YAML parser whenever a job is added: the scanner's
-/// list is identical to PyYAML's for all 46 jobs in the nine workflows, name
-/// for name (re-checked when the cross-arch pairs took it from 42 to 45, and
-/// again at 46 when the corpus leg gained its twin). The
+/// list is identical to PyYAML's for all 47 jobs in the nine workflows, name
+/// for name (re-checked when the cross-arch pairs took it from 42 to 45, at 46
+/// when the corpus leg gained its twin, and at 47 when the C Interop leg
+/// gained its own). The
 /// standing protection is the sibling test —
 /// a workflow this returns nothing for is a workflow every gate here passes
 /// vacuously.
@@ -2721,7 +2722,7 @@ const CURRENT_ORACLE_SUFFIX: &str = "-current-oracle";
 /// Each entry is a decision with a reason, not a silent omission — and the
 /// list is checked in both directions, so pairing a leg means deleting its row
 /// here and leaving one behind is a failure rather than a stale paragraph.
-const UNPAIRED_ORACLE_JOBS: [(&str, &str, &str); 3] = [
+const UNPAIRED_ORACLE_JOBS: [(&str, &str, &str); 2] = [
     (
         "ci.yml",
         "mutants-in-diff",
@@ -2729,13 +2730,6 @@ const UNPAIRED_ORACLE_JOBS: [(&str, &str, &str); 3] = [
          tests kill a mutant, and the oracle is there so the differential \
          suites can execute at all. Pairing it would double a `continue-on-error` \
          job's cost to answer the same question twice.",
-    ),
-    (
-        "ci.yml",
-        "test-cross-encode",
-        "the macOS aarch64 leg. Upstream ships no macOS package, so a twin \
-         means a second source build of libjpeg-turbo on every pull request \
-         on top of the 3.1.4.1 one this leg already builds.",
     ),
     (
         "fuzz-smoke.yml",
@@ -2888,19 +2882,150 @@ fn test_runs_in(job_block: &str) -> BTreeSet<TestRun> {
     runs
 }
 
-/// The `runs-on:` a job declares, verbatim — `ubuntu-24.04-arm` and
-/// `${{ matrix.os }}` alike, since two legs are only a pair if they run the
+/// The runner a job runs on, since two legs are only a pair if they run the
 /// same measurement on the same machine.
+///
+/// A literal `runs-on: ubuntu-24.04-arm` is read verbatim. A
+/// `runs-on: ${{ matrix.os }}` is resolved through the job's own matrix to
+/// the set of runners that key takes — read verbatim, `test-cross-encode` and
+/// a twin whose matrix said `ubuntu-latest` compared equal, because the two
+/// expressions are the same six words whatever the matrix names. A matrix
+/// expression the block never resolves is `None`: unreadable, rather than a
+/// runner every other unreadable leg happens to share.
 fn runs_on_in(block: &str) -> Option<String> {
-    block.lines().find_map(|line| {
+    let declared: String = block.lines().find_map(|line| {
         let trimmed: &str = line.trim();
         if trimmed.starts_with('#') {
             return None;
         }
         trimmed
             .strip_prefix("runs-on:")
-            .map(|value| value.trim().to_string())
-    })
+            .map(|value| unquoted(&uncommented(value)))
+    })?;
+    if declared.is_empty() {
+        // The object form — `runs-on:` followed by `group:` / `labels:` —
+        // is unreadable, not an empty runner every such leg shares.
+        return None;
+    }
+    let matrix_key: Option<&str> = declared
+        .strip_prefix("${{")
+        .and_then(|rest| rest.strip_suffix("}}"))
+        .map(str::trim)
+        .and_then(|expression| expression.strip_prefix("matrix."));
+    let Some(key) = matrix_key else {
+        return Some(declared);
+    };
+    let runners: BTreeSet<String> = matrix_values_in(block, key);
+    if runners.is_empty() {
+        return None;
+    }
+    Some(runners.into_iter().collect::<Vec<String>>().join(", "))
+}
+
+/// Every value `key` takes inside the job's `strategy:` block, in any of the
+/// three spellings a matrix uses — `key: value` (at top level or inside an
+/// `include:` entry), a flow list `key: [a, b]`, and a block list of `- value`
+/// lines under a bare `key:`, at its indent or deeper. Entries under
+/// `exclude:` name *combinations* the job does not run, not runners, so they
+/// are neither harvested nor subtracted: the set is over-approximated, which
+/// fails a pair rather than passing one. A flow list wrapped across lines is
+/// not modelled and reads as a single unresolvable item — the quoting and
+/// continuation shapes P4-177 tracks, in a spelling no workflow here uses.
+fn matrix_values_in(block: &str, key: &str) -> BTreeSet<String> {
+    let mut values: BTreeSet<String> = BTreeSet::new();
+    let mut strategy_indent: Option<usize> = None;
+    let mut excluded_indent: Option<usize> = None;
+    let mut list_indent: Option<usize> = None;
+    for line in block.lines() {
+        let trimmed: &str = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let indent: usize = line.len() - line.trim_start().len();
+        let Some(strategy) = strategy_indent else {
+            if trimmed == "strategy:" {
+                strategy_indent = Some(indent);
+            }
+            continue;
+        };
+        if indent <= strategy {
+            break;
+        }
+        if let Some(excluded) = excluded_indent {
+            if indent > excluded {
+                continue;
+            }
+            excluded_indent = None;
+        }
+        if let Some(list) = list_indent {
+            // A block sequence may sit at its key's own indent, not only
+            // deeper; a non-item line at that indent ends it.
+            if indent >= list {
+                if let Some(item) = trimmed.strip_prefix("- ") {
+                    values.insert(unquoted(&uncommented(item)));
+                    continue;
+                }
+            }
+            list_indent = None;
+        }
+        if trimmed == "exclude:" {
+            excluded_indent = Some(indent);
+            continue;
+        }
+        let entry: &str = trimmed.strip_prefix("- ").unwrap_or(trimmed);
+        let Some(value) = entry
+            .strip_prefix(key)
+            .and_then(|rest| rest.strip_prefix(':'))
+        else {
+            continue;
+        };
+        let value: String = uncommented(value);
+        if value.is_empty() {
+            list_indent = Some(indent);
+        } else if let Some(flow) = value
+            .strip_prefix('[')
+            .and_then(|rest| rest.strip_suffix(']'))
+        {
+            values.extend(flow.split(',').map(|item| unquoted(item.trim())));
+        } else {
+            values.insert(unquoted(&value));
+        }
+    }
+    values
+}
+
+/// A YAML scalar with its trailing ` # comment` removed and whitespace
+/// trimmed.
+fn uncommented(value: &str) -> String {
+    value.split('#').next().unwrap_or(value).trim().to_string()
+}
+
+/// A YAML scalar with one pair of surrounding quotes removed, so
+/// `"${{ matrix.os }}"` and `'macos-latest'` read as their unquoted twins.
+fn unquoted(value: &str) -> String {
+    value.trim().trim_matches(['"', '\'']).to_string()
+}
+
+/// The runner a pair shares, or why it does not. An unreadable baseline
+/// runner is a refusal rather than a match with another unreadable one —
+/// two `None`s compare equal, and a pair whose runners nothing could read is
+/// exactly the pair this comparison must not wave through.
+fn shared_runner_of(baseline: &str, current: &str) -> Result<String, String> {
+    let Some(baseline_runner) = runs_on_in(baseline) else {
+        return Err("the baseline declares a runner this scanner cannot \
+                    resolve, so nothing here can say its twin runs on the \
+                    same machine"
+            .to_string());
+    };
+    match runs_on_in(current) {
+        Some(current_runner) if current_runner == baseline_runner => Ok(baseline_runner),
+        other => Err(format!(
+            "the two legs run on different machines ({baseline_runner} \
+             against {}), so a divergence between them is not evidence about \
+             the oracle release",
+            other.unwrap_or_else(|| "a runner this scanner cannot resolve".to_string())
+        )),
+    }
 }
 
 /// A job's own `env:` mapping — the one every step inherits.
@@ -3430,13 +3555,9 @@ fn every_leg_pair_is_compared_and_a_twin_runs_what_its_baseline_runs() {
         let baseline: String = block_of(baseline_job);
         let current: String = block_of(current_job);
 
-        assert_eq!(
-            runs_on_in(&baseline),
-            runs_on_in(&current),
-            "{workflow}'s {baseline_job} and {current_job} run on different \
-             machines, so a divergence between them is not evidence about the \
-             oracle release"
-        );
+        if let Err(why) = shared_runner_of(&baseline, &current) {
+            panic!("{workflow}'s {baseline_job} and {current_job}: {why}");
+        }
 
         // Whatever else a pair does, the root crate's whole integration matrix
         // must run identically on both legs. Asserted before the branch,
@@ -3512,6 +3633,134 @@ fn every_leg_pair_is_compared_and_a_twin_runs_what_its_baseline_runs() {
          command and {by_selection} by selection out of {} pairs — an empty \
          branch is a branch that has stopped matching",
         pairs.len()
+    );
+}
+
+#[test]
+fn a_matrix_declared_runner_is_compared_through_the_matrix() {
+    // `test-cross-encode` and its twin both say `runs-on: ${{ matrix.os }}`,
+    // and read verbatim those two strings are equal whatever the matrix names
+    // — a twin moved to ubuntu-latest passed the runner comparison with that
+    // spelling on the day the pair was added. The runner a leg runs on is
+    // what its matrix resolves the expression to, so that is what the pair
+    // compares.
+    let leg = |os: &str| -> String {
+        format!(
+            "    runs-on: ${{{{ matrix.os }}}}\n\
+             \x20   strategy:\n\
+             \x20     fail-fast: false\n\
+             \x20     matrix:\n\
+             \x20       include:\n\
+             \x20         - os: {os}  # aarch64\n\
+             \x20   steps:\n\
+             \x20     - run: cargo test --tests\n"
+        )
+    };
+    assert_eq!(
+        runs_on_in(&leg("macos-latest")).as_deref(),
+        Some("macos-latest"),
+        "the matrix entry is the runner, without its trailing comment"
+    );
+    assert_ne!(
+        runs_on_in(&leg("macos-latest")),
+        runs_on_in(&leg("ubuntu-latest")),
+        "two legs whose matrices name different runners are not on the same machine"
+    );
+    // A literal runner reads as it always did.
+    assert_eq!(
+        runs_on_in("    runs-on: ubuntu-24.04-arm\n    steps:\n").as_deref(),
+        Some("ubuntu-24.04-arm")
+    );
+    // A matrix expression the block never resolves is unreadable, not a
+    // runner every other unreadable leg happens to share.
+    assert_eq!(
+        runs_on_in("    runs-on: ${{ matrix.os }}\n    steps:\n"),
+        None
+    );
+    // A leg that fans out over several runners runs on all of them, in either
+    // YAML list spelling — and an `exclude:` entry names a runner it does
+    // *not* run on.
+    let flow: &str = "    runs-on: ${{ matrix.os }}\n\
+                      \x20   strategy:\n\
+                      \x20     matrix:\n\
+                      \x20       os: [ubuntu-latest, macos-latest]\n\
+                      \x20   steps:\n";
+    let block_list: &str = "    runs-on: ${{ matrix.os }}\n\
+                            \x20   strategy:\n\
+                            \x20     matrix:\n\
+                            \x20       os:\n\
+                            \x20         - macos-latest\n\
+                            \x20         - ubuntu-latest\n\
+                            \x20       exclude:\n\
+                            \x20         - os: windows-latest\n\
+                            \x20   steps:\n";
+    assert_eq!(
+        runs_on_in(flow).as_deref(),
+        Some("macos-latest, ubuntu-latest")
+    );
+    assert_eq!(runs_on_in(flow), runs_on_in(block_list));
+    // `exclude:` names *combinations*, not runners: with a second matrix
+    // dimension, excluding one pair leaves the runner in play for the rest.
+    // The set is over-approximated on purpose, so an excluded runner still
+    // counts — a leg whose runner survives only in an excluded combination
+    // is a shape no workflow here uses, and an over-count fails a pair
+    // rather than passing one.
+    let excluded_still_counts: &str = "    runs-on: ${{ matrix.os }}\n\
+                                       \x20   strategy:\n\
+                                       \x20     matrix:\n\
+                                       \x20       os: [ubuntu-latest, macos-latest]\n\
+                                       \x20       exclude:\n\
+                                       \x20         - os: macos-latest\n\
+                                       \x20   steps:\n";
+    assert_eq!(
+        runs_on_in(excluded_still_counts).as_deref(),
+        Some("macos-latest, ubuntu-latest")
+    );
+    // The spellings that would fall back to the verbatim read this test
+    // exists to close: a quoted expression, a trailing comment on either
+    // form, quoted flow items, and a block sequence at its key's own indent.
+    let quoted_expression: &str = "    runs-on: \"${{ matrix.os }}\"  # arm box\n\
+                                   \x20   strategy:\n\
+                                   \x20     matrix:\n\
+                                   \x20       os: [\"ubuntu-latest\", 'macos-latest']\n\
+                                   \x20   steps:\n";
+    assert_eq!(runs_on_in(quoted_expression), runs_on_in(flow));
+    let sibling_indent_list: &str = "    runs-on: ${{ matrix.os }}\n\
+                                     \x20   strategy:\n\
+                                     \x20     matrix:\n\
+                                     \x20       os:\n\
+                                     \x20       - ubuntu-latest\n\
+                                     \x20       - macos-latest\n\
+                                     \x20   steps:\n";
+    assert_eq!(runs_on_in(sibling_indent_list), runs_on_in(flow));
+    assert_eq!(
+        runs_on_in("    runs-on: ubuntu-24.04-arm  # the NEON box\n    steps:\n"),
+        runs_on_in("    runs-on: ubuntu-24.04-arm\n    steps:\n")
+    );
+    // The object form (`runs-on:` followed by `group:` / `labels:`) is
+    // unreadable too — not an empty runner every such leg shares.
+    assert_eq!(
+        runs_on_in("    runs-on:\n      group: self-hosted\n    steps:\n"),
+        None
+    );
+}
+
+#[test]
+fn an_unreadable_runner_is_refused_rather_than_matched() {
+    // Every pair in `.github/workflows` resolves today, so the refusal in
+    // `every_leg_pair_is_compared_and_a_twin_runs_what_its_baseline_runs`
+    // never fires there; this is the path that shows it would.
+    let unreadable: &str = "    runs-on: ${{ matrix.os }}\n    steps:\n";
+    let literal: &str = "    runs-on: macos-latest\n    steps:\n";
+    let why: String = shared_runner_of(unreadable, unreadable)
+        .expect_err("two unreadable runners must not read as the same machine");
+    assert!(why.contains("cannot resolve"), "{why}");
+    let why: String = shared_runner_of(literal, unreadable)
+        .expect_err("a readable baseline and an unreadable twin are not a pair");
+    assert!(why.contains("different machines"), "{why}");
+    assert_eq!(
+        shared_runner_of(literal, literal).as_deref(),
+        Ok("macos-latest")
     );
 }
 
