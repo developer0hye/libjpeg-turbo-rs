@@ -194,7 +194,16 @@ while true; do
   # log holds the agent's prose too, and a looser pattern turned an agent that
   # merely wrote "rate limit" into an hour-long sleep and an endless retry of
   # the same issue.
-  if tail -c 4000 "$log" | grep -qiE "usage limit reached|reached your .{0,40} limit|/usage-credits"; then
+  #
+  # The phrase test alone is still a heuristic over prose, so it is gated on
+  # the harness's own verdict: a run whose JSON envelope says
+  # `"subtype":"success"` completed, whatever its summary mentions. On
+  # 2026-09-07 an agent that had merged its pull request wrote that *codex*
+  # was unavailable "because of a usage limit", and the older, unguarded
+  # pattern parked the loop for an hour and re-queued the finished issue.
+  run_succeeded=0
+  grep -q '"subtype":"success"' "$log" && run_succeeded=1
+  if (( ! run_succeeded )) && tail -c 4000 "$log" | grep -qiE "usage limit reached|reached your .{0,40} limit|/usage-credits"; then
     processed=$((processed - 1))
     echo "usage limit reached — sleeping $((USAGE_LIMIT_SLEEP / 60))m, then retrying this issue."
     sleep "$USAGE_LIMIT_SLEEP"
