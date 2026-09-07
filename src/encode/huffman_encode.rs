@@ -556,16 +556,25 @@ impl HuffmanEncoder {
                 // --- AC coefficients ---
                 #[cfg(all(target_arch = "x86_64", feature = "simd"))]
                 {
-                    if crate::cpu_has!("bmi1") && crate::cpu_has!("lzcnt") {
-                        encode_ac_x86_64_bmi1_lzcnt(
+                    // Same tier dispatch as `encode_block_hoisted`.
+                    match AcTier::current() {
+                        AcTier::Bmi1LzcntBmi2 => encode_ac_x86_64_bmi1_lzcnt_bmi2(
                             &mut pb,
                             &mut fb,
                             &mut buf,
                             coeffs_zigzag,
                             ac_table,
-                        );
-                    } else {
-                        encode_ac_x86_64(&mut pb, &mut fb, &mut buf, coeffs_zigzag, ac_table);
+                        ),
+                        AcTier::Bmi1Lzcnt => encode_ac_x86_64_bmi1_lzcnt(
+                            &mut pb,
+                            &mut fb,
+                            &mut buf,
+                            coeffs_zigzag,
+                            ac_table,
+                        ),
+                        AcTier::Sse2 => {
+                            encode_ac_x86_64(&mut pb, &mut fb, &mut buf, coeffs_zigzag, ac_table)
+                        }
                     }
                 }
                 #[cfg(all(
@@ -625,15 +634,21 @@ impl HuffmanEncoder {
             let combined: u32 = (huff_code << category) | mag_masked;
             local_put_bits(pb, fb, buf, combined, huff_size + category);
 
-            // BMI1+LZCNT runtime dispatch (one branch per block; the cached
-            // `is_x86_feature_detected!` macro is essentially free after first
-            // call). The elevated path skips the inner indirect call that
-            // wrapping `encode_ac_corrected_lsb` would otherwise impose, so the
-            // TZCNT + BLSR savings flow through without offsetting overhead.
-            if crate::cpu_has!("bmi1") && crate::cpu_has!("lzcnt") {
-                encode_ac_x86_64_bmi1_lzcnt(pb, fb, buf, coeffs_zigzag, ac_table);
-            } else {
-                encode_ac_x86_64(pb, fb, buf, coeffs_zigzag, ac_table);
+            // Runtime dispatch across three compilations of the same AC body:
+            // one relaxed load of the cached tier and one direct call per
+            // block. The elevated paths skip the inner indirect call that
+            // wrapping `encode_ac_corrected_lsb` would otherwise impose, so
+            // the TZCNT + BLSR savings (BMI1/LZCNT, P4-8) and the SHLX-family
+            // shifts in the inlined bit packer (BMI2, P4-133 / #464) flow
+            // through without offsetting overhead.
+            match AcTier::current() {
+                AcTier::Bmi1LzcntBmi2 => {
+                    encode_ac_x86_64_bmi1_lzcnt_bmi2(pb, fb, buf, coeffs_zigzag, ac_table)
+                }
+                AcTier::Bmi1Lzcnt => {
+                    encode_ac_x86_64_bmi1_lzcnt(pb, fb, buf, coeffs_zigzag, ac_table)
+                }
+                AcTier::Sse2 => encode_ac_x86_64(pb, fb, buf, coeffs_zigzag, ac_table),
             }
         }
     }
@@ -652,6 +667,70 @@ impl HuffmanEncoder {
         if category > 0 && category < 16 {
             writer.write_bits(magnitude_bits, category);
         }
+    }
+}
+
+/// Which compilation of the x86_64 AC body a block takes.
+///
+/// The three tiers are one `#[inline(always)]` body re-emitted under three
+/// `target_feature` contexts (P4-8 added `bmi1,lzcnt`; P4-133 / #464 added
+/// `bmi2` for the `SHLX`-family shifts in the inlined bit packer).
+#[cfg(all(target_arch = "x86_64", feature = "simd"))]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum AcTier {
+    /// SSE2 only — the x86_64 baseline.
+    Sse2 = 1,
+    /// BMI1 + LZCNT: TZCNT/BLSR in the bitmap walk.
+    Bmi1Lzcnt = 2,
+    /// BMI1 + LZCNT + BMI2: the above plus SHLX/SHRX in the bit packer.
+    Bmi1LzcntBmi2 = 3,
+}
+
+/// Resolved tier, `0` until the first block asks. A block then pays one
+/// relaxed load rather than three `is_x86_feature_detected!` probes — the
+/// probes were of the same order as the 1.3–2.9 % BMI2 win they unlock.
+/// Process-wide because the CPU does not change; P4-133 criterion 3 wants the
+/// choice on the encode *plan*, which is where this moves once P4-123
+/// workstream 2 gives the MCU loops a plan object to read it from.
+#[cfg(all(target_arch = "x86_64", feature = "simd"))]
+static AC_TIER_CACHE: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+
+#[cfg(all(target_arch = "x86_64", feature = "simd"))]
+impl AcTier {
+    /// The tier this CPU takes, resolved once and cached.
+    #[inline(always)]
+    pub(crate) fn current() -> AcTier {
+        match AC_TIER_CACHE.load(core::sync::atomic::Ordering::Relaxed) {
+            1 => AcTier::Sse2,
+            2 => AcTier::Bmi1Lzcnt,
+            3 => AcTier::Bmi1LzcntBmi2,
+            _ => AcTier::resolve_and_cache(),
+        }
+    }
+
+    /// The uncached answer — what `current()` stores on first use.
+    ///
+    /// BMI2 does not imply BMI1/LZCNT architecturally (a VM can expose one
+    /// without the others), and BLSR faults without BMI1, so all three are
+    /// checked; a CPU with BMI1+LZCNT but not BMI2 (AMD Piledriver /
+    /// Steamroller) keeps the middle tier.
+    pub(crate) fn detect() -> AcTier {
+        let has_bmi1_lzcnt: bool = crate::cpu_has!("bmi1") && crate::cpu_has!("lzcnt");
+        if has_bmi1_lzcnt && crate::cpu_has!("bmi2") {
+            AcTier::Bmi1LzcntBmi2
+        } else if has_bmi1_lzcnt {
+            AcTier::Bmi1Lzcnt
+        } else {
+            AcTier::Sse2
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn resolve_and_cache() -> AcTier {
+        let tier: AcTier = AcTier::detect();
+        AC_TIER_CACHE.store(tier as u8, core::sync::atomic::Ordering::Relaxed);
+        tier
     }
 }
 
@@ -750,15 +829,40 @@ unsafe fn encode_ac_x86_64(
 /// `encode_ac_x86_64_body` is `#[inline(always)]`, so its full call tree
 /// (including the `#[inline(always)]` `encode_ac_corrected_lsb`) is inlined
 /// here under the `bmi1,lzcnt` context. The dispatcher in
-/// `encode_block_hoisted` selects between this function and the default one
-/// once per block based on `is_x86_feature_detected!`, with no inner indirect
-/// call inside the hot loop.
+/// `encode_block_hoisted` selects between this function, the BMI2 tier below
+/// and the default one once per block based on `is_x86_feature_detected!`,
+/// with no inner indirect call inside the hot loop.
 ///
 /// # Safety
 /// CPU must support BMI1 + LZCNT (caller checks via `is_x86_feature_detected!`).
 #[cfg(all(target_arch = "x86_64", feature = "simd"))]
 #[target_feature(enable = "bmi1,lzcnt")]
 unsafe fn encode_ac_x86_64_bmi1_lzcnt(
+    pb: &mut u64,
+    fb: &mut i32,
+    buf: &mut *mut u8,
+    coeffs_zigzag: &[i16; 64],
+    ac_table: &HuffTable,
+) {
+    unsafe { encode_ac_x86_64_body(pb, fb, buf, coeffs_zigzag, ac_table) }
+}
+
+/// BMI1 + LZCNT + BMI2-elevated entry point (P4-133, #464).
+///
+/// The 2026-09-08 portable-vs-native A/B found `+bmi2` alone worth 1.3–2.9 %
+/// of the whole 1080p encode on Zen 3 and Zen 4 — not PEXT/PDEP, which
+/// nothing here uses, but the `SHLX`/`SHRX` variable shifts the compiler
+/// emits for `local_put_bits` once BMI2 is in the feature context. That
+/// packer is inlined into this body, so the third compilation reaches them
+/// from a baseline build; the middle tier stays for CPUs that have BMI1 and
+/// LZCNT without BMI2.
+///
+/// # Safety
+/// CPU must support BMI1 + LZCNT + BMI2 (`AcTier::current()` selects this
+/// only when all three were detected).
+#[cfg(all(target_arch = "x86_64", feature = "simd"))]
+#[target_feature(enable = "bmi1,lzcnt,bmi2")]
+unsafe fn encode_ac_x86_64_bmi1_lzcnt_bmi2(
     pb: &mut u64,
     fb: &mut i32,
     buf: &mut *mut u8,
@@ -1655,6 +1759,126 @@ mod tests {
                 mag_corr, mag_scalar,
                 "magnitude mismatch for v={v}: scalar={mag_scalar}, corrected={mag_corr}"
             );
+        }
+    }
+
+    /// P4-133 (#464) criterion 3, as far as the Huffman loop goes today: the
+    /// tier is resolved from CPUID once and cached, and the cached answer must
+    /// be the uncached one.
+    #[cfg(all(target_arch = "x86_64", feature = "simd"))]
+    #[test]
+    fn x86_64_ac_tier_is_resolved_once_and_matches_detection() {
+        let detected: AcTier = AcTier::detect();
+        let expected: AcTier = if crate::cpu_has!("bmi1") && crate::cpu_has!("lzcnt") {
+            if crate::cpu_has!("bmi2") {
+                AcTier::Bmi1LzcntBmi2
+            } else {
+                AcTier::Bmi1Lzcnt
+            }
+        } else {
+            AcTier::Sse2
+        };
+        assert_eq!(detected, expected, "detect() disagrees with the CPU");
+        assert_eq!(AcTier::current(), detected, "first cached read");
+        assert_eq!(AcTier::current(), detected, "second cached read");
+        assert_eq!(
+            AC_TIER_CACHE.load(core::sync::atomic::Ordering::Relaxed),
+            detected as u8,
+            "the cache holds the resolved tier after the first read"
+        );
+    }
+
+    /// P4-133 (#464): the Huffman AC loop has three x86_64 tiers — SSE2,
+    /// BMI1+LZCNT, and BMI1+LZCNT+BMI2 — that are the *same* body compiled
+    /// under different `target_feature` contexts. They must emit identical
+    /// bytes for every block shape the emit loop distinguishes: EOB-only,
+    /// sparse, dense, ZRL runs (16+ zeros before a non-zero), a trailing
+    /// coefficient at position 63 (no EOB), and category-10 magnitudes.
+    #[cfg(all(target_arch = "x86_64", feature = "simd"))]
+    #[test]
+    fn x86_64_ac_kernel_tiers_emit_identical_bytes() {
+        let ac_table = build_huff_table(&AC_LUMINANCE_BITS, &AC_LUMINANCE_VALUES);
+
+        type AcKernel = unsafe fn(&mut u64, &mut i32, &mut *mut u8, &[i16; 64], &HuffTable);
+        let mut tiers: Vec<(&str, AcKernel)> = vec![("sse2", encode_ac_x86_64 as AcKernel)];
+        if crate::cpu_has!("bmi1") && crate::cpu_has!("lzcnt") {
+            tiers.push(("bmi1+lzcnt", encode_ac_x86_64_bmi1_lzcnt as AcKernel));
+        }
+        if crate::cpu_has!("bmi2") && crate::cpu_has!("bmi1") && crate::cpu_has!("lzcnt") {
+            tiers.push((
+                "bmi1+lzcnt+bmi2",
+                encode_ac_x86_64_bmi1_lzcnt_bmi2 as AcKernel,
+            ));
+        }
+        if tiers.len() == 1 {
+            eprintln!(
+                "SKIP: this CPU has no BMI1/LZCNT tier; only the SSE2 body exists to compare"
+            );
+            return;
+        }
+        eprintln!(
+            "tiers exercised: {:?}",
+            tiers.iter().map(|(name, _)| *name).collect::<Vec<_>>()
+        );
+
+        let mut state: u32 = 0x2545_F491;
+        let mut next_u32 = move || -> u32 {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state
+        };
+
+        let mut blocks: Vec<[i16; 64]> = Vec::new();
+        blocks.push([0i16; 64]); // EOB only
+        let mut trailing: [i16; 64] = [0i16; 64];
+        trailing[63] = -1; // 62 zeros: three ZRLs, then no EOB
+        blocks.push(trailing);
+        let mut category_10: [i16; 64] = [0i16; 64];
+        category_10[1] = 1023;
+        category_10[2] = -1023;
+        category_10[40] = 512;
+        blocks.push(category_10);
+        for block_index in 0..600usize {
+            let mut block: [i16; 64] = [0i16; 64];
+            // Vary density so both the sparse (mostly runs) and dense
+            // (mostly symbols) branches of the emit loop are covered.
+            let density: u32 = [2, 8, 32, 100][block_index % 4];
+            for coefficient in block.iter_mut().skip(1) {
+                if next_u32() % 100 < density {
+                    let magnitude: i16 = (next_u32() % 1024) as i16;
+                    *coefficient = if next_u32() & 1 == 0 {
+                        magnitude
+                    } else {
+                        -magnitude
+                    };
+                }
+            }
+            blocks.push(block);
+        }
+
+        for (block_index, block) in blocks.iter().enumerate() {
+            let mut outputs: Vec<(&str, Vec<u8>)> = Vec::new();
+            for (name, kernel) in &tiers {
+                let mut writer = BitWriter::new(512);
+                // SAFETY: begin_block/end_block bracket exactly one kernel
+                // call with no other BitWriter method in between, and the
+                // tier was pushed only after its CPU features were detected.
+                unsafe {
+                    let (mut pb, mut fb, mut buf) = writer.begin_block(512);
+                    kernel(&mut pb, &mut fb, &mut buf, block, &ac_table);
+                    writer.end_block(pb, fb, buf);
+                }
+                writer.flush();
+                outputs.push((name, writer.data().to_vec()));
+            }
+            let (baseline_name, baseline_bytes) = &outputs[0];
+            for (name, bytes) in &outputs[1..] {
+                assert_eq!(
+                    bytes, baseline_bytes,
+                    "block {block_index}: tier {name} diverged from tier {baseline_name}"
+                );
+            }
         }
     }
 }

@@ -254,6 +254,17 @@ pub struct EncoderSimdRoutines {
     /// `quant` contains pre-scaled divisors and reciprocals.
     /// Output is in zigzag scan order, ready for Huffman encoding.
     pub fdct_quantize: fn(input: &mut [i16; 64], quant: &QuantDivisors, output: &mut [i16; 64]),
+
+    /// Combined FDCT (**float**, `DctMethod::Float`) + quantize + zigzag
+    /// reorder for one 8×8 block; same contract as [`Self::fdct_quantize`]
+    /// but for the `cjpeg -dct float` transform, paired with
+    /// [`QuantDivisors::float_divisors`].
+    ///
+    /// Scalar on every backend today (P4-187 tracks the SIMD port). On x86_64
+    /// it is the FMA-compiled twin of the scalar kernel when the CPU has FMA,
+    /// chosen here once per kernel set rather than per block (P4-133, #464).
+    pub fdct_float_quantize:
+        fn(input: &mut [i16; 64], quant: &QuantDivisors, output: &mut [i16; 64]),
 }
 
 impl EncoderSimdRoutines {
