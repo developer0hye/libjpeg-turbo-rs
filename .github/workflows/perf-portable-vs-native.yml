@@ -89,8 +89,9 @@ jobs:
           /opt/libjpeg-turbo/bin/cjpeg -version 2>&1 | grep -q "version 3.2.0"
           /opt/libjpeg-turbo/bin/jpegtran -version 2>&1 | grep -q "version 3.2.0"
           test -f /opt/libjpeg-turbo/include/jpeglib.h
-          ls /opt/libjpeg-turbo/lib64/libjpeg.* /opt/libjpeg-turbo/lib/libjpeg.* \
-             2>/dev/null | grep -q .
+          # Not `ls a b | grep -q .`: under pipefail a missing lib/ glob makes
+          # `ls` exit 2 and fails the pipeline even though lib64/ matched.
+          test -n "$(ls /opt/libjpeg-turbo/lib64/libjpeg.* /opt/libjpeg-turbo/lib/libjpeg.* 2>/dev/null)"
       # The CPU decides which variants can differ at all: a runner without
       # FMA makes the `fma` column meaningless, and `target-cpu=native` means
       # whatever this box is. Both go into the artifact next to the numbers.
