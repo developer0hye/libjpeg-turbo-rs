@@ -195,13 +195,13 @@ The script supports `--destdir` / `--prefix` / `--soname` flags and an optional 
 6. `jconfig.h` declares `JPEG_LIB_VERSION 80`,
 7. (optional, if `pkg-config` on PATH) `pkg-config --libs libjpeg` against `PKG_CONFIG_PATH=<staged>` returns `-ljpeg`.
 
-Skip-with-reason on Windows (script is bash; Windows packagers use their own conventions) or when `bash` is not on PATH.
+Skip-with-reason when `bash` is not on PATH. (Until 2026-09-07 it also skipped on Windows, where the script did not run; P4-131's Windows milestone made it stage the MSVC layout there and run the suite under Git for Windows' bash.)
 
 **Out of scope (deferred):**
 
 - LD_LIBRARY_PATH-injected Pillow round-trip against the staged tree. The `tests/capi_pillow_compat.rs` harness already verifies the cdylib works against Pillow when it's pre-loaded; verifying it through the installed-tree path is structural redundancy with no extra signal.
 - `cmake --find-package` end-to-end check. The CMake config file content is asserted; running CMake itself just to confirm it parses the file would add a CMake dependency to the test suite without revealing additional bugs.
-- Windows MSI / DLL install layout. The Linux/macOS install path is the entry-point most distros and Homebrew formulae need; Windows packagers typically ship raw artifacts via NSIS / WiX with their own conventions.
+- Windows MSI / DLL install layout. The Linux/macOS install path is the entry-point most distros and Homebrew formulae need; Windows packagers typically ship raw artifacts via NSIS / WiX with their own conventions. (The DLL half landed 2026-09-07 under P4-131 — `bin/jpeg8.dll` + `lib/jpeg.lib`, staged by this same script; the MSI/installer half stays out of scope.)
 
 ## P2-9. v6b / v7 / v8 ABI Compatibility Matrix — **CLOSED**
 

@@ -398,10 +398,10 @@ replacement-tier framing and its readiness status live in
 [`docs/LAST_MILE.md`](docs/LAST_MILE.md).
 
 Tagged releases attach prebuilt bundles of those shims — libraries, headers,
-`.pc` files and CMake config for x86_64/aarch64 Linux and macOS, with a
-`SHA256SUMS` manifest, and each bundle carries Sigstore build provenance and
-a CycloneDX SBOM that `gh attestation verify` checks. There is no Windows
-bundle yet.
+`.pc` files and CMake config for x86_64/aarch64 Linux and macOS and for
+x86_64 Windows (MSVC: `jpeg8.dll` + `jpeg.lib`), with a `SHA256SUMS`
+manifest, and each bundle carries Sigstore build provenance and a CycloneDX
+SBOM that `gh attestation verify` checks.
 [`docs/RELEASE_ARTIFACTS.md`](docs/RELEASE_ARTIFACTS.md) covers what ships,
 how to verify and install it, and what is still missing. Downloading a bundle
 does not change the tiers above.

@@ -330,8 +330,9 @@ This is genuinely large work and is *out of scope* for the current "v8-targeted 
 
 ## Binary distribution (P4-131 — PARTIAL)
 
-**Tagged releases attach native bundles** for `x86_64`/`aarch64` Linux and
-`x86_64`/`aarch64` macOS: the libraries with their SONAME chains, the headers,
+**Tagged releases attach native bundles** for `x86_64`/`aarch64` Linux,
+`x86_64`/`aarch64` macOS and `x86_64` Windows (MSVC): the libraries with their
+SONAME chains — on Windows the DLLs with their import libraries — the headers,
 the `.pc` files and the CMake config, checksummed by a single `SHA256SUMS`.
 Before 2026-08-18 there was no such artifact, and a packager wanting to replace
 a system `libjpeg.so.8` had to clone, install a Rust toolchain, build, and run
@@ -350,14 +351,24 @@ one who unpacks a `.so` does not. The T3 classic-ABI gaps are open, the bundle
 says so in its own `BUNDLE.txt`, and the tiers above still govern whether it
 may replace a system library.
 
-Two parts of **P4-131 (#462)** remain open, which is why it is PARTIAL rather
+One part of **P4-131 (#462)** remains open, which is why it is PARTIAL rather
 than closed.
 
-### Windows — open
+### Windows — shipped since 2026-09-07, MSVC only
 
-No DLL or import library. `install_capi.sh` handles Linux and macOS only, and
-the Windows layout is a separate decision (no SONAME chain, an import library,
-a toolchain-dependent `.pc` convention) rather than another matrix row.
+`install_capi.sh` stages upstream's Visual C++ layout on Windows: the DLL as
+`bin/jpeg8.dll` (`jpeg62.dll` under the `--soname` v6b opt-in, with the same
+documented risk as on Linux) and `bin/turbojpeg.dll`, with import libraries
+`lib/jpeg.lib` and `lib/turbojpeg.lib`. There is no SONAME: a Windows
+consumer's import table records the DLL's file name, so the name is the
+identity, and the import libraries are regenerated from the DLL's export table
+to bind to the shipped names — cargo's own import library binds to
+`libjpeg_turbo_rs_capi.dll`, which the bundle does not contain. The `.pc`
+files keep `-ljpeg`, which under MSVC pkg-config (`--msvc-syntax`) is
+`jpeg.lib`; a MinGW consumer expects `libjpeg-8.dll` and `libjpeg.dll.a`
+instead, and no bundle ships that layout. The DLL links the dynamic Visual C++
+runtime, as upstream's does. [`RELEASE_ARTIFACTS.md`](RELEASE_ARTIFACTS.md)
+has the install steps.
 
 ### Signing and SBOM — attested since 2026-09-07
 

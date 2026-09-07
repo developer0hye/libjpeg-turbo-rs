@@ -316,8 +316,14 @@ jobs:
   # cannot be withdrawn: a bundle that fails to build must fail before the
   # irreversible step, not after it. Not a publish job itself, so it is also
   # the one job a dispatch may run. Skipped on `wasm-v*`, which ships no
-  # native library. Windows (DLL + import library) is still open; P4-131
-  # stays PARTIAL until it lands.
+  # native library.
+  #
+  # The Windows leg ships upstream's MSVC layout — `bin/jpeg8.dll` with an
+  # import library `lib/jpeg.lib` regenerated to bind to that name — staged
+  # by the same `install_capi.sh` under Git for Windows' bash, which is why
+  # every `run:` step of this job defaults to bash: the steps use
+  # `pipefail`, `shopt` and `[ ]`, and a Windows runner would otherwise hand
+  # them to PowerShell.
   #
   # Each leg also signs what it built (P4-131 criterion 4): a checksum beside
   # the file it covers proves integrity, not origin. `attest-build-provenance`
@@ -341,6 +347,9 @@ jobs:
       # the result. Nothing else — this job publishes no release.
       id-token: write
       attestations: write
+    defaults:
+      run:
+        shell: bash
     strategy:
       fail-fast: false
       matrix:
@@ -357,6 +366,10 @@ jobs:
           # ci.yml on their own hosts.
           - target: x86_64-apple-darwin
             os: macos-latest
+          # MSVC only (P4-131): the layout is upstream's Visual C++ one, and
+          # `-ljpeg` in the staged `.pc` names a different file under MinGW.
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
     steps:
       # `submodules: recursive` is load-bearing, not boilerplate: the staged
       # headers are copied verbatim out of references/libjpeg-turbo.

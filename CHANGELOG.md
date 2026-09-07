@@ -21,8 +21,7 @@ and `git log` between tags.
   which is what P4-124 needs before the downstream harnesses can test the tree
   you download; today they still stage the raw cargo cdylib. See
   [`docs/RELEASE_ARTIFACTS.md`](docs/RELEASE_ARTIFACTS.md) for verification and
-  install steps, and for what is still missing: no Windows bundle and no
-  first-party deb/rpm.
+  install steps, and for what is still missing: no first-party deb/rpm.
 - **Every native bundle is attested** (P4-131, #462). The job that builds a
   bundle signs it through Sigstore with its own identity: SLSA build
   provenance from `actions/attest-build-provenance`, and a CycloneDX SBOM of
@@ -33,6 +32,19 @@ and `git log` between tags.
   checksum beside the file never could; the Sigstore bundles are attached as
   `<bundle>.tar.gz.{provenance,sbom}.sigstore.json` for offline use, and
   `SHA256SUMS` now covers the SBOMs as well as the archives.
+- **A Windows bundle** (P4-131, #462).
+  `libjpeg-turbo-rs-capi-<version>-x86_64-pc-windows-msvc.tar.gz` ships
+  upstream's Visual C++ layout: `bin/jpeg8.dll` and `bin/turbojpeg.dll` (one
+  DLL under both names) with import libraries `lib/jpeg.lib` and
+  `lib/turbojpeg.lib` regenerated from the DLL's export table so that they
+  bind to the shipped names rather than to cargo's `libjpeg_turbo_rs_capi.dll`,
+  plus the same headers, `.pc` files, CMake config and licence texts as the
+  Unix bundles. It is staged by the same `scripts/install_capi.sh` (now run
+  under Git for Windows' bash; `--soname jpeg62.dll` is the v6b opt-in there),
+  checksummed and attested like the others, and the `install_layout` and
+  `release_bundle` suites now run for real on the Windows CI leg instead of
+  skipping. MSVC only — no MinGW bundle — and the DLL links the dynamic
+  Visual C++ runtime, as upstream's does.
 
 ### Changed
 

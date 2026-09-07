@@ -902,9 +902,11 @@ jobs:
       # the five headers — and `release_bundle` asserts that the release
       # archive is that prefix and nothing else, which is the one-staging-path
       # rule P4-131 and P4-124 share. Both are per-platform structural facts
-      # (DT_SONAME vs install_name, `.so` vs `.dylib`), so they belong in this
-      # matrix rather than on Linux alone; on Windows they skip with a reason,
-      # because a Windows bundle is still open under P4-131.
+      # (DT_SONAME vs install_name vs an import library's DLL binding; `.so`
+      # vs `.dylib` vs `bin/jpeg8.dll` + `lib/jpeg.lib`), so they belong in
+      # this matrix rather than on Linux alone. The Windows leg runs the bash
+      # scripts under Git for Windows' bash and finds `dumpbin`/`lib.exe`
+      # through vswhere, the way rustc finds `link.exe` (P4-131).
       #
       # `install_layout` has existed since P2-8 and no workflow had ever named
       # it, so the gate that closed P2-8 ran on no pull request. Named here
@@ -917,10 +919,20 @@ jobs:
       # without it that test skips with a reason and the release's SBOM step
       # is exercised only by a dispatch rehearsal. Same pin as release.yml —
       # `sbom_generator_is_pinned_to_one_version_across_workflows` holds the
-      # two together. Not on Windows, where the SBOM test skips anyway.
+      # two together, and `sbom_generator_is_installed_on_every_capi_abi_checks_leg`
+      # keeps this step unconditional, so the Windows bundle's SBOM path is
+      # checked on pull requests too.
       - name: Install the SBOM generator (P4-131)
-        if: runner.os != 'Windows'
         run: cargo install cargo-cyclonedx --locked --version 0.5.9
+      # `install_layout` asserts the identity of *both* staged libraries. On
+      # Linux the P4-81 relink bakes `libjpeg.so.8` into the binary and only
+      # `patchelf --set-soname` gives the libturbojpeg copy its own name;
+      # without the tool the script warns and stages both under the libjpeg
+      # SONAME, which is the bug the assertion exists to catch — so the leg
+      # installs it, as release.yml's `native-artifacts` does.
+      - name: Install patchelf (Linux SONAME patching)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y patchelf
       - name: Shipped install layout and release bundle (P2-8, P4-131)
         run: >
           cargo test -p libjpeg-turbo-rs-capi --release
