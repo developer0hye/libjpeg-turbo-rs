@@ -235,9 +235,9 @@ pub struct QuantDivisors {
 /// Function-pointer dispatch table for SIMD-accelerated encode operations.
 ///
 /// Field visibility follows the same rule as [`SimdRoutines`]: `fdct_quantize`
-/// is `pub` because its parameters are fixed-size arrays, `rgb_to_ycbcr_row` is
-/// `pub(crate)` because its safety depends on `width` agreeing with four slice
-/// lengths (P4-135, #474).
+/// and `fdct_float_quantize` are `pub` because their parameters are fixed-size
+/// arrays, `rgb_to_ycbcr_row` is `pub(crate)` because its safety depends on
+/// `width` agreeing with four slice lengths (P4-135, #474).
 pub struct EncoderSimdRoutines {
     /// RGB → YCbCr color conversion, one row.
     /// Only handles interleaved RGB (3 bytes/pixel).

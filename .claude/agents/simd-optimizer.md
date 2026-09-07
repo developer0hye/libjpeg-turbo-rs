@@ -32,7 +32,7 @@ Multi-ISA SIMD optimization specialist for the libjpeg-turbo-rs project. Guides 
 
 **Key structs**:
 - `SimdRoutines`: `idct_islow`, `idct_ifast`, `idct_float`, `ycbcr_to_rgb_row`, `fancy_upsample_h2v1`
-- `EncoderSimdRoutines`: `rgb_to_ycbcr_row`, `fdct_quantize`
+- `EncoderSimdRoutines`: `rgb_to_ycbcr_row`, `fdct_quantize`, `fdct_float_quantize`
 - `QuantDivisors`: pre-computed reciprocals/corrections/shifts for division-free quantization
 
 ### Current SIMD Coverage

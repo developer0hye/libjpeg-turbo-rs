@@ -808,8 +808,8 @@ unsafe fn encode_ac_x86_64_body(
 /// Default x86_64 entry point — SSE2 baseline (no BMI1/LZCNT).
 ///
 /// Wraps the `#[inline(always)]` body so callers always have one stable
-/// indirect symbol regardless of whether the elevated `_bmi1_lzcnt` variant
-/// is dispatched.
+/// indirect symbol regardless of whether an elevated `_bmi1_lzcnt` /
+/// `_bmi1_lzcnt_bmi2` variant is dispatched.
 #[cfg(all(target_arch = "x86_64", feature = "simd"))]
 unsafe fn encode_ac_x86_64(
     pb: &mut u64,
@@ -828,13 +828,15 @@ unsafe fn encode_ac_x86_64(
 ///
 /// `encode_ac_x86_64_body` is `#[inline(always)]`, so its full call tree
 /// (including the `#[inline(always)]` `encode_ac_corrected_lsb`) is inlined
-/// here under the `bmi1,lzcnt` context. The dispatcher in
-/// `encode_block_hoisted` selects between this function, the BMI2 tier below
-/// and the default one once per block based on `is_x86_feature_detected!`,
-/// with no inner indirect call inside the hot loop.
+/// here under the `bmi1,lzcnt` context. The dispatchers in `encode_block` and
+/// `encode_block_hoisted` select between this function, the BMI2 tier below
+/// and the default one once per block on `AcTier::current()` — a relaxed load
+/// of the tier, which CPUID resolves once per process — with no inner
+/// indirect call inside the hot loop.
 ///
 /// # Safety
-/// CPU must support BMI1 + LZCNT (caller checks via `is_x86_feature_detected!`).
+/// CPU must support BMI1 + LZCNT (`AcTier::current()` selects this only when
+/// both were detected).
 #[cfg(all(target_arch = "x86_64", feature = "simd"))]
 #[target_feature(enable = "bmi1,lzcnt")]
 unsafe fn encode_ac_x86_64_bmi1_lzcnt(

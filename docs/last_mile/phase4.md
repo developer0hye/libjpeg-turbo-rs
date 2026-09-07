@@ -6544,14 +6544,14 @@ current test or downstream harness in this repository transfers a `cinfo` across
 threads, so nothing is broken today for what we actually measure. It is a
 correctness-of-contract gap that blocks the T3 claim, not a live defect.
 
-## P4-133. BMI2/FMA Paths Are Reachable Only via `target-cpu=native`, So Portable Builds Leave Them Off — **PARTIAL: measured on a runner; BMI2 in the Huffman loop and FMA in the float FDCT still wait on runtime dispatch**
+## P4-133. BMI2/FMA Paths Are Reachable Only via `target-cpu=native`, So Portable Builds Leave Them Off — **PARTIAL: measured, and both wins now dispatch at runtime from a baseline build; the Huffman tier is still chosen per block rather than once per plan**
 
 **GitHub:** [#464](https://github.com/developer0hye/libjpeg-turbo-rs/issues/464) — under the [#470](https://github.com/developer0hye/libjpeg-turbo-rs/issues/470) umbrella.
 
 **Motivation.** Filed 2026-08-09 by the external drop-in readiness review.
 **[P4-8](#p4-8-runtime-bmi1lzcnt-dispatch-for-x86_64-encode-already-live-readme-updated--closed-2026-05-17)** closed 2026-05-17 after establishing that the BMI1/LZCNT AC
 encoding loop already dispatches at runtime
-(`src/encode/huffman_encode.rs:559,633`), so a stock `cargo build --release` is
+(`src/encode/huffman_encode.rs:560,644`), so a stock `cargo build --release` is
 within ~2 pp of C. That closure recorded an explicit follow-up
 (`phase4.md:235`): *"BMI2 PEXT/PDEP coverage for any encode hot path that
 benefits + FMA-dispatched FDCT scalar fallback. The static-analysis review
@@ -6633,14 +6633,83 @@ samples, on AMD EPYC 7763 (Zen 3) and EPYC 9V74 (Zen 4), recorded in
   line is no longer described as a portable baseline (it faults without
   BMI2/FMA).
 
-**Remaining (criteria 2 and 3):** (a) add `bmi2` to the elevated Huffman
-variant's feature set behind `cpu_has!("bmi2")`; (b) a
-`#[target_feature(enable = "fma")]` twin of `scalar_fdct_float_quantize`
-selected where `DctMethod::Float` already picks the kernel at plan build — both
-resolved once per plan, per P4-123 workstream 2, and each proved by
-dispatching the workflow on its branch (this PR registers it on `main`, so
-`gh workflow run perf-portable-vs-native.yml --ref <branch>` works) and by the
-existing `cjpeg -dct float` byte-parity suites for (b).
+**Remaining after the first milestone (criteria 2 and 3):** (a) add `bmi2`
+to the elevated Huffman variant's feature set behind `cpu_has!("bmi2")`; (b)
+a `#[target_feature(enable = "fma")]` twin of `scalar_fdct_float_quantize`
+selected where `DctMethod::Float` already picks the kernel at plan build —
+both resolved once per plan, per P4-123 workstream 2, and each proved by
+dispatching the workflow on its branch and by the existing `cjpeg -dct float`
+byte-parity suites for (b).
+
+**Progress (2026-09-08, second milestone) — criterion 2 met for both wins;
+criterion 3 met for FMA, not yet for the Huffman tier.**
+
+- **FMA float FDCT, once per plan.** `src/simd/x86_64/fma_fdct.rs` is the
+  scalar float FDCT + quantise body re-emitted under
+  `#[target_feature(enable = "fma")]`; the scalar kernel and
+  `fdct_float_workspace` were split into `#[inline(always)]` bodies so the
+  twin is the *same* code under a different feature context, and its safe
+  wrapper checks `cpu_has!("fma")` itself (the P4-135 rule). It is installed
+  in the encoder's existing per-operation kernel set —
+  `EncoderSimdRoutines` gained an `fdct_float_quantize` field, filled by all
+  four `encoder_routines()` constructors, x86_64 choosing the twin when the
+  CPU reports FMA independently of AVX2 — and the six `DctMethod::Float`
+  sites in `src/encode/pipeline_impl/` now take the kernel from the plan
+  instead of naming the scalar function. That is the mechanism P4-123
+  workstream 2 asks for, not a parallel one. The islow-shortcut guard
+  (`dispatch::may_use_islow_simd_kernel`) compares function pointers, so the
+  twin had to be added to the float list or `-dct float` on an FMA CPU would
+  have re-created #330; `mcu::can_use_fused_islow`, a second copy of the same
+  pointer comparison, is deleted and its call sites now ask the one guard.
+  Cross-compiled x86_64 release assembly: the twin contains four `vfmadd`
+  and no `fmaf` call, the scalar kernel four `call fmaf`. The coefficients
+  are bit-identical by construction (`mul_add` is single-rounding either
+  way), asserted by
+  `fma_float_fdct_twin_is_bit_identical_to_the_scalar_kernel` over Annex K
+  tables at five qualities, and the `cjpeg -dct float` suites
+  (`tests/dct_method.rs`, `tests/regression_dct_method_parity.rs`) exercise
+  the twin on every x86_64 CI runner.
+- **BMI2 Huffman tier.** `encode_ac_x86_64_bmi1_lzcnt_bmi2` is the third
+  compilation of the AC body, under `bmi1,lzcnt,bmi2`. The tier is an
+  `AcTier` enum resolved from CPUID once per process and cached in an
+  `AtomicU8` (review finding: the three per-block `cpu_has!` probes the
+  first cut used were of the same order as the win), so the two dispatch
+  points (`encode_block`, `encode_block_hoisted`) pay one relaxed load and a
+  direct call per block; a CPU with BMI1+LZCNT but no BMI2
+  (Piledriver/Steamroller) keeps the middle tier. The assembly check shows
+  four `shlx` in the BMI2 tier and none in the BMI1 tier.
+  `x86_64_ac_kernel_tiers_emit_identical_bytes` asserts all three tiers
+  emit the same bytes across EOB-only, ZRL-run, trailing-63, dense, sparse
+  and category-10 blocks, and `x86_64_ac_tier_is_resolved_once_and_matches_detection`
+  pins the cache to the uncached answer.
+- **Measured on the branch** (`gh workflow run perf-portable-vs-native.yml
+  --ref perf/p4-133-runtime-dispatch`, run 34157974332, AMD EPYC 9V74 /
+  Zen 4, C 3.2.0, noise 0.2–0.6 % at 1080p; tables in
+  `experiments/portable_vs_native_x86_64_2026-09-08.md`). **Float DCT:** the
+  portable build is 1.39–1.41× C at 1080p (1.41–1.51× across the matrix),
+  where the previous Zen 4 run's portable build was 1.72–1.94× and its
+  `+fma` build 1.41–1.53×; compile-time `+fma` over the dispatched portable
+  build is now 1.0–1.8 % everywhere, against 18–21 % before — the twin is
+  reached, and `native` / the README set are 4–9 % *slower* than portable on
+  that path. **Integer DCT:** portable/C 1.10–1.12× at 1080p; `+bmi2` over
+  portable 0.4–2.2 % (noise 0.4–0.6 %), `native` 2.0–2.9 %. Against the
+  previous Zen 4 run (`+bmi2` 1.3–1.9 %, portable/C 1.09–1.10×) that is
+  inside cross-run variance — a different host on a different hour — so this
+  run cannot say whether the BMI2 tier pays; the harness now builds a
+  same-run `main-portable` variant to settle it (result below once it runs).
+- Rosetta on the aarch64 host reports neither FMA nor BMI2, so locally every
+  new test ran its fallback branch and still had to pass; the elevated
+  branches are exercised by CI's x86_64 runners and by the A/B above.
+
+**Remaining (criterion 3 for the Huffman tier).** The AC-tier choice is
+resolved once — but per process, in a static, not on the encode plan. Moving
+it onto the plan means threading a resolved tier through the sixteen
+`encode_block_hoisted` and fifty-odd `encode_block` call sites, or giving the
+MCU loops a plan object to read it from, which is P4-123 workstream 2's
+`EncodePlan`; doing it as a one-off parameter now would be the parallel
+mechanism criterion 3 warns against. Close this item when that plan carries
+the tier (the static then goes away), or re-file the hoist under P4-123 if
+the umbrella lands it first.
 
 ## P4-134. No RISC-V RVV SIMD Backend — Upstream 3.2 Ships One — **OPEN**
 
@@ -8113,7 +8182,7 @@ into a hard error. Review caught it; no automated gate did.
    matrix covers, so the next person narrowing a `cfg` does not repeat this.
 4. Audit whether the same masking applies elsewhere: `aarch64` NEON is mandatory
    so it has no equivalent, but the x86_64 `target-cpu=native` question in
-   [P4-133](#p4-133-bmi2fma-paths-are-reachable-only-via-target-cpunative-so-portable-builds-leave-them-off--open)
+   [P4-133](#p4-133-bmi2fma-paths-are-reachable-only-via-target-cpunative-so-portable-builds-leave-them-off--partial-measured-and-both-wins-now-dispatch-at-runtime-from-a-baseline-build-the-huffman-tier-is-still-chosen-per-block-rather-than-once-per-plan)
    is the same class of "CI tests a configuration consumers do not get".
 
 **Why it matters beyond P4-135.** It is a *coverage* defect, not a code defect:
@@ -8145,7 +8214,7 @@ criterion 5:
    equivalent gap); the x86_64 `target-cpu=native` case is the same
    "CI tests a configuration consumers do not get" class and is already
    tracked as its own item —
-   [P4-133](#p4-133-bmi2fma-paths-are-reachable-only-via-target-cpunative-so-portable-builds-leave-them-off--open)
+   [P4-133](#p4-133-bmi2fma-paths-are-reachable-only-via-target-cpunative-so-portable-builds-leave-them-off--partial-measured-and-both-wins-now-dispatch-at-runtime-from-a-baseline-build-the-huffman-tier-is-still-chosen-per-block-rather-than-once-per-plan)
    — so it stays there rather than being duplicated. `.cargo/config.toml`
    sets no rustflags beyond the two wasm targets, so nothing else is masked
    repo-wide; the per-job `RUSTFLAGS` in `cross-arch.yml`/`armv7.yml`/
@@ -10140,13 +10209,16 @@ mechanical rather than reviewed.
 timed `BENCH_DCT_METHOD=float` against `cjpeg`-equivalent C at `JDCT_FLOAT`
 on AMD EPYC 7763 and 9V74 runners, from 320×240 up: the portable build is **1.72–1.94×
 slower than C 3.2.0**, and a build with FMA enabled — which removes the libm
-`fmaf` calls P4-133 will dispatch around — is still **1.37–1.53× slower**. A
-one-sample smoke of the same benches on an Apple M-series host (recorded in
-that report's appendix: homebrew jpeg-turbo, unpinned clocks) showed
-1.35–1.55× on 4:2:0/4:2:2 and 1.03× on 4:4:4. Every
-`DctMethod::Float =>` selection site in `src/encode/pipeline_impl/` picks
-`crate::simd::scalar::scalar_fdct_float_quantize`, on every architecture;
-upstream runs `jsimd_convsamp_float` + `jsimd_fdct_float` + `jsimd_quantize_float`
+`fmaf` calls P4-133's FMA twin now dispatches around (2026-09-08) — is still
+**1.37–1.53× slower**. A one-sample smoke of the same benches on an Apple
+M-series host (recorded in that report's appendix: homebrew jpeg-turbo,
+unpinned clocks) showed 1.35–1.55× on 4:2:0/4:2:2 and 1.03× on 4:4:4. Every
+`DctMethod::Float =>` selection site in `src/encode/pipeline_impl/` takes
+`EncoderSimdRoutines::fdct_float_quantize`, which is
+`crate::simd::scalar::scalar_fdct_float_quantize` on every architecture — on
+x86_64 with FMA, that same scalar body re-emitted under `target_feature`
+(P4-133), still not a SIMD kernel; upstream runs `jsimd_convsamp_float` +
+`jsimd_fdct_float` + `jsimd_quantize_float`
 (`simd/x86_64/jfdctflt-sse.asm`, `jquantf-sse2.asm`; `simd/i386/*`) wherever
 SSE is present. The integer default is unaffected — it has AVX2/NEON
 FDCT+quantise kernels — so this is a non-default-path gap, but `-dct float` is
@@ -10167,8 +10239,8 @@ slower on it is a regression a benchmark will find.
    recorded in `experiments/encode.tsv`.
 
 **Why deferred.** Performance on a non-default DCT method; gate item 7 puts
-it after correctness, and P4-133's FMA dispatch should land first so the
-remaining gap is measured without the libm calls in it.
+it after correctness, and P4-133's FMA dispatch landed first (2026-09-08) so
+the remaining gap is measured without the libm calls in it.
 
 ## P4-188. `DctMethod::Float` Documents f64 Arithmetic While the Encoder's Float Path Is f32 — **OPEN**
 
@@ -10176,7 +10248,8 @@ remaining gap is measured without the libm calls in it.
 
 **Motivation.** `src/common/types.rs` documents the variant as "Floating-point
 DCT. Uses f64 arithmetic and the AA&N algorithm." The encode path selected for
-it is `scalar_fdct_float_quantize` → `fdct_float_workspace`
+it is the plan's `fdct_float_quantize` kernel — `scalar_fdct_float_quantize`,
+or its FMA twin on x86_64 — over the shared `fdct_float_workspace_body`
 (`src/encode/fdct.rs`), which is single-precision on purpose — its doc comment
 says so, and byte-parity with `cjpeg -dct float` (`FAST_FLOAT = float`) depends
 on it. `fdct_float` at `src/encode/fdct.rs:389`, the routine the comment seems
@@ -10195,3 +10268,43 @@ that `f32::mul_add` cannot be on the hot path.
 
 **Why deferred.** Documentation only, no runtime effect; filed rather than
 fixed inside #599 because that PR is scoped to the P4-133 measurement.
+
+## P4-189. The islow-Shortcut Guard Infers the DCT Method From Function-Pointer Identity, Which the Language Does Not Guarantee — **OPEN**
+
+**GitHub:** [#603](https://github.com/developer0hye/libjpeg-turbo-rs/issues/603) — filed 2026-09-08 by the P4-133 second milestone (PR #602); coordinates with [P4-123](#p4-123-architecture-umbrella-codec-plans-c-abi-state-public-boundaries-simd-dispatch--open) workstream 2.
+
+**Motivation.** `encode::pipeline_impl::dispatch::may_use_islow_simd_kernel`
+— the #330 fix, consulted at seventeen sites in `mcu.rs` / `baseline.rs` /
+`optimized.rs` — decides whether the fused islow SIMD kernels may replace the
+requested transform by `core::ptr::eq`-comparing the plan's `fdct_quantize_fn`
+against `scalar_fdct_ifast_quantize`, `scalar_fdct_float_quantize` and, since
+#602, the FMA float twin. Rust does not guarantee function-pointer identity:
+the same function may have different addresses and different functions may
+share one (cross-crate instantiation, identical-code folding). Miri models
+exactly that, and #602's `float_and_ifast_kernels_never_unlock_the_islow_simd_shortcut`
+failed under the Miri job on its first `ptr::eq` of a scalar kernel against
+itself. On every shipping target the guard works today — each kernel is a
+distinct non-generic function in one crate, and the `cjpeg -dct fast` /
+`-dct float` byte-parity suites prove it on every CI leg — but the design
+*infers* the method from an address instead of carrying it, so an LLVM merge
+or a cross-crate instantiation would re-create #330 silently. #602 excludes
+that one test under Miri (`#[cfg_attr(miri, ignore = …)]`); it stays live on
+every non-Miri leg.
+
+**Acceptance criteria.**
+
+1. The plan carries the DCT method (or the resolved kernel *kind*) explicitly
+   — an enum beside the `fdct_quantize_fn` pointer, or P4-123 workstream 2's
+   `EncodePlan` — and every former `may_use_islow_simd_kernel` site reads
+   that, not a pointer comparison.
+2. No `ptr::eq` against an FDCT kernel remains in `src/encode/pipeline_impl/`.
+3. `float_and_ifast_kernels_never_unlock_the_islow_simd_shortcut` loses its
+   Miri exclusion and passes under
+   `cargo miri test --no-default-features --features std --lib`.
+4. `tests/regression_dct_method_parity.rs` and `tests/dct_method.rs` stay
+   byte-exact against `cjpeg`.
+
+**Why deferred.** Correct on every shipping target and covered by C parity;
+the fix belongs to the plan model P4-123 workstream 2 is building, and a
+one-off parameter now would be the parallel mechanism that programme warns
+against.

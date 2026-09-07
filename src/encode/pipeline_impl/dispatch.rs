@@ -140,6 +140,16 @@ mod tests {
     /// exactly like the scalar float kernel — otherwise `-dct float` on an
     /// FMA CPU would silently get islow coefficients fed to float divisors,
     /// the #330 defect all over again.
+    ///
+    /// Not run under Miri: it deliberately gives a function a fresh address
+    /// on each pointer cast, which the language permits, so a guard built on
+    /// `ptr::eq` of kernels cannot hold there. That the guard *is* built on
+    /// pointer identity is P4-189 (#603); this test stays live on every real
+    /// target until that lands.
+    #[cfg_attr(
+        miri,
+        ignore = "fn-pointer identity is non-unique under Miri by design; the guard's redesign is P4-189 / #603"
+    )]
     #[test]
     fn float_and_ifast_kernels_never_unlock_the_islow_simd_shortcut() {
         let enc_simd = crate::simd::detect_encoder();

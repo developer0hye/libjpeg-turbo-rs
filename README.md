@@ -62,12 +62,14 @@ Intel Core i5-10400 @ 2.90GHz (turbo off, `performance` governor), C libjpeg-tur
 
 #### Encoding — portable build (stock `cargo build --release`)
 
-The number a packager should judge: no `RUSTFLAGS`, AVX2/SSE2 kernels and the
-BMI1/LZCNT Huffman loop reached by runtime detection. Measured 2026-09-08 by
+The number a packager should judge: no `RUSTFLAGS`, AVX2/SSE2 kernels, the
+BMI1/LZCNT/BMI2 Huffman loop and the FMA float FDCT all reached by runtime
+detection. Measured 2026-09-08 by
 [`perf-portable-vs-native.yml`](.github/workflows/perf-portable-vs-native.yml)
 on a GitHub-hosted AMD EPYC 7763 (Zen 3) runner against upstream's official
-libjpeg-turbo 3.2.0 package, quality 75; shared runner, governor not pinnable,
-run-to-run noise 0–2.5 % (full tables and the per-feature A/B in
+libjpeg-turbo 3.2.0 package, quality 75, on the build as it stood before the
+BMI2 tier and the FMA twin were dispatched; shared runner, governor not
+pinnable, run-to-run noise 0–2.5 % (full tables and the per-feature A/B in
 [`experiments/portable_vs_native_x86_64_2026-09-08.md`](experiments/portable_vs_native_x86_64_2026-09-08.md)).
 
 | Image | Subsampling | Rust (µs) | C (µs) | Ratio |
@@ -86,7 +88,8 @@ run-to-run noise 0–2.5 % (full tables and the per-feature A/B in
 On the same runner `-C target-cpu=native` moved these by 0.7–2.0 % at 1080p
 (1.03–1.07× C). A second sample on an AMD EPYC 9V74 (Zen 4) runner put the
 portable build at 1.09–1.10× C at 1080p and native 2.2–3.5 % faster than
-portable. That is the whole native-only gap for the default integer DCT.
+portable. That was the whole native-only gap for the default integer DCT —
+most of it BMI2, which the portable build now reaches by detection.
 
 #### Encoding — native build (`RUSTFLAGS="-C target-cpu=native"`, supplementary)
 
@@ -126,7 +129,7 @@ Apple M1 Pro, C libjpeg-turbo 3.1.0, quality 75:
 
 **aarch64**: Decoding matches or beats C for 4:2:2 and 4:4:4; 4:2:0 has a 7% gap. Encoding matches or beats C in 7 of 8 configurations (see [`docs/ENCODING_PERFORMANCE.md`](docs/ENCODING_PERFORMANCE.md)); the remaining 1080p 4:2:0 gap (~4%) is structural function-call overhead.
 
-**x86_64**: Decoding beats C across most resolutions. The portable encoder trails C 3.2.0 by 0–14 % (5–10 % at 1080p) on Zen 3 and Zen 4 runners; the 2026-05 native i5-10400 build beat C 3.1.2 by 2–7 %. The encoder runs SSE2 Huffman + AVX2 FDCT/quantize/color/downsample, and the Huffman bitmap-iteration hot path dispatches at runtime on `bmi1 && lzcnt` (P4-8, `src/encode/huffman_encode.rs`), so a stock build already lights up TZCNT/BLSR/LZCNT. What `target-cpu=native` still adds was measured feature by feature in 2026-09 (P4-133 / [#464](https://github.com/developer0hye/libjpeg-turbo-rs/issues/464)): on the default integer DCT, BMI2 (`SHLX`-family shifts in the bit packer) is worth 1.3–2.9 % at 1080p and FMA is noise (≤ 1.7 %); on the non-default float DCT, FMA is worth 18–23 % because `f32::mul_add` is a libm call on a baseline build. Nothing in this port uses PEXT/PDEP. Moving those two behind `cpu_has!` so a portable build reaches them is the open remainder of #464.
+**x86_64**: Decoding beats C across most resolutions. The portable encoder trails C 3.2.0 by 0–14 % (5–10 % at 1080p) on Zen 3 and Zen 4 runners; the 2026-05 native i5-10400 build beat C 3.1.2 by 2–7 %. The encoder runs SSE2 Huffman + AVX2 FDCT/quantize/color/downsample, and the Huffman bitmap-iteration hot path dispatches at runtime on `bmi1 && lzcnt` (P4-8, `src/encode/huffman_encode.rs`), so a stock build already lights up TZCNT/BLSR/LZCNT. What `target-cpu=native` still adds was measured feature by feature in 2026-09 (P4-133 / [#464](https://github.com/developer0hye/libjpeg-turbo-rs/issues/464)): on the default integer DCT, BMI2 (`SHLX`-family shifts in the bit packer) is worth 1.3–2.9 % at 1080p and FMA is noise (≤ 1.7 %); on the non-default float DCT, FMA is worth 18–23 % because `f32::mul_add` is a libm call on a baseline build. Nothing in this port uses PEXT/PDEP. Both are now behind `cpu_has!` — a third BMI2 compilation of the Huffman AC loop, and an FMA twin of the float FDCT installed once per encode in the kernel set — so a portable build reaches them. Measured on the branch (Zen 4 runner, C 3.2.0): the float-DCT portable build now sits at 1.39–1.41× C at 1080p where it was 1.72–1.94×, with compile-time `+fma` adding only 1–2 % more; on the integer DCT the remaining `+bmi2` margin over portable is 0.4–2.2 % against a 0.4–0.6 % noise bracket, which is inside cross-run variance, so the same-run `main-portable` column of the A/B is the number to read for that one.
 
 ## Quick Start
 
@@ -148,7 +151,7 @@ Two numbers exist and they are not interchangeable (P4-133 / [#464](https://gith
 - **Portable** — plain `cargo build --release`. This is what a distribution ships and what a packager should judge the project on. AVX2/NEON/SSE2 kernels are still reached, by runtime detection.
 - **Native** — `RUSTFLAGS="-C target-cpu=native"`. Faster, but the binary is only valid on CPUs matching the build host.
 
-**Measured, not asserted (2026-09-08, Zen 3 and Zen 4 runners, C 3.2.0):** on the default integer DCT the native build is 0.7–3.5 % faster than portable at 1080p, most of it BMI2 in the Huffman bit packer (1.3–2.9 %); FMA changes nothing there. On the float DCT, FMA alone is worth 18–23 %. `-C target-feature=+bmi1,+lzcnt,+bmi2,+fma` is **not** a portable build — it faults on any CPU without BMI2/FMA — so it is an application-only choice, worth 0.8–4.3 % at 1080p. Reaching the BMI2 and FMA wins from a portable build by runtime dispatch is the open remainder of #464; the per-feature tables are in [`experiments/portable_vs_native_x86_64_2026-09-08.md`](experiments/portable_vs_native_x86_64_2026-09-08.md).
+**Measured, not asserted (2026-09-08, Zen 3 and Zen 4 runners, C 3.2.0):** on the default integer DCT the native build is 0.7–3.5 % faster than portable at 1080p, most of it BMI2 in the Huffman bit packer (1.3–2.9 %); FMA changes nothing there. On the float DCT, FMA alone is worth 18–23 %. `-C target-feature=+bmi1,+lzcnt,+bmi2,+fma` is **not** a portable build — it faults on any CPU without BMI2/FMA — so it is an application-only choice, worth 0.8–4.3 % at 1080p *before* the BMI2 and FMA paths were dispatched at runtime; since 2026-09-08 the portable build reaches both by detection, so what compile-time flags still add is the per-block dispatch overhead and the BMI1/LZCNT compile-time margin P4-8 priced at ≤ 1.5 %. The per-feature tables are in [`experiments/portable_vs_native_x86_64_2026-09-08.md`](experiments/portable_vs_native_x86_64_2026-09-08.md).
 
 
 #### x86_64
@@ -158,14 +161,15 @@ it runs on may add the flags:
 
 ```sh
 cargo build --release                                  # portable: what a distribution ships
-RUSTFLAGS="-C target-cpu=native" cargo build --release  # application only: +0.7–3.5 % at 1080p (integer DCT)
+RUSTFLAGS="-C target-cpu=native" cargo build --release  # application only: +0.7–3.5 % at 1080p (integer DCT), measured before the BMI2/FMA dispatch
 ```
 
-The portable build already reaches the AVX2/SSE2 kernels and the BMI1/LZCNT
-Huffman loop by runtime detection. `-C target-feature=+bmi1,+lzcnt,+bmi2,+fma`
-is not a portable baseline — it faults on CPUs without BMI2/FMA — and is worth
-0.8–4.3 % at 1080p on the integer DCT, 19–25 % on the float DCT, until #464
-moves those two behind runtime dispatch. aarch64 / NEON builds are unaffected.
+The portable build already reaches the AVX2/SSE2 kernels, the
+BMI1/LZCNT/BMI2 Huffman loop and the FMA float FDCT by runtime detection
+(#464). `-C target-feature=+bmi1,+lzcnt,+bmi2,+fma` is not a portable
+baseline — it faults on CPUs without BMI2/FMA — and what it still buys over
+the dispatched portable build was 0.4–2.2 % at 1080p on the integer DCT and
+1–2 % on the float DCT in the branch A/B (noise 0.4–0.6 %). aarch64 / NEON builds are unaffected.
 
 #### 32-bit ARM (`armv7`) — measure before you ship it
 
