@@ -975,13 +975,76 @@ jobs:
       # zero tests. Even the corrected multi-filter form
       # (`-- cross_encode cross_check`) selects only 8 tests by name.
       # This job's unique coverage is the C-tool environment: aarch64 macOS
-      # against a real 3.x toolchain, and it is the only leg that runs the
-      # whole suite there — full-c-parity.yml's arm64 legs share the
+      # against a real 3.x toolchain, and it and its `-current-oracle` twin
+      # below are the only legs that run the whole suite there —
+      # full-c-parity.yml's arm64 legs share the
       # environment but run four selected matrices, weekly. The former
       # ubuntu-latest leg is gone: with apt's 2.1.x tools the suite cannot
       # run (tests feed SOF3/12-bit streams to djpeg unconditionally), and
       # installing the official 3.1.4.1 deb would make it an exact duplicate
       # of the Integration Tests job.
+      - run: cargo test --tests
+        timeout-minutes: 30
+
+  # The C Interop leg's `-current-oracle` twin (P4-130). Same runner, same
+  # job-level environment, same unfiltered `cargo test --tests`; the only thing
+  # that differs is the release under LIBJPEG_TURBO_PREFIX. The baseline and
+  # this twin are the only legs that run the whole root suite on macOS
+  # aarch64 for every pull request; until the pair existed that suite had
+  # been measured against 3.2.0 only weekly, by full-c-parity.yml's four
+  # selected matrices (Linux NEON has its own paired cross-arch.yml leg).
+  # Upstream ships no macOS package, which is why this is a second source
+  # build per pull request rather than a deb: the cost that kept the leg on
+  # the unpaired inventory, accepted here because the build is a
+  # NEON-intrinsics tree with no NASM step and takes a fraction of the suite
+  # it serves (56 s against 4 min 26 s on the baseline's last green run).
+  test-cross-encode-current-oracle:
+    name: C Interop (${{ matrix.os }}, oracle 3.2.0)
+    runs-on: ${{ matrix.os }}
+    needs: [test-integration]
+    env:
+      # Exclusive, like the baseline's: on this runner a PATH entry does not
+      # select an oracle at all (`helpers::c_tool_path` reads /opt/homebrew/bin
+      # before PATH), so this variable is the whole of what makes the leg
+      # measure the 3.2.0 build below and nothing else (#569).
+      LIBJPEG_TURBO_PREFIX: /tmp/ljt320/prefix
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest  # aarch64
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build libjpeg-turbo 3.2.0 from source
+        run: |
+          # No NASM: this is an arm64 host, where upstream's SIMD is NEON
+          # intrinsics compiled by the C compiler.
+          command -v cmake >/dev/null || brew install cmake
+          git clone --depth 1 --branch 3.2.0 https://github.com/libjpeg-turbo/libjpeg-turbo.git /tmp/ljt320/src
+          cmake -S /tmp/ljt320/src -B /tmp/ljt320/build -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/tmp/ljt320/prefix
+          cmake --build /tmp/ljt320/build -j$(sysctl -n hw.ncpu)
+          cmake --install /tmp/ljt320/build
+          # PATH so that anything not going through the test helpers reaches
+          # the same install; LIBJPEG_TURBO_PREFIX above is what selects it.
+          echo "/tmp/ljt320/prefix/bin" >> $GITHUB_PATH
+        timeout-minutes: 20
+      # Asserted at the prefix the suite resolves through, not printed: a tag
+      # that upstream repointed, or a build that installed elsewhere, would
+      # otherwise run this leg green under a release it was not measuring.
+      - name: Verify the oracle really is 3.2.0
+        run: |
+          /tmp/ljt320/prefix/bin/djpeg -version 2>&1 | tee /tmp/oracle-version.txt
+          grep -q "version 3.2.0" /tmp/oracle-version.txt
+          /tmp/ljt320/prefix/bin/cjpeg -version 2>&1 | grep -q "version 3.2.0"
+          /tmp/ljt320/prefix/bin/jpegtran -version 2>&1 | grep -q "version 3.2.0"
+      # The identical command to the baseline leg's, which is what
+      # `every_leg_pair_is_compared_and_a_twin_runs_what_its_baseline_runs`
+      # compares: the pair differs in the oracle release and in nothing else.
       - run: cargo test --tests
         timeout-minutes: 30
 
@@ -1041,7 +1104,8 @@ jobs:
   # unmeasured.
   #
   # Cheaper than its baseline rather than dearer, which is why this pair landed
-  # before the other two on the remainder: upstream's official 3.2.0 deb serves
+  # before the C Interop leg (whose twin is a second macOS source build) and
+  # the fuzz leg: upstream's official 3.2.0 deb serves
   # x86_64 Linux, so this leg installs a package where the baseline builds its
   # oracle from source. apt's own libjpeg-turbo serves neither leg: it ships
   # 2.1.x, which is neither of the two releases the pair names.
