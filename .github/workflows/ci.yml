@@ -989,6 +989,13 @@ jobs:
     name: Corpus Test (C parity)
     runs-on: ubuntu-latest
     needs: [test-cross-encode]
+    env:
+      # Exclusive, like its twin's: with the prefix set, the corpus harness
+      # resolves its tools from here and nowhere else. Without it the harness
+      # falls back to lookup order, and a runner image that ever shipped its
+      # own djpeg ahead of /usr/local/bin would make the two legs differ in
+      # PATH and blame the difference on an upstream release (P4-130).
+      LIBJPEG_TURBO_PREFIX: /usr/local
     steps:
       - uses: actions/checkout@v7
         with:
@@ -1036,9 +1043,8 @@ jobs:
   # Cheaper than its baseline rather than dearer, which is why this pair landed
   # before the other two on the remainder: upstream's official 3.2.0 deb serves
   # x86_64 Linux, so this leg installs a package where the baseline builds its
-  # oracle from source. apt's own libjpeg-turbo cannot serve either leg — it is
-  # 2.1.x, which does not have the lossless and 12-bit options this corpus is
-  # generated with.
+  # oracle from source. apt's own libjpeg-turbo serves neither leg: it ships
+  # 2.1.x, which is neither of the two releases the pair names.
   test-corpus-current-oracle:
     name: Corpus Test (C parity, oracle 3.2.0)
     runs-on: ubuntu-latest

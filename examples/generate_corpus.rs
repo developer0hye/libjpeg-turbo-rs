@@ -31,7 +31,20 @@ fn run_cjpeg(cjpeg: &Path, input_ppm: &Path, output_jpg: &Path, args: &[&str]) -
         .arg(input_ppm)
         .output();
     match output {
-        Ok(o) if o.status.success() => true,
+        // An exit status alone does not say a file was written. The
+        // every-variant gate below counts what this returns, so a cjpeg that
+        // exited 0 having produced nothing must not count as generated.
+        Ok(o) if o.status.success() => {
+            let wrote_output: bool =
+                std::fs::metadata(output_jpg).is_ok_and(|metadata| metadata.len() > 0);
+            if !wrote_output {
+                eprintln!(
+                    "cjpeg exited 0 but wrote no output: {}",
+                    output_jpg.display()
+                );
+            }
+            wrote_output
+        }
         Ok(o) => {
             eprintln!("cjpeg failed: {}", String::from_utf8_lossy(&o.stderr));
             false
@@ -611,9 +624,10 @@ fn assert_every_variant_generated(generated: usize, failed: usize) -> Result<(),
         return Ok(());
     }
     Err(format!(
-        "{failed} of {} planned cjpeg variants failed to generate. The corpus \
-         this oracle produces is what the comparison then runs on, so a leg \
-         that drops variants compares a smaller corpus and still reports green.",
+        "{failed} of {} planned cjpeg outputs (variants x sources) failed to \
+         generate. The corpus this oracle produces is what the comparison then \
+         runs on, so a leg that drops outputs compares a smaller corpus and \
+         still reports green.",
         generated + failed
     ))
 }

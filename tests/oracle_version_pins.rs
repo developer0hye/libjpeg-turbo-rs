@@ -2804,6 +2804,12 @@ fn measurement_commands_in(script: &str) -> BTreeSet<String> {
             let Some(subcommand) = cargo_subcommand_index_after(&tokens, at) else {
                 continue;
             };
+            // A run whose failure the shell absorbs is not a measurement:
+            // `cmd || true` normalises to `cmd` below, and a twin written that
+            // way would compare equal to a baseline that fails on it.
+            if failure_is_swallowed(&tokens, subcommand) {
+                continue;
+            }
             let mut words: Vec<&str> = tokens[start..=subcommand].to_vec();
             // An operator glued to the command word is the shell's, not the
             // command's: `cargo test; echo done` runs `cargo test`.
@@ -2815,6 +2821,31 @@ fn measurement_commands_in(script: &str) -> BTreeSet<String> {
         }
     }
     commands
+}
+
+/// Whether the shell absorbs the failure of the invocation whose subcommand
+/// sits at `subcommand`: a `||` is reached before the command list ends.
+///
+/// The scan runs to a `;`, a keyword that closes a compound command, or the
+/// end of the logical line — not to `&&` or `|`, since `a && b || c` runs `c`
+/// when `a` fails and a pipeline's `||` covers the whole pipeline. A `||`
+/// glued to the subcommand word (`cargo test||true`) counts too. Reading a
+/// quoted `||` as one over-approximates in the direction that fails closed.
+fn failure_is_swallowed(tokens: &[&str], subcommand: usize) -> bool {
+    for token in tokens.iter().skip(subcommand) {
+        if token.contains("||") {
+            return true;
+        }
+        if token.ends_with(';')
+            || matches!(
+                shell_word(token),
+                "then" | "do" | "else" | "elif" | "fi" | "done" | "esac"
+            )
+        {
+            return false;
+        }
+    }
+    false
 }
 
 /// One oracle-reaching command a job runs, with the environment it runs
@@ -2835,6 +2866,13 @@ fn test_runs_in(job_block: &str) -> BTreeSet<TestRun> {
     let job_environment: BTreeMap<String, String> = job_level_env_in(job_block);
     let mut runs: BTreeSet<TestRun> = BTreeSet::new();
     for step in steps_in(job_block) {
+        // A step that may not run (`if:`), may not fail
+        // (`continue-on-error:`), or runs under another shell or directory
+        // is not the measurement its command string names, so it earns no
+        // credit; the complete-inventory gate reads the same flag.
+        if step.has_execution_override {
+            continue;
+        }
         let mut environment: BTreeMap<String, String> = job_environment.clone();
         environment.extend(step.environment.iter().map(|(k, v)| (k.clone(), v.clone())));
         for name in ORACLE_PREFIX_VARS {
@@ -4167,6 +4205,84 @@ fn the_corpus_harness_resolves_its_oracle_through_the_shared_rule() {
              leg labelled with one release measures another: it cannot be \
              pointed at an oracle prefix, and it falls back to any djpeg on \
              the machine rather than failing"
+        );
+    }
+}
+
+#[test]
+fn a_run_whose_failure_the_shell_swallows_is_not_a_measurement() {
+    // `cmd || true` normalises to `cmd`: the arguments end where the shell
+    // takes the line back, and `||` is where it does. A twin written that way
+    // compares equal to a baseline that fails on the same command while never
+    // being able to go red itself — the swallowed-failure shape the
+    // version-check gate already refuses, arriving at the measurement. Found
+    // by the review of the corpus pairing, the first pair whose whole
+    // measurement is a `cargo run`.
+    let corpus: &str = "cargo run --release --example corpus_test -- --corpus-dir tests/corpus/";
+    for swallowed in [
+        format!("{corpus} || true"),
+        format!("{corpus}|| true"),
+        format!("{corpus} 2>&1 | tee log || true"),
+        // `a && b || c`: when `a` fails, `c` runs and the step exits with its
+        // status, so the `&&` does not close the swallow.
+        format!("{corpus} && echo compared || echo ignored"),
+        "cargo test --tests || true".to_string(),
+        "cargo test||true".to_string(),
+    ] {
+        assert_eq!(
+            measurement_commands_in(&swallowed),
+            BTreeSet::new(),
+            "{swallowed:?} cannot fail, so it measures nothing"
+        );
+    }
+    // A `||` after a hard separator or on the next line belongs to the next
+    // command, and `if !` is how `test-corpus` introduces its run: all of
+    // these are the measurement.
+    for kept in [
+        format!("{corpus}; tail -5 log || true"),
+        format!("{corpus}\ntail -5 log || true"),
+        format!(
+            "if ! {corpus} > corpus-test.tsv 2>&1; then\n  exit 1\nfi\ntail -5 corpus-test.tsv || true"
+        ),
+    ] {
+        assert_eq!(
+            measurement_commands_in(&kept),
+            BTreeSet::from([corpus.to_string()]),
+            "{kept:?}"
+        );
+    }
+}
+
+#[test]
+fn a_step_that_may_not_run_or_may_not_fail_contributes_no_run() {
+    // `continue-on-error: true` keeps the job green when the step fails, and
+    // `if:` can keep it from running at all; either way the twin's command
+    // string is identical to its baseline's while the measurement is not. The
+    // step scanner already records these for the complete-inventory gate
+    // (`has_execution_override`); the pairing comparison has to read it too,
+    // or a twin that cannot go red runs what its baseline runs.
+    let plain: String = job_around("      - run: cargo test --tests\n");
+    assert_eq!(
+        test_runs_in(&plain),
+        BTreeSet::from([TestRun {
+            command: "cargo test --tests".to_string(),
+            environment: BTreeMap::new(),
+        }])
+    );
+    for override_line in [
+        "if: false",
+        "continue-on-error: true",
+        "working-directory: other",
+        "shell: echo {0}",
+    ] {
+        let overridden: String = job_around(&format!(
+            "      - run: cargo test --tests\n        {override_line}\n"
+        ));
+        assert_eq!(
+            test_runs_in(&overridden),
+            BTreeSet::new(),
+            "a step with `{override_line}` may not run, may not fail, or runs \
+             elsewhere — none of which is the baseline's measurement"
         );
     }
 }
