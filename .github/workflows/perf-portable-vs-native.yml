@@ -13,8 +13,8 @@ name: Perf A/B (portable vs native, x86_64 encode)
 # against the C reference built from upstream's official package, so every
 # per-benchmark delta is a measurement from a single machine and a single hour.
 #
-# Manual only: the deltas being measured are a few percent, and a shared
-# runner's noise floor is of the same order. The job therefore runs the
+# Manual, or on a change to the harness: the deltas being measured are a few
+# percent, and a shared runner's noise floor is of the same order. The job therefore runs the
 # portable binary twice, first and last, and reports that pair alongside the
 # variants — a variant inside the stock/stock spread is noise, not a win.
 # Record the outcome in experiments/encode.tsv per the keep/discard protocol.
@@ -25,6 +25,17 @@ name: Perf A/B (portable vs native, x86_64 encode)
 
 on:
   workflow_dispatch:
+  # Also on a pull request that changes the harness itself — the workflow,
+  # the two benches or the summariser — so a broken harness is caught by the
+  # change that broke it rather than by the next person who needs a number.
+  # A dispatch-only workflow is not even registered by GitHub until it exists
+  # on the default branch, so this is also what lets the first version run.
+  pull_request:
+    paths:
+      - '.github/workflows/perf-portable-vs-native.yml'
+      - 'examples/bench_encode_matrix.rs'
+      - 'examples/bench_c_encode_linux.c'
+      - 'scripts/perf_ab_summary.py'
 
 env:
   CARGO_TERM_COLOR: always
