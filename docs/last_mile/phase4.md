@@ -6544,16 +6544,16 @@ current test or downstream harness in this repository transfers a `cinfo` across
 threads, so nothing is broken today for what we actually measure. It is a
 correctness-of-contract gap that blocks the T3 claim, not a live defect.
 
-## P4-133. BMI2/FMA Paths Are Reachable Only via `target-cpu=native`, So Portable Builds Leave Them Off — **OPEN**
+## P4-133. BMI2/FMA Paths Are Reachable Only via `target-cpu=native`, So Portable Builds Leave Them Off — **PARTIAL: measured on a runner; BMI2 in the Huffman loop and FMA in the float FDCT still wait on runtime dispatch**
 
 **GitHub:** [#464](https://github.com/developer0hye/libjpeg-turbo-rs/issues/464) — under the [#470](https://github.com/developer0hye/libjpeg-turbo-rs/issues/470) umbrella.
 
 **Motivation.** Filed 2026-08-09 by the external drop-in readiness review.
 **[P4-8](#p4-8-runtime-bmi1lzcnt-dispatch-for-x86_64-encode-already-live-readme-updated--closed-2026-05-17)** closed 2026-05-17 after establishing that the BMI1/LZCNT AC
 encoding loop already dispatches at runtime
-(`src/encode/huffman_encode.rs:524,598`), so a stock `cargo build --release` is
+(`src/encode/huffman_encode.rs:559,633`), so a stock `cargo build --release` is
 within ~2 pp of C. That closure recorded an explicit follow-up
-(`phase4.md:233`): *"BMI2 PEXT/PDEP coverage for any encode hot path that
+(`phase4.md:235`): *"BMI2 PEXT/PDEP coverage for any encode hot path that
 benefits + FMA-dispatched FDCT scalar fallback. The static-analysis review
 correctly notes these remain `target-cpu=native`-gated today."*
 
@@ -6563,16 +6563,17 @@ downstream lab. By this repository's own rule — if it is not in LAST_MILE, it
 does not exist for the next session — the deferral was a silent drop. This entry
 restores it.
 
-**Why it matters for T3 specifically.** `README.md:94,113` still recommends
-`RUSTFLAGS="-C target-cpu=native"` for the last few percent. That is sound advice
-for an application built on the target machine, and unusable for a *system
-library*: a distribution package is built once and runs on every CPU of that
-architecture, so it must be compiled to the baseline and light up wider
-instruction sets at runtime. Every percent that only `target-cpu=native` unlocks
-is a percent a packaged `libjpeg.so.8` cannot have. C libjpeg-turbo has no such
-constraint — its hot loops are hand-written NASM with the instructions embedded,
-dispatched at runtime, which `docs/last_mile/phase1.md:217` already identifies as
-the root of the original gap.
+**Why it matters for T3 specifically.** README's performance and build-flag
+sections recommended, at filing, `RUSTFLAGS="-C target-cpu=native"` for the
+last few percent. That is sound advice for an application built on the target
+machine, and unusable for a *system library*: a distribution package is built
+once and runs on every CPU of that architecture, so it must be compiled to the
+baseline and light up wider instruction sets at runtime. Every percent that
+only `target-cpu=native` unlocks is a percent a packaged `libjpeg.so.8` cannot
+have. C libjpeg-turbo has no such constraint — its hot loops are hand-written
+NASM with the instructions embedded, dispatched at runtime, which
+`docs/last_mile/phase1.md:217` already identifies as the root of the original
+gap.
 
 **Acceptance criteria.**
 
@@ -6599,6 +6600,47 @@ the root of the original gap.
 **Why deferred.** Performance, and gate item 7 puts correctness first. It is
 filed now because the deferral was previously untracked, not because it
 outranks the Stage A items.
+
+**Progress (2026-09-08) — criteria 1, 4 and 5 met; 2 and 3 remain.**
+PR #599 added `.github/workflows/perf-portable-vs-native.yml` (manual, or on
+a pull request that changes the harness): one x86_64 runner builds
+`examples/bench_encode_matrix` seven ways — portable, `+bmi1,+lzcnt`, `+bmi2`,
+`+fma`, README's `+bmi1,+lzcnt,+bmi2,+fma`, `+avx2`, `target-cpu=native` —
+and times each for the integer and the float DCT against upstream's official
+3.2.0 package, portable and C each timed first and last so the run's own
+drift brackets the variants (`scripts/perf_ab_summary.py --noise-pair`). Two
+samples, on AMD EPYC 7763 (Zen 3) and EPYC 9V74 (Zen 4), recorded in
+`experiments/portable_vs_native_x86_64_2026-09-08.md` and
+`experiments/encode.tsv`:
+
+- **Integer DCT (every default encode):** native is worth 0.7–3.5 % at
+  1080p; `+bmi2` alone 1.3–2.9 %, outside the 0–1.2 % noise bracket in every
+  1080p case of both samples — the compiler's `SHLX`-family shifts in the Huffman bit packer,
+  which the `#[target_feature(enable = "bmi1,lzcnt")]` variant does not
+  enable. `+fma` is noise (≤ 1.7 %); `+avx2` ≤ 1.6 %; compile-time `+bmi1,+lzcnt` a
+  further 0.6–1.5 % over the runtime dispatch (P4-8 priced that). Nothing in
+  the port uses PEXT/PDEP; that half of the P4-8 follow-up had nothing to
+  measure. **Portable vs C 3.2.0: 1.00–1.14× from 320×240 up, 1.05–1.10×
+  at 1080p**; even native does not beat C on either CPU (the 2026-05 i5-10400
+  native table did, against 3.1.2).
+- **Float DCT (`-dct float`):** compile-time FMA is worth 18–23 % of the
+  whole encode — `f32::mul_add` in `fdct_float_workspace` is a libm `fmaf`
+  call on a baseline build. Even with it the port trails C by 1.37–1.53×
+  because upstream's float FDCT/quantiser is SIMD and ours is scalar on every
+  backend: filed as **P4-187**.
+- README's performance section now quotes the portable build from the run and
+  marks the i5-10400 native table supplementary; the `+bmi1,+lzcnt,+bmi2,+fma`
+  line is no longer described as a portable baseline (it faults without
+  BMI2/FMA).
+
+**Remaining (criteria 2 and 3):** (a) add `bmi2` to the elevated Huffman
+variant's feature set behind `cpu_has!("bmi2")`; (b) a
+`#[target_feature(enable = "fma")]` twin of `scalar_fdct_float_quantize`
+selected where `DctMethod::Float` already picks the kernel at plan build — both
+resolved once per plan, per P4-123 workstream 2, and each proved by
+dispatching the workflow on its branch (this PR registers it on `main`, so
+`gh workflow run perf-portable-vs-native.yml --ref <branch>` works) and by the
+existing `cjpeg -dct float` byte-parity suites for (b).
 
 ## P4-134. No RISC-V RVV SIMD Backend — Upstream 3.2 Ships One — **OPEN**
 
@@ -10089,3 +10131,67 @@ frame's reference), and that reasoning is recorded only in the PR #597 review.
 hand with the reason recorded, and the defect class the gate exists for is
 already caught on the primary decode path. This makes the remaining checks
 mechanical rather than reviewed.
+
+## P4-187. Float-DCT Encode Runs Scalar on Every Backend While C Uses SIMD, So `-dct float` Trails C by Well Over a Third — **OPEN**
+
+**GitHub:** [#600](https://github.com/developer0hye/libjpeg-turbo-rs/issues/600) — surfaced by the P4-133 measurement (PR #599).
+
+**Motivation.** The P4-133 A/B (`experiments/portable_vs_native_x86_64_2026-09-08.md`)
+timed `BENCH_DCT_METHOD=float` against `cjpeg`-equivalent C at `JDCT_FLOAT`
+on AMD EPYC 7763 and 9V74 runners, from 320×240 up: the portable build is **1.72–1.94×
+slower than C 3.2.0**, and a build with FMA enabled — which removes the libm
+`fmaf` calls P4-133 will dispatch around — is still **1.37–1.53× slower**. A
+one-sample smoke of the same benches on an Apple M-series host (recorded in
+that report's appendix: homebrew jpeg-turbo, unpinned clocks) showed
+1.35–1.55× on 4:2:0/4:2:2 and 1.03× on 4:4:4. Every
+`DctMethod::Float =>` selection site in `src/encode/pipeline_impl/` picks
+`crate::simd::scalar::scalar_fdct_float_quantize`, on every architecture;
+upstream runs `jsimd_convsamp_float` + `jsimd_fdct_float` + `jsimd_quantize_float`
+(`simd/x86_64/jfdctflt-sse.asm`, `jquantf-sse2.asm`; `simd/i386/*`) wherever
+SSE is present. The integer default is unaffected — it has AVX2/NEON
+FDCT+quantise kernels — so this is a non-default-path gap, but `-dct float` is
+a documented `cjpeg` option and a TurboJPEG flag, and a drop-in that is 1.4×
+slower on it is a regression a benchmark will find.
+
+**Acceptance criteria.**
+
+1. An x86_64 SSE2 (and, if it pays, AVX2) float FDCT + float quantise kernel
+   pair, dispatched with `cpu_has!` the same way `fdct_quantize` is, selected
+   once at plan build; a NEON pair on aarch64 (upstream has none there, so
+   parity with C on aarch64 is the bar, not upstream's mechanism).
+2. Byte-identical output to `cjpeg -dct float` on the existing float parity
+   suites (`tests/regression_dct_method_parity.rs`, `tests/dct_method.rs`,
+   `tests/cross_check_encoder_options.rs`) — upstream's SSE float FDCT is the
+   same AA&N arithmetic in single precision, so exactness is the contract.
+3. The P4-133 workflow's float table at ≤ 1.10× C 3.2.0 on the 1080p cases,
+   recorded in `experiments/encode.tsv`.
+
+**Why deferred.** Performance on a non-default DCT method; gate item 7 puts
+it after correctness, and P4-133's FMA dispatch should land first so the
+remaining gap is measured without the libm calls in it.
+
+## P4-188. `DctMethod::Float` Documents f64 Arithmetic While the Encoder's Float Path Is f32 — **OPEN**
+
+**GitHub:** [#601](https://github.com/developer0hye/libjpeg-turbo-rs/issues/601) — surfaced by the P4-133 review (PR #599).
+
+**Motivation.** `src/common/types.rs` documents the variant as "Floating-point
+DCT. Uses f64 arithmetic and the AA&N algorithm." The encode path selected for
+it is `scalar_fdct_float_quantize` → `fdct_float_workspace`
+(`src/encode/fdct.rs`), which is single-precision on purpose — its doc comment
+says so, and byte-parity with `cjpeg -dct float` (`FAST_FLOAT = float`) depends
+on it. `fdct_float` at `src/encode/fdct.rs:389`, the routine the comment seems
+to describe, is not what the pipeline uses. A reader choosing `Float` for
+"more precision" is being told the opposite of what they get; a reader
+reasoning about the P4-133 FMA dispatch from the public doc would conclude
+that `f32::mul_add` cannot be on the hot path.
+
+**Acceptance criteria.**
+
+1. The variant's doc states the precision the *selected* path actually uses,
+   for the encoder and, if it differs, the decoder's float IDCT, with the
+   parity reason.
+2. If `fdct_float` (the `[i32; 64]`-output routine) is dead on every path,
+   say so at its definition or remove it; if it is live, name where.
+
+**Why deferred.** Documentation only, no runtime effect; filed rather than
+fixed inside #599 because that PR is scoped to the P4-133 measurement.

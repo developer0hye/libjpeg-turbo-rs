@@ -2724,7 +2724,7 @@ const CURRENT_ORACLE_SUFFIX: &str = "-current-oracle";
 /// Each entry is a decision with a reason, not a silent omission — and the
 /// list is checked in both directions, so pairing a leg means deleting its row
 /// here and leaving one behind is a failure rather than a stale paragraph.
-const UNPAIRED_ORACLE_JOBS: [(&str, &str, &str); 2] = [
+const UNPAIRED_ORACLE_JOBS: [(&str, &str, &str); 3] = [
     (
         "ci.yml",
         "mutants-in-diff",
@@ -2741,6 +2741,16 @@ const UNPAIRED_ORACLE_JOBS: [(&str, &str, &str); 2] = [
          75-minute jobs every six hours — and the reproduction instructions \
          the failure path prints name the release too, so the pairing has to \
          reach those as well.",
+    ),
+    (
+        "perf-portable-vs-native.yml",
+        "perf-encode-x86_64",
+        "a performance measurement, not a parity measurement (P4-133): it \
+         times our encoder built portable, per-feature and native against the \
+         C reference on one runner, and the C column is a target, not an \
+         expectation. The reference is current upstream stable alone because \
+         a second C release would double this job's wall clock to \
+         measure a codec that does not change between the two.",
     ),
 ];
 

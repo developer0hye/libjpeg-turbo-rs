@@ -36,15 +36,15 @@ Measured with the in-repo harnesses (methodology: [#361](https://github.com/deve
 | vs | Result (decode) |
 | --- | --- |
 | **zune-jpeg** (the `image` crate's default) | **31 wins / 3 losses** of 34 scored cases (±2% threshold) across subsampling × progressive × 16×16→8K, quiet aarch64, 2026-07-28; e.g. 4K progressive **0.65×**, 4K 4:2:0 **0.74×** of zune's time. Through the `image`-crate bridge: **1.31× faster** at 1080p. Two losses are 16×16 fixed-cost cases (1.20×, 1.08×); the third is a 64×64 non-interleaved 4:4:0 image (1.78×) on the multi-scan path. Full output: [`experiments/zune_matrix_aarch64_2026-07-28.md`](experiments/zune_matrix_aarch64_2026-07-28.md). |
-| **C libjpeg-turbo** | **Decode** (stock `cargo build --release`): matches or beats C on most benchmarks on x86_64/AVX2 (i5-10400), within a few % on aarch64/NEON (M1 Pro). **Encode**: the x86_64 tables below are built with `RUSTFLAGS="-C target-cpu=native"`, not a stock release build — see [Portable vs native builds](#portable-vs-native-builds) before quoting them. Dated per-platform tables below. |
+| **C libjpeg-turbo** | **Decode** (stock `cargo build --release`): matches or beats C on most benchmarks on x86_64/AVX2 (i5-10400), within a few % on aarch64/NEON (M1 Pro). **Encode**: the x86_64 *portable* table below is a stock `cargo build --release` (1.05–1.10× C 3.2.0 at 1080p on Zen 3 and Zen 4 runners); the i5-10400 table is a `target-cpu=native` build and supplementary — see [Portable vs native builds](#portable-vs-native-builds) before quoting either. Dated per-platform tables below. |
 
 ## Performance
 
 ### x86_64 (AVX2)
 
-Intel Core i5-10400 @ 2.90GHz (turbo off, `performance` governor), C libjpeg-turbo 3.1.2, quality 75:
-
 #### Decoding
+
+Intel Core i5-10400 @ 2.90GHz (turbo off, `performance` governor), C libjpeg-turbo 3.1.2, quality 75:
 
 | Image | Subsampling | Rust (us) | C (us) | Ratio |
 |-------|-------------|-----------|--------|-------|
@@ -60,7 +60,38 @@ Intel Core i5-10400 @ 2.90GHz (turbo off, `performance` governor), C libjpeg-tur
 | 2560x1440 | 4:2:0 | 35,137 | 37,918 | **0.93x** |
 | 3840x2160 | 4:2:0 | 78,868 | 89,325 | **0.88x** |
 
-#### Encoding (built with `RUSTFLAGS="-C target-cpu=native"`)
+#### Encoding — portable build (stock `cargo build --release`)
+
+The number a packager should judge: no `RUSTFLAGS`, AVX2/SSE2 kernels and the
+BMI1/LZCNT Huffman loop reached by runtime detection. Measured 2026-09-08 by
+[`perf-portable-vs-native.yml`](.github/workflows/perf-portable-vs-native.yml)
+on a GitHub-hosted AMD EPYC 7763 (Zen 3) runner against upstream's official
+libjpeg-turbo 3.2.0 package, quality 75; shared runner, governor not pinnable,
+run-to-run noise 0–2.5 % (full tables and the per-feature A/B in
+[`experiments/portable_vs_native_x86_64_2026-09-08.md`](experiments/portable_vs_native_x86_64_2026-09-08.md)).
+
+| Image | Subsampling | Rust (µs) | C (µs) | Ratio |
+|-------|-------------|-----------|--------|-------|
+| 320x240 | 4:2:0 | 303 | 287 | 1.05x |
+| 320x240 | 4:2:2 | 382 | 361 | 1.06x |
+| 320x240 | 4:4:4 | 566 | 566 | 1.00x |
+| 640x480 | 4:2:0 | 1,065 | 1,037 | 1.03x |
+| 640x480 | 4:2:2 | 1,343 | 1,275 | 1.05x |
+| 640x480 | 4:4:4 | 1,920 | 1,890 | 1.02x |
+| 1280x720 | 4:2:0 | 3,619 | 3,501 | 1.03x |
+| 1920x1080 | 4:2:0 | 8,171 | 7,643 | 1.07x |
+| 1920x1080 | 4:2:2 | 10,471 | 9,685 | 1.08x |
+| 1920x1080 | 4:4:4 | 15,496 | 14,806 | 1.05x |
+
+On the same runner `-C target-cpu=native` moved these by 0.7–2.0 % at 1080p
+(1.03–1.07× C). A second sample on an AMD EPYC 9V74 (Zen 4) runner put the
+portable build at 1.09–1.10× C at 1080p and native 2.2–3.5 % faster than
+portable. That is the whole native-only gap for the default integer DCT.
+
+#### Encoding — native build (`RUSTFLAGS="-C target-cpu=native"`, supplementary)
+
+Intel Core i5-10400, C libjpeg-turbo 3.1.2, 2026-05; valid only for a binary
+built on the machine it runs on.
 
 | Image | Subsampling | Rust (µs) | C (µs) | Ratio |
 |-------|-------------|-----------|--------|-------|
@@ -95,7 +126,7 @@ Apple M1 Pro, C libjpeg-turbo 3.1.0, quality 75:
 
 **aarch64**: Decoding matches or beats C for 4:2:2 and 4:4:4; 4:2:0 has a 7% gap. Encoding matches or beats C in 7 of 8 configurations (see [`docs/ENCODING_PERFORMANCE.md`](docs/ENCODING_PERFORMANCE.md)); the remaining 1080p 4:2:0 gap (~4%) is structural function-call overhead.
 
-**x86_64**: Decoding beats C across most resolutions. Encoding (with `target-cpu=native`) beats C in every benchmark above by 2–7 %; the encoder runs SSE2 Huffman + AVX2 FDCT/quantize/color/downsample. The Huffman bitmap-iteration hot path uses runtime `is_x86_feature_detected!("bmi1") && is_x86_feature_detected!("lzcnt")` dispatch (P4-8, see `src/encode/huffman_encode.rs:508,580,703`) so a stock `cargo build --release` automatically lights up TZCNT/BLSR/LZCNT on any CPU that supports them — no `RUSTFLAGS` needed for the AC-encoding inner loop. `target-cpu=native` still wins because it unlocks BMI2 PEXT/PDEP and FMA in code paths the runtime dispatch does not yet cover (FDCT scalar fallback, scalar quantization tail), so the recommendation stands for the last few percent: `RUSTFLAGS="-C target-cpu=native"` (best) or `-C target-feature=+bmi1,+lzcnt,+bmi2,+fma`. Pre-P4-8 the stock baseline trailed C by 5–10 pp at 1080p; that gap is now < 2 pp on a Haswell-class CPU.
+**x86_64**: Decoding beats C across most resolutions. The portable encoder trails C 3.2.0 by 0–14 % (5–10 % at 1080p) on Zen 3 and Zen 4 runners; the 2026-05 native i5-10400 build beat C 3.1.2 by 2–7 %. The encoder runs SSE2 Huffman + AVX2 FDCT/quantize/color/downsample, and the Huffman bitmap-iteration hot path dispatches at runtime on `bmi1 && lzcnt` (P4-8, `src/encode/huffman_encode.rs`), so a stock build already lights up TZCNT/BLSR/LZCNT. What `target-cpu=native` still adds was measured feature by feature in 2026-09 (P4-133 / [#464](https://github.com/developer0hye/libjpeg-turbo-rs/issues/464)): on the default integer DCT, BMI2 (`SHLX`-family shifts in the bit packer) is worth 1.3–2.9 % at 1080p and FMA is noise (≤ 1.7 %); on the non-default float DCT, FMA is worth 18–23 % because `f32::mul_add` is a libm call on a baseline build. Nothing in this port uses PEXT/PDEP. Moving those two behind `cpu_has!` so a portable build reaches them is the open remainder of #464.
 
 ## Quick Start
 
@@ -117,25 +148,24 @@ Two numbers exist and they are not interchangeable (P4-133 / [#464](https://gith
 - **Portable** — plain `cargo build --release`. This is what a distribution ships and what a packager should judge the project on. AVX2/NEON/SSE2 kernels are still reached, by runtime detection.
 - **Native** — `RUSTFLAGS="-C target-cpu=native"`. Faster, but the binary is only valid on CPUs matching the build host.
 
-**The x86_64 encoding table below is a native build.** The remaining native-only win is BMI2 PEXT/PDEP and FMA in paths runtime dispatch does not yet cover; moving those behind `cpu_has!` so a portable build reaches them is #464, and the per-benchmark delta is unmeasured until then — treat "the last few percent" as a claim awaiting measurement, not a result.
+**Measured, not asserted (2026-09-08, Zen 3 and Zen 4 runners, C 3.2.0):** on the default integer DCT the native build is 0.7–3.5 % faster than portable at 1080p, most of it BMI2 in the Huffman bit packer (1.3–2.9 %); FMA changes nothing there. On the float DCT, FMA alone is worth 18–23 %. `-C target-feature=+bmi1,+lzcnt,+bmi2,+fma` is **not** a portable build — it faults on any CPU without BMI2/FMA — so it is an application-only choice, worth 0.8–4.3 % at 1080p. Reaching the BMI2 and FMA wins from a portable build by runtime dispatch is the open remainder of #464; the per-feature tables are in [`experiments/portable_vs_native_x86_64_2026-09-08.md`](experiments/portable_vs_native_x86_64_2026-09-08.md).
 
 
 #### x86_64
 
-For x86_64 production builds, set:
+A package should ship the plain build; an application built for the machine
+it runs on may add the flags:
 
 ```sh
-RUSTFLAGS="-C target-cpu=native" cargo build --release
-# or, for a portable v3 baseline:
-RUSTFLAGS="-C target-feature=+bmi1,+lzcnt,+bmi2,+fma" cargo build --release
+cargo build --release                                  # portable: what a distribution ships
+RUSTFLAGS="-C target-cpu=native" cargo build --release  # application only: +0.7–3.5 % at 1080p (integer DCT)
 ```
 
-This unlocks BMI1 / LZCNT / BMI2 / FMA in the encoder's scalar
-bitmap-iteration hot path, which the C reference's NASM SIMD already
-embeds. Without these flags `cargo build --release` defaults to the
-SSE2-only `x86_64-v1` baseline and the encoder trails C by 5–10 pp at
-1080p; with them, Rust beats C in every encode benchmark in the
-Performance section above. aarch64 / NEON builds are unaffected.
+The portable build already reaches the AVX2/SSE2 kernels and the BMI1/LZCNT
+Huffman loop by runtime detection. `-C target-feature=+bmi1,+lzcnt,+bmi2,+fma`
+is not a portable baseline — it faults on CPUs without BMI2/FMA — and is worth
+0.8–4.3 % at 1080p on the integer DCT, 19–25 % on the float DCT, until #464
+moves those two behind runtime dispatch. aarch64 / NEON builds are unaffected.
 
 #### 32-bit ARM (`armv7`) — measure before you ship it
 

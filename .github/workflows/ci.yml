@@ -148,6 +148,10 @@ jobs:
       # syntax error would surface as a red scheduled job nobody is watching.
       - run: bash -n scripts/check_oracle_currency.sh
       - run: python3 -m unittest discover -s scripts/tests -p 'test_issue_loop_watch.py'
+      # P4-133's A/B summariser is what turns a perf run into the numbers
+      # README and experiments/encode.tsv quote; a parser that dropped a case
+      # would put an unmeasured claim back.
+      - run: python3 -m unittest discover -s scripts/tests -p 'test_perf_ab_summary.py'
 
   # Proves each declared `rust-version` actually compiles (issue #390).
   # A single workspace-wide 1.87 check is impossible: the image-bridge
