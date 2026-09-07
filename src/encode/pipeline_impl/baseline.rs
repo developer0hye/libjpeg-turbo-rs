@@ -1,5 +1,7 @@
 #[cfg(all(target_arch = "x86_64", feature = "simd"))]
 use super::may_use_islow_simd_kernel;
+#[cfg(all(target_arch = "x86_64", feature = "simd"))]
+use super::AcTier;
 use super::{
     build_huff_table, compress_optimized_with_params, convert_to_ycbcr, encode_color_mcu,
     encode_color_mcu_with_dummies, encode_single_block, format, fullsize_smooth_plane,
@@ -396,7 +398,9 @@ pub fn compress_with_params(params: &CompressParams<'_>) -> Result<Vec<u8>> {
 
                 if fast_cols > 0 {
                     unsafe {
-                        // Reserve capacity for the columns this path will encode
+                        // The writer's AC tier, then the row's capacity
+                        // reservation — both hoisted out of the per-MCU loop.
+                        let ac_tier: AcTier = bit_writer.ac_tier();
                         let (mut pb, mut fb, mut buf) = bit_writer.begin_block(3072 * fast_cols);
 
                         for mcu_col in 0..fast_cols {
@@ -449,6 +453,7 @@ pub fn compress_with_params(params: &CompressParams<'_>) -> Result<Vec<u8>> {
                                     &mut pb,
                                     &mut fb,
                                     &mut buf,
+                                    ac_tier,
                                     block,
                                     &mut prev_dc_y,
                                     &dc_luma_table,
@@ -459,6 +464,7 @@ pub fn compress_with_params(params: &CompressParams<'_>) -> Result<Vec<u8>> {
                                 &mut pb,
                                 &mut fb,
                                 &mut buf,
+                                ac_tier,
                                 &q[4],
                                 &mut prev_dc_cb,
                                 &dc_chroma_table,
@@ -468,6 +474,7 @@ pub fn compress_with_params(params: &CompressParams<'_>) -> Result<Vec<u8>> {
                                 &mut pb,
                                 &mut fb,
                                 &mut buf,
+                                ac_tier,
                                 &q[5],
                                 &mut prev_dc_cr,
                                 &dc_chroma_table,

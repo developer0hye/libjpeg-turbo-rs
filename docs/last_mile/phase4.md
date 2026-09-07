@@ -229,7 +229,7 @@ Original acceptance criteria preserved below:
 
 **Verification:**
 
-- `grep -n "is_x86_feature_detected" src/encode/huffman_encode.rs` shows the BMI1+LZCNT dispatch in the two AC-encode call sites and the `#[target_feature(enable = "bmi1,lzcnt")]` variant.
+- `grep -n "is_x86_feature_detected" src/encode/huffman_encode.rs` shows the BMI1+LZCNT dispatch in the two AC-encode call sites and the `#[target_feature(enable = "bmi1,lzcnt")]` variant. *(As of 2026-09-08 the probes live in `AcTier::detect()` behind `cpu_has!` and the two dispatch sites are the `match ac_tier` in `encode_block` / `encode_block_hoisted`, so the equivalent command is `grep -n "AcTier::detect\|match ac_tier\|target_feature(enable = \"bmi1" src/encode/huffman_encode.rs` — see P4-133.)*
 - A stock `cargo build --release` (no env) followed by `RUSTFLAGS="-C target-cpu=native" cargo build --release` and per-bench comparison against C libjpeg-turbo at 1080p shows < 2 pp delta on a Haswell-class CPU (operator should pin the measurement in `experiments/encode.tsv` when running on a new CPU class).
 
 **Follow-up (deferred to P2 backlog):** BMI2 PEXT/PDEP coverage for any encode hot path that benefits + FMA-dispatched FDCT scalar fallback. The static-analysis review correctly notes these remain `target-cpu=native`-gated today.
@@ -6544,14 +6544,14 @@ current test or downstream harness in this repository transfers a `cinfo` across
 threads, so nothing is broken today for what we actually measure. It is a
 correctness-of-contract gap that blocks the T3 claim, not a live defect.
 
-## P4-133. BMI2/FMA Paths Are Reachable Only via `target-cpu=native`, So Portable Builds Leave Them Off — **PARTIAL: measured, and both wins now dispatch at runtime from a baseline build; the Huffman tier is still chosen per block rather than once per plan**
+## P4-133. BMI2/FMA Paths Are Reachable Only via `target-cpu=native`, So Portable Builds Leave Them Off — **CLOSED 2026-09-08**
 
 **GitHub:** [#464](https://github.com/developer0hye/libjpeg-turbo-rs/issues/464) — under the [#470](https://github.com/developer0hye/libjpeg-turbo-rs/issues/470) umbrella.
 
 **Motivation.** Filed 2026-08-09 by the external drop-in readiness review.
 **[P4-8](#p4-8-runtime-bmi1lzcnt-dispatch-for-x86_64-encode-already-live-readme-updated--closed-2026-05-17)** closed 2026-05-17 after establishing that the BMI1/LZCNT AC
 encoding loop already dispatches at runtime
-(`src/encode/huffman_encode.rs:560,644`), so a stock `cargo build --release` is
+(`src/encode/huffman_encode.rs:613,708`), so a stock `cargo build --release` is
 within ~2 pp of C. That closure recorded an explicit follow-up
 (`phase4.md:235`): *"BMI2 PEXT/PDEP coverage for any encode hot path that
 benefits + FMA-dispatched FDCT scalar fallback. The static-analysis review
@@ -6681,7 +6681,9 @@ criterion 3 met for FMA, not yet for the Huffman tier.**
   `x86_64_ac_kernel_tiers_emit_identical_bytes` asserts all three tiers
   emit the same bytes across EOB-only, ZRL-run, trailing-63, dense, sparse
   and category-10 blocks, and `x86_64_ac_tier_is_resolved_once_and_matches_detection`
-  pins the cache to the uncached answer.
+  pins the cache to the uncached answer (that test is
+  `x86_64_bit_writer_resolves_ac_tier_at_construction_and_matches_detection`
+  since the third milestone below removed the cache).
 - **Measured on the branch** (`gh workflow run perf-portable-vs-native.yml
   --ref perf/p4-133-runtime-dispatch`, run 34157974332, AMD EPYC 9V74 /
   Zen 4, C 3.2.0, noise 0.2–0.6 % at 1080p; tables in
@@ -6717,15 +6719,58 @@ criterion 3 met for FMA, not yet for the Huffman tier.**
   new test ran its fallback branch and still had to pass; the elevated
   branches are exercised by CI's x86_64 runners and by the A/B above.
 
-**Remaining (criterion 3 for the Huffman tier).** The AC-tier choice is
-resolved once — but per process, in a static, not on the encode plan. Moving
-it onto the plan means threading a resolved tier through the sixteen
-`encode_block_hoisted` and fifty-odd `encode_block` call sites, or giving the
-MCU loops a plan object to read it from, which is P4-123 workstream 2's
-`EncodePlan`; doing it as a one-off parameter now would be the parallel
-mechanism criterion 3 warns against. Close this item when that plan carries
-the tier (the static then goes away), or re-file the hoist under P4-123 if
-the umbrella lands it first.
+**Progress (2026-09-08, third milestone) — criterion 3 met for the Huffman
+tier; the process-wide static is gone.** After the second milestone the
+AC-tier choice was resolved once — but per process, in an `AtomicU8`, not on
+the encode operation. The object every entropy-emitting site already holds
+is the operation's `BitWriter`: each encode, transcode and 12-bit writer
+constructs exactly one where it builds its plan (baseline and raw right
+after `detect_encoder()`, the planar/coefficient/precision writers where
+they build their tables), every `encode_block` takes it, and every
+`encode_block_hoisted` site sits inside that writer's
+`begin_block`/`end_block` bracket. So the writer now owns the tier:
+`BitWriter::new` resolves `AcTier::detect()` once, `encode_block` reads the
+writer's tier next to the hoisted `pb`/`fb`/`buf`, and the five hoisted MCU
+paths — the four `mcu.rs` `encode_mcu_*` loops per MCU, `baseline.rs`'s
+4:2:0 fast path per MCU row — read `writer.ac_tier()` once beside
+`begin_block` and pass it to `encode_block_hoisted` as one more piece of
+hoisted writer state — no new parameter threads through the MCU-loop
+signatures, and no second dispatch mechanism exists beside the kernel set.
+`AC_TIER_CACHE`, `AcTier::current()` and `resolve_and_cache()` are deleted.
+A test-only `BitWriter::with_ac_tier` refuses a tier above the detected one
+(running a `target_feature` body without the feature is UB) and lets the
+dispatch be exercised at every tier the CPU has. Per-block cost is one field
+load and a match instead of one relaxed atomic load and a match; the
+assembly still shows four `shlx` in the BMI2 tier and none in the BMI1 tier.
+When P4-123 workstream 2's `EncodePlan` lands it owns the writer, and with
+it the tier, without further change.
+
+**Status (2026-09-08): closed.** Criteria 1, 4, 5 by PR #599, criterion 2
+by PR #602, criterion 3 by PR #602 (FMA, `EncoderSimdRoutines`) and this
+milestone (Huffman tier on the operation's `BitWriter`). Proof:
+`cargo test --lib --target x86_64-apple-darwin huffman_encode` —
+`x86_64_bit_writer_resolves_ac_tier_at_construction_and_matches_detection`
+(the writer's tier is the CPU's, fixed per writer, a tier above the CPU is
+refused), `x86_64_encode_block_dispatches_on_the_writer_tier` and
+`x86_64_encode_block_hoisted_takes_the_writer_tier_it_is_handed` (reference
+bytes through a writer pinned to each available tier, on both dispatchers) and
+`x86_64_ac_kernel_tiers_emit_identical_bytes`; `grep -rn "AC_TIER_CACHE\|AcTier::current" src` is empty; the
+`cjpeg` byte-parity suites (`tests/dct_method.rs`,
+`tests/regression_dct_method_parity.rs`, the encode matrices) cover every
+x86_64 CI runner. Each dispatch test skips a tier this CPU cannot run, so on
+the Rosetta host — no BMI2, as the second milestone recorded — the elevated
+arms are proven on CI's x86_64 runners, not locally. Same-run A/B on the branch
+(`perf-portable-vs-native.yml`, runs 6–7 in
+`experiments/portable_vs_native_x86_64_2026-09-08.md` and the `67f672d` row
+of `experiments/encode.tsv`; `main-portable` is `origin/main` with #602 in,
+so the column isolates this change): run 34166439144 (Intel Xeon 6973P-C)
+could not resolve it — `main-portable / stock` 0.96–1.01 inside that host's
+0.2–6.3 % drift; run 34167658277 (AMD EPYC 7763 / Zen 3, brackets ≤ 0.6 %)
+puts `main` 3.2–3.9 % slower than the branch on every 4:2:0 case and within
+0.5 % on 4:2:2/4:4:4, and compile-time `+bmi2` over the dispatched build at
+0.991–1.011 (noise) on the CPU model where it was worth 1.3–2.9 % before the
+tier existed. The tier is reached, and moving it onto the writer cost
+nothing and gained a measured 3–4 % on the row-hoisted 4:2:0 paths.
 
 ## P4-134. No RISC-V RVV SIMD Backend — Upstream 3.2 Ships One — **OPEN**
 
@@ -8198,7 +8243,7 @@ into a hard error. Review caught it; no automated gate did.
    matrix covers, so the next person narrowing a `cfg` does not repeat this.
 4. Audit whether the same masking applies elsewhere: `aarch64` NEON is mandatory
    so it has no equivalent, but the x86_64 `target-cpu=native` question in
-   [P4-133](#p4-133-bmi2fma-paths-are-reachable-only-via-target-cpunative-so-portable-builds-leave-them-off--partial-measured-and-both-wins-now-dispatch-at-runtime-from-a-baseline-build-the-huffman-tier-is-still-chosen-per-block-rather-than-once-per-plan)
+   [P4-133](#p4-133-bmi2fma-paths-are-reachable-only-via-target-cpunative-so-portable-builds-leave-them-off--closed-2026-09-08)
    is the same class of "CI tests a configuration consumers do not get".
 
 **Why it matters beyond P4-135.** It is a *coverage* defect, not a code defect:
@@ -8230,7 +8275,7 @@ criterion 5:
    equivalent gap); the x86_64 `target-cpu=native` case is the same
    "CI tests a configuration consumers do not get" class and is already
    tracked as its own item —
-   [P4-133](#p4-133-bmi2fma-paths-are-reachable-only-via-target-cpunative-so-portable-builds-leave-them-off--partial-measured-and-both-wins-now-dispatch-at-runtime-from-a-baseline-build-the-huffman-tier-is-still-chosen-per-block-rather-than-once-per-plan)
+   [P4-133](#p4-133-bmi2fma-paths-are-reachable-only-via-target-cpunative-so-portable-builds-leave-them-off--closed-2026-09-08)
    — so it stays there rather than being duplicated. `.cargo/config.toml`
    sets no rustflags beyond the two wasm targets, so nothing else is masked
    repo-wide; the per-job `RUSTFLAGS` in `cross-arch.yml`/`armv7.yml`/
@@ -10323,4 +10368,7 @@ every non-Miri leg.
 **Why deferred.** Correct on every shipping target and covered by C parity;
 the fix belongs to the plan model P4-123 workstream 2 is building, and a
 one-off parameter now would be the parallel mechanism that programme warns
-against.
+against. (P4-133's third milestone set a precedent worth weighing: it put
+the Huffman tier on the `BitWriter` the operation already holds rather than
+waiting for `EncodePlan`, which criterion 1's "an enum beside the
+`fdct_quantize_fn` pointer" option would mirror for the DCT method.)

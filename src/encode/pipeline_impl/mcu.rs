@@ -1,5 +1,7 @@
 #[cfg(all(target_arch = "x86_64", feature = "simd"))]
 use super::downsample_chroma_block_h2v1_ssse3;
+#[cfg(all(target_arch = "x86_64", feature = "simd"))]
+use super::AcTier;
 use super::{
     downsample_chroma_block, extract_block, may_use_islow_simd_kernel, vec, BitWriter, HuffTable,
     HuffmanEncoder, QuantDivisors, Subsampling,
@@ -985,11 +987,13 @@ pub(super) fn encode_mcu_444_x86_64(
     }
 
     unsafe {
+        let ac_tier: AcTier = writer.ac_tier();
         let (mut pb, mut fb, mut buf) = writer.begin_block(1536);
         HuffmanEncoder::encode_block_hoisted(
             &mut pb,
             &mut fb,
             &mut buf,
+            ac_tier,
             &q[0],
             prev_dc_y,
             dc_luma_table,
@@ -999,6 +1003,7 @@ pub(super) fn encode_mcu_444_x86_64(
             &mut pb,
             &mut fb,
             &mut buf,
+            ac_tier,
             &q[1],
             prev_dc_cb,
             dc_chroma_table,
@@ -1008,6 +1013,7 @@ pub(super) fn encode_mcu_444_x86_64(
             &mut pb,
             &mut fb,
             &mut buf,
+            ac_tier,
             &q[2],
             prev_dc_cr,
             dc_chroma_table,
@@ -1116,11 +1122,13 @@ pub(super) fn encode_mcu_422_x86_64(
     }
 
     unsafe {
+        let ac_tier: AcTier = writer.ac_tier();
         let (mut pb, mut fb, mut buf) = writer.begin_block(2048);
         HuffmanEncoder::encode_block_hoisted(
             &mut pb,
             &mut fb,
             &mut buf,
+            ac_tier,
             &q[0],
             prev_dc_y,
             dc_luma_table,
@@ -1130,6 +1138,7 @@ pub(super) fn encode_mcu_422_x86_64(
             &mut pb,
             &mut fb,
             &mut buf,
+            ac_tier,
             &q[1],
             prev_dc_y,
             dc_luma_table,
@@ -1139,6 +1148,7 @@ pub(super) fn encode_mcu_422_x86_64(
             &mut pb,
             &mut fb,
             &mut buf,
+            ac_tier,
             &q[2],
             prev_dc_cb,
             dc_chroma_table,
@@ -1148,6 +1158,7 @@ pub(super) fn encode_mcu_422_x86_64(
             &mut pb,
             &mut fb,
             &mut buf,
+            ac_tier,
             &q[3],
             prev_dc_cr,
             dc_chroma_table,
@@ -1286,6 +1297,7 @@ pub(super) fn encode_mcu_420_x86_64(
     // Phase 2: Huffman encode all 6 blocks with MCU-level hoisted state.
     // 3072 bytes = 6 blocks × 512 bytes worst-case per block.
     unsafe {
+        let ac_tier: AcTier = writer.ac_tier();
         let (mut pb, mut fb, mut buf) = writer.begin_block(3072);
 
         // 4 Y blocks
@@ -1294,6 +1306,7 @@ pub(super) fn encode_mcu_420_x86_64(
                 &mut pb,
                 &mut fb,
                 &mut buf,
+                ac_tier,
                 block,
                 prev_dc_y,
                 dc_luma_table,
@@ -1305,6 +1318,7 @@ pub(super) fn encode_mcu_420_x86_64(
             &mut pb,
             &mut fb,
             &mut buf,
+            ac_tier,
             &q[4],
             prev_dc_cb,
             dc_chroma_table,
@@ -1315,6 +1329,7 @@ pub(super) fn encode_mcu_420_x86_64(
             &mut pb,
             &mut fb,
             &mut buf,
+            ac_tier,
             &q[5],
             prev_dc_cr,
             dc_chroma_table,
@@ -1454,12 +1469,14 @@ pub(super) fn encode_mcu_420_half_chroma(
 
     // Huffman encode all 6 blocks with MCU-level hoisted state
     unsafe {
+        let ac_tier: AcTier = writer.ac_tier();
         let (mut pb, mut fb, mut buf) = writer.begin_block(3072);
         for block in q.iter().take(4) {
             HuffmanEncoder::encode_block_hoisted(
                 &mut pb,
                 &mut fb,
                 &mut buf,
+                ac_tier,
                 block,
                 prev_dc_y,
                 dc_luma_table,
@@ -1470,6 +1487,7 @@ pub(super) fn encode_mcu_420_half_chroma(
             &mut pb,
             &mut fb,
             &mut buf,
+            ac_tier,
             &q[4],
             prev_dc_cb,
             dc_chroma_table,
@@ -1479,6 +1497,7 @@ pub(super) fn encode_mcu_420_half_chroma(
             &mut pb,
             &mut fb,
             &mut buf,
+            ac_tier,
             &q[5],
             prev_dc_cr,
             dc_chroma_table,

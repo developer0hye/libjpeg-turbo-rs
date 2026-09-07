@@ -11,6 +11,8 @@ use crate::common::error::{JpegError, Result};
 use crate::common::layout::{checked_span, ImageLayout};
 use crate::common::types::{DctMethod, PixelFormat, SavedMarker, ScanScript, Subsampling};
 use crate::encode::color;
+#[cfg(all(target_arch = "x86_64", feature = "simd"))]
+use crate::encode::huffman_encode::AcTier;
 use crate::encode::huffman_encode::{
     build_huff_table, local_drain_bits, local_put_bits, BitWriter, HuffTable, HuffmanEncoder,
 };
