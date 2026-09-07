@@ -1482,7 +1482,7 @@ pub fn write_coefficients_optimized(coeffs: &JpegCoefficients) -> Result<Vec<u8>
                         let dc_val: i16 = if is_dummy { prev_dc[ci] } else { block[0] };
                         // wrapping_sub: corrupt/adversarial input can pair DCs
                         // whose difference exceeds i16; wrap matches the
-                        // baseline-encoder convention (huffman_encode.rs:461/495)
+                        // baseline-encoder convention (huffman_encode.rs:559/597)
                         // and gather_dc_symbol's leading-zeros classification.
                         let diff: i16 = dc_val.wrapping_sub(prev_dc[ci]);
                         prev_dc[ci] = dc_val;

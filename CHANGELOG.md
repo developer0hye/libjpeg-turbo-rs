@@ -57,12 +57,16 @@ and `git log` between tags.
   are now compiled as `target_feature` twins of the same bodies and selected
   with the crate's `cpu_has!` pattern — the FMA twin once per encode in
   `EncoderSimdRoutines::fdct_float_quantize`, the Huffman tier once per
-  process and cached — so a packaged library gets them on the CPUs that have
-  them. Output is unchanged: `mul_add` rounds once either way, and
+  encode on the operation's `BitWriter` — so a packaged library gets them
+  on the CPUs that have them. Output is unchanged: `mul_add` rounds once either way, and
   the three Huffman tiers are one body, both asserted by new tests.
   `EncoderSimdRoutines` gained a public `fdct_float_quantize` field; the type
   has a private field and cannot be constructed outside the crate, so this is
-  additive.
+  additive. `HuffmanEncoder::encode_block_hoisted` is now `pub(crate)`: it
+  gained the writer's `AcTier`, which is crate-private. It took raw hoisted
+  `BitWriter` state that only the in-crate MCU loops can produce, so nothing
+  downstream could call it, but it was nameable, so this is a removal from
+  the public surface.
 - **The C reference submodule is libjpeg-turbo 3.2.0** (P4-130, #461).
   `references/libjpeg-turbo` moved from 3.1.90 (3.2 beta1) to the 3.2.0 tag,
   so the classic-ABI trace oracle built from it and every `j*.c:NNN` citation

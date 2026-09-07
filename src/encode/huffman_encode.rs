@@ -153,8 +153,8 @@ impl BitWriter {
     /// The x86_64 AC tier this writer resolved when it was built.
     ///
     /// The hoisted MCU paths read it once next to [`Self::begin_block`] —
-    /// per MCU in `encode_mcu_*_x86_64`, per MCU row in the `baseline.rs`
-    /// 4:2:0 fast path — and hand it to
+    /// per MCU in `mcu.rs`'s four `encode_mcu_*` paths, per MCU row in the
+    /// `baseline.rs` 4:2:0 fast path — and hand it to
     /// [`HuffmanEncoder::encode_block_hoisted`] alongside the other hoisted
     /// state.
     #[cfg(all(target_arch = "x86_64", feature = "simd"))]
@@ -607,25 +607,35 @@ impl HuffmanEncoder {
                 // --- AC coefficients ---
                 #[cfg(all(target_arch = "x86_64", feature = "simd"))]
                 {
-                    // Same tier dispatch as `encode_block_hoisted`.
-                    #[cfg(test)]
-                    LAST_AC_TIER.with(|taken| taken.set(Some(ac_tier)));
+                    // Same tier dispatch as `encode_block_hoisted`. Each arm
+                    // records itself under `cfg(test)` so the tests see the
+                    // arm taken, not the value matched on.
                     match ac_tier {
-                        AcTier::Bmi1LzcntBmi2 => encode_ac_x86_64_bmi1_lzcnt_bmi2(
-                            &mut pb,
-                            &mut fb,
-                            &mut buf,
-                            coeffs_zigzag,
-                            ac_table,
-                        ),
-                        AcTier::Bmi1Lzcnt => encode_ac_x86_64_bmi1_lzcnt(
-                            &mut pb,
-                            &mut fb,
-                            &mut buf,
-                            coeffs_zigzag,
-                            ac_table,
-                        ),
+                        AcTier::Bmi1LzcntBmi2 => {
+                            #[cfg(test)]
+                            LAST_AC_TIER.with(|taken| taken.set(Some(AcTier::Bmi1LzcntBmi2)));
+                            encode_ac_x86_64_bmi1_lzcnt_bmi2(
+                                &mut pb,
+                                &mut fb,
+                                &mut buf,
+                                coeffs_zigzag,
+                                ac_table,
+                            )
+                        }
+                        AcTier::Bmi1Lzcnt => {
+                            #[cfg(test)]
+                            LAST_AC_TIER.with(|taken| taken.set(Some(AcTier::Bmi1Lzcnt)));
+                            encode_ac_x86_64_bmi1_lzcnt(
+                                &mut pb,
+                                &mut fb,
+                                &mut buf,
+                                coeffs_zigzag,
+                                ac_table,
+                            )
+                        }
                         AcTier::Sse2 => {
+                            #[cfg(test)]
+                            LAST_AC_TIER.with(|taken| taken.set(Some(AcTier::Sse2)));
                             encode_ac_x86_64(&mut pb, &mut fb, &mut buf, coeffs_zigzag, ac_table)
                         }
                     }
@@ -684,7 +694,7 @@ impl HuffmanEncoder {
             // Adversarial / corrupt input can produce a quantized DC pair whose
             // difference exceeds i16 range. Use wrapping_sub to match the bit
             // pattern Huffman category encoding expects (and the existing
-            // baseline-encoder convention at lines 461 / 495); silent overflow
+            // baseline-encoder convention at lines 559 / 597); silent overflow
             // in release stayed silent only by luck and panicked under fuzz.
             let diff: i16 = dc.wrapping_sub(*prev_dc);
             *prev_dc = dc;
@@ -702,17 +712,24 @@ impl HuffmanEncoder {
             // `encode_ac_corrected_lsb` would otherwise impose, so the
             // TZCNT + BLSR savings (BMI1/LZCNT, P4-8) and the SHLX-family
             // shifts in the inlined bit packer (BMI2, P4-133 / #464) flow
-            // through without offsetting overhead.
-            #[cfg(test)]
-            LAST_AC_TIER.with(|taken| taken.set(Some(ac_tier)));
+            // through without offsetting overhead. Each arm records itself
+            // under `cfg(test)` so the tests see the arm taken.
             match ac_tier {
                 AcTier::Bmi1LzcntBmi2 => {
+                    #[cfg(test)]
+                    LAST_AC_TIER.with(|taken| taken.set(Some(AcTier::Bmi1LzcntBmi2)));
                     encode_ac_x86_64_bmi1_lzcnt_bmi2(pb, fb, buf, coeffs_zigzag, ac_table)
                 }
                 AcTier::Bmi1Lzcnt => {
+                    #[cfg(test)]
+                    LAST_AC_TIER.with(|taken| taken.set(Some(AcTier::Bmi1Lzcnt)));
                     encode_ac_x86_64_bmi1_lzcnt(pb, fb, buf, coeffs_zigzag, ac_table)
                 }
-                AcTier::Sse2 => encode_ac_x86_64(pb, fb, buf, coeffs_zigzag, ac_table),
+                AcTier::Sse2 => {
+                    #[cfg(test)]
+                    LAST_AC_TIER.with(|taken| taken.set(Some(AcTier::Sse2)));
+                    encode_ac_x86_64(pb, fb, buf, coeffs_zigzag, ac_table)
+                }
             }
         }
     }
@@ -756,9 +773,9 @@ pub(crate) enum AcTier {
 
 // Test-only observation point for the dispatch (P4-133, #464 criterion 3).
 // The three tiers emit identical bytes, so output alone cannot show which
-// body a block took; each dispatcher records the tier it matched on here,
-// per thread so parallel tests do not see each other. `cfg(test)` only —
-// the shipped library carries nothing.
+// body a block took; each dispatch arm records itself here (the arm taken,
+// not the value matched on), per thread so parallel tests do not see each
+// other. `cfg(test)` only — the shipped library carries nothing.
 #[cfg(all(test, target_arch = "x86_64", feature = "simd"))]
 std::thread_local! {
     pub(crate) static LAST_AC_TIER: core::cell::Cell<Option<AcTier>> =
@@ -1532,7 +1549,7 @@ mod tests {
         let mut writer = BitWriter::new(256);
 
         let dc: i16 = coeffs[0];
-        // wrapping_sub: see lines 461/495 for rationale (adversarial DC pairs
+        // wrapping_sub: see lines 559/597 for rationale (adversarial DC pairs
         // can exceed i16 range; wrap matches the baseline-encoder convention).
         let diff: i16 = dc.wrapping_sub(*prev_dc);
         *prev_dc = dc;
