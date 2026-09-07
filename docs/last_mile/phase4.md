@@ -5786,8 +5786,8 @@ same two commands on the same runner against the official 3.2.0 deb. It is
 *cheaper* than its baseline rather than dearer, which is why this pair landed
 before the other two on the remainder: the baseline builds its oracle from
 source at `/usr/local`, so pairing it costs a package install rather than a
-second build. (apt's own libjpeg-turbo serves neither leg: it is 2.1.x, which
-lacks the lossless and 12-bit options this corpus is generated with.)
+second build. (apt's own libjpeg-turbo serves neither leg: it ships 2.1.x,
+which is neither of the two releases the pair names.)
 
 **Pairing it was not a workflow edit, because the comparison could not see what
 this leg measures.** `test-corpus` runs no `cargo test`: it measures with
@@ -5849,13 +5849,40 @@ a stand-in `cjpeg` under `LIBJPEG_TURBO_PREFIX` refusing one variant label lost
 46 of 8,832 in a scratch run — well inside the slack the floor leaves — and the
 run exits 1 naming the count.
 
-The gates were validated by mutation rather than by passing, in eight
+The gates were validated by mutation rather than by passing, in ten
 directions: echoing the twin's corpus run, moving it to another runner, pointing
 it at 3.1.4.1, deleting its version assertion, deleting its oracle prefix,
 deleting its corpus-generation step, leaving the now-paired row in
-`UNPAIRED_ORACLE_JOBS`, and giving `corpus_test.rs` a private lookup back. Each
-turns exactly the intended gate red, and the unmutated tree is 54 green (52 at
-the time; P4-175's closure added two more the day this landed).
+`UNPAIRED_ORACLE_JOBS`, giving `corpus_test.rs` a private lookup back, writing
+the twin's corpus run as `… || true`, and putting `continue-on-error: true` on
+that step. Each turns exactly the intended gate red, and the unmutated tree is
+56 green (52 when first measured; P4-175's closure added two the day this
+landed, and the review round below two more).
+
+*The review found a twin that cannot fail satisfied the pair.* `cmd || true`
+normalised to `cmd`, because the argument scan stops where the shell takes the
+line back and `||` is where it does — so a twin written that way compared
+equal to a baseline that fails on the same command while never being able to
+go red itself. The step scanner already recorded `if:` and
+`continue-on-error:` for the complete-inventory gate, and the pairing
+comparison never read the flag. Pre-existing in kind for every `cargo test`
+pair, and newly load-bearing here: this is the first pair whose whole
+measurement is two `cargo run` steps. `failure_is_swallowed` now drops an
+invocation whose command list reaches a `||` before a `;` or a closing
+keyword (`&&` and `|` do not close the swallow: `a && b || c` runs `c` when
+`a` fails), and `test_runs_in` credits no step carrying an execution
+override. Both pinned in both directions — `if !` and a next-line `||` are
+still the measurement. The `if`-conditional shape without `exit 1` stays with
+P4-177's criterion 5. The same round gave the **baseline** leg
+`LIBJPEG_TURBO_PREFIX: /usr/local`: it had resolved by lookup order while its
+twin resolved exclusively, so a runner image shipping its own `djpeg` ahead of
+`/usr/local/bin` would have made the pair differ in PATH and blamed the
+difference on a release. Also corrected on the way: the corpus is generated
+with none of the lossless or 12-bit options the workflow comment claimed, so
+apt's 2.1.x is excluded for being neither release the pair names, not for
+lacking them; and `run_cjpeg` now requires a non-empty output file, since the
+every-output gate counts what it returns and an exit status alone does not say
+a file was written.
 
 **What remains.**
 
@@ -5902,10 +5929,16 @@ remaining pairing of `fuzz-smoke.yml`.
 hard-coded list — `/opt/homebrew/bin`, `/usr/local/bin`,
 `/opt/libjpeg-turbo/bin`, `/usr/bin` — and never read
 `LIBJPEG_TURBO_PREFIX`: `fuzz/fuzz_targets/fuzz_decode_diff_c.rs:63`,
-`fuzz_encode_diff_c.rs:93,98`, `fuzz_transform_diff_c.rs:67,72`. It is the same
-list in the same order as the private `find_c_tool` the review of #569 found in
-`capi_classic_lifecycle_pathological` — a survivor of the P4-116 sweep — and the
-same one both corpus examples carried until this pairing moved them onto
+`fuzz_encode_diff_c.rs:93,98`, `fuzz_transform_diff_c.rs:75,80`. The encode
+target alone reads a differently named `LIBJPEG_TURBO_BIN` first
+(`fuzz_encode_diff_c.rs:73`) and *falls back* to the list when the tool is not
+under it, so it is selectable but not exclusively — criterion 1 there is a
+rename plus exclusivity rather than a mechanism from scratch. It is the same
+four directories as the private `find_c_tool` the review of #569 found in
+`capi_classic_lifecycle_pathological` — a survivor of the P4-116 sweep, which
+read `/usr/bin` before `/opt/libjpeg-turbo/bin` rather than after — and the same
+prefix-blind shape both corpus examples carried, in their shorter
+`/opt/homebrew/bin`-then-PATH form, until this pairing moved them onto
 `tests/helpers/oracle_prefix.rs`.
 
 Two consequences. **The oracle cannot be selected**, so the leg cannot be
