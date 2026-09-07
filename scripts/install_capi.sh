@@ -448,12 +448,17 @@ write_import_library() {
         cat "$work/dumpbin.txt" >&2
         exit 1
     fi
-    # The export table rows: `ordinal hint RVA name`. Every export of this
-    # crate is a `#[no_mangle] extern "C" fn`; a `#[no_mangle] static` would
-    # need the `DATA` keyword here, which dumpbin's listing does not reveal,
-    # so one must not be added to the crate without extending this writer.
+    # The export table rows: `ordinal hint RVA name`, followed by
+    # `= <symbol>` when dumpbin can name the code behind the export — it does
+    # for this DLL, and identical-code folding makes several exports share
+    # one symbol there (`jpeg_c_get_bool_param = jpeg_c_bool_param_supported`),
+    # so the fourth field is the export name and the rest is ignored. Every
+    # export of this crate is a `#[no_mangle] extern "C" fn`; a
+    # `#[no_mangle] static` would need the `DATA` keyword here, which the
+    # listing does not reveal, so one must not be added to the crate without
+    # extending this writer.
     tr -d '\r' < "$work/dumpbin.txt" \
-        | awk 'NF == 4 && $1 ~ /^[0-9]+$/ && $3 ~ /^[0-9A-Fa-f]+$/ { print $4 }' \
+        | awk 'NF >= 4 && $1 ~ /^[0-9]+$/ && $3 ~ /^[0-9A-Fa-f]+$/ { print $4 }' \
         > "$exports"
     count="$(wc -l < "$exports" | tr -d ' ')"
     # Both API surfaces and a plausible count: a parse that dropped most rows
