@@ -288,7 +288,7 @@ const COMPRESS_FORMATS: &[PixelFormat] = &[
 /// |---|---|---|
 /// | `gray_8x8.jpg` | `decompress` | `8, 8, 8, 2, 3, 1, 1, 0` |
 /// | `api_sequence_color_16x16_422_dense.jpg` | `decompress` | `16, 16, 8, 1, 1, 72, 71, 1` |
-/// | `api_sequence_lossless16_gray_8x8.jpg` | `decompress_16bit` | `8, 8, 16, -1, -1, 1, 1, 0` |
+/// | `inputs/api_sequence_lossless16_gray_8x8.jpg` | `decompress_16bit` | `8, 8, 16, -1, -1, 1, 1, 0` |
 /// | `real_world/libjpeg_testorig12_227x149_12bit.jpg` | `decompress_12bit` | `227, 149, 12, …` |
 ///
 /// The second is `cjpeg -quality 80 -sample 2x1` output whose JFIF APP0
@@ -310,7 +310,11 @@ const COMPRESS_FORMATS: &[PixelFormat] = &[
 pub const BUILTIN_INPUTS: &[&[u8]] = &[
     include_bytes!("../fixtures/gray_8x8.jpg"),
     include_bytes!("../fixtures/api_sequence_color_16x16_422_dense.jpg"),
-    include_bytes!("../fixtures/api_sequence_lossless16_gray_8x8.jpg"),
+    // Not under `tests/fixtures/`: `examples/generate_corpus.rs` copies that
+    // tree wholesale into the C-parity corpus, whose decode comparison runs
+    // the 8-bit `decompress()`, and this stream is 16-bit lossless. See
+    // `tests/inputs/README.md` and P4-201.
+    include_bytes!("../inputs/api_sequence_lossless16_gray_8x8.jpg"),
     include_bytes!("../fixtures/real_world/libjpeg_testorig12_227x149_12bit.jpg"),
 ];
 

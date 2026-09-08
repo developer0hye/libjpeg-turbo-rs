@@ -8561,7 +8561,19 @@ the harness first would only pin current behaviour.
   `criterion_named_sequence_leaves_no_state_behind` drives the triggering
   configuration across eleven fixtures and passes. The module doc says so, and
   criterion 5 of P4-200 is the fifth property that closes it.
-  That is four defects from criterion 3, against five from criterion 4.
+  A fifth came from CI rather than from review:
+  [P4-201](#p4-201-the-c-parity-corpus-adopts-every-file-under-testsfixtures-and-compares-it-through-the-8-bit-decompress-so-a-precision-specific-fixture-is-reported-as-a-crash--open)
+  (#623). The branch's first push turned both `Corpus Test (C parity)` legs red
+  with `1 crash` and nothing else — `examples/generate_corpus.rs` copies the
+  whole of `tests/fixtures/` into the corpus and `examples/corpus_test.rs`
+  compares every file through the **8-bit** `decompress()`, so the new 16-bit
+  lossless built-in was read by an entry point that cannot read it, and the two
+  offending rows landed nine thousand lines above the `tail -200` the workflow
+  prints. The stream lives in `tests/inputs/` now, outside the tree the corpus
+  copies, and `the_sixteen_bit_builtin_stays_out_of_the_c_parity_corpus`
+  asserts both the reason and the consequence, comparing bytes so a rename does
+  not evade it.
+  That is five defects from criterion 3, against five from criterion 4.
 - **Criterion 2 — partial since 2026-08-13** (see the criterion text).
 - **Criteria 1, 6, 7 — untouched; criterion 3's C-ABI half untouched.**
 
@@ -11541,3 +11553,68 @@ the P4-141 criterion-3 harness. Changing what a decode publishes is a
 public-API behaviour change needing its own C cross-validation pass, and the
 fix has to decide what `decompress_12bit` / `decompress_16bit` do as well,
 which overlaps P4-199.
+
+## P4-201. The C-Parity Corpus Adopts Every File Under `tests/fixtures/` and Compares It Through the 8-Bit `decompress()`, So a Precision-Specific Fixture Is Reported as a Crash — **OPEN**
+
+**GitHub:** [#623](https://github.com/developer0hye/libjpeg-turbo-rs/issues/623) — found 2026-09-09 by the pull request that landed the P4-141 criterion-3 harness, whose first push turned both `Corpus Test (C parity)` legs red; under the [#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481) umbrella.
+
+**What it is.** `examples/generate_corpus.rs` copies **the whole of
+`tests/fixtures/`**, recursively and unfiltered, into the C-parity corpus
+(`copy_jpgs(&fixtures_src, &fixtures_dir)`), and `examples/corpus_test.rs`
+compares every corpus file against `djpeg`/`cjpeg`/`jpegtran` through the
+**8-bit** entry point, classifying any error from it as a *crash*
+(`run_decode_test`, `examples/corpus_test.rs:511-520`). One 16-bit lossless
+fixture — `cjpeg -precision 16 -lossless 1`, which only `decompress_16bit`
+reads — therefore produced
+
+```
+Decode:  9738 pass, 2 expected-reject, 1 known-mismatch, 0 fail, 1 crash, 0 skip
+Encode:  9404 pass, 1 expected-reject, 0 known-mismatch, 0 fail, 1 crash, 0 skip
+```
+
+with the two offending rows written to `corpus-test.tsv` some nine thousand
+lines before the `tail -200` the workflow prints. The job log named neither the
+file, nor its precision, nor the fact that the corpus's *premise* rather than
+the library was what broke; reproducing it took a local corpus run over a
+two-file directory.
+
+**The premise is worth keeping, which is why this is not simply "filter by
+precision".** `decompress()` reads 12-bit sources too:
+`tests/fixtures/real_world/libjpeg_testorig12_227x149_12bit.jpg` passes the
+corpus comparison byte-exactly (measured 2026-09-09). Filtering the fixture
+bucket by declared precision would *remove* real coverage. The true premise is
+narrower — "the 8-bit entry point can read it" — and it is nowhere stated or
+enforced. The fuzz-seed bucket, by contrast, *is* filtered, by a predicate that
+does not depend on our code (`retain_matching_files(..., strict_djpeg_accepts)`).
+
+**Acceptance criteria.**
+
+1. A fixture the corpus's decode comparison cannot run is either excluded at
+   corpus-assembly time or reported with a distinct outcome — not as `crash`,
+   which is the harness's word for "Rust errored where C succeeded".
+2. The rule is enforced rather than documented: adding such a file to
+   `tests/fixtures/` fails a *named* check that says which file and why. The
+   filter must not be able to silently drop a fixture we have merely regressed
+   on — which is why `strict_djpeg_accepts` is safe as a predicate and "our
+   decoder accepts it" would not be.
+3. The corpus job surfaces the offending rows: `tail -200` over a
+   nine-thousand-line TSV cannot show a failure near the top. Upload
+   `corpus-test.tsv` as an artifact, or grep the non-`pass` rows before the
+   tail.
+4. `tests/inputs/README.md` — the stopgap filed alongside this item — is
+   replaced by the enforced rule, or kept and pointed at it.
+
+**Stopgap in place.** `tests/inputs/` holds the one file, outside the tree the
+corpus copies, and `the_sixteen_bit_builtin_stays_out_of_the_c_parity_corpus`
+in `tests/api_sequence_state.rs` asserts both halves: that the 8-bit entry
+point really does refuse the stream (the reason) and that no copy of it sits
+under `tests/fixtures/` (the consequence). It compares bytes rather than names,
+so renaming does not evade it — verified by planting a copy under a different
+name, which fails it. That guard covers this one input; it does not cover the
+next one.
+
+**Why deferred.** Filed rather than fixed inside the pull request that surfaced
+it, which lands test infrastructure for a different item. Criteria 1 and 2
+change what the corpus job admits and how it classifies an outcome, which is a
+release-gate mechanism; criterion 3 is a workflow edit whose value is that it
+*runs*.

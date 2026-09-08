@@ -64,7 +64,7 @@ fn corpus() -> Vec<(&'static str, Vec<u8>)> {
         ),
         (
             "lossless16_gray_8x8",
-            include_bytes!("fixtures/api_sequence_lossless16_gray_8x8.jpg").to_vec(),
+            include_bytes!("inputs/api_sequence_lossless16_gray_8x8.jpg").to_vec(),
         ),
         // The only 12-bit source in the tree, and so the only input on which
         // `Op::Decompress12` returns `Ok` — see `BUILTIN_INPUTS`.
@@ -544,6 +544,73 @@ fn the_fuzz_input_indices_name_the_images_they_claim() {
         "this input is the only one `Decompress12` accepts, so it is the only \
          one on which P4's write-back comparison for that opcode runs"
     );
+}
+
+/// The 16-bit built-in must stay out of `tests/fixtures/`.
+///
+/// `examples/generate_corpus.rs` copies that tree wholesale into the C-parity
+/// corpus, and `examples/corpus_test.rs` compares every corpus file through
+/// the **8-bit** `decompress()`. This stream is 16-bit lossless, which that
+/// entry point refuses — and the corpus harness records a Rust error as a
+/// `crash`, so putting the file under `tests/fixtures/` turns a premise
+/// mismatch into a job failure that names neither the file's precision nor the
+/// premise. It did exactly that on the first push of this branch.
+///
+/// Both halves are asserted, because either alone is satisfiable by accident:
+/// that the 8-bit entry point really does refuse it (the reason), and that the
+/// file is not under `tests/fixtures/` (the consequence). The trap itself is
+/// P4-201.
+#[test]
+fn the_sixteen_bit_builtin_stays_out_of_the_c_parity_corpus() {
+    let sixteen_bit: &[u8] = BUILTIN_INPUTS[2];
+    assert!(
+        libjpeg_turbo_rs::decompress(sixteen_bit).is_err(),
+        "if the 8-bit entry point ever reads this stream, the reason for \
+         keeping it out of the corpus is gone and this test should go with it"
+    );
+    assert!(
+        TjHandle::new().decompress_16bit(sixteen_bit).is_ok(),
+        "and the precision entry point must still read it"
+    );
+
+    // The corpus copies by path, so the placement is what the corpus sees.
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let inside: std::path::PathBuf =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        let offenders: Vec<String> = walk(&inside)
+            .into_iter()
+            .filter(|path| {
+                std::fs::read(path)
+                    .map(|b| b == sixteen_bit)
+                    .unwrap_or(false)
+            })
+            .map(|path| path.display().to_string())
+            .collect();
+        assert!(
+            offenders.is_empty(),
+            "the 16-bit lossless input is inside the C-parity corpus tree: {offenders:?}"
+        );
+    }
+}
+
+/// Every file under `dir`, recursively. Only used by the placement check
+/// above, which needs the whole fixture tree because `copy_jpgs` recurses.
+#[cfg(not(target_arch = "wasm32"))]
+fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out: Vec<std::path::PathBuf> = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let path: std::path::PathBuf = entry.path();
+        if path.is_dir() {
+            out.extend(walk(&path));
+        } else {
+            out.push(path);
+        }
+    }
+    out
 }
 
 /// `Op::Decompress12`'s write-back comparison must actually run.
