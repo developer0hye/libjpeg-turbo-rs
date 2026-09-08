@@ -85,10 +85,10 @@ pub(crate) fn decode_ac_first_tracked(
     eob_run: &mut u16,
     ac_max_k: &mut u8,
 ) -> Result<()> {
-    // JPEG T.81 G.1.1.1.1: AC scan requires 1 <= ss <= se <= 63. The
-    // entropy loop below indexes `ZIGZAG_ORDER` via `get_unchecked`, so
-    // out-of-range values from a malformed SOS are UB rather than a
-    // clean panic — reject up front.
+    // JPEG T.81 G.1.1.1.1: AC scan requires 1 <= ss <= se <= 63. Reject a
+    // malformed SOS up front with a typed error; `se <= 63` bounds the loop,
+    // and together with the soft-landing `k >= 64` branch at each write it
+    // is what establishes `k < 64` for the safe zigzag indexing below.
     if ss < 1 || se < ss || se > 63 {
         return Err(JpegError::CorruptData(format!(
             "progressive AC-first scan bounds: ss={} se={}",
@@ -133,10 +133,13 @@ pub(crate) fn decode_ac_first_tracked(
                 *ac_max_k = 63;
                 break;
             }
-            // SAFETY: k < 64, ZIGZAG_ORDER values are all < 64.
-            unsafe {
-                *coeffs.get_unchecked_mut(*ZIGZAG_ORDER.get_unchecked(k)) = coeff;
-            }
+            // Safe indexing (P4-141 criterion 5): progressive scan state is
+            // malformed-input handling, so it must not rely on `unsafe`.
+            // `k < 64` holds by the guard directly above and every
+            // ZIGZAG_ORDER entry is < 64 by construction, so the checks the
+            // safe form adds are redundant; measured: no decode throughput
+            // change (experiments/progressive.tsv).
+            coeffs[ZIGZAG_ORDER[k]] = coeff;
             if k as u8 > *ac_max_k {
                 *ac_max_k = k as u8;
             }
@@ -165,10 +168,8 @@ pub(crate) fn decode_ac_first_tracked(
                 *ac_max_k = 63;
                 break;
             }
-            // SAFETY: k < 64, ZIGZAG_ORDER values are all < 64.
-            unsafe {
-                *coeffs.get_unchecked_mut(*ZIGZAG_ORDER.get_unchecked(k)) = coeff << al;
-            }
+            // Safe indexing -- see the note on the fast AC path above.
+            coeffs[ZIGZAG_ORDER[k]] = coeff << al;
             if k as u8 > *ac_max_k {
                 *ac_max_k = k as u8;
             }
@@ -253,15 +254,16 @@ pub(crate) fn decode_ac_refine_tracked(
 
             // Scan through coefficients: apply correction bits to nonzero,
             // count zero-valued positions for run-length, then place new value.
-            // SAFETY: k <= se <= 63, ZIGZAG_ORDER values are all < 64.
+            // Safe indexing (P4-141 criterion 5): `k <= se <= 63` by the
+            // scan-bounds guard, so the zigzag lookup is in range and the
+            // coefficient index it yields is < 64 by construction.
             loop {
                 if k > se {
                     break;
                 }
-                let natural = unsafe { *ZIGZAG_ORDER.get_unchecked(k) };
-                let c = unsafe { *coeffs.get_unchecked(natural) };
-                if c != 0 {
-                    apply_correction_bit(reader, unsafe { coeffs.get_unchecked_mut(natural) }, p1);
+                let coeff: &mut i16 = &mut coeffs[ZIGZAG_ORDER[k]];
+                if *coeff != 0 {
+                    apply_correction_bit(reader, coeff, p1);
                 } else {
                     r -= 1;
                     if r < 0 {
@@ -280,8 +282,7 @@ pub(crate) fn decode_ac_refine_tracked(
             // padded natural-order entries k=64..79 all map to natural 63.
             if new_val != 0 {
                 if k < 64 {
-                    let natural = unsafe { *ZIGZAG_ORDER.get_unchecked(k) };
-                    unsafe { *coeffs.get_unchecked_mut(natural) = new_val };
+                    coeffs[ZIGZAG_ORDER[k]] = new_val;
                     if k as u8 > *ac_max_k {
                         *ac_max_k = k as u8;
                     }
@@ -305,10 +306,10 @@ pub(crate) fn decode_ac_refine_tracked(
     if *eob_run > 0 {
         let bound = se.min(*ac_max_k as usize);
         while k <= bound {
-            // SAFETY: k <= bound <= 63, ZIGZAG_ORDER values are all < 64.
-            let natural = unsafe { *ZIGZAG_ORDER.get_unchecked(k) };
-            if unsafe { *coeffs.get_unchecked(natural) } != 0 {
-                apply_correction_bit(reader, unsafe { coeffs.get_unchecked_mut(natural) }, p1);
+            // Safe indexing: `k <= bound <= se <= 63`, see the note above.
+            let coeff: &mut i16 = &mut coeffs[ZIGZAG_ORDER[k]];
+            if *coeff != 0 {
+                apply_correction_bit(reader, coeff, p1);
             }
             k += 1;
         }
