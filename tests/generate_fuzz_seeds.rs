@@ -16,11 +16,19 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use libjpeg_turbo_rs::tj3::TjParam;
 use libjpeg_turbo_rs::{
     compress, compress_arithmetic, compress_arithmetic_progressive, compress_lossless,
-    compress_lossless_arithmetic, compress_lossless_extended, compress_progressive, PixelFormat,
-    Subsampling,
+    compress_lossless_arithmetic, compress_lossless_extended, compress_progressive, CropRegion,
+    PixelFormat, Subsampling,
 };
+
+/// The `fuzz_api_sequence` wire format, shared with the target and with
+/// `tests/api_sequence_state.rs`. Assembling opcode bytes by hand here would
+/// put a second copy of that format in the tree, which goes stale the first
+/// time an opcode moves.
+#[path = "helpers/api_sequence.rs"]
+mod api_sequence;
 
 /// Width/height used for every synthetic seed. Small enough to keep the
 /// corpus cheap, large enough to exercise >1 MCU for every subsampling.
@@ -566,6 +574,277 @@ fn transform_options_seeds(corpus_base: &Path) {
     }
 }
 
+/// Seed corpus for `fuzz_api_sequence` (P4-141 criterion 3, #480).
+///
+/// Each seed is a program assembled by [`api_sequence::encode_program`]
+/// followed by a JPEG, matching the target's input layout. The programs are
+/// the orderings the criterion names plus the ones that put two different
+/// images through one handle, which is where a published parameter can go
+/// stale.
+fn api_sequence_seeds(corpus_base: &Path) {
+    use api_sequence::{Op, FUZZ_INPUT_COLOR_DENSE, FUZZ_INPUT_GRAY, FUZZ_INPUT_LOSSLESS16};
+
+    let target: &str = "fuzz_api_sequence";
+
+    let programs: Vec<(&str, Vec<Op>)> = vec![
+        // The criterion's own ordering: configure, probe, decode, reset,
+        // decode, transform.
+        (
+            "criterion",
+            vec![
+                Op::Set {
+                    param: TjParam::Quality,
+                    value: 82,
+                },
+                Op::Set {
+                    param: TjParam::Subsampling,
+                    value: 2,
+                },
+                Op::DecompressHeader,
+                Op::InspectHeader,
+                Op::Decompress,
+                Op::Reset,
+                Op::Decompress,
+                Op::Transform { op: 5, flags: 0 },
+            ],
+        ),
+        // Two images through one handle, in both directions: the shape a
+        // stale published parameter needs to become visible.
+        (
+            "alternating_images",
+            vec![
+                Op::Decompress,
+                Op::SelectInput {
+                    index: FUZZ_INPUT_GRAY,
+                },
+                Op::Decompress,
+                Op::SelectInput {
+                    index: FUZZ_INPUT_COLOR_DENSE,
+                },
+                Op::Decompress,
+                Op::SelectInput { index: 0 },
+                Op::Decompress,
+            ],
+        ),
+        // A decode publishes width, height, subsampling, colour space and the
+        // densities; the compress that follows reads them.
+        (
+            "decode_then_compress",
+            vec![
+                Op::Set {
+                    param: TjParam::Quality,
+                    value: 90,
+                },
+                Op::Decompress,
+                Op::Compress {
+                    width: 15,
+                    height: 15,
+                    format: 1,
+                },
+                Op::Reset,
+                Op::Set {
+                    param: TjParam::Quality,
+                    value: 90,
+                },
+                Op::Set {
+                    param: TjParam::Subsampling,
+                    value: 0,
+                },
+                Op::Compress {
+                    width: 15,
+                    height: 15,
+                    format: 1,
+                },
+            ],
+        ),
+        // Scaling and cropping are the decode-side configuration the oracle
+        // has to replay exactly.
+        (
+            "crop_and_scale",
+            vec![
+                Op::SetScaling { index: 12 },
+                Op::SetCrop {
+                    region: Some(CropRegion {
+                        x: 0,
+                        y: 1,
+                        width: 8,
+                        height: 4,
+                    }),
+                },
+                Op::Decompress,
+                Op::SetCrop { region: None },
+                Op::Decompress,
+                Op::SelectInput { index: 1 },
+                Op::Decompress,
+            ],
+        ),
+        // The 12/16-bit entry points update a different, smaller set of
+        // published parameters than the 8-bit one.
+        (
+            "mixed_precision",
+            vec![
+                Op::Decompress,
+                Op::Decompress12,
+                Op::Decompress16,
+                Op::SelectInput {
+                    index: FUZZ_INPUT_COLOR_DENSE,
+                },
+                Op::Decompress12,
+                Op::Decompress,
+            ],
+        ),
+        // An ICC profile set by the caller, then a decode, then a compress.
+        (
+            "icc_then_decode",
+            vec![
+                Op::Set {
+                    param: TjParam::Quality,
+                    value: 75,
+                },
+                Op::Set {
+                    param: TjParam::Subsampling,
+                    value: 2,
+                },
+                Op::SetIcc {
+                    profile: Some(vec![0x5A; 64]),
+                },
+                Op::Compress {
+                    width: 7,
+                    height: 7,
+                    format: 1,
+                },
+                Op::Decompress,
+                Op::SetIcc { profile: None },
+                Op::Decompress,
+            ],
+        ),
+        // Marker preservation and warning escalation, both read by decode.
+        (
+            "markers_and_warnings",
+            vec![
+                Op::Set {
+                    param: TjParam::SaveMarkers,
+                    value: 0,
+                },
+                Op::Decompress,
+                Op::Set {
+                    param: TjParam::SaveMarkers,
+                    value: 4,
+                },
+                Op::Decompress,
+                Op::Set {
+                    param: TjParam::StopOnWarning,
+                    value: 1,
+                },
+                Op::Decompress,
+                Op::Set {
+                    param: TjParam::BottomUp,
+                    value: 1,
+                },
+                Op::Decompress,
+            ],
+        ),
+        // A 16-bit decode leaves PRECISION = 16; the 8-bit decode that
+        // follows has to publish 8 over it. This is the only ordering in
+        // which that parameter's write-back comparison can fail.
+        (
+            "precision_transition",
+            vec![
+                Op::SelectInput {
+                    index: FUZZ_INPUT_LOSSLESS16,
+                },
+                Op::Decompress16,
+                Op::SelectInput {
+                    index: FUZZ_INPUT_COLOR_DENSE,
+                },
+                Op::Decompress,
+                Op::SelectInput {
+                    index: FUZZ_INPUT_LOSSLESS16,
+                },
+                Op::Decompress16,
+                Op::SelectInput { index: 0 },
+                Op::DecompressHeader,
+            ],
+        ),
+        // Transform between decodes: the free function takes no handle, so
+        // this is the ordering that would expose global state.
+        (
+            "transform_between_decodes",
+            vec![
+                Op::Decompress,
+                Op::Transform { op: 3, flags: 0 },
+                Op::Decompress,
+                Op::Transform { op: 6, flags: 0x14 },
+                Op::SelectInput {
+                    index: FUZZ_INPUT_GRAY,
+                },
+                Op::Decompress,
+            ],
+        ),
+    ];
+
+    let sources: &[(Content, SubsampLabel, u8, Entropy)] = &[
+        (Content::Gradient, SubsampLabel::S420, 75, Entropy::Baseline),
+        (Content::Checker, SubsampLabel::S444, 90, Entropy::Baseline),
+        (
+            Content::SyntheticPhoto,
+            SubsampLabel::S422,
+            60,
+            Entropy::Progressive,
+        ),
+        (Content::Checker, SubsampLabel::Gray, 75, Entropy::Baseline),
+        (
+            Content::Gradient,
+            SubsampLabel::S420,
+            80,
+            Entropy::Arithmetic,
+        ),
+        (
+            Content::SyntheticPhoto,
+            SubsampLabel::S444,
+            75,
+            Entropy::Lossless,
+        ),
+    ];
+
+    let write_seed = |name: &str, program: &[Op], jpeg: &[u8]| {
+        let mut bytes: Vec<u8> = api_sequence::encode_program(program);
+        bytes.extend_from_slice(jpeg);
+        fan_out_write(name, &bytes, corpus_base, &[target]);
+    };
+
+    for &(content, sub, quality, entropy) in sources {
+        let Some(jpeg) = encode_seed(content, sub, quality, entropy) else {
+            continue;
+        };
+        let src_label: String = format!(
+            "{c}_{s}_{quality}_{e}",
+            c = content.label(),
+            s = sub.label(),
+            e = entropy.label(),
+        );
+        for (program_label, program) in &programs {
+            write_seed(
+                &format!("apiseq_{src_label}_{program_label}.bin"),
+                program,
+                &jpeg,
+            );
+        }
+    }
+
+    // Malformed bodies exercise the error orderings: a failed decode must
+    // leave the handle no less predictable than a successful one.
+    for (edge_name, edge_bytes) in structural_edge_seeds() {
+        for (program_label, program) in &programs {
+            write_seed(
+                &format!("apiseq_{program_label}_edge_{edge_name}"),
+                program,
+                &edge_bytes,
+            );
+        }
+    }
+}
+
 #[test]
 fn generate_seeds() {
     let corpus_base: &Path = Path::new("fuzz/corpus");
@@ -584,6 +863,9 @@ fn generate_seeds() {
     //                           fuzz_transform_options' header)
     all_targets.push("fuzz_encode_diff_c");
     all_targets.push("fuzz_transform_diff_c");
+    // P4-141 criterion 3 (#480): structured input — an operation program
+    // followed by the JPEG the program operates on.
+    all_targets.push("fuzz_api_sequence");
     for t in &all_targets {
         fs::create_dir_all(corpus_base.join(t)).expect("failed to create corpus directory");
     }
@@ -701,6 +983,10 @@ fn generate_seeds() {
 
     // Seeds for the new fuzz_transform_options target (structured header + JPEG).
     transform_options_seeds(corpus_base);
+
+    // P4-141 criterion 3 (#480): operation programs + JPEG for the
+    // API-sequence target.
+    api_sequence_seeds(corpus_base);
 
     // P2-7: structured seeds for fuzz_encode_diff_c. Codex round-2 P2:
     // fan-out of JPEG bytes alone left this target effectively unseeded

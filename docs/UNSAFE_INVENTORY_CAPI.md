@@ -144,8 +144,8 @@ three things.
   without a C compiler or the stock tools.
 - **Not covered anywhere:** `cross-arch.yml` and `wasm.yml` (root package
   only), `full-c-parity.yml` (root `--test` targets), and Fuzz Smoke — all
-  twelve fuzz targets drive the Rust API, so **no fuzzer reaches the C ABI**.
-  That is criterion 3 of P4-141, still open.
+  thirteen fuzz targets drive the Rust API, so **no fuzzer reaches the C ABI**.
+  That is the C-ABI half of criterion 3 of P4-141, still open.
 
 ## Maintaining a row
 

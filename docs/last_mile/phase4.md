@@ -8070,7 +8070,7 @@ an infallible constructor and so needs an API decision (panic, or a fallible
   the dispatcher picks (measured locally: `llvm.aarch64.neon.ushl.v8i16`),
   which is why the library's own Miri run passes `--skip simd::`. A
   scalar-only capi build under Miri belongs to
-  [P4-141](#p4-141-soundness-verification-program-mirisanitizerfuzz-coverage-gaps-and-an-unsafe-inventory-gate--partial-criteria-4-and-5-landed-and-gated-criteria-1-3-6-and-7-open),
+  [P4-141](#p4-141-soundness-verification-program-mirisanitizerfuzz-coverage-gaps-and-an-unsafe-inventory-gate--partial-criteria-4-and-5-landed-and-gated-criterion-3s-api-sequence-half-landed-criteria-1-2-6-and-7-open-criterion-3s-c-abi-half-open),
   not here.
 
 **Also recorded: resource-limit defaults.** `DecodeLimits` currently defaults to
@@ -8146,7 +8146,7 @@ immediately, ahead of the code work.
 
 **Status (2026-08-09): closed.** Landed in #485; `crates/libjpeg-turbo-rs-capi/src/lib.rs` no longer offers the crate as a `libjpeg.so.62` replacement, and `README.md` states the safety scope rather than a guarantee.
 
-## P4-141. Soundness Verification Program: Miri/Sanitizer/Fuzz Coverage Gaps and an `unsafe` Inventory Gate — **PARTIAL: criteria 4 and 5 landed and gated; criteria 1-3, 6 and 7 open**
+## P4-141. Soundness Verification Program: Miri/Sanitizer/Fuzz Coverage Gaps and an `unsafe` Inventory Gate — **PARTIAL: criteria 4 and 5 landed and gated, criterion 3's API-sequence half landed; criteria 1, 2, 6 and 7 open, criterion 3's C-ABI half open**
 
 **GitHub:** [#480](https://github.com/developer0hye/libjpeg-turbo-rs/issues/480) — under the [#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481) umbrella.
 
@@ -8194,6 +8194,12 @@ misuse of a public SIMD entry point; none injects allocation failure; none runs
    orderings — plus a process-isolated C-ABI harness covering
    `init→destroy→destroy`, undersized output buffers, pitch boundaries, maximum
    dimensions, same-handle concurrent calls, and callback reentry.
+   **Half delivered 2026-09-09**: the API-sequence fuzzer exists, is seeded and
+   is in the `Fuzz Smoke` matrix, and its oracle also runs deterministically on
+   every pull request — see *Progress* below. The process-isolated C-ABI
+   harness remains, and it is the half the criterion-4 inventories measured as
+   the larger hole: no TurboJPEG entry point runs under Miri, `sanitizers.yml`
+   is `--workspace --lib`, and no fuzz target crosses the C ABI at all.
 4. **An `unsafe` inventory is committed and gated.** Per site: location,
    why safe Rust cannot express it, the invariant (bounds/lifetime/aliasing/CPU
    feature), whether a safe caller can reach it, the regression test that would
@@ -8329,7 +8335,7 @@ the harness first would only pin current behaviour.
   as the bound it is not. The
   document also records what *no* leg reaches: no TurboJPEG entry point runs
   under Miri, `sanitizers.yml` is `--lib` so it sees only this crate's own
-  unit tests, and none of the twelve fuzz targets crosses the C ABI at all —
+  unit tests, and none of the thirteen fuzz targets crosses the C ABI at all —
   which is criterion 3, restated as evidence instead of as a plan.
 - **Criterion 4 — 2026-09-09, the C-ABI crate's last file, and the
   criterion's close:** `docs/UNSAFE_INVENTORY_CAPI.md` gains
@@ -8377,8 +8383,118 @@ the harness first would only pin current behaviour.
   instead, and the `rust-code-reviewer` pass produced both defects above. An
   inventory's coverage column is only as good as its measurement; asserting
   it from the source is the same mistake #320 named.
+- **Criterion 3 — 2026-09-09, the API-sequence half:**
+  `fuzz/fuzz_targets/fuzz_api_sequence.rs` drives ordered `TjHandle`
+  lifecycles — `new → configure → probe → decode → reset → decode →
+  transform → destroy` — where no existing target touches `TjHandle` or
+  mixes operation kinds on one handle. The engine, the wire format and the
+  oracle live in `tests/helpers/api_sequence.rs`, included by path by the
+  target *and* by `tests/api_sequence_state.rs`, so what CI proves on every
+  pull request and what libFuzzer searches on the 6-hourly schedule are the
+  same code rather than two drifting copies of it. The seeds are assembled by
+  `encode_program`, the exact inverse of the target's decoder and pinned by
+  `program_round_trips_through_its_wire_format`, so the seed generator does
+  not carry a second copy of the wire format; and `program_from_bytes`
+  re-anchors the image on SOI, so a libFuzzer insertion before it cannot turn
+  a good corpus entry into a garbage body.
+  **The oracle is four properties**, each stated against the documented
+  contract rather than against current behaviour. *P1, decode purity* — every
+  decode-family result on a used handle must equal the same call on a handle
+  built fresh from the configuration alone, which is sound because
+  `TjHandle::decompress` reads only writable parameters (scaling, cropping,
+  `STOPONWARNING`, `FASTUPSAMPLE`, `FASTDCT`, `SAVEMARKERS`, `BOTTOMUP` and
+  the limits) and none of the eight it publishes. *P2* — a compress must
+  equal the same call on a fresh handle replaying the configuration **plus
+  the last publishing operation that succeeded**, on the image it read; a
+  compress legitimately reads `SUBSAMP`, the densities and `COLORSPACE` from
+  the handle (`setCompDefaults`, `turbojpeg.c:376-378` and `:418-422`), so
+  the reference has to include that one call — and only that one. *P3* —
+  determinism of `transform_jpeg_with_options`, which takes no handle at all,
+  so a difference there is global state; it is deliberately not a statement
+  about handle state. *P4, both directions* — after a successful decode every
+  parameter the call documents writing must agree with the fresh handle's,
+  **and** every parameter it does not document writing must be unchanged from
+  before the call, which is what holds `inspect_header` and `compress` (both
+  `&self`) to writing nothing at all.
+  **Two drafts of this oracle compared nothing, and both were caught by
+  asking what would have to change for the comparison to fail.** The first
+  passed one JPEG per program, so P4 compared a number against itself — the
+  value an earlier call left behind is the value this call would write
+  anyway. `Op::SelectInput` fixed that. The second skipped P2 once anything
+  had been published, which removed every sequence in which a compress could
+  have differed; replaying the last publishing operation fixed that. A third
+  survived review: all the committed fixtures report `PRECISION = 8` and the
+  JFIF default density `0 / 1 / 1`, which are also `TjHandle::new()`'s initial
+  values, so four of P4's eight comparisons were dead — deleting the whole
+  density write-back left every test green. `BUILTIN_INPUTS` now carries a
+  `cjpeg -sample 2x1` image whose JFIF density was set to `1 / 72 x 71` and a
+  `cjpeg -precision 16 -lossless 1` image, and
+  `the_builtin_inputs_can_move_every_published_parameter` fails if any
+  published parameter stops taking two values across them.
+  **Each property has a committed proof that it can fail.**
+  `ReferencePolicy::NoConfig` (a reference replaying nothing) and
+  `NoWriteBackReplay` (one replaying the configuration but not the last
+  published header) are both required to be *detected*. Verified by source
+  mutation before the tests were believed: deleting the density write-back
+  fails the premise gate, publishing it only on the first decode fails P4 in
+  three tests naming `XDensity` and the operation index, writing an
+  undocumented `Optimize` fails P4's second half, and leaving `bottom_up` set
+  at the end of `decompress` fails P1.
+  189 committed seeds, one program of nine against each of six encoder
+  configurations and fifteen structural edge cases.
+  **The fuzzer's first real finding was a defect in the oracle, which is the
+  right order for it to happen in.** Ninety seconds in, P2 failed on
+  `[Set(Quality), Decompress, Set(Quality), Set(Subsampling), Compress]`: the
+  reference replayed the configuration and *then* the last publishing decode,
+  which reorders `set(SUBSAMP) → decode` into `decode → set(SUBSAMP)` — and a
+  decode publishes `SUBSAMP`, so the two orders leave different values behind.
+  The prefix is replayed in its original order now, and that program is pinned
+  as `the_reference_replays_configuration_and_the_decode_in_their_original_order`.
+  After the fix, 346,032 runs over five minutes found nothing.
+  `codex review` then found two more, both of the same shape — a safeguard
+  that was not where it claimed to be. The pixel ceiling lived only in a
+  pre-filter that reads the header with `Decoder::new`, which refuses a stream
+  whose *scan count* exceeds its own default of 8192 while a fresh `TjHandle`
+  leaves `TJPARAM_SCANLIMIT` unset: a header the pre-filter could not read was
+  one the handle decoded anyway, past the ceiling. It is set as
+  `TJPARAM_MAXPIXELS` on the live and reference handles now — a parameter no
+  program can write, so every comparison stays exact — and
+  `the_pixel_ceiling_survives_a_header_the_prefilter_cannot_read` fails when
+  the cap is removed, which the first version of that test did not. And the
+  target handed the engine two of the three built-in images while the seeds
+  addressed three, so the `precision_transition` seed's `Decompress16` calls
+  landed on an 8-bit image; the input layout is one function
+  (`fuzz_inputs`) with named indices now, checked by decoding each one.
+  A second `codex review` round found two more of the same kind at the
+  lifecycle edges the first fix created: `Op::Reset` built an *uncapped*
+  handle while every reference kept the ceiling, so `[Reset, InspectHeader]`
+  failed P1 on the harness rather than on the library; and blanking an
+  oversize input by *removing* it renumbered every input behind it, folding
+  `FUZZ_INPUT_LOSSLESS16` (3) to `3 % 3` and deleting the corpus's only
+  16-bit decode whenever the fuzzed body happened to be large. An oversize
+  input keeps its slot as an empty slice now. Both are pinned, and both
+  regressions fail when the fix is reverted — which is the check that
+  distinguishes a test of the fix from a test of its ingredients, and which
+  the first version of the ceiling test did not pass.
+  A third round found the same class one level in: the decode outcome
+  summarised ICC, EXIF, XMP, IPTC and the comment as *lengths*, so two images
+  whose metadata differed but happened to be the same size compared equal —
+  a decode returning the previous image's XMP would have been invisible to P1,
+  and to P4 too, since none of them is a `TjParam`. The outcome carries every
+  metadata byte now, length-prefixed, and the regression compares two streams
+  that differ only in metadata content with `TJPARAM_SAVEMARKERS` off, because
+  under the default level the raw APP segments would distinguish them even if
+  the parsed fields did not.
+  It produced one defect on its first run:
+  [P4-197](#p4-197-a-cropping-region-whose-left-boundary-exceeds-the-scaled-width-decodes-to-zero-columns-and-trips-a-false-debug_assert--open)
+  (#618), a crop whose left boundary is past the scaled width decoding to
+  zero columns, tripping a `debug_assert!` whose comment calls that state
+  unreachable and, in release, silently dropping the requested crop height.
+  Upstream refuses the region (`turbojpeg.c:2106-2109`). The generator pins
+  crop `x` to 0 until that closes, in code and with the item's number, and
+  criterion 5 of P4-197 is to remove the pin.
 - **Criterion 2 — partial since 2026-08-13** (see the criterion text).
-- **Criteria 1, 3, 6, 7 — untouched.**
+- **Criteria 1, 6, 7 — untouched; criterion 3's C-ABI half untouched.**
 
 ## P4-142. `tj3DecompressHeader` Decodes the Entire Image to Read the Header — **OPEN**
 
@@ -11063,3 +11179,89 @@ line — the offset, not the value.
 request, which is a documentation-and-gate change: the fix touches three call
 sites plus a CI leg, and criterion 3 of it is a workflow edit whose value is
 that it *runs*, which a documentation PR cannot demonstrate.
+
+## P4-197. A Cropping Region Whose Left Boundary Exceeds the Scaled Width Decodes to Zero Columns and Trips a False `debug_assert!` — **OPEN**
+
+**GitHub:** [#618](https://github.com/developer0hye/libjpeg-turbo-rs/issues/618) — found 2026-09-09 by the P4-141 criterion-3 API-sequence harness on its first run; under the [#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481) umbrella.
+
+**What it is.** A cropping region whose `x` is at or past the *scaled* output
+width is accepted, and the decode that follows produces an image with no
+columns. Minimal reproduction, entirely in safe Rust, on the committed 8x8
+grayscale fixture:
+
+```rust
+let mut decoder = Decoder::new(include_bytes!("fixtures/gray_8x8.jpg"))?;
+decoder.set_crop_region(10, 1, 16, 2);
+let image = decoder.decode_image()?;
+```
+
+* **debug** — panics in `src/decode/pipeline_impl/output.rs` at the
+  `debug_assert!(!image.data.is_empty(), "vertical crop cannot apply to a
+  sink-claimed decode")`;
+* **release** — returns `Ok`, with `width = 0`, `height = 8` and no data. The
+  requested crop *height* of 2 is silently dropped, because the vertical-crop
+  step is skipped by the `if !image.data.is_empty()` guard below the assert.
+
+The same region reaches the same place through `TjHandle::set_cropping_region`
++ `decompress`, and through the C ABI's `tj3SetCroppingRegion` — which
+validates only that `x` and `y` are non-negative, that `w` and `h` are
+positive, and that all-zero means "clear the region"
+(`crates/libjpeg-turbo-rs-capi/src/header.rs`); it never compares the region
+against the image, because at that point it has no image.
+
+**Root cause.** `pipeline_impl/output.rs` aligns the crop's left boundary down
+to the scaled iMCU boundary and clamps the width against what is left of the
+row:
+
+```rust
+let aligned_x: usize = (cx / scaled_imcu_w) * scaled_imcu_w;
+let expanded_w: usize = cw + (cx - aligned_x);
+let clamped_w: usize = expanded_w.min(out_width.saturating_sub(aligned_x));
+```
+
+With `cx = 10` on an 8-pixel-wide output, `aligned_x` is 8 and
+`out_width.saturating_sub(8)` is 0, so the decode emits zero columns and
+`image.data` is empty. The assert's comment — "A sink-claimed decode returns
+empty data; vertical crop is excluded from sink mode in `decode_image_into`,
+so this is unreachable" — names a second, unrelated route to empty data and
+concludes it is the only one. It is the comment that is wrong, not just the
+assertion: an ordinary owned decode reaches it.
+
+**What upstream does.** It refuses the region rather than degenerating.
+`tj3SetCroppingRegion` (`references/libjpeg-turbo/src/turbojpeg.c:2106-2109`)
+throws "The cropping region exceeds the scaled image dimensions" when
+`x + w > scaledWidth` or `y + h > scaledHeight`, and rejects an `x` that is not
+divisible by the scaled iMCU width two lines above (`:2096-2101`);
+`jpeg_crop_scanline` refuses the same shape at the libjpeg level:
+`references/libjpeg-turbo/src/jdapistd.c:212-215` raises `JERR_WIDTH_OVERFLOW`
+when `xoffset + width > output_width` (the `JERR_BAD_CROP_SPEC` two lines
+above is the null-pointer guard, not this case). Upstream can validate at *set*
+time because its handle has already read the header; ours cannot — `TjHandle`
+and `Decoder::set_crop_region` both accept the region before any frame is
+known — so the equivalent check has to run where the scaled dimensions exist,
+which is the decode.
+
+**Acceptance criteria.**
+
+1. A crop region exceeding the scaled output dimensions returns a typed `Err`
+   from `Decoder::decode_image` and from `TjHandle::decompress`, with the
+   message upstream uses, instead of a zero-column image.
+2. `tj3SetCroppingRegion` reports it the way upstream does for the cases it can
+   see, and the C-ABI decode reports the rest; cross-validated against
+   `tj3SetCroppingRegion` in a C harness rather than against our own previous
+   output.
+3. The iMCU-divisibility rule (`turbojpeg.c:2096-2101`) is decided one way or
+   the other and written down — today the Rust side aligns down silently where
+   upstream refuses, which is a second, separable divergence this item
+   surfaced.
+4. The false invariant in `pipeline_impl/output.rs` is deleted rather than
+   softened, and a regression test pins the 8x8 reproduction above.
+5. `tests/helpers/api_sequence.rs` drops the `x: 0` pin in `op_from_record`
+   and lets the API-sequence fuzzer generate the full offset range again.
+
+**Why deferred.** Filed rather than fixed inside the pull request that found
+it, which lands the P4-141 criterion-3 harness. The fix is a behaviour change
+on an accepted input — today's clamping is exercised by the crop and
+crop-plus-scale cross-check suites — so it needs its own C cross-validation
+pass, and folding it into a harness PR would put a decode-pipeline change
+behind a test-infrastructure review.

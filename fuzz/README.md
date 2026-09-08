@@ -29,6 +29,8 @@ so libFuzzer starts from meaningful inputs. The generator covers:
   zero-dimension SOF0, all-0xFF, non-JPEG bytes, etc.)
 - `fuzz_transform_options`-specific seeds: 6 source JPEGs × 15 option combos + edge cases
   (117 seeds total for that target)
+- `fuzz_api_sequence`-specific seeds: 9 operation programs × (6 source JPEGs + 15 structural
+  edge-case bodies) = 189 seeds, each an `encode_program` byte prefix followed by a JPEG
 
 ## JPEG marker dictionary
 
@@ -55,6 +57,7 @@ cargo +nightly fuzz run fuzz_decompress -- -dict=fuzz/jpeg.dict -max_total_time=
 | `fuzz_progressive_decoder` | Progressive scan-by-scan decoder | ~350 |
 | `fuzz_encode_roundtrip` | Structured header + raw pixels → encode → decode assertion | ~294 |
 | `fuzz_transform_options` | `transform_jpeg_with_options` with all TransformOp × option combos | ~117 |
+| `fuzz_api_sequence` | Ordered `TjHandle` lifecycles — configure/probe/decode/reset/transform on one handle, each result compared against a handle built fresh from the same configuration (P4-141 criterion 3) | 189 |
 
 ## Run
 

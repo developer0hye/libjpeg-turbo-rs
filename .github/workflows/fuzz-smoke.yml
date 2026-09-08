@@ -60,6 +60,12 @@ jobs:
           - fuzz_decode_diff_c     # P2-7 differential decode vs subprocess djpeg
           - fuzz_encode_diff_c     # P2-7 differential encode-roundtrip vs subprocess djpeg
           - fuzz_transform_diff_c  # P2-7 differential transform vs subprocess jpegtran
+          # P4-141 criterion 3 (#480): ordered handle lifecycles rather than
+          # one buffer per handle. No target above touches `TjHandle` or mixes
+          # operation kinds on one handle, so a defect that only appears when
+          # one operation reads what an earlier one left behind is unreachable
+          # from all of them.
+          - fuzz_api_sequence
     steps:
       - uses: actions/checkout@v7
 
