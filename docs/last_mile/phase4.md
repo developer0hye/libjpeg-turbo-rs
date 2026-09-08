@@ -1290,6 +1290,8 @@ The one non-obvious piece was the **scan script**. `jpeg_simple_progression` tak
 
 **Progress (2026-07-28): step 1 landed, item stays OPEN.** Table-driven YCbCr→RGB (`src/decode/color.rs`, exact const-evaluated precomputation of the multiply form — bit-identical, proven by an exhaustive chroma equivalence test and 49 simd-off djpeg cross-checks): kernel 1.63× faster on riscv64 (same-binary A/B), decode totals 12–14% lower than the 07-27 env though no same-env baseline was re-measured, same-run ours/C now ~1.12× at 640×480 and ~1.72× at 1080p (`experiments/riscv64_scalar_2026-07-27.md`, 07-28 section). The ≤1.2× criterion is not yet met at 1080p. The criteria's profiling step is now DONE (07-28 profile section): at 1080p volume the three kernels sum to 36.4% (IDCT 13.5%, fancy upsample 9.2%, colour 13.7%) and the ~63.6% residual is Huffman entropy decode + `BitReader` — the measured next target (`jdhuff.c` two-level lookahead tables vs `decode/huffman.rs`). No per-stage profile has been run yet, so the acceptance criteria's "profile the scalar IDCT / fancy upsample / YCbCr→RGB" step is still outstanding.
 
+**Premise change (2026-09-08, via [P4-134](#p4-134-no-risc-v-rvv-simd-backend--upstream-32-ships-one--partial-measured-under-emulation-only-hardware-measurement-outstanding)).** The riscv64 numbers in this entry (07-27 and 07-28 sections of `experiments/riscv64_scalar_2026-07-27.md`) were taken against libjpeg-turbo 2.1.x distro builds, when *neither* side vectorised on RISC-V. libjpeg-turbo **3.2.0 ships RVV kernels** for colour conversion, up/downsampling, quantisation and the integer DCT/IDCT, so on RVV hardware C is no longer scalar there. **These measurements remain valid as scalar-kernel data — the quantity this entry's acceptance criteria are about — and stop being a statement about our position versus current upstream on riscv64.** The scalar-vs-scalar pair was re-measured against 3.2.0 with `JSIMD_FORCENONE=1` on 2026-09-08 (`experiments/riscv64_rvv_2026-09-08.md`: decode ~1.1–1.5×, encode ~1.7–1.9× behind C's scalar under `qemu-riscv64`, spread under 10 %), and the same run showed that emulator cannot measure the RVV side at all; the current-upstream question lives in P4-134.
+
 ## P4-59. Extended XMP Writing Not Implemented — **OPEN**
 
 **Motivation.** #358 landed XMP/IPTC read (with Extended XMP reassembly) and single-segment write. Packets larger than one APP1 segment (65,504 payload bytes) error at encode time with `JpegError::Unsupported` rather than being split into `http://ns.adobe.com/xmp/extension/` chunks with a GUID + full-length + offset header and an `xmpNote:HasExtendedXMP` reference in the standard packet. Cameras and editors do emit such packets, so a read-modify-write round trip through our encoder currently fails on them instead of preserving the metadata.
@@ -1487,7 +1489,7 @@ Proof the refactor is behaviour-preserving: a temporary differential harness com
 
 **The asymmetry.** On 32-bit ARM we dispatch **100% scalar**: `src/simd/mod.rs` compiles backend modules for `aarch64` / `x86_64` / `wasm32` only, so `detect()` and `detect_encoder()` fall through to `scalar::routines()` on `target_arch = "arm"`. C libjpeg-turbo does **not** — `simd/CMakeLists.txt:352-356` compiles the same 13 shared `simd/arm/*-neon.c` intrinsics kernels for `CPU_TYPE=arm` as for `arm64` (IDCT islow/ifast/reduced, FDCT int/fast, both colour directions, merged upsample, upsample, downsample, quantize, progressive Huffman) plus an AArch32-specific `arm/aarch32/jchuff-neon.c`, with `-mfpu=neon` forced at line 358. NEON is then detected at run time on AArch32 Linux/Android by parsing `/proc/cpuinfo` (`simd/arm/aarch32/jsimdcpu.c:72-125`), so a distro build serves NEON and non-NEON ARMv7 cores from one binary.
 
-This makes 32-bit ARM different in kind from the other scalar targets. On RISC-V / POWER / s390x **neither** side vectorises, so P4-60's scalar-kernel gap is the whole story. On ARMv7-A it is our scalar code against C's full SIMD pipeline, and the two deficits multiply. Note the hardware caveat: NEON is optional in ARMv7-A (present on most Cortex-A parts, e.g. A7/A15; optional on A5/A9) and absent from ARMv7-M/R — on a NEON-less ARMv7 core C is scalar too, and P4-60 alone describes the gap.
+This makes 32-bit ARM different in kind from the other scalar targets. On POWER / s390x **neither** side vectorises, so P4-60's scalar-kernel gap is the whole story — and that held for RISC-V too until libjpeg-turbo 3.2.0 shipped RVV ([P4-134](#p4-134-no-risc-v-rvv-simd-backend--upstream-32-ships-one--partial-measured-under-emulation-only-hardware-measurement-outstanding)). On ARMv7-A it is our scalar code against C's full SIMD pipeline, and the two deficits multiply. Note the hardware caveat: NEON is optional in ARMv7-A (present on most Cortex-A parts, e.g. A7/A15; optional on A5/A9) and absent from ARMv7-M/R — on a NEON-less ARMv7 core C is scalar too, and P4-60 alone describes the gap.
 
 **Estimated magnitude — inference, not measurement.** No ARMv7 hardware measurement exists yet; the honest bound composes two known factors: our scalar decode measured **1.12× at 640×480 and 1.72× at 1080p** vs C's scalar decode (`experiments/riscv64_scalar_2026-07-27.md`, 07-28 section, post-P4-60-step-1), times C's own NEON speedup — upstream claims **2-6×** for SIMD-capable CPUs generally (`references/libjpeg-turbo/README.md:6`). That puts us in the region of **2-5× slower than C libjpeg-turbo on a NEON-capable ARMv7-A core**, decode. Encode is not better: C's AArch32 NEON covers FDCT, colour convert, downsample, quantize and Huffman encode. **Do not quote a hardware figure until one is measured** — see the recipe below.
 
@@ -5148,7 +5150,7 @@ release notes):
   Upstream moving off TLS weakens the "upstream is single-threaded too" framing.
 - **RISC-V Vector (RVV) SIMD** (beta1 note 6): +149-246% compress, +48-180%
   decompress vs 3.1.x on RVV hardware. See
-  **[P4-134](#p4-134-no-risc-v-rvv-simd-backend--upstream-32-ships-one--open)**;
+  **[P4-134](#p4-134-no-risc-v-rvv-simd-backend--upstream-32-ships-one--partial-measured-under-emulation-only-hardware-measurement-outstanding)**;
   it also moves the goalposts for **[P4-60](#p4-60-scalar-kernels-are-25x-slower-than-cs-scalar-kernels--open)**,
   whose riscv64 measurement assumed *neither* side had SIMD. That assumption
   expires with 3.2.
@@ -5583,7 +5585,7 @@ was filed with:
 | # | 3.2 change | Disposition |
 | --- | --- | --- |
 | beta1-2 | Per-instance SIMD dispatch replaces thread-local storage | **Closed 2026-09-08 — [P4-132](#p4-132-classic-c-abi-per-cinfo-state-is-thread-affine-p4-16-option-a--closed-2026-09-08).** Upstream removing TLS from its libjpeg API is that item's central evidence. |
-| beta1-6 | RISC-V Vector (RVV) SIMD | **Tracked — [P4-134](#p4-134-no-risc-v-rvv-simd-backend--upstream-32-ships-one--open)**, and it expires [P4-60](#p4-60-scalar-kernels-are-25x-slower-than-cs-scalar-kernels--open)'s premise that riscv64 was scalar-vs-scalar. |
+| beta1-6 | RISC-V Vector (RVV) SIMD | **Tracked — [P4-134](#p4-134-no-risc-v-rvv-simd-backend--upstream-32-ships-one--partial-measured-under-emulation-only-hardware-measurement-outstanding)**, and it expires [P4-60](#p4-60-scalar-kernels-are-25x-slower-than-cs-scalar-kernels--open)'s premise that riscv64 was scalar-vs-scalar. |
 | beta1-8 | 8-bit lossy JPEG decompressed to 12-bit output | **New — [P4-171](#p4-171-8-bit-lossy-jpeg-cannot-be-decompressed-to-12-bit-output-32-beta1-note-8--open).** Measured: `src/api/precision.rs:865` refuses any stream whose precision is not 12, so we reject where 3.2 decodes. |
 | beta1-10 | TurboJPEG: `TJCS_DEFAULT`, repeated `tj3GetICCProfile`, ICC from a compression instance, 4:1:0 and 2:4 subsampling | **Split.** 4:1:0 and 2:4 are implemented (`TJSAMP_410`/`TJSAMP_24`) and covered by the subsampling matrices; the ICC and `TJCS_DEFAULT` additions are **new — [P4-172](#p4-172-turbojpeg-32-icc-and-tjcs_default-additions-are-unimplemented-32-beta1-note-10--open)**. |
 | beta1-4, beta1-12, 3.2.0-4 | jpegtran `-crop` expansion honouring `-trim`/`-perfect`; new `-roll`; the `-crop`/`-trim` overflow fix and its flatten/reflect error | **New — [P4-173](#p4-173-jpegtran-32-crop-expansion--roll-and-the-flattenreflect-refusal-are-unported--open).** These are `transupp.c` semantics our transform API mirrors, so "it is app code" does not exempt us. |
@@ -6772,7 +6774,7 @@ puts `main` 3.2–3.9 % slower than the branch on every 4:2:0 case and within
 tier existed. The tier is reached, and moving it onto the writer cost
 nothing and gained a measured 3–4 % on the row-hoisted 4:2:0 paths.
 
-## P4-134. No RISC-V RVV SIMD Backend — Upstream 3.2 Ships One — **OPEN**
+## P4-134. No RISC-V RVV SIMD Backend — Upstream 3.2 Ships One — **PARTIAL: measured under emulation only; hardware measurement outstanding**
 
 **GitHub:** [#465](https://github.com/developer0hye/libjpeg-turbo-rs/issues/465) — under the [#470](https://github.com/developer0hye/libjpeg-turbo-rs/issues/470) umbrella.
 
@@ -6817,6 +6819,66 @@ a statement about our position versus current upstream on that architecture.
 installed base of the architectures we target, and unlike P4-78 (where ARMv7
 hardware is everywhere and the gap is inferred from a real user question) there
 is no downstream request. It is filed so the P4-60 premise change is on record.
+
+**Status (2026-09-08): PARTIAL — criteria 2, 3 and 4 delivered; criterion 1
+measured under emulation only, and the emulator turned out unable to answer
+it.** Full record: `experiments/riscv64_rvv_2026-09-08.md`; harness
+`examples/bench_p4134_riscv64.rs` (the two `tjbench` operations upstream's RVV
+kernels accelerate, so the hardware run reuses it).
+
+*Criterion 1 — what was measured, and why it is not the number the criterion
+asks for.* libjpeg-turbo 3.2.0 (`references/libjpeg-turbo` @ `c85e6b9`) was
+cross-built for riscv64 with `HAVE_RVV` (gcc 14.2, 324 `vsetvli` in each
+tool), ours with rustc 1.98.0, and both run under `qemu-riscv64` 10.0.11,
+`-cpu rv64,v=true`. Verified by mechanism, not by passing: QEMU's translated-
+block log shows 57 vector blocks for a `djpeg` decode with V on, **0** under
+`JSIMD_FORCENONE=1` and **0** under `v=false`, with byte-identical output.
+Then the finding that gates the rest: **under QEMU C's RVV build is 3–4×
+slower than C's own scalar path** (640×480: 8.4 vs 40.0 Mpix/s decompress,
+7.6 vs 29.0 compress; 1080p: 6.9 vs 21.8, 6.5 vs 21.1), because TCG runs each
+vector instruction through a helper loop — the emulation asymmetry P4-78
+predicted for NEON, now measured for RVV. Upstream reports the same kernels
+at +48–180 % decode / +149–246 % encode on a Ky X1. **So no emulator ratio
+against the RVV build has the right sign, and the hardware gap remains
+inferred:** composing the re-measured scalar-vs-scalar pair against 3.2.0
+(`JSIMD_FORCENONE=1`, same emulator: decode ~1.1–1.5×, encode ~1.7–1.9×
+behind C's scalar, spread under 10 %) with upstream's reported RVV win
+(decode 1.1–1.5 × 1.48–2.80 = 1.6–4.2×; encode 1.7–1.9 × 2.49–3.46 = 4.2–6.6×)
+puts us at roughly **1.5–4× slower decode and 4–7× slower encode on RVV
+hardware. That is inference, not measurement — do not quote it as one.** Criterion 1 stays
+open until an RVV 1.0 board runs `bench_p4134_riscv64` against `tjbench`.
+
+*Criterion 2 — done.* P4-60 carries the premise-change note (below, in its
+own entry), so its riscv64 numbers read as scalar-kernel data only.
+
+*Criterion 3 — scope decision, measured on rustc 1.98.0 stable.*
+`#[target_feature(enable = "v")]` is **unstable** (`E0658`); `core::arch::riscv64`
+has **no vector intrinsics at all** (not merely gated — stdarch ships none);
+`is_riscv_feature_detected!` is **unstable** (`stdarch_riscv_feature_detection`,
+rust-lang/rust#111192); `asm!` is stable. `-C target-feature=+v` is accepted
+with a warning and honoured, and `-C target-cpu=sifive-x280`/`spacemit-x60`
+enable V silently — but auto-vectorisation (P4-78's option D) lands its
+7,930 vector instructions in pipeline plumbing and **none in the kernels**
+(`idct_8x8` 9, `fancy_h2v2_row` 0, `ycbcr_to_rgb_row` 0, `rgb_to_ycbcr_row` 0;
+contrast ARMv7 `+neon`: 270 / 232 / 140). So the options are: **(A)** wait for
+`riscv_target_feature` + intrinsics to stabilise; **(B)** hand-written `asm!`
+kernels behind our own `AT_HWCAP`/`riscv_hwprobe` probe (C's shape,
+`simd/riscv64/jsimdcpu.c:44-86`); **(C)** nightly-only feature; **(D)** is
+ruled out on riscv64 by the count above, independent of the SIGILL objection.
+**Decision: defer.** (B) is the only stable route and it is an investment
+that cannot be measured without hardware; building it against an emulator
+that penalises every vector instruction would optimise for the wrong machine.
+
+*Criterion 4 — reopen trigger, in P4-78's shape.* Reopen when **any** of:
+(1) an RVV 1.0 board (SpacemiT K1/Ky X1, SiFive P670-class, or a cloud
+riscv64 instance with `V` in `AT_HWCAP`) is available to run
+`examples/bench_p4134_riscv64` against 3.2.0 `tjbench`, which converts the
+inference above into criterion 1's number; (2) `riscv_target_feature` `v`
+and RVV intrinsics stabilise, which removes the `asm!`-only constraint on
+(B); (3) a downstream riscv64 performance request arrives, which supplies
+the missing motivation the way #424 did for P4-78. Whichever fires, the
+first step is the hardware measurement, split into its two factors
+(scalar-vs-scalar, C's RVV win) exactly as P4-78's recipe does.
 
 ## P4-135. Public Safe SIMD Wrappers Let Safe Rust Reach `target_feature` Kernels With Unvalidated Slices — **CLOSED 2026-08-13**
 
