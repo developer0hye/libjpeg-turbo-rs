@@ -5,7 +5,8 @@
  * and decodes a small fixed corpus.  It allocates its own buffers with
  * malloc/free rather than tj3Alloc/tj3Free, so the shared-allocator contract
  * those two exist for is NOT exercised across this boundary — recorded in
- * docs/UNSAFE_INVENTORY_CAPI.md's tj3Free row and in P4-141 criterion 2.  Compiled with
+ * docs/UNSAFE_INVENTORY_CAPI.md's tj3Free row and in P4-141 criterion 2.
+ * Compiled with
  * `-fsanitize=address,undefined` and run with `ASAN_OPTIONS=...` so any
  * boundary bug at the FFI surface (wrong free, OOB read, undefined behavior
  * in the conversion layer) trips a sanitizer report instead of silently
