@@ -1400,7 +1400,7 @@ C expands instead of ignoring: `djpeg -rgb` on a `cjpeg -precision 12` grayscale
 **Remaining work.**
 1. **Module-level feature enforcement**: gate the backend modules (or their exported fns) on `feature = "simd"` so a simd-off build cannot even name an intrinsic wrapper; decide the interplay with `cpu_has!` and the scalar reference paths.
 2. **simd/ `unsafe_op_in_unsafe_fn` sweep**: lift the carve by wrapping the ~780 sites with per-op blocks + SAFETY notes (mechanical but must not be rushed — wrong SAFETY prose is worse than none).
-3. **Non-SIMD unsafe audit to zero**: the sites that survive phase 1 outside `simd/` (the `BitWriter` built over `mem::forget` in `huffman_encode.rs`, `Vec::set_len`-on-uninit patterns carrying `#[allow(clippy::uninit_vec)]`, raw-pointer `.add()` arithmetic, cold-path `get_unchecked`s in `decode/progressive.rs`) — each migrated to safe code (perf-gated per `experiments/`) or kept with a written `// SAFETY:` invariant.
+3. **Non-SIMD unsafe audit to zero**: the sites that survive phase 1 outside `simd/` (the `BitWriter` built over `mem::forget` in `huffman_encode.rs`, `Vec::set_len`-on-uninit patterns carrying `#[allow(clippy::uninit_vec)]`, raw-pointer `.add()` arithmetic, cold-path `get_unchecked`s in `decode/progressive.rs` — done 2026-09-08 under P4-141 criterion 5, and now gated) — each migrated to safe code (perf-gated per `experiments/`) or kept with a written `// SAFETY:` invariant.
 4. **Goal state (#389's last criterion)**: `#![cfg_attr(not(feature = "simd"), forbid(unsafe_code))]` compiles, README-advertised and CI-checked — requires (3) to reach zero.
 
 **Acceptance criteria.** Each numbered item lands with tests/benches per the project rules; #389 closes only when all four do. The phase-1 Miri job (non-SIMD `--lib` subset, 191 tests) must stay green throughout.
@@ -8070,7 +8070,7 @@ an infallible constructor and so needs an API decision (panic, or a fallible
   the dispatcher picks (measured locally: `llvm.aarch64.neon.ushl.v8i16`),
   which is why the library's own Miri run passes `--skip simd::`. A
   scalar-only capi build under Miri belongs to
-  [P4-141](#p4-141-soundness-verification-program-mirisanitizerfuzz-coverage-gaps-and-an-unsafe-inventory-gate--open),
+  [P4-141](#p4-141-soundness-verification-program-mirisanitizerfuzz-coverage-gaps-and-an-unsafe-inventory-gate--partial-criterion-5-landed-and-gated-criteria-1-4-6-and-7-open),
   not here.
 
 **Also recorded: resource-limit defaults.** `DecodeLimits` currently defaults to
@@ -8146,7 +8146,7 @@ immediately, ahead of the code work.
 
 **Status (2026-08-09): closed.** Landed in #485; `crates/libjpeg-turbo-rs-capi/src/lib.rs` no longer offers the crate as a `libjpeg.so.62` replacement, and `README.md` states the safety scope rather than a guarantee.
 
-## P4-141. Soundness Verification Program: Miri/Sanitizer/Fuzz Coverage Gaps and an `unsafe` Inventory Gate — **OPEN**
+## P4-141. Soundness Verification Program: Miri/Sanitizer/Fuzz Coverage Gaps and an `unsafe` Inventory Gate — **PARTIAL: criterion 5 landed and gated; criteria 1-4, 6 and 7 open**
 
 **GitHub:** [#480](https://github.com/developer0hye/libjpeg-turbo-rs/issues/480) — under the [#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481) umbrella.
 
@@ -8198,7 +8198,8 @@ misuse of a public SIMD entry point; none injects allocation failure; none runs
    largest attack surface and should be entirely safe Rust. `decode/huffman.rs`'s
    `get_unchecked`/`get_unchecked_mut` on `ZIGZAG_ORDER` and coefficients is the
    known instance: replace with safe indexing and show the generated code is
-   unchanged, or justify with a benchmark.
+   unchanged, or justify with a benchmark. **Landed and gated 2026-09-08** —
+   see *Progress* below.
 6. **`#![cfg_attr(not(feature = "simd"), forbid(unsafe_code))]` compiles.** This
    is P4-69's goal; it becomes reachable once (5) and P4-138 land. `OnceBox` in
    `HuffmanTable` is the remaining blocker — the standard Annex K tables are
@@ -8212,6 +8213,50 @@ misuse of a public SIMD entry point; none injects allocation failure; none runs
 **Why P2.** It is the evidence layer. Sequenced after the P0 fixes because
 several criteria here exist specifically to prove those fixes hold, and writing
 the harness first would only pin current behaviour.
+
+**Progress.**
+
+- **Criterion 5 — 2026-08-10 (#500):** `decode/huffman.rs`'s two
+  `get_unchecked`/`get_unchecked_mut` sites on `ZIGZAG_ORDER` and the
+  coefficient block became safe indexing; both bounds were already
+  established at the call site, and the 8K progressive decode measured
+  41.29 / 41.16 ms unchecked vs 41.33 / 41.32 ms safe (`experiments/huffman.tsv`).
+- **Criterion 5 — 2026-09-08:** `decode/progressive.rs` — the ten remaining
+  `unsafe` blocks (twelve `get_unchecked`/`get_unchecked_mut` calls) in the
+  AC-first and AC-refine scans (progressive scan state, EOB runs, spectral
+  ranges, coefficient indexing — the surfaces the criterion names) — became
+  safe indexing. `k < 64` is established by the
+  scan-bounds guard (`1 <= ss <= se <= 63`) and the soft-landing `k >= 64`
+  branch directly above each write, and every `ZIGZAG_ORDER` entry is < 64
+  by construction. Same harness (`examples/p4141_huff_bench.rs`, 8K
+  progressive, best-of-9, two runs each), interleaved in one machine state:
+  `origin/main` 43.56 / 43.20 ms, safe 42.76 / 42.59 ms — no regression,
+  within noise (`experiments/progressive.tsv`; an earlier separate-state
+  pair read 46.74 / 47.44 vs 46.31 / 45.24 ms, same verdict). Byte parity
+  with `djpeg` is pinned by `tests/progressive_ac_soft_landing.rs`, which
+  exercises the AC-refine `k` overflow edge; the AC-first edge has no pinned
+  fixture of its own — that file describes one but does not commit it, filed
+  as [P4-190](#p4-190-the-ac-first-progressive-soft-landing-has-no-pinned-regression-fixture--open).
+  **The mechanism is `tests/parser_unsafe_gate.rs`:** twenty-six parser /
+  control-plane sources (marker parsing, bit reader, Huffman, arithmetic,
+  progressive, lossless, resync, scan layout and drivers, output plumbing,
+  zigzag tables, scan-script types, marker writer, encode-side progressive
+  and arithmetic) plus the five scalar decode kernels that are already clean
+  must contain no `unsafe` token outside comments, and a new one fails the
+  build until it is removed — the first *gate* under this item, in the
+  P4-139 criterion-3 shape. It does not fail open either: every `.rs` under
+  `src/decode/` must be classified into one of its three lists (parser,
+  unsafe-free kernel, inventory-owned), so a new module cannot slip past it.
+  With it, "parser and control-plane `unsafe`" is zero for every listed
+  file. Not in the list:
+  `common/huffman_table.rs`, whose `OnceBox` lazy-init `unsafe` is criterion
+  6's named blocker — it joins the gate when that lands. The
+  `pipeline_impl/{baseline,progressive,arithmetic,streaming}.rs` scan drivers
+  still hold `unsafe`, but all ten sites are `idct_scaled_strided`
+  destination pointers — strided IDCT dispatch, not parsing; they belong to
+  the criterion-4 inventory.
+- **Criterion 2 — partial since 2026-08-13** (see the criterion text).
+- **Criteria 1, 3, 4, 6, 7 — untouched.**
 
 ## P4-142. `tj3DecompressHeader` Decodes the Entire Image to Read the Header — **OPEN**
 
@@ -10434,3 +10479,40 @@ against. (P4-133's third milestone set a precedent worth weighing: it put
 the Huffman tier on the `BitWriter` the operation already holds rather than
 waiting for `EncodePlan`, which criterion 1's "an enum beside the
 `fdct_quantize_fn` pointer" option would mirror for the DCT method.)
+
+## P4-190. The AC-First Progressive Soft-Landing Has No Pinned Regression Fixture — **OPEN**
+
+**GitHub:** [#607](https://github.com/developer0hye/libjpeg-turbo-rs/issues/607) — filed 2026-09-08 by the P4-141 criterion-5 landing (#480), found by its docs-drift audit.
+
+**Motivation.** `decode_ac_first_tracked` in `src/decode/progressive.rs`
+mirrors libjpeg-turbo's `jpeg_natural_order[DCTSIZE2 + 16]` padding: when a
+run-length advance pushes `k` past 63, the coefficient is written to
+`coeffs[63]` and the block ends instead of erroring, because `djpeg` accepts
+such inputs. `tests/progressive_ac_soft_landing.rs` describes **two**
+fixtures that surfaced this class — a 70 KB 640×480 progressive RGB file for
+the AC-*first* path and a 544-byte 16×16 file for the AC-*refine* path — but
+commits only the second; its module doc claimed "both fixtures are pinned
+here" until the P4-141 PR corrected it. The AC-first branch is covered by
+code reading and by whatever the 6-hourly fuzzers happen to hit, not by a
+regression test — the "pinned by the checks' code, not by a gate" shape
+P4-141 exists to retire. It matters more now that the path uses safe
+indexing: a future "tighten the bounds check" edit would fail with a
+`CorruptData` error rather than UB, but it would still diverge from `djpeg`
+with nothing to catch it.
+
+**Acceptance criteria.**
+
+1. A committed fixture — small and synthesised is fine (a progressive stream
+   whose AC-first scan carries a symbol with run ≥ 1 from `k ≥ 49` so
+   `k + run > 63` with `Se = 63`, plus the same pattern via the fast
+   combined-table path if reachable) — whose decode is asserted byte-exact
+   against `djpeg` in `tests/progressive_ac_soft_landing.rs`, citing #607.
+2. The test fails when the `k >= 64` branch in `decode_ac_first_tracked` is
+   replaced by an error return (proven discriminating).
+3. `tests/progressive_ac_soft_landing.rs`'s module doc lists what it
+   actually pins.
+
+**Why deferred.** Filed rather than fixed inside the P4-141 PR because that
+PR is a behaviour-preserving refactor plus a gate, and a new C-oracle fixture
+is its own TDD cycle; the fixture must be built and proven discriminating,
+not just committed.
