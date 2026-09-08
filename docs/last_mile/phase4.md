@@ -8632,11 +8632,24 @@ the harness first would only pin current behaviour.
   redundancy: the sanitizer leg runs the cases *without* the Rust runner and
   reads only the exit status, so a case that merely printed `canary=corrupt` and
   returned 0 left that leg green on real corruption. `codex review` demonstrated
-  it three times — an injected short-stride write into the argument-rejection
-  destination, a valid 12-bit decode made to report failure, and an underrun of
-  the one buffer no case happened to check — and each now exits 2 naming the
-  check. The third moved the canary test into `guarded_free` itself, so the
-  coverage is structural: a case that forgets to ask is still covered. `require()` covers only what holds on *both*
+  it five times over four rounds, and each mutation is now caught: a
+  short-stride write into the argument-rejection destination; a valid 12-bit
+  decode made to report failure; an underrun of the one buffer no case happened
+  to check — which moved the canary test into `guarded_free` itself, so a case
+  that forgets to ask is still covered; a rejected decode writing byte *one* of
+  its destination, where only byte zero was inspected — now the whole payload is
+  checked against its poison; and a compress output zeroed after the SOI, which
+  a length and a marker cannot distinguish from a valid JPEG — now the
+  compressed bytes are digested and compared, which both libraries produce
+  identically (810 and 1097 bytes, byte for byte), so it is an encode
+  cross-validation rather than a snapshot of our own output. That last one is
+  this paragraph's one exception, stated rather than glossed: a digest cannot
+  be `require()`d without pinning our own bytes, so it is the *transcript
+  comparison* that catches it and not the exit status — verified by corrupting
+  the compress output for our library alone, which fails
+  `transcripts_match_stock_turbojpeg`; corrupting it in the driver for both
+  passes, because the same binary drives both. The sanitizer leg prints that
+  line and checks nothing. `require()` covers only what holds on *both*
   implementations; every known divergence is left to the transcript comparison,
   since failing on one would turn the oracle run red. `every_harness_case_is_driven`
   reads the C driver's dispatch chain and fails if a case exists that no Rust

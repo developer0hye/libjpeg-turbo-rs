@@ -311,6 +311,18 @@ static int guarded_alloc(guarded_buf *g, size_t len, const char *label) {
     return 0;
 }
 
+/* True when nothing wrote *into* the payload — every byte still poison.
+ *
+ * Checking byte zero alone is not the contract: a rejected call that modified
+ * any other byte passed until this existed, and the write is in-bounds, so
+ * neither the guard page nor ASan sees it. */
+static int fully_poisoned(const guarded_buf *g) {
+    for (size_t i = 0; i < g->len; i++) {
+        if (g->data[i] != POISON) return 0;
+    }
+    return 1;
+}
+
 /* True when nothing wrote before the payload.
  *
  * Walked back from `data` rather than forward from a re-derived page offset:
@@ -582,10 +594,11 @@ static int case_null_handle(const unsigned char *jpeg, size_t jpeg_len) {
     printf("compress8_out_ptr=%s\n", out ? "written" : "untouched");
     printf("compress8_out_len=%zu\n", out_len);
     printf("dst_canary=%s\n", canary_intact(&pixel_buf) ? "intact" : "corrupt");
-    printf("dst_untouched=%s\n", pixel[0] == POISON ? "yes" : "no");
+    printf("dst_untouched=%s\n", fully_poisoned(&pixel_buf) ? "yes" : "no");
     int intact = canary_intact(&pixel_buf);
     require(intact, "null_handle destination canary");
-    require(pixel[0] == POISON, "a refused call wrote nothing to the destination");
+    require(fully_poisoned(&pixel_buf),
+            "a refused call wrote nothing to the destination");
     require(!out && out_len == 0, "a refused compress left the out-pair alone");
     guarded_free(&pixel_buf);
     return intact ? 0 : 2;
@@ -677,11 +690,11 @@ static int case_pitch_boundaries(const unsigned char *jpeg, size_t jpeg_len) {
     printf("pitch_reject_canary=%s\n",
            canary_intact(&tiny) ? "intact" : "corrupt");
     printf("pitch_reject_untouched=%s\n",
-           tiny.data[0] == POISON ? "yes" : "no");
+           fully_poisoned(&tiny) ? "yes" : "no");
     for (int i = 0; i < 3; i++)
         require(rejected[i] == -1, "a pitch below width * pixelSize is refused");
     require(canary_intact(&tiny), "rejected-pitch destination canary");
-    require(tiny.data[0] == POISON, "a refused decode wrote nothing");
+    require(fully_poisoned(&tiny), "a refused decode wrote nothing");
     guarded_free(&tiny);
 
     /* Out-of-range pixel formats are rejected by the same guard clause. */
@@ -707,11 +720,11 @@ static int case_pitch_boundaries(const unsigned char *jpeg, size_t jpeg_len) {
     printf("arg_reject_canary=%s\n",
            canary_intact(&small) ? "intact" : "corrupt");
     printf("arg_reject_untouched=%s\n",
-           small.data[0] == POISON ? "yes" : "no");
+           fully_poisoned(&small) ? "yes" : "no");
     for (int i = 0; i < 5; i++)
         require(refused[i] == -1, "an invalid argument is refused");
     require(canary_intact(&small), "argument-rejection destination canary");
-    require(small.data[0] == POISON, "a refused decode wrote nothing");
+    require(fully_poisoned(&small), "a refused decode wrote nothing");
     guarded_free(&small);
 
     api.destroy(handle);
@@ -770,6 +783,13 @@ static int case_undersized_output(void) {
                                &size);
         printf("compressed_rc=%d\n", rc);
         printf("compressed=%zu\n", rc == 0 ? size : (size_t)0);
+        /* The bytes, not just the length: a compress that produced 1097 bytes
+         * of zeroes after the SOI passed every other check here. Both
+         * implementations emit this image byte for byte identically, so the
+         * digest is a real encode cross-validation and not a snapshot of our
+         * own output. */
+        printf("compressed_bytes=%016llx\n",
+               rc == 0 ? (unsigned long long)fnv1a(probe.data, size) : 0ULL);
         require(rc == 0, "the probe compress into a worst-case buffer");
         guarded_free(&probe);
         if (rc != 0 || size < 2 || size > worst_case) { free(src); return 2; }
@@ -812,6 +832,8 @@ static int case_undersized_output(void) {
                 dst.data[1] == 0xD8)
                    ? "yes"
                    : "n/a");
+        printf("norealloc_%s_bytes=%016llx\n", slots[i].label,
+               rc == 0 ? (unsigned long long)fnv1a(dst.data, size) : 0ULL);
         int intact = canary_intact(&dst);
         require(intact, "NOREALLOC destination canary");
         require(slot == dst.data, "NOREALLOC never moves the caller's pointer");
@@ -1130,6 +1152,9 @@ static int case_alloc_ownership(const unsigned char *jpeg, size_t jpeg_len) {
     printf("compress_alloc_soi=%s\n",
            (out && out_len >= 2 && out[0] == 0xFF && out[1] == 0xD8) ? "yes"
                                                                     : "no");
+    printf("compress_alloc_len=%zu\n", out ? out_len : (size_t)0);
+    printf("compress_alloc_bytes=%016llx\n",
+           out ? (unsigned long long)fnv1a(out, out_len) : 0ULL);
     require(crc == 0 && out && out_len >= 2 && out[0] == 0xFF && out[1] == 0xD8,
             "a library-allocated compress output starts with SOI");
     api.free(out);

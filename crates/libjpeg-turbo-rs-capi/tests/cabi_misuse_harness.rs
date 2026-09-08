@@ -176,6 +176,11 @@ const KNOWN_DIVERGENCES: &[KnownDivergence] = &[
         key: "norealloc_exact_soi",
         item: "P4-206 (#628)",
     },
+    KnownDivergence {
+        case: "undersized_output",
+        key: "norealloc_exact_bytes",
+        item: "P4-206 (#628)",
+    },
 ];
 
 fn workspace_root() -> PathBuf {
@@ -715,6 +720,10 @@ fn undersized_output_buffers_are_refused() {
         "undersized_output",
         &[
             ("compressed_rc", "0"),
+            // The compressed *bytes*, cross-validated against stock TurboJPEG
+            // by the comparison below — a length and an SOI marker do not
+            // distinguish a valid JPEG from 1097 zeroes behind one.
+            ("norealloc_worst_case_soi", "yes"),
             // One byte under what the image actually compresses to — the case
             // measures that first rather than guessing, so the boundary does
             // not drift when the encoder's output moves.
@@ -859,6 +868,9 @@ fn allocator_ownership_crosses_the_boundary() {
             ("compress_alloc_rc", "0"),
             ("compress_alloc_out", "allocated"),
             ("compress_alloc_soi", "yes"),
+            // 810 bytes on both libraries, byte for byte; the digest itself is
+            // compared by `transcripts_match_stock_turbojpeg`.
+            ("compress_alloc_len", "810"),
         ],
     );
 }
