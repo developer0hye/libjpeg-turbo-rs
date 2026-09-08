@@ -8065,12 +8065,12 @@ an infallible constructor and so needs an API decision (panic, or a fallible
   Its assertions (rows match a dense decode, inter-row padding untouched) pass
   either way; only Miri or ASAN sees the out-of-bounds slice.
   `sanitizers.yml` excludes integration tests and the capi Miri step names
-  `capi_create_abi_guards` alone. Adding a leg is not a one-liner — the test
+  `capi_create_abi_guards` and `capi_thread_affinity` only. Adding a leg is not a one-liner — the test
   performs a real encode and decode, so Miri stops at the first SIMD intrinsic
   the dispatcher picks (measured locally: `llvm.aarch64.neon.ushl.v8i16`),
   which is why the library's own Miri run passes `--skip simd::`. A
   scalar-only capi build under Miri belongs to
-  [P4-141](#p4-141-soundness-verification-program-mirisanitizerfuzz-coverage-gaps-and-an-unsafe-inventory-gate--partial-criteria-4-root-crate-and-5-landed-and-gated-criteria-1-3-6-and-7-open),
+  [P4-141](#p4-141-soundness-verification-program-mirisanitizerfuzz-coverage-gaps-and-an-unsafe-inventory-gate--partial-criterion-5-landed-and-gated-criterion-4-landed-and-gated-for-the-root-crate-and-for-the-c-abi-crate-except-jpeglibrs-criteria-1-3-6-and-7-open),
   not here.
 
 **Also recorded: resource-limit defaults.** `DecodeLimits` currently defaults to
@@ -8146,7 +8146,7 @@ immediately, ahead of the code work.
 
 **Status (2026-08-09): closed.** Landed in #485; `crates/libjpeg-turbo-rs-capi/src/lib.rs` no longer offers the crate as a `libjpeg.so.62` replacement, and `README.md` states the safety scope rather than a guarantee.
 
-## P4-141. Soundness Verification Program: Miri/Sanitizer/Fuzz Coverage Gaps and an `unsafe` Inventory Gate — **PARTIAL: criteria 4 (root crate) and 5 landed and gated; criteria 1-3, 6 and 7 open**
+## P4-141. Soundness Verification Program: Miri/Sanitizer/Fuzz Coverage Gaps and an `unsafe` Inventory Gate — **PARTIAL: criterion 5 landed and gated; criterion 4 landed and gated for the root crate and for the C-ABI crate except `jpeglib.rs`; criteria 1-3, 6 and 7 open**
 
 **GitHub:** [#480](https://github.com/developer0hye/libjpeg-turbo-rs/issues/480) — under the [#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481) umbrella.
 
@@ -8175,7 +8175,16 @@ misuse of a public SIMD entry point; none injects allocation failure; none runs
    under a masked CPUID; it now carries `--lib`, and the scalar-fallback arms
    P4-135 added to `avx2_idct_islow` / `avx2_fdct_quantize` execute there.
    That is the x86 non-AVX2 half for *tests*; the sanitizer legs, `i686` and
-   AArch64 NEON remain. Also outstanding from the same closure: the wasm
+   AArch64 NEON remain. Two further gaps the criterion-4 C-ABI inventory
+   measured on 2026-09-08, and that this criterion owns: the C-boundary ASan
+   harness resolves five symbols (`tj3Init`, `tj3DecompressHeader`,
+   `tj3Get`, `tj3Decompress8`, `tj3Destroy`) over three fixtures — baseline,
+   progressive, arithmetic — so no 12-bit path and no compress path crosses
+   the boundary under a sanitizer at all; and it allocates with its own
+   `malloc`/`free`, so `tj3Alloc`/`tj3Free`'s shared-allocator contract is
+   never exercised across the ABI. Both `harness.c`'s header comment and
+   `sanitizers.yml`'s step comment claimed more than that — six symbols and
+   four fixtures including a 12-bit one — until this landing corrected them. Also outstanding from the same closure: the wasm
    wrappers' `fits == false` fallback arms have no executing coverage
    anywhere (wasip1 parity uses exact-fit slices, and the panic arm cannot
    be asserted under `panic = "abort"`) — the "pinned by the checks' code,
@@ -8192,8 +8201,9 @@ misuse of a public SIMD entry point; none injects allocation failure; none runs
    inventory and requires review for additions. **A raw count is not the
    deliverable** — "780 unsafe operations" says nothing about risk; one
    precondition-free safe wrapper (P4-135) outweighs hundreds of intrinsic calls.
-   **Landed and gated for the root crate 2026-09-08** — see *Progress* below;
-   the C-ABI crate remains.
+   **Landed and gated for the root crate 2026-09-08**, and the same day for
+   the C-ABI crate except `jpeglib.rs` — see *Progress* below; that one file
+   remains.
 5. **Parser and control-plane `unsafe` goes to zero.** Malformed-input handling —
    progressive scan state, restart markers, EOB runs, spectral ranges,
    coefficient indexing, marker length parsing, custom scan scripts — is the
@@ -8279,18 +8289,44 @@ the harness first would only pin current behaviour.
   gaps this inventory surfaced — thirty-two of the 224 — and they are the
   criterion's product rather than a defect in it: a raw count could not
   have named one of them. They are filed together as
-  [P4-191](#p4-191-thirty-two-inventoried-unsafe-items-have-no-regression-test--open)
+  [P4-191](#p4-191-fifty-seven-inventoried-unsafe-items-have-no-regression-test--open)
   (#609), which includes three uncalled functions holding `unsafe`. Writing
   one of those cells also produced the criterion's first *defect*:
   [P4-192](#p4-192-a-custom-scan-script-with-se--63-writes-past-two-stack-arrays-from-safe-rust-on-x86_64--open)
   (#610), a stack overflow reachable from safe Rust — the answer to the
   premise of this whole item, which is that no gate had ever found one.
-  **Not yet inventoried:** `crates/libjpeg-turbo-rs-capi` (786 sites in 15
-  files by the same scanner on 2026-09-08 — `extern "C"` end to end), the
-  next chunk of this criterion; the gate's `SCAN_ROOT` widens to it when its
-  rows exist. The workspace's other two crates
-  (`libjpeg-turbo-rs-image`, `libjpeg-turbo-rs-wasm`) hold no `unsafe` at
-  all, so `src/` plus the C-ABI crate is the whole of it.
+  The workspace's other two crates (`libjpeg-turbo-rs-image`,
+  `libjpeg-turbo-rs-wasm`) hold no `unsafe` at all, so `src/` plus the C-ABI
+  crate is the whole of it.
+- **Criterion 4 — 2026-09-08, C-ABI crate except `jpeglib.rs`:**
+  `docs/UNSAFE_INVENTORY_CAPI.md` lists every code `unsafe` token under
+  `crates/libjpeg-turbo-rs-capi/src/` outside that one file — 285 sites in
+  14 files, 91 rows — with the same seven cells. The gate now carries a
+  `SCOPES` table of (tree, document) pairs rather than one `SCAN_ROOT`, so
+  the two inventories are diffed by one mechanism, and two new tests hold
+  the edges: `the_scanned_roots_are_the_whole_workspace` fails if
+  `libjpeg-turbo-rs-image` or `libjpeg-turbo-rs-wasm` grows an `unsafe` no
+  document covers, and `deferrals_are_live_and_named` requires every
+  `DEFERRED` entry to exist, to sit inside a scanned root and to *still hold
+  `unsafe`* — so the deferral has to be deleted the moment the file is
+  inventoried, and the list cannot become a place for stale exemptions.
+  Both directions were mutation-checked before the rows were written:
+  removing `jpeglib.rs` from `DEFERRED` fails with "holds 501 `unsafe`
+  site(s) and is not in docs/UNSAFE_INVENTORY_CAPI.md", and adding one
+  `unsafe` to `bufsize.rs` fails naming the new item.
+  **Deferred:** `jpeglib.rs` — 501 sites in 12.9k lines, 64 % of the crate's
+  total, the classic `jpeg_*` surface. It is named in code, not in prose.
+  What the C-ABI rows produced, beyond the inventory itself: twenty-five
+  answer `**none**`, four of them entry points no leg executes at all
+  (`tj3LoadImage12/16`, `tj3SaveImage12/16`), added to
+  [P4-191](#p4-191-fifty-seven-inventoried-unsafe-items-have-no-regression-test--open)
+  (#609) as criteria 6 and 7 rather than filed as a sibling; and one
+  divergence, [P4-193](#p4-193-the-c-abi-destination-spans-do-not-use-imagelayoutstrided-so-a-decode-forms-a-slice-over-one-rows-padding--open),
+  where a destination span is wider than the extent upstream touches. The
+  document also records what *no* leg reaches: no TurboJPEG entry point runs
+  under Miri, `sanitizers.yml` is `--lib` so it sees only this crate's own
+  unit tests, and none of the twelve fuzz targets crosses the C ABI at all —
+  which is criterion 3, restated as evidence instead of as a plan.
 - **Criterion 2 — partial since 2026-08-13** (see the criterion text).
 - **Criteria 1, 3, 6, 7 — untouched.**
 
@@ -10553,17 +10589,19 @@ PR is a behaviour-preserving refactor plus a gate, and a new C-oracle fixture
 is its own TDD cycle; the fixture must be built and proven discriminating,
 not just committed.
 
-## P4-191. Thirty-Two Inventoried `unsafe` Items Have No Regression Test — **OPEN**
+## P4-191. Fifty-Seven Inventoried `unsafe` Items Have No Regression Test — **OPEN**
 
 **GitHub:** [#609](https://github.com/developer0hye/libjpeg-turbo-rs/issues/609) — filed 2026-09-08 by the P4-141 criterion-4 landing.
 
-**What produced it.** `docs/UNSAFE_INVENTORY.md` asks every row for the test
-that would fail if the invariant broke. Thirty-two of its 224 rows answer
-`**none**`, for the whole site or for a named sub-invariant. That answer is
-the criterion's product, not a defect in it — a raw count could not have
-named one of them.
+**What produced it.** The P4-141 criterion-4 inventories ask every row for
+the test that would fail if the invariant broke. Thirty-two of
+`docs/UNSAFE_INVENTORY.md`'s 224 rows answer `**none**`, and — since the
+C-ABI chunk landed 2026-09-08 — twenty-five of
+`docs/UNSAFE_INVENTORY_CAPI.md`'s 91 do, for the whole site or for a named
+sub-invariant. Fifty-seven in all. That answer is the criterion's product,
+not a defect in it — a raw count could not have named one of them.
 
-Five clusters are actionable; the rest are qualified `**none**`s (a named
+Six clusters are actionable; the rest are qualified `**none**`s (a named
 sub-invariant or a CI leg, not an untested site) and are context.
 
 **Acceptance criteria.**
@@ -10603,13 +10641,37 @@ sub-invariant or a CI leg, not an untested site) and are context.
    under-sized second luma row — the odd-height case their SAFETY contract
    permits and `parity_merged_upsample_h2v2`, which feeds equal-length rows
    only, never produces.
-6. Each `**none**` cell that a landed test replaces is rewritten in
-   `docs/UNSAFE_INVENTORY.md` in the same pull request.
+6. **Four C-ABI entry points have no test at all** and are executed by no
+   leg: `tj3LoadImage12`, `tj3LoadImage16`, `tj3SaveImage12` and
+   `tj3SaveImage16` (`crates/libjpeg-turbo-rs-capi/src/imageio.rs`). Each
+   body is a refusal — "not routed through the Rust shim yet" — so the test
+   is small: call it, assert -1 or NULL, and assert the message reaches
+   `tj3GetErrorStr`. The nine `mozjpeg_compat.rs` stubs are the same shape
+   and are deliberately *not* included here: they exist for dyld resolution,
+   `capi_libvips_compat.rs` proves that, and a test that calls them would
+   assert only that a no-op is a no-op.
+7. **Eleven C-ABI rows name an untested sub-case**, each worth one small
+   test: a non-NULL `numScalingFactors` for `tj3GetScalingFactors`; a
+   destination allocated at exactly `pitch * (h - 1) + row_bytes` for
+   `tj3Decompress8` (see [P4-193](#p4-193-the-c-abi-destination-spans-do-not-use-imagelayoutstrided-so-a-decode-forms-a-slice-over-one-rows-padding--open));
+   a non-UTF-8 filename for `cstr_to_path`; a partially-NULL out-slot set for
+   `tjDecompressHeader3`; a cross-thread move for `MemPool`'s
+   `unsafe impl Send for Block`; an out-of-range window for
+   `access_virt_sarray_impl` and `access_virt_barray_impl`; a padded pitch
+   for `tj3Decompress16`; a double `tj3Destroy` (which cannot be asserted
+   without a registry — P4-137's open decision — so this one is a note, not
+   a test); a C-ABI-crate-side test for `tj3GetICCProfile`, today covered
+   only from the root crate; and the profile-clearing branch of
+   `tj3SetICCProfile`.
+8. Each `**none**` cell that a landed test replaces is rewritten in
+   `docs/UNSAFE_INVENTORY.md` or `docs/UNSAFE_INVENTORY_CAPI.md` in the same
+   pull request.
 
 **Why deferred.** Filed rather than fixed inside the P4-141 criterion-4 pull
-request, which commits the inventory and its gate: five test programs across
-four backends is its own work, and deleting dead `unsafe` changes the
-compiled surface, which a documentation-and-gate change should not.
+requests, which commit the inventories and their gate: several test programs
+across four backends and the C ABI is its own work, and deleting dead
+`unsafe` changes the compiled surface, which a documentation-and-gate change
+should not.
 
 ## P4-192. A Custom Scan Script With `Se > 63` Writes Past Two Stack Arrays From Safe Rust on x86_64 — **OPEN**
 
@@ -10664,3 +10726,59 @@ approximation chain. This port has no equivalent.
 **Why deferred.** Filed rather than fixed inside the P4-141 criterion-4 pull
 request, which changes no file under `src/`; the fix is a behaviour change
 with its own C-parity contract and its own TDD cycle.
+
+## P4-193. The C-ABI Destination Spans Do Not Use `ImageLayout::strided`, So a Decode Forms a Slice Over One Row's Padding — **OPEN**
+
+**GitHub:** [#612](https://github.com/developer0hye/libjpeg-turbo-rs/issues/612) — found 2026-09-08 while writing the P4-141 criterion-4 inventory for the C-ABI crate.
+
+**Motivation.** `tj3Decompress8` sizes the caller's destination as
+`effective_pitch * height` and hands that to `slice::from_raw_parts_mut`
+(`crates/libjpeg-turbo-rs-capi/src/decompress.rs`). Its *source* sibling
+`tj3Compress8` does not: it uses `ImageLayout::strided`, whose rule is
+`pitch * (h - 1) + row_bytes` — every row but the last is a full pitch, and
+the last needs only its own pixels, because a caller is not required to
+allocate padding past the final row. Upstream touches exactly that tighter
+extent too: `turbojpeg-mp.c:244-246` builds `row_pointer[i] = &dstBuf[i *
+pitch]` and libjpeg writes `output_width * output_components` bytes through
+each one, so the final row's padding is never addressed.
+
+Writing the *Invariant* cell for the row is what surfaced it: the cell had to
+say the slice is wider than what the writes use, and the asymmetry with the
+compress side is visible only when the two rows sit next to each other.
+
+**Severity, stated plainly.** This is not a live overrun and not a
+documentation divergence: `turbojpeg.h:2077-2079` — `tj3Decompress8`'s own
+`@param dstBuf` — tells the caller the buffer "should normally be `pitch *
+destinationHeight` samples in size", so a caller following upstream's own
+documentation allocates enough and the reference is valid. The
+defect is that the shim *requires* what upstream only *recommends*. A caller
+that sized from what upstream actually touches — legal against the C library,
+and the exact shape `tj_encode_yuv3_does_not_over_read_padded_input_buffer`
+guards against on the encode side — gets a `&mut [u8]` formed over memory it
+never allocated, which is undefined behaviour before a single byte is
+written. The same question applies to `tj3Decompress12` / `tj3Decompress16`,
+whose `SampleGrid` is built on `ImageLayout` and therefore may already be
+correct, and to `tj3DecodeYUV8` / `tj3DecodeYUVPlanes8`, which write row by
+row through raw pointers and form no over-wide slice at all — so the audit is
+narrow.
+
+**Acceptance criteria.**
+
+1. `tj3Decompress8`'s destination span comes from `ImageLayout::strided`, so
+   the slice covers `pitch * (h - 1) + width * bpp` bytes and not one byte
+   more.
+2. A regression test allocates a destination at exactly that size with
+   `pitch > width * bpp`, decodes into it, and asserts the pixels — failing
+   before the change under Miri or ASan, passing after. It belongs in
+   `crates/libjpeg-turbo-rs-capi/tests/capi_layout_adoption.rs`, beside
+   `tj3_decompress12_writes_only_the_pitched_extent`, which is the same test
+   for the 12-bit path.
+3. The other pitched *destinations* in the C-ABI crate are audited against
+   the same rule and either fixed or recorded as already tight, in the row's
+   *Invariant* cell in `docs/UNSAFE_INVENTORY_CAPI.md`.
+4. The `tj3Decompress8` row's `**none**` in that document is replaced by the
+   test from criterion 2, and P4-191's criterion 7 entry for it is struck.
+
+**Why deferred.** Filed rather than fixed inside the P4-141 criterion-4 pull
+request, which is a documentation-and-gate change: this one edits a decode
+entry point and wants its own differential test against the C oracle.
