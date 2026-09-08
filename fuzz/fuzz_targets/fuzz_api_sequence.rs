@@ -34,13 +34,26 @@ mod api_sequence;
 use api_sequence::{fuzz_inputs, program_from_bytes, run_program, Limits};
 use libfuzzer_sys::fuzz_target;
 
-/// Same ceiling the byte-decode targets use: keep the time in parsing,
-/// entropy decoding and handle state rather than in huge allocations. The
-/// engine refuses a program whose inputs exceed it, and `MAXPIXELS` /
-/// `MAXMEMORY` are excluded from the fuzzable parameters so a program cannot
-/// raise its own cap.
+/// A sixteenth of the ceiling the byte-decode targets use, on purpose.
+///
+/// Those targets decode **once** per input, so 1 MP is a sensible per-input
+/// budget for them. This one runs a *program*: with `MAX_OPS = 16`, every
+/// decode-family operation also builds a reference handle and repeats the
+/// call, `Op::DecompressHeader` is a full decode in this port (P4-142) and
+/// `Op::Compress` replays the last publishing decode — so a single input can
+/// ask for well over thirty full decodes. At 1 MP against libFuzzer's
+/// `-timeout=30` (`.github/workflows/fuzz-smoke.yml`) that is a hang report
+/// whose cause is the harness rather than the library, and the interesting
+/// state here is in the *ordering*, not in the resolution. 256 x 256 keeps
+/// every committed seed and every `BUILTIN_INPUTS` entry — the largest is the
+/// 12-bit fixture at 227 x 149 = 33,823 px — well inside the budget.
+///
+/// The engine blanks an input above it and sets it as `TJPARAM_MAXPIXELS` on
+/// every handle, and `MAXPIXELS` / `MAXMEMORY` are excluded from the fuzzable
+/// parameters so a program cannot raise its own cap.
 const LIMITS: Limits = Limits {
-    max_pixels: 1_048_576,
+    max_pixels: 65_536,
+    prefilter_headers: true,
 };
 
 fuzz_target!(|data: &[u8]| {

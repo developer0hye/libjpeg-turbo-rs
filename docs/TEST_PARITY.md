@@ -267,6 +267,7 @@
 - [x] Differential decode vs djpeg — `fuzz/fuzz_targets/fuzz_decode_diff_c.rs`
 - [x] Differential encode vs cjpeg/djpeg — `fuzz/fuzz_targets/fuzz_encode_diff_c.rs`
 - [x] Differential transform vs jpegtran — `fuzz/fuzz_targets/fuzz_transform_diff_c.rs`
+- [x] Ordered `TjHandle` API sequences with a state-leakage oracle (P4-141 criterion 3, issue #480) — `fuzz/fuzz_targets/fuzz_api_sequence.rs`, oracle shared with `tests/api_sequence_state.rs`
 - [x] Seed corpus generation — `tests/generate_fuzz_seeds.rs`
 - [ ] Continuous fuzzing (OSS-Fuzz integration) — project files ready, upstream submission tracked in P2-H
 

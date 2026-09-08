@@ -582,7 +582,9 @@ fn transform_options_seeds(corpus_base: &Path) {
 /// images through one handle, which is where a published parameter can go
 /// stale.
 fn api_sequence_seeds(corpus_base: &Path) {
-    use api_sequence::{Op, FUZZ_INPUT_COLOR_DENSE, FUZZ_INPUT_GRAY, FUZZ_INPUT_LOSSLESS16};
+    use api_sequence::{
+        Op, FUZZ_INPUT_COLOR_DENSE, FUZZ_INPUT_GRAY, FUZZ_INPUT_LOSSLESS16, FUZZ_INPUT_LOSSY12,
+    };
 
     let target: &str = "fuzz_api_sequence";
 
@@ -680,17 +682,32 @@ fn api_sequence_seeds(corpus_base: &Path) {
         ),
         // The 12/16-bit entry points update a different, smaller set of
         // published parameters than the 8-bit one.
+        //
+        // The two `Decompress12` calls have to land on `FUZZ_INPUT_LOSSY12`:
+        // `decompress_12bit` refuses an 8-bit source (P4-171) and a 16-bit
+        // one, and P4's write-back comparison is gated on the live call
+        // succeeding, so aiming them at any other input makes this program's
+        // stated purpose an error path.
         (
             "mixed_precision",
             vec![
                 Op::Decompress,
+                Op::SelectInput {
+                    index: FUZZ_INPUT_LOSSY12,
+                },
                 Op::Decompress12,
+                Op::SelectInput {
+                    index: FUZZ_INPUT_LOSSLESS16,
+                },
                 Op::Decompress16,
                 Op::SelectInput {
                     index: FUZZ_INPUT_COLOR_DENSE,
                 },
-                Op::Decompress12,
                 Op::Decompress,
+                Op::SelectInput {
+                    index: FUZZ_INPUT_LOSSY12,
+                },
+                Op::Decompress12,
             ],
         ),
         // An ICC profile set by the caller, then a decode, then a compress.
@@ -762,6 +779,10 @@ fn api_sequence_seeds(corpus_base: &Path) {
                     index: FUZZ_INPUT_LOSSLESS16,
                 },
                 Op::Decompress16,
+                Op::SelectInput {
+                    index: FUZZ_INPUT_LOSSY12,
+                },
+                Op::Decompress12,
                 Op::SelectInput { index: 0 },
                 Op::DecompressHeader,
             ],
@@ -810,6 +831,18 @@ fn api_sequence_seeds(corpus_base: &Path) {
     let write_seed = |name: &str, program: &[Op], jpeg: &[u8]| {
         let mut bytes: Vec<u8> = api_sequence::encode_program(program);
         bytes.extend_from_slice(jpeg);
+        // Assert on the seed, not on a stand-in. `program_from_bytes`
+        // re-anchors the body on SOI, so it is an exact inverse of
+        // `encode_program` only when the body starts with `FF D8` or holds no
+        // `FF D8` at all — a body with leading garbage would silently reach
+        // the target shorter than it was written, and the round-trip test in
+        // `api_sequence_state.rs` appends a real JPEG and cannot see it.
+        let (decoded, body) = api_sequence::program_from_bytes(&bytes);
+        assert_eq!(
+            decoded, program,
+            "seed {name} does not decode to its program"
+        );
+        assert_eq!(body, jpeg, "seed {name} does not decode to its body");
         fan_out_write(name, &bytes, corpus_base, &[target]);
     };
 

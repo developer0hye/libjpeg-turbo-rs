@@ -22,17 +22,19 @@ mod api_sequence;
 use api_sequence::{
     decode_outcome, encode_program, fuzz_inputs, program_from_bytes, run_program, run_program_with,
     Limits, Op, ReferencePolicy, ALL_PARAMS, BUILTIN_INPUTS, FUZZ_INPUT_BODY,
-    FUZZ_INPUT_COLOR_DENSE, FUZZ_INPUT_GRAY, FUZZ_INPUT_LOSSLESS16,
+    FUZZ_INPUT_COLOR_DENSE, FUZZ_INPUT_GRAY, FUZZ_INPUT_LOSSLESS16, FUZZ_INPUT_LOSSY12,
 };
 use libjpeg_turbo_rs::tj3::{TjHandle, TjParam};
 use libjpeg_turbo_rs::{CropRegion, PixelFormat, Subsampling};
 
-/// The same frame-header ceiling the byte-decode fuzz targets use. Every
-/// fixture here is far below it, so it never fires in this file; it is set to
-/// the fuzzer's value so the deterministic runs and the fuzzed ones take the
-/// same path through `run_program`.
+/// `fuzz_api_sequence`'s frame-header ceiling, kept in step with it so the
+/// deterministic runs and the fuzzed ones take the same path through
+/// `run_program`. Every fixture here is far below it — the largest is the
+/// 12-bit built-in at 227 x 149 = 33,823 px — so it never fires in this file;
+/// the tests that need it to fire set their own, lower value.
 const LIMITS: Limits = Limits {
-    max_pixels: 1_048_576,
+    max_pixels: 65_536,
+    prefilter_headers: true,
 };
 
 /// The committed fixtures, plus two built here because the tree has no
@@ -63,6 +65,12 @@ fn corpus() -> Vec<(&'static str, Vec<u8>)> {
         (
             "lossless16_gray_8x8",
             include_bytes!("fixtures/api_sequence_lossless16_gray_8x8.jpg").to_vec(),
+        ),
+        // The only 12-bit source in the tree, and so the only input on which
+        // `Op::Decompress12` returns `Ok` — see `BUILTIN_INPUTS`.
+        (
+            "lossy12_227x149",
+            include_bytes!("fixtures/real_world/libjpeg_testorig12_227x149_12bit.jpg").to_vec(),
         ),
         // Truncated: the error paths are part of the sequence space, and a
         // failed decode must leave the handle no less predictable than a
@@ -164,11 +172,12 @@ fn criterion_named_program() -> Vec<Op> {
 fn criterion_named_sequence_leaves_no_state_behind() {
     let program: Vec<Op> = criterion_named_program();
     for (label, jpeg) in corpus() {
-        let inputs: [&[u8]; 3] = [&jpeg, BUILTIN_INPUTS[0], BUILTIN_INPUTS[1]];
+        let inputs: Vec<&[u8]> = fuzz_inputs(&jpeg);
         let report = run_program(&inputs, &program, &LIMITS);
-        assert!(
-            report.executed > 0,
-            "{label}: the named sequence executed no operations"
+        assert_eq!(
+            report.executed,
+            program.len(),
+            "{label}: the named sequence dropped an operation"
         );
     }
 }
@@ -246,9 +255,13 @@ fn decode_is_independent_of_every_three_operation_prefix() {
                         c.clone(),
                         Op::Decompress,
                     ];
-                    let inputs: [&[u8]; 2] = [jpeg, BUILTIN_INPUTS[1]];
+                    let inputs: Vec<&[u8]> = fuzz_inputs(jpeg);
                     let report = run_program(&inputs, &program, &LIMITS);
-                    assert!(report.executed > 0, "{label}: nothing executed");
+                    assert_eq!(
+                        report.executed,
+                        program.len(),
+                        "{label}: dropped an operation"
+                    );
                 }
             }
         }
@@ -283,7 +296,11 @@ fn byte_programs_run_clean() {
         let mut input: Vec<u8> = header;
         input.extend_from_slice(jpeg);
         let (program, body) = program_from_bytes(&input);
-        let inputs: [&[u8]; 3] = [body, BUILTIN_INPUTS[0], BUILTIN_INPUTS[1]];
+        // `fuzz_inputs`, not a hand-built list: this is the stand-in for
+        // libFuzzer and the only test that runs *generated* `SelectInput`
+        // indices, so a shorter list here folds index 3 back onto the body
+        // and the 16-bit image is never selected.
+        let inputs: Vec<&[u8]> = fuzz_inputs(body);
         let report = run_program(&inputs, &program, &LIMITS);
         assert!(
             !report.skipped_oversize,
@@ -331,7 +348,7 @@ fn program_decoding_is_total_and_deterministic() {
 /// this harness used two images that both reported `PRECISION = 8` and the
 /// JFIF default density `0 / 1 / 1`, which are also `TjHandle::new()`'s
 /// initial values, so deleting the entire density write-back from
-/// `TjHandle::decompress` left every test and all 168 seeds green.
+/// `TjHandle::decompress` left every test and all 168 seeds it then had green.
 #[test]
 fn the_builtin_inputs_can_move_every_published_parameter() {
     let published: &[TjParam] = &[
@@ -515,64 +532,255 @@ fn the_fuzz_input_indices_name_the_images_they_claim() {
         16,
         "this input is the only way PRECISION ever holds anything but 8"
     );
+
+    let mut twelve: TjHandle = TjHandle::new();
+    let lossy12 = twelve
+        .decompress_12bit(inputs[usize::from(FUZZ_INPUT_LOSSY12)])
+        .expect("FUZZ_INPUT_LOSSY12 must be decodable by decompress_12bit");
+    assert_eq!((lossy12.width, lossy12.height), (227, 149));
+    assert_eq!(
+        twelve.get(TjParam::Precision),
+        12,
+        "this input is the only one `Decompress12` accepts, so it is the only \
+         one on which P4's write-back comparison for that opcode runs"
+    );
 }
 
-/// The pixel ceiling has to reach the handles, not just the pre-filter.
+/// `Op::Decompress12`'s write-back comparison must actually run.
 ///
-/// `Decoder::new` refuses a stream whose scan count exceeds its own default of
-/// 8192, while a fresh `TjHandle` leaves `TJPARAM_SCANLIMIT` unset — so a
-/// header the pre-filter cannot read is one the handle decodes anyway.
-/// `codex review` reproduced it on a 2048x2048 progressive frame whose scan
-/// count exceeded the limit; this rebuilds the same shape on an 8x8 frame so
-/// the fixture stays a few hundred kilobytes.
+/// P4's first half is gated on the live call succeeding, and
+/// `decompress_12bit` refuses an 8-bit source (P4-171) and a 16-bit one — so
+/// before `FUZZ_INPUT_LOSSY12` existed, that opcode returned `Err` on every
+/// image the engine could select, in every deterministic test and in all 189
+/// seeds, and its arm of P4 was dead. `rust-code-reviewer` measured it. This
+/// pins the repair the only way that can fail: by asserting the call
+/// *succeeded*, which is what makes the comparison execute.
 #[test]
-fn the_pixel_ceiling_survives_a_header_the_prefilter_cannot_read() {
-    let jpeg: Vec<u8> = progressive_stream_with_excess_scans();
-    assert!(
-        libjpeg_turbo_rs::Decoder::new(&jpeg).is_err(),
-        "the fixture must be one the pre-filter refuses, or it proves nothing"
-    );
-
-    assert!(
-        TjHandle::new().inspect_header(&jpeg).is_ok(),
-        "an uncapped handle accepts this header — that is the bypass"
-    );
-
-    let tight: Limits = Limits { max_pixels: 32 };
-    let inputs: [&[u8]; 1] = [&jpeg];
-    // Nothing to assert about the result beyond "it ran and refused": the
-    // ceiling is on the handle now, so every decode in the program returns
-    // the limit error rather than allocating a frame above it.
-    let report = run_program(&inputs, &[Op::Decompress, Op::InspectHeader], &tight);
-    assert_eq!(report.executed, 2);
+fn the_twelve_bit_write_back_comparison_runs_on_some_input() {
+    let inputs: Vec<&[u8]> = fuzz_inputs(BUILTIN_INPUTS[0]);
+    let program: Vec<Op> = vec![
+        // Publish 8-bit facts first, so the 12-bit write-back has a different
+        // value to overwrite rather than agreeing by coincidence.
+        Op::SelectInput {
+            index: FUZZ_INPUT_GRAY,
+        },
+        Op::Decompress,
+        Op::SelectInput {
+            index: FUZZ_INPUT_LOSSY12,
+        },
+        Op::Decompress12,
+    ];
+    let report = run_program(&inputs, &program, &LIMITS);
+    assert_eq!(report.executed, program.len());
     assert_eq!(
-        report.decode_errors, 2,
-        "both decode-family calls must be refused by the ceiling — an uncapped \
-         handle answers `inspect_header` for this stream"
+        report.decode_errors, 0,
+        "both decodes must succeed — a failing Decompress12 skips P4's \
+         write-back comparison entirely"
     );
 
-    // The reset path builds a handle of its own; without the ceiling on it, a
-    // header the reference refuses is one the live handle answers, and P1
-    // fails on the harness rather than on the library.
-    let after_reset = run_program(
-        &inputs,
-        &[Op::Reset, Op::InspectHeader, Op::Decompress],
-        &tight,
-    );
-    assert_eq!(after_reset.executed, 3);
-    assert_eq!(
-        after_reset.decode_errors, 2,
-        "a handle created by Reset must carry the same ceiling as the first one"
-    );
-
+    // And the values it compares are genuinely different from what the
+    // previous decode left, so the comparison is not a number against itself.
     let mut handle: TjHandle = TjHandle::new();
     handle
-        .set(TjParam::MaxPixels, 32)
-        .expect("MAXPIXELS accepts any i32");
+        .decompress(inputs[usize::from(FUZZ_INPUT_GRAY)])
+        .expect("the grayscale built-in decodes");
+    let before: (i32, i32, i32) = (
+        handle.get(TjParam::Width),
+        handle.get(TjParam::Height),
+        handle.get(TjParam::Precision),
+    );
+    handle
+        .decompress_12bit(inputs[usize::from(FUZZ_INPUT_LOSSY12)])
+        .expect("the 12-bit built-in decodes");
+    let after: (i32, i32, i32) = (
+        handle.get(TjParam::Width),
+        handle.get(TjParam::Height),
+        handle.get(TjParam::Precision),
+    );
+    assert_ne!(
+        before, after,
+        "the 12-bit built-in must publish different values than the 8-bit one"
+    );
+}
+
+/// P2 is free of a merged-ICC false positive only because
+/// `decompress_header` is implemented as `decompress`.
+///
+/// `TjHandle` keeps one ICC field where upstream keeps two (P4-198, #619), so
+/// `compress` reads whatever the last decode left. P2's reference replays only
+/// the *most recent* publishing operation, so if `DecompressHeader` and
+/// `Decompress` treated that field differently, the program
+/// `SetIcc(v), Decompress, DecompressHeader, Compress` would leave the two
+/// handles carrying different profiles and P2 would panic on the harness
+/// rather than on the library — from four operations, well inside libFuzzer's
+/// reach.
+///
+/// Making `decompress_header` header-only is P4-142, which is open. This
+/// fails the moment it lands without carrying the ICC write with it, which is
+/// a named test failure instead of a mystery crash.
+#[test]
+fn the_two_publishing_operations_agree_on_the_icc_profile() {
+    let icc: Vec<u8> = vec![0x5A; 32];
+    for (label, jpeg) in corpus() {
+        for level in [0, 1, 2, 3, 4] {
+            let mut header_side: TjHandle = TjHandle::new();
+            header_side.set_icc_profile(Some(icc.clone()));
+            header_side
+                .set(TjParam::SaveMarkers, level)
+                .expect("SAVEMARKERS accepts 0..=4");
+            let header_ok: bool = header_side.decompress_header(&jpeg).is_ok();
+
+            let mut decode_side: TjHandle = TjHandle::new();
+            decode_side.set_icc_profile(Some(icc.clone()));
+            decode_side
+                .set(TjParam::SaveMarkers, level)
+                .expect("SAVEMARKERS accepts 0..=4");
+            let decode_ok: bool = decode_side.decompress(&jpeg).is_ok();
+
+            assert_eq!(
+                header_ok, decode_ok,
+                "{label} @ SAVEMARKERS={level}: the two publishers disagree on \
+                 whether the stream decodes"
+            );
+            assert_eq!(
+                header_side.icc_profile().map(<[u8]>::to_vec),
+                decode_side.icc_profile().map(<[u8]>::to_vec),
+                "{label} @ SAVEMARKERS={level}: `decompress_header` and \
+                 `decompress` must leave the same ICC profile on the handle, \
+                 or P2's reference replay reports a harness bug as a library \
+                 crash (P4-198 #619 via P4-142)"
+            );
+        }
+    }
+}
+
+/// A header the pre-parse cannot read *because of a limit* must be kept out
+/// of the run, not waved through.
+///
+/// `Decoder::new` refuses a stream whose scan count exceeds its own default of
+/// 8192, and `TjHandle::decompress_12bit` / `decompress_16bit` read nothing
+/// from the handle — they build their own decoder with `DecodeLimits::default()`
+/// (P4-199, #620) — so `TJPARAM_MAXPIXELS` does not reach them at all. Treating
+/// every parse failure as "safe to forward", which the first version did, let a
+/// 16-bit lossless frame of any declared size through the ceiling.
+/// `codex review` found it.
+///
+/// Every *other* parse failure is still forwarded on purpose: a malformed
+/// stream is rejected cheaply by every entry point, and those error paths are
+/// most of what a program of decode operations exercises.
+#[test]
+fn a_header_the_prefilter_cannot_read_because_of_a_limit_is_kept_out() {
+    let jpeg: Vec<u8> = progressive_stream_with_excess_scans();
     assert!(
-        handle.inspect_header(&jpeg).is_err(),
-        "TJPARAM_MAXPIXELS must refuse a 64-pixel frame at a 32-pixel ceiling — \
-         if it does not, capping the handle is not the safeguard it claims"
+        matches!(
+            libjpeg_turbo_rs::Decoder::new(&jpeg),
+            Err(libjpeg_turbo_rs::JpegError::LimitExceeded { .. })
+        ),
+        "the fixture must be one the pre-parse refuses *for a limit*, or it \
+         proves nothing"
+    );
+    assert!(
+        TjHandle::new().inspect_header(&jpeg).is_ok(),
+        "and one an uncapped handle answers — that is what made it a bypass"
+    );
+
+    let ceiling: Limits = Limits {
+        max_pixels: 32,
+        prefilter_headers: true,
+    };
+    let alone: [&[u8]; 1] = [&jpeg];
+    let report = run_program(&alone, &[Op::Decompress, Op::InspectHeader], &ceiling);
+    assert!(
+        report.skipped_oversize,
+        "as the only input it leaves nothing to run"
+    );
+    assert_eq!(report.executed, 0);
+
+    // Alongside the built-ins it is blanked rather than removed, so the
+    // 16-bit image keeps its index and the stream reaches no entry point.
+    let inputs: Vec<&[u8]> = fuzz_inputs(&jpeg);
+    let reachable = run_program(
+        &inputs,
+        &[
+            Op::SelectInput {
+                index: FUZZ_INPUT_BODY,
+            },
+            Op::Decompress,
+            Op::Decompress16,
+            Op::SelectInput {
+                index: FUZZ_INPUT_LOSSLESS16,
+            },
+            Op::Decompress16,
+        ],
+        &LIMITS,
+    );
+    assert!(!reachable.skipped_oversize);
+    assert_eq!(
+        reachable.decode_errors, 2,
+        "the blanked body decodes nothing at either precision, and the 16-bit \
+         built-in still decodes"
+    );
+}
+
+/// Every handle the engine builds carries the run's ceiling — including the
+/// one `Op::Reset` creates, which the first version left uncapped while every
+/// reference kept it. `codex review` reproduced the resulting P1 false
+/// positive on `[Reset, InspectHeader]`.
+///
+/// The assertion is on the *live* handle's behaviour rather than on the
+/// mechanism: a program whose every operation runs after a `Reset` must still
+/// see the ceiling. With the pre-parse now excluding over-ceiling inputs, the
+/// handle cap is belt-and-braces for `MAXPIXELS` — no input distinguishes the
+/// two — so what this pins is the symmetry: whatever ceiling the references
+/// carry, the reset handle carries too, which is what keeps P1 from firing on
+/// the harness.
+#[test]
+fn a_handle_built_by_reset_carries_the_same_ceiling_as_the_references() {
+    let inputs: Vec<&[u8]> = fuzz_inputs(BUILTIN_INPUTS[0]);
+    let program: Vec<Op> = vec![
+        Op::Decompress,
+        Op::Reset,
+        Op::Decompress,
+        Op::InspectHeader,
+        Op::SelectInput {
+            index: FUZZ_INPUT_COLOR_DENSE,
+        },
+        Op::Decompress,
+        Op::Reset,
+        Op::Decompress,
+    ];
+    let report = run_program(&inputs, &program, &LIMITS);
+    assert_eq!(report.executed, program.len());
+    assert_eq!(
+        report.decode_errors, 0,
+        "the built-ins are well under the ceiling at every point in the program"
+    );
+
+    // And with the pre-parse off, so the handle's TJPARAM_MAXPIXELS is the
+    // only ceiling, every decode after a `Reset` must still be refused. This
+    // is the arrangement in which the reset path forgetting the cap is
+    // observable at all — with the pre-parse on, nothing can tell the two
+    // mechanisms apart.
+    let handle_only: Limits = Limits {
+        max_pixels: 32,
+        prefilter_headers: false,
+    };
+    let after_reset = run_program(
+        &inputs,
+        &[
+            Op::Reset,
+            Op::Decompress,
+            Op::InspectHeader,
+            Op::DecompressHeader,
+        ],
+        &handle_only,
+    );
+    assert!(!after_reset.skipped_oversize, "the pre-parse is off");
+    assert_eq!(after_reset.executed, 4);
+    assert_eq!(
+        after_reset.decode_errors, 3,
+        "a handle created by Reset must carry the same ceiling as the first \
+         one and as every reference"
     );
 }
 
@@ -620,8 +828,13 @@ fn progressive_stream_with_excess_scans() -> Vec<u8> {
 fn an_oversize_input_does_not_renumber_the_others() {
     let oversize: &[u8] = include_bytes!("fixtures/photo_64x64_420.jpg");
     let inputs: Vec<&[u8]> = fuzz_inputs(oversize);
-    // Above the 64x64 body's 4096 pixels, below it: every built-in stays.
-    let ceiling: Limits = Limits { max_pixels: 256 };
+    // Below the 64x64 body's 4096 pixels and the 12-bit built-in's 33,823,
+    // above the three small ones — so an entry is blanked at the head of the
+    // list *and* at its tail, and the three between them keep their indices.
+    let ceiling: Limits = Limits {
+        max_pixels: 256,
+        prefilter_headers: true,
+    };
     let program: Vec<Op> = vec![
         Op::SelectInput {
             index: FUZZ_INPUT_LOSSLESS16,
@@ -648,6 +861,22 @@ fn an_oversize_input_does_not_renumber_the_others() {
     ];
     let blanked = run_program(&inputs, &body_program, &ceiling);
     assert_eq!(blanked.decode_errors, 1, "a blanked input decodes nothing");
+
+    // Same at the tail: the 12-bit built-in is above this ceiling too, and it
+    // is blanked in place rather than dropped — if it were dropped the list
+    // would still hold four entries and index 4 would fold to 0.
+    let tail_program: Vec<Op> = vec![
+        Op::SelectInput {
+            index: FUZZ_INPUT_LOSSY12,
+        },
+        Op::Decompress12,
+    ];
+    let tail = run_program(&inputs, &tail_program, &ceiling);
+    assert_eq!(
+        tail.decode_errors, 1,
+        "a blanked tail input decodes nothing, and must not have been \
+         replaced by the body"
+    );
 }
 
 /// The comparator has to see metadata *bytes*, not metadata sizes.

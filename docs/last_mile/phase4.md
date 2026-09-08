@@ -8407,7 +8407,7 @@ the harness first would only pin current behaviour.
   equal the same call on a fresh handle replaying the configuration **plus
   the last publishing operation that succeeded**, on the image it read; a
   compress legitimately reads `SUBSAMP`, the densities and `COLORSPACE` from
-  the handle (`setCompDefaults`, `turbojpeg.c:376-378` and `:418-422`), so
+  the handle (`setCompDefaults`, `turbojpeg.c:376-378` and `:418-427`), so
   the reference has to include that one call — and only that one. *P3* —
   determinism of `transform_jpeg_with_options`, which takes no handle at all,
   so a difference there is global state; it is deliberately not a statement
@@ -8431,7 +8431,9 @@ the harness first would only pin current behaviour.
   `cjpeg -precision 16 -lossless 1` image, and
   `the_builtin_inputs_can_move_every_published_parameter` fails if any
   published parameter stops taking two values across them.
-  **Each property has a committed proof that it can fail.**
+  **Each property but P3 has a committed proof that it can fail** — P3,
+  determinism of the handle-free `transform_jpeg_with_options`, has none,
+  because the only defects it can see are ones the language mostly prevents.
   `ReferencePolicy::NoConfig` (a reference replaying nothing) and
   `NoWriteBackReplay` (one replaying the configuration but not the last
   published header) are both required to be *detected*. Verified by source
@@ -8453,14 +8455,27 @@ the harness first would only pin current behaviour.
   After the fix, 346,032 runs over five minutes found nothing.
   `codex review` then found two more, both of the same shape — a safeguard
   that was not where it claimed to be. The pixel ceiling lived only in a
-  pre-filter that reads the header with `Decoder::new`, which refuses a stream
+  pre-parse that reads the header with `Decoder::new`, which refuses a stream
   whose *scan count* exceeds its own default of 8192 while a fresh `TjHandle`
-  leaves `TJPARAM_SCANLIMIT` unset: a header the pre-filter could not read was
-  one the handle decoded anyway, past the ceiling. It is set as
-  `TJPARAM_MAXPIXELS` on the live and reference handles now — a parameter no
-  program can write, so every comparison stays exact — and
-  `the_pixel_ceiling_survives_a_header_the_prefilter_cannot_read` fails when
-  the cap is removed, which the first version of that test did not. And the
+  leaves `TJPARAM_SCANLIMIT` unset: a header the pre-parse could not read was
+  one the handle decoded anyway, past the ceiling. Two things changed, because
+  neither alone is enough. `TJPARAM_MAXPIXELS` is set on the live handle and on
+  every reference now — a parameter no program can write, so every comparison
+  stays exact — and the pre-parse *blanks* an input whose header it refuses
+  **for a limit** rather than forwarding it, because `decompress_12bit` /
+  `decompress_16bit` read nothing from the handle at all
+  ([P4-199](#p4-199-setdecompparameters-publishes-thirteen-handle-parameters-our-8-bit-decode-publishes-eight-and-the-1216-bit-ones-publish-three-and-ignore-the-handles-limits--open),
+  #620), so `TJPARAM_MAXPIXELS` never reaches them; every *other* parse failure
+  is still forwarded on purpose, since those error paths are most of what a
+  program of decode operations exercises.
+  `a_header_the_prefilter_cannot_read_because_of_a_limit_is_kept_out` pins the
+  first of those. The second needed a switch to be testable at all: with the
+  pre-parse on, no input can distinguish it from the handle ceiling, so
+  `Limits::prefilter_headers` exists to turn it off and let
+  `a_handle_built_by_reset_carries_the_same_ceiling_as_the_references` drive a
+  path where forgetting the cap is observable — without it that assertion would
+  be asserting around an unreachable branch, which is exactly what the first
+  version of the ceiling test did. And the
   target handed the engine two of the three built-in images while the seeds
   addressed three, so the `precision_transition` seed's `Decompress16` calls
   landed on an 8-bit image; the input layout is one function
@@ -8493,6 +8508,60 @@ the harness first would only pin current behaviour.
   Upstream refuses the region (`turbojpeg.c:2106-2109`). The generator pins
   crop `x` to 0 until that closes, in code and with the item's number, and
   criterion 5 of P4-197 is to remove the pin.
+  Writing the oracle down produced two more, both from the same question the
+  criterion-4 inventory asked of every `unsafe` site — *what is this call
+  allowed to read, and what is it allowed to write?*
+  [P4-198](#p4-198-tjhandle-merges-upstreams-two-icc-buffers-so-a-decode-changes-the-profile-a-later-compress-embeds--open)
+  (#619) came from asking whether `icc_profile` is a compress parameter or a
+  decompress one — upstream's answer is "both, separately", and `TjHandle`
+  merges them, so a decode changes the profile a later compress embeds.
+  [P4-199](#p4-199-setdecompparameters-publishes-thirteen-handle-parameters-our-8-bit-decode-publishes-eight-and-the-1216-bit-ones-publish-three-and-ignore-the-handles-limits--open)
+  (#620) came from having to enumerate what a decode publishes in order to
+  compare it: `setDecompParameters` writes thirteen parameters on the shared
+  path all three precisions take, ours writes eight at 8-bit and three at
+  12/16-bit, and the 12/16-bit entry points read no handle limits at all.
+  Neither is fixed here — each changes what downstream callers read back and
+  needs its own C cross-validation pass — so `WRITE_BACK_8BIT`,
+  `WRITE_BACK_PRECISION`, `Op::publishes_for_compress` and
+  `Limits::prefilter_headers` encode the *port's* write sets and carry a
+  pointer to #620, and P1's comparison on `Decompress12` / `Decompress16` is a
+  forward guard rather than a live check until it closes.
+  A fourth `rust-code-reviewer` round produced the third, and named the
+  harness's own limit. **`Op::Decompress12` could not succeed on any input the
+  engine could reach**: `decompress_12bit` refuses an 8-bit source (P4-171)
+  and a 16-bit one, and P4's first half is gated on the live call succeeding,
+  so that opcode's write-back comparison was dead in every deterministic test
+  and in all 189 seeds — the "assert around an unrunnable path" shape this
+  file goes to some lengths elsewhere to avoid. `BUILTIN_INPUTS` gains
+  `real_world/libjpeg_testorig12_227x149_12bit.jpg` as
+  `FUZZ_INPUT_LOSSY12`, the `mixed_precision` and `precision_transition` seed
+  programs now aim their `Decompress12` calls at it, and
+  `the_twelve_bit_write_back_comparison_runs_on_some_input` fails when the
+  fixture is removed. Two more of the round's findings were taken as written:
+  the per-input pixel ceiling drops from 1 MP to 256 x 256, because the
+  byte targets decode once per input while a program of sixteen operations can
+  ask for more than thirty full decodes and 1 MP against libFuzzer's
+  `-timeout=30` is a hang report the harness caused; and P2's freedom from a
+  merged-ICC false positive turns out to rest on P4-142 being *open* —
+  `decompress_header` is literally `self.decompress(data)`, so both publishers
+  write `icc_profile` identically, and a header-only rewrite that drops the
+  ICC write would make `SetIcc(v), Decompress, DecompressHeader, Compress`
+  report a harness bug as a library crash.
+  `the_two_publishing_operations_agree_on_the_icc_profile` turns that into a
+  named failure; injecting `self.icc_profile = None` into `decompress_header`
+  fails it.
+  **And the blind spot is now stated rather than left to be found.** Every
+  property here is a *mirror* comparison — the live handle against a second
+  handle carrying the same configuration — so it can see a value that differs
+  between two paths and not one that is wrong on both.
+  [P4-200](#p4-200-jpegwidth--jpegheight-publish-the-scaled-and-cropped-output-dimensions-where-upstream-publishes-the-sofs--open)
+  (#621) is exactly that: `JPEGWIDTH` / `JPEGHEIGHT` are published from the
+  decoded output, so a scaled or cropped decode reports the output size where
+  `setDecompParameters` reports the SOF's, and
+  `criterion_named_sequence_leaves_no_state_behind` drives the triggering
+  configuration across eleven fixtures and passes. The module doc says so, and
+  criterion 5 of P4-200 is the fifth property that closes it.
+  That is four defects from criterion 3, against five from criterion 4.
 - **Criterion 2 — partial since 2026-08-13** (see the criterion text).
 - **Criteria 1, 6, 7 — untouched; criterion 3's C-ABI half untouched.**
 
@@ -11231,9 +11300,9 @@ assertion: an ordinary owned decode reaches it.
 `tj3SetCroppingRegion` (`references/libjpeg-turbo/src/turbojpeg.c:2106-2109`)
 throws "The cropping region exceeds the scaled image dimensions" when
 `x + w > scaledWidth` or `y + h > scaledHeight`, and rejects an `x` that is not
-divisible by the scaled iMCU width two lines above (`:2096-2101`);
+divisible by the scaled iMCU width ten lines above (`:2096-2101`);
 `jpeg_crop_scanline` refuses the same shape at the libjpeg level:
-`references/libjpeg-turbo/src/jdapistd.c:212-215` raises `JERR_WIDTH_OVERFLOW`
+`references/libjpeg-turbo/src/jdapistd.c:213-216` raises `JERR_WIDTH_OVERFLOW`
 when `xoffset + width > output_width` (the `JERR_BAD_CROP_SPEC` two lines
 above is the null-pointer guard, not this case). Upstream can validate at *set*
 time because its handle has already read the header; ours cannot — `TjHandle`
@@ -11265,3 +11334,210 @@ on an accepted input — today's clamping is exercised by the crop and
 crop-plus-scale cross-check suites — so it needs its own C cross-validation
 pass, and folding it into a harness PR would put a decode-pipeline change
 behind a test-infrastructure review.
+
+## P4-198. `TjHandle` Merges Upstream's Two ICC Buffers, So a Decode Changes the Profile a Later Compress Embeds — **OPEN**
+
+**GitHub:** [#619](https://github.com/developer0hye/libjpeg-turbo-rs/issues/619) — found 2026-09-09 while designing the P4-141 criterion-3 API-sequence oracle; under the [#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481) umbrella.
+
+**What it is.** `tjinstance` carries **two** ICC buffers
+(`references/libjpeg-turbo/src/turbojpeg.c:111-112`):
+
+```c
+unsigned char *iccBuf, *decompICCBuf;
+size_t iccSize, decompICCSize;
+```
+
+`iccBuf` is written only by `tj3SetICCProfile` (`:1239-1246`) and read by the
+compress and transform paths — `tj3Compress*` (`turbojpeg-mp.c:126`),
+`tj3CompressFromYUVPlanes8` (`turbojpeg.c:1367`) and `tj3Transform`
+(`:3045`). `decompICCBuf` is written only by the decompressor, in
+`tj3DecompressHeader` (`:1909-1913` — `turbojpeg-mp.c` never writes the
+field; its one mention there is a read, in `tj3SaveImage*`'s PNG branch at
+`turbojpeg-mp.c:562-570`), and read only by `tj3GetICCProfile` when the instance was initialised for decompression
+(`:1993-2011`). In C a decode therefore cannot change the profile a later
+compress embeds.
+
+`TjHandle` has one field (`src/api/tj3.rs:134`, `icc_profile: Option<Vec<u8>>`).
+`set_icc_profile` writes it (`:348`), `configure_encoder` reads it (`:524`) and
+`decompress` **overwrites** it from the decoded image on every
+`TJPARAM_SAVEMARKERS` arm (`:884-898`). So
+
+```
+set_icc_profile(P) → decompress(imageA) → compress(...)
+```
+
+embeds **A's** profile where upstream embeds `P`, and embeds nothing at all
+where `A` carried none. The C ABI inherits it: `tj3GetICCProfile` in
+`crates/libjpeg-turbo-rs-capi/src/tj3.rs` delegates to
+`inst.inner.icc_profile()`, so it answers with whatever the last decode left.
+
+`docs/FEATURE_PARITY.md` records the merged behaviour as intended
+("decompress populates handle ICC"), which is what kept it from being noticed.
+
+**Acceptance criteria.**
+
+1. `TjHandle` carries a compress-side profile and a decompress-side profile
+   separately; `set_icc_profile` writes only the first, `decompress` only the
+   second.
+2. `tj3GetICCProfile` returns the decompress-side buffer for a handle
+   initialised for decompression and the compress-side one otherwise, matching
+   `turbojpeg.c:1993-2011`.
+3. A regression drives `set → decompress → compress` and asserts the embedded
+   profile is the one that was *set*, cross-validated against real
+   `tj3SetICCProfile` / `tj3Compress8` rather than against our own previous
+   output.
+4. `docs/FEATURE_PARITY.md`'s "decompress populates handle ICC" line is
+   corrected.
+5. `tests/helpers/api_sequence.rs` gains the property this item is the
+   exception to — "the profile a compress embeds is the one `set_icc_profile`
+   last supplied" — which the P4-141 criterion-3 oracle deliberately does not
+   assert while this is open. P2 cannot see it today because P2's reference
+   replays the same decode, so both handles carry whatever profile it left.
+
+**Why deferred.** Filed rather than fixed inside the pull request that landed
+the P4-141 criterion-3 harness. Splitting the field changes the public
+`TjHandle::icc_profile()` accessor's meaning and the `tj3GetICCProfile` C entry
+point, so it needs its own C cross-validation pass rather than riding behind a
+test-infrastructure review.
+
+## P4-199. `setDecompParameters` Publishes Thirteen Handle Parameters; Our 8-Bit Decode Publishes Eight and the 12/16-Bit Ones Publish Three and Ignore the Handle's Limits — **OPEN**
+
+**GitHub:** [#620](https://github.com/developer0hye/libjpeg-turbo-rs/issues/620) — found 2026-09-09 by the `rust-code-reviewer` pass on the P4-141 criterion-3 harness, which had to write down what a decode publishes in order to compare it; under the [#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481) umbrella.
+
+**What it is.** `setDecompParameters`
+(`references/libjpeg-turbo/src/turbojpeg.c:514-536`) writes **thirteen**
+parameters: `subsamp`, `jpegWidth`, `jpegHeight`, `precision`, `colorspace`,
+`progressive`, `arithmetic`, `lossless`, `losslessPSV`, `losslessPt`,
+`xDensity`, `yDensity` and `densityUnits`. It is called from the *shared* body of
+`tj3Decompress{8,12,16}` (`turbojpeg-mp.c:153`, whose `setDecompParameters`
+call is at `:190`), which `turbojpeg.c:1255-1263` compiles once per precision,
+so all three publish the same thirteen — and the same shared function applies `TJPARAM_MAXPIXELS` five lines
+later (`turbojpeg-mp.c:195-198`), so the ceiling holds at every precision too.
+
+Ours diverges twice:
+
+* `TjHandle::decompress` (`src/api/tj3.rs:856-878`) publishes **eight**:
+  `Width`, `Height`, `Precision`, `ColorSpace`, `Subsampling`, `XDensity`,
+  `YDensity`, `DensityUnits`. `TJPARAM_PROGRESSIVE`, `TJPARAM_ARITHMETIC`,
+  `TJPARAM_LOSSLESS`, `TJPARAM_LOSSLESSPSV` and `TJPARAM_LOSSLESSPT` keep
+  whatever the caller last set, so a caller cannot ask a decoded stream whether
+  it was progressive, arithmetic or lossless — and a compress that follows
+  inherits the caller's old values where upstream would have replaced them with
+  the frame's.
+* `TjHandle::decompress_12bit` / `decompress_16bit` (`:920-938`) publish
+  **three** (`Width`, `Height`, `Precision`) and read *nothing* from the
+  handle: they delegate to `crate::api::precision::decompress_12bit` /
+  `_16bit`, which build their own decoder with `DecodeLimits::default()`.
+  `TJPARAM_MAXPIXELS`, `TJPARAM_MAXMEMORY` and `TJPARAM_SCANLIMIT` therefore do
+  not apply to the 12/16-bit entry points at all.
+
+The resource half is reachable rather than theoretical: `Decoder::new` refuses
+a stream whose scan count exceeds its own default of 8192, so a header a
+caller's pre-parse cannot read is one `decompress_16bit` will still decode —
+and a lossless 16-bit SOF at 65500 x 32000 is a 4.19 GB `vec![0u16; …]` from a
+stream any sane `MAXPIXELS` was meant to exclude.
+
+**Acceptance criteria.**
+
+1. `TjHandle::decompress` publishes all thirteen parameters
+   `setDecompParameters` writes, cross-validated against `tj3Get` after
+   `tj3Decompress8` on progressive, arithmetic and lossless fixtures.
+2. `decompress_12bit` / `decompress_16bit` publish the same thirteen, since
+   upstream reaches them through the same function.
+3. `decompress_12bit` / `decompress_16bit` apply the handle's
+   `TJPARAM_MAXPIXELS`, `TJPARAM_MAXMEMORY` and `TJPARAM_SCANLIMIT`; a
+   regression drives `Decompress16` on an over-ceiling frame and asserts
+   refusal.
+4. `tests/helpers/api_sequence.rs`'s `WRITE_BACK_8BIT`, `WRITE_BACK_PRECISION`
+   and `Op::publishes_for_compress` are re-derived from `setDecompParameters`
+   rather than from our behaviour, and `Limits::prefilter_headers` — which
+   exists to keep an over-ceiling frame away from an entry point that ignores
+   the ceiling — is re-examined. Until then they encode the *port's* write
+   sets, which is why each carries a pointer to this item: closing it without
+   updating them would fail P4's "and nothing else" half on a correct parity
+   fix, and then break P2, because `Decompress16` would start publishing
+   `SUBSAMP` while `publishes_for_compress` still says it does not.
+
+**Why deferred.** Filed rather than fixed inside the pull request that landed
+the P4-141 criterion-3 harness. Widening a decode's published set changes what
+every downstream caller reads back, and threading the handle's limits into the
+precision entry points is a decode-pipeline change; both need their own C
+cross-validation pass.
+
+## P4-200. `JPEGWIDTH` / `JPEGHEIGHT` Publish the Scaled and Cropped Output Dimensions Where Upstream Publishes the SOF's — **OPEN**
+
+**GitHub:** [#621](https://github.com/developer0hye/libjpeg-turbo-rs/issues/621) — found 2026-09-09 by the `rust-code-reviewer` pass on the P4-141 criterion-3 harness, as the one defect class that harness cannot see; under the [#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481) umbrella.
+
+**What upstream does.** `setDecompParameters`
+(`references/libjpeg-turbo/src/turbojpeg.c:514-536`) publishes the **frame
+header's** dimensions — `this->jpegWidth = this->dinfo.image_width` — which
+`jpeg_read_header` filled and which `jpeg_calc_output_dimensions` never
+touches; it writes `output_width` / `output_height` instead. The call sits at
+`turbojpeg-mp.c:190`, before any scaling or cropping is applied, and
+`turbojpeg-mp.c:195-198` then applies `TJPARAM_MAXPIXELS` to
+`jpegWidth * jpegHeight`, which only makes sense on the SOF figures.
+`tj3SetCroppingRegion` depends on it too: it derives `scaledWidth` from
+`this->jpegWidth` (`:2093`) in order to validate the region, so a `jpegWidth`
+that had already been cropped would make that check compare a region against
+itself.
+
+**What we do.** `TjHandle::decompress` (`src/api/tj3.rs:856-857`) publishes the
+*decoded output* dimensions, `img.width` / `img.height` — post-scaling and
+post-cropping. Measured on `tests/fixtures/photo_64x64_420.jpg` (64x64):
+
+| call | configuration | handle `Width` | C publishes |
+|---|---|---|---|
+| `decompress` | scaling 1/2 | **32** | 64 |
+| `decompress_header` | scaling 1/2 | 64 ✅ | 64 |
+| `decompress` | crop 8x8 | **8** | 64 |
+| `decompress_header` | crop 8x8 | **8** | 64 |
+
+The port already knows the rule and applies it in one of the four cases.
+`decompress_header`'s doc says it outright (`:735-737`) — "`JPEGWIDTH`/
+`JPEGHEIGHT` must reflect the ORIGINAL JPEG dimensions per the libjpeg-turbo
+spec, not the scaled output" — and implements it by saving the scaling factor,
+setting it to 1:1 and calling `decompress` (`:747-753`), a route that
+neutralises scaling and can say nothing about cropping.
+
+Distinct from the two items filed beside it:
+[P4-199](#p4-199-setdecompparameters-publishes-thirteen-handle-parameters-our-8-bit-decode-publishes-eight-and-the-1216-bit-ones-publish-three-and-ignore-the-handles-limits--open)
+(#620) enumerates *which* parameters a decode publishes and never their values,
+and [P4-198](#p4-198-tjhandle-merges-upstreams-two-icc-buffers-so-a-decode-changes-the-profile-a-later-compress-embeds--open)
+(#619) is about ICC.
+
+**Why the API-sequence harness cannot see it — and why that is worth
+recording.** P4's first half in `tests/helpers/api_sequence.rs` compares the
+live handle against a reference that replayed the *same* `SetScaling` /
+`SetCrop`, so both publish the same wrong value and agree.
+`criterion_named_sequence_leaves_no_state_behind` drives exactly the triggering
+configuration — `SetScaling { index: 12 }` and `SetCrop { 8x8 }` before a
+decode — across eleven fixtures, and passes. A differential oracle has no notion
+of a *correct* published value, only of a *consistent* one. That limit is now
+stated in the harness's module doc rather than left to be rediscovered, which
+is the same lesson #320 taught about coverage claims.
+
+**Acceptance criteria.**
+
+1. `TjHandle::decompress`, `decompress_header`, `decompress_12bit` and
+   `decompress_16bit` publish `JPEGWIDTH` / `JPEGHEIGHT` from the frame header,
+   unaffected by `TJPARAM_SCALINGFACTOR` and by the cropping region;
+   cross-validated against `tj3Get` after `tj3Decompress8` on a scaled decode
+   and on a cropped one, against real TurboJPEG rather than against our own
+   previous output.
+2. `decompress_header` stops implementing the rule by round-tripping the
+   scaling factor, since that route cannot express the cropping half.
+3. `TJPARAM_MAXPIXELS` is applied to the published (SOF) dimensions, as
+   `turbojpeg-mp.c:195-198` does.
+4. `docs/C_API_REFERENCE.md`'s `TJPARAM_JPEGWIDTH` / `TJPARAM_JPEGHEIGHT` rows
+   record the divergence until it closes.
+5. `tests/helpers/api_sequence.rs` gains a property that derives the expected
+   `Width` / `Height` from the SOF independently — `Decoder::new(jpeg).header()`
+   is already in hand in `exceeds_limits` — rather than from a second handle.
+   Until this closes such a property would fail, which is why it is not there
+   today.
+
+**Why deferred.** Filed rather than fixed inside the pull request that landed
+the P4-141 criterion-3 harness. Changing what a decode publishes is a
+public-API behaviour change needing its own C cross-validation pass, and the
+fix has to decide what `decompress_12bit` / `decompress_16bit` do as well,
+which overlaps P4-199.

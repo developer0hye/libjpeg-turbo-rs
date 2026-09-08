@@ -41,10 +41,13 @@
 //! density `0 / 1 / 1`, which are also what `TjHandle::new()` initialises —
 //! so four of P4's eight comparisons were a number against itself *and*
 //! against the fresh-handle default. [`BUILTIN_INPUTS`] therefore carries
-//! three images chosen so every published parameter can take at least two
+//! four images chosen so every published parameter can take at least two
 //! values across them, and
 //! `the_builtin_inputs_can_move_every_published_parameter` in
-//! `tests/api_sequence_state.rs` fails if that stops being true.
+//! `tests/api_sequence_state.rs` fails if that stops being true. The fourth is
+//! there for a different reason — a 12-bit source is the only input on which
+//! `Op::Decompress12` succeeds, and P4's first half is gated on success, so
+//! without it that opcode's write-back comparison never runs at all.
 //!
 //! # The oracle
 //!
@@ -58,14 +61,18 @@
 //!   `FASTUPSAMPLE`, `FASTDCT`, `SAVEMARKERS`, `BOTTOMUP` and the resource
 //!   limits — all writable parameters — so a fresh handle carrying the same
 //!   writes must produce the same bytes. Anything else it reads is state that
-//!   leaked from an earlier call.
+//!   leaked from an earlier call. On `Decompress12` / `Decompress16` this is a
+//!   *forward* guard rather than a live check: those two read nothing from the
+//!   handle today ([P4-199](https://github.com/developer0hye/libjpeg-turbo-rs/issues/620)),
+//!   so the comparison is one pure call against another until they start to.
 //! * **P2, compress depends on the configuration and the most recent
 //!   published header, and on nothing else.** `tj3DecompressHeader` and
 //!   `tj3Decompress8` deliberately publish header facts into the handle
 //!   (`JPEGWIDTH`, `JPEGHEIGHT`, `PRECISION`, `COLORSPACE`, `SUBSAMP`, the
 //!   densities), and a later compress is documented to read them —
 //!   `setCompDefaults` takes the densities from the handle at
-//!   `turbojpeg.c:376-378` and the sampling factors at `:418-422`. So the
+//!   `turbojpeg.c:376-378` and the sampling factors at `:418-427` (`:418-422`
+//!   is the horizontal half only). So the
 //!   reference for a compress is a fresh handle replaying the configuration
 //!   *plus the last publishing operation that succeeded*, on the image it ran
 //!   on. Skipping the compress comparison after any write-back — the first
@@ -74,12 +81,15 @@
 //!   `tj3Decompress12` / `tj3Decompress16` are not publishing operations for
 //!   this purpose: they write `JPEGWIDTH`, `JPEGHEIGHT` and `PRECISION`, none
 //!   of which `configure_encoder` reads.
-//! * **P3, determinism of the handle-free entry points.**
+//! * **P3, determinism of the handle-free entry point.**
 //!   `transform_jpeg_with_options` takes no handle at all, so two identical
-//!   calls differing is global state. It is deliberately *not* a statement
-//!   about handle state — P1 covers repetition of a stateful operation,
-//!   because the live handle's n-th decode is compared against a fresh
-//!   handle's first.
+//!   calls differing is process-global state or a mutation of the input
+//!   slice. It is deliberately *not* a statement about handle state — P1
+//!   covers repetition of a stateful operation, because the live handle's
+//!   n-th decode is compared against a fresh handle's first — and it is the
+//!   one property here with no committed can-fail proof, because the only
+//!   defects it can see are ones the language mostly prevents. Read it as a
+//!   cheap smoke check next to the other three.
 //! * **P4, write-back agreement, in both directions.** After a *successful*
 //!   decode-family operation, every parameter that operation documents it
 //!   writes holds the same value on the used handle as on the fresh one — and
@@ -98,16 +108,37 @@
 //! and `tj3Transform` at `:3045`), and `decompICCBuf`, written only by
 //! the decompressor (`:1909-1913`) — so in C a decode can never change the profile
 //! a later compress embeds. `TjHandle` merges them into one field, which is
-//! filed as its own gap; P2 does not cover it because P2 stops at the first
-//! write-back. That property joins this oracle when the gap closes, rather
-//! than being pinned here in its current shape.
+//! [P4-198](https://github.com/developer0hye/libjpeg-turbo-rs/issues/619); P2 does not cover it because P2's reference replays
+//! that same decode, so both handles carry whatever profile it left. That
+//! property joins this oracle when the gap closes, rather than being pinned
+//! here in its current shape.
+//!
+//! # The blind spot, stated rather than discovered later
+//!
+//! Every property here is a **mirror** comparison: the live handle against a
+//! second handle built from the same configuration. That structure can see a
+//! value that *differs* between two paths, and cannot see a value that is
+//! *wrong on both*. It therefore says nothing about whether a published
+//! parameter holds the number the contract calls for.
+//!
+//! This is not hypothetical.
+//! [P4-200](https://github.com/developer0hye/libjpeg-turbo-rs/issues/621) is
+//! exactly that shape: `JPEGWIDTH` / `JPEGHEIGHT` are published from the
+//! decoded *output*, so a scaled or cropped decode reports the output size
+//! where `setDecompParameters` reports the SOF's (`turbojpeg.c:517`).
+//! `criterion_named_sequence_leaves_no_state_behind` drives the triggering
+//! configuration — a scaling factor *and* a crop, then a decode — across
+//! eleven fixtures and passes, because the reference replays both and writes
+//! the same wrong number. Closing P4-200 is what makes a fifth property
+//! possible: one that derives the expected dimensions from the SOF
+//! independently, which `exceeds_limits` below already has in hand.
 
 #![allow(dead_code)]
 
 use libjpeg_turbo_rs::tj3::{FrameInfo, TjHandle, TjParam};
 use libjpeg_turbo_rs::{
-    transform_jpeg_with_options, CropRegion, Decoder, MarkerCopyMode, PixelFormat, TransformOp,
-    TransformOptions,
+    transform_jpeg_with_options, CropRegion, Decoder, JpegError, MarkerCopyMode, PixelFormat,
+    TransformOp, TransformOptions,
 };
 
 /// Upper bound on the operations one program may hold.
@@ -161,8 +192,15 @@ const FUZZABLE_PARAMS: &[TjParam] = &[
     TjParam::SaveMarkers,
 ];
 
-/// Parameters `tj3DecompressHeader` / `tj3Decompress8` publish from the frame
-/// header. Compared after a successful 8-bit decode-family operation (P4).
+/// Parameters `TjHandle::decompress` publishes from the frame header.
+/// Compared after a successful 8-bit decode-family operation (P4).
+///
+/// **This is the port's write set, not upstream's.** `setDecompParameters`
+/// (`turbojpeg.c:514-536`) writes thirteen: these eight plus `PROGRESSIVE`,
+/// `ARITHMETIC`, `LOSSLESS`, `LOSSLESSPSV` and `LOSSLESSPT`. That gap is
+/// [P4-199](https://github.com/developer0hye/libjpeg-turbo-rs/issues/620), and
+/// this list moves with it — closing it without widening this one would fail
+/// P4's "and nothing else" half on a correct parity fix.
 const WRITE_BACK_8BIT: &[TjParam] = &[
     TjParam::Width,
     TjParam::Height,
@@ -174,7 +212,15 @@ const WRITE_BACK_8BIT: &[TjParam] = &[
     TjParam::DensityUnits,
 ];
 
-/// What `TjHandle::decompress_12bit` / `decompress_16bit` document they write.
+/// What `TjHandle::decompress_12bit` / `decompress_16bit` write.
+///
+/// Upstream reaches all three precisions through one function —
+/// `tj3Decompress{8,12,16}`, defined once at `turbojpeg-mp.c:153` and
+/// macro-expanded per precision by the three `#include "turbojpeg-mp.c"` at
+/// `turbojpeg.c:1255-1263` — which calls `setDecompParameters` unconditionally
+/// at `turbojpeg-mp.c:190`. So in C these publish the same thirteen as the
+/// 8-bit path; here they publish three and read nothing from the handle at
+/// all. Same item, [P4-199](https://github.com/developer0hye/libjpeg-turbo-rs/issues/620).
 const WRITE_BACK_PRECISION: &[TjParam] = &[TjParam::Width, TjParam::Height, TjParam::Precision];
 
 /// Every parameter `TjHandle::get` answers.
@@ -182,7 +228,7 @@ const WRITE_BACK_PRECISION: &[TjParam] = &[TjParam::Width, TjParam::Height, TjPa
 /// P4's second half asserts that an operation leaves everything outside its
 /// documented write set untouched, so this list has to be complete rather than
 /// interesting: a parameter missing here is one an operation could scribble on
-/// unnoticed. `every_parameter_is_in_all_params` in
+/// unnoticed. `all_params_lists_every_tjparam` in
 /// `tests/api_sequence_state.rs` fails if a new `TjParam` variant does not
 /// reach it.
 pub const ALL_PARAMS: &[TjParam] = &[
@@ -243,6 +289,7 @@ const COMPRESS_FORMATS: &[PixelFormat] = &[
 /// | `gray_8x8.jpg` | `decompress` | `8, 8, 8, 2, 3, 1, 1, 0` |
 /// | `api_sequence_color_16x16_422_dense.jpg` | `decompress` | `16, 16, 8, 1, 1, 72, 71, 1` |
 /// | `api_sequence_lossless16_gray_8x8.jpg` | `decompress_16bit` | `8, 8, 16, -1, -1, 1, 1, 0` |
+/// | `real_world/libjpeg_testorig12_227x149_12bit.jpg` | `decompress_12bit` | `227, 149, 12, …` |
 ///
 /// The second is `cjpeg -quality 80 -sample 2x1` output whose JFIF APP0
 /// density field was then set to `units = 1, 72 x 71`: `cjpeg` has no
@@ -251,10 +298,20 @@ const COMPRESS_FORMATS: &[PixelFormat] = &[
 /// those alone the three density comparisons could not fail. The third is
 /// `cjpeg -precision 16 -lossless 1`, and it is the only way `PRECISION` ever
 /// holds anything but 8 before an 8-bit decode publishes over it.
+///
+/// The fourth exists because without it **`Op::Decompress12`'s write-back
+/// comparison never runs**. `decompress_12bit` refuses an 8-bit source
+/// outright (P4-171) and a 16-bit one, so on the first three built-ins it
+/// returns `Err` every time and P4's first half — which is gated on success —
+/// is dead for that opcode, in every deterministic test and in all 189 seeds.
+/// `rust-code-reviewer` measured it. `libjpeg_testorig12_227x149_12bit.jpg` is
+/// 227 x 149 = 33,823 px, well under [`Limits::max_pixels`], and parses under
+/// `Decoder::new`, so the pre-parse bounds it like any other input.
 pub const BUILTIN_INPUTS: &[&[u8]] = &[
     include_bytes!("../fixtures/gray_8x8.jpg"),
     include_bytes!("../fixtures/api_sequence_color_16x16_422_dense.jpg"),
     include_bytes!("../fixtures/api_sequence_lossless16_gray_8x8.jpg"),
+    include_bytes!("../fixtures/real_world/libjpeg_testorig12_227x149_12bit.jpg"),
 ];
 
 /// The input list the fuzz target builds: the fuzzed body first, then every
@@ -281,6 +338,10 @@ pub const FUZZ_INPUT_COLOR_DENSE: u8 = 2;
 /// `Op::SelectInput` index of the 16-bit lossless image — the only one
 /// `Decompress16` accepts, and so the only way `PRECISION` reaches 16.
 pub const FUZZ_INPUT_LOSSLESS16: u8 = 3;
+/// `Op::SelectInput` index of the 12-bit lossy image — the only one
+/// `Decompress12` accepts, and so the only input on which P4's write-back
+/// comparison for that opcode runs at all.
+pub const FUZZ_INPUT_LOSSY12: u8 = 4;
 
 /// One call in a program.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -332,11 +393,30 @@ impl Op {
     /// Whether this operation publishes the header facts a later *compress*
     /// reads.
     ///
-    /// `tj3Decompress12` / `tj3Decompress16` are excluded deliberately: they
-    /// write `JPEGWIDTH`, `JPEGHEIGHT` and `PRECISION`, and
+    /// `tj3Decompress12` / `tj3Decompress16` are excluded deliberately: *in
+    /// this port* they write `JPEGWIDTH`, `JPEGHEIGHT` and `PRECISION`, and
     /// `configure_encoder` reads none of the three. Including them would make
     /// P2's reference replay an operation that changes nothing it compares,
-    /// while hiding the last operation that does.
+    /// while hiding the last operation that does. Upstream publishes
+    /// `SUBSAMP` and the densities there too
+    /// ([P4-199](https://github.com/developer0hye/libjpeg-turbo-rs/issues/620)),
+    /// so this predicate widens with that item — and must, or P2 starts
+    /// producing the false positives the ordered replay exists to prevent.
+    ///
+    /// **P2's freedom from a merged-ICC false positive rests on an open
+    /// item.** `compress` reads `self.icc_profile` and `decompress` overwrites
+    /// it on every success — that is
+    /// [P4-198](https://github.com/developer0hye/libjpeg-turbo-rs/issues/619) —
+    /// so `SetIcc(v), Decompress, DecompressHeader, Compress` would leave the
+    /// live handle carrying the image's profile and a reference that replays
+    /// only the *last* publisher carrying `v`. It does not fire today solely
+    /// because `decompress_header` is literally `self.decompress(data)`
+    /// (`src/api/tj3.rs:747-753`) and therefore writes `icc_profile`
+    /// identically — and making it header-only is the whole point of P4-142
+    /// (`docs/last_mile/phase4.md`, OPEN, no issue of its own).
+    /// `the_two_publishing_operations_agree_on_the_icc_profile` in
+    /// `tests/api_sequence_state.rs` fails the moment that stops holding, so
+    /// the trap surfaces as a named test rather than as a mystery P2 crash.
     pub fn publishes_for_compress(&self) -> bool {
         matches!(self, Op::DecompressHeader | Op::Decompress)
     }
@@ -375,8 +455,24 @@ impl ReferencePolicy {
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
     /// Frame-header pixels — width x height as the SOF declares them, before
-    /// any scaling — above which an input is dropped from the program.
+    /// any scaling — above which an input is blanked, and the ceiling every
+    /// handle the engine builds carries as `TJPARAM_MAXPIXELS`.
     pub max_pixels: u64,
+    /// Whether to screen inputs by pre-parsing their frame header.
+    ///
+    /// Always `true` in the fuzz target and in every deterministic program:
+    /// it is what keeps a 16-bit lossless frame of any declared size away
+    /// from `decompress_16bit`, which reads no handle limits at all
+    /// (P4-199, #620).
+    ///
+    /// It exists as a switch because with it on, *no input can distinguish
+    /// the pre-parse from the handle ceiling* — both refuse exactly the
+    /// frames above `max_pixels` — so a test for the handle ceiling would be
+    /// asserting around a path it cannot run. Turning it off makes
+    /// `TJPARAM_MAXPIXELS` the only ceiling, which is how
+    /// `a_handle_built_by_reset_carries_the_same_ceiling_as_the_references`
+    /// can fail when the reset path forgets it.
+    pub prefilter_headers: bool,
 }
 
 /// What one [`run_program`] call did.
@@ -531,8 +627,11 @@ fn op_from_record(record: &[u8]) -> Op {
         // at or past the *scaled* output width narrows the decode to zero
         // columns, and the vertical-crop step then trips a `debug_assert!`
         // in `pipeline_impl/output.rs` whose comment calls the empty-data
-        // case unreachable. Upstream refuses the region instead
-        // (`turbojpeg.c:2106-2109`). Any non-zero `x` is reachable for some
+        // case unreachable. Upstream refuses the region instead — the general
+        // set-time bounds check at `turbojpeg.c:2106-2109` fires through its
+        // `x + w > scaledWidth` term, and `x` has already had to clear the
+        // iMCU-divisibility rule at `:2096-2101`, which this port applies by
+        // aligning down silently. Any non-zero `x` is reachable for some
         // scale in the 1/8..2/1 range a program may also set, so the whole
         // offset is excluded rather than bounded. Delete this pin — and
         // `x: usize::from(b % 16)` returns — when that item closes.
@@ -591,7 +690,7 @@ pub fn run_program_with(
     let mut usable: Vec<&[u8]> = Vec::with_capacity(inputs.len());
     let mut blanked: usize = 0;
     for input in inputs {
-        if exceeds_limits(input, limits) {
+        if limits.prefilter_headers && exceeds_limits(input, limits) {
             usable.push(&[]);
             blanked += 1;
         } else {
@@ -670,8 +769,12 @@ pub fn run_program_with(
                 if live_outcome.succeeded() {
                     compare_params(index, op, ops, jpeg, &live, &reference, published);
                 }
-                // P4, second half: and nothing else. Asserted whether or not
-                // the call succeeded — a failure is not a licence to scribble.
+                // P4, second half: and nothing else. Asserted on the error
+                // path too, but against the same `published` list: a
+                // `decompress` that fails inside `try_clone_opt` has already
+                // written all eight, and C leaves them set after a mid-decode
+                // failure as well, so exempting nothing there would flag
+                // upstream-matching behaviour.
                 compare_untouched(index, op, ops, jpeg, &live, &before, published);
                 if op.publishes_for_compress() && live_outcome.succeeded() {
                     // Only the most recent publisher matters, and it takes the
@@ -728,13 +831,27 @@ pub fn run_program_with(
     }
 }
 
-/// Whether the frame header declares more pixels than this run allows.
+/// Whether this input must be kept out of the run.
 ///
-/// Mirrors `fuzz_decompress_precision`: a stream whose header does not parse
-/// falls through to the entry points, which must reject it with a typed error.
+/// Two reasons, and the second is not obvious. A header that parses and
+/// declares more pixels than the run allows is the easy case. The other is a
+/// header the pre-parse *cannot read because of a limit*: `Decoder::new`
+/// refuses a stream whose scan count exceeds its own default of 8192, and
+/// `TjHandle::decompress_12bit` / `decompress_16bit` read nothing from the
+/// handle at all — they build their own decoder with `DecodeLimits::default()`
+/// ([P4-199](https://github.com/developer0hye/libjpeg-turbo-rs/issues/620)) —
+/// so `TJPARAM_MAXPIXELS` does not reach them and a 16-bit lossless SOF at
+/// 65500 x 32000 would allocate 4 GB from a stream the ceiling was meant to
+/// exclude. A `LimitExceeded` from the pre-parse therefore blanks the input.
+///
+/// Every *other* parse failure is kept, deliberately: a malformed stream is
+/// rejected cheaply by every entry point, and those error paths are most of
+/// what a program of decode operations is for.
 fn exceeds_limits(jpeg: &[u8], limits: &Limits) -> bool {
-    let Ok(decoder) = Decoder::new(jpeg) else {
-        return false;
+    let decoder = match Decoder::new(jpeg) {
+        Ok(decoder) => decoder,
+        Err(JpegError::LimitExceeded { .. }) => return true,
+        Err(_) => return false,
     };
     let header = decoder.header();
     let pixels: u64 = (header.width as u64).saturating_mul(header.height as u64);
@@ -924,6 +1041,15 @@ fn apply(handle: &mut TjHandle, op: &Op, jpeg: &[u8], limits: &Limits) -> Outcom
         }
         Op::SetScaling { index } => {
             let factors: Vec<(u32, u32)> = TjHandle::scaling_factors();
+            // Forward guard, not a live check: `scaling_factors()` returns
+            // the sixteen JPEG IDCT factors from a constant table, so today
+            // this cannot fire. It exists because the `% len()` below would
+            // divide by zero if that table ever became empty.
+            assert!(
+                !factors.is_empty(),
+                "TjHandle::scaling_factors() is the sixteen JPEG IDCT factors; \
+                 an empty list would divide by zero here"
+            );
             let (num, denom): (u32, u32) = factors[usize::from(*index) % factors.len()];
             Outcome::Config(
                 handle
@@ -1176,10 +1302,14 @@ fn compare_params(
 /// P4's second half: every parameter outside the operation's documented write
 /// set must hold the value it held before the call.
 ///
-/// This is what holds `Op::InspectHeader` and `Op::Compress` — both `&self` —
-/// to writing nothing at all, and what would catch a decode that writes a
-/// parameter its contract does not mention. Twenty-six `get()` calls are free
-/// next to a decode.
+/// It is what would catch a decode that writes a parameter its contract does
+/// not mention — the committed proof is a `self.optimize = 1` injected into
+/// `TjHandle::decompress`, which fails it in six tests. For `Op::InspectHeader`,
+/// `Op::Compress` and `Op::Transform` it is a forward guard only: the first two
+/// take `&self` and `TjHandle` has no interior mutability, and the third is a
+/// free function that never receives the handle, so the borrow checker already
+/// holds all three and this assertion cannot fail until one of them takes
+/// `&mut self`. Twenty-six `get()` calls are free next to a decode.
 #[allow(clippy::too_many_arguments)]
 fn compare_untouched(
     index: usize,
