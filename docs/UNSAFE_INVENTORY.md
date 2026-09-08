@@ -22,9 +22,12 @@ the row.
 
 - **Scope:** the root crate, `src/` — parser, pipelines, scalar kernels and
   every SIMD backend (`src/simd/`). The C-ABI crate
-  (`crates/libjpeg-turbo-rs-capi`, `extern "C"` end to end) is **not yet
-  inventoried**; it is the next chunk of criterion 4 and is tracked in
-  `docs/last_mile/phase4.md` under P4-141.
+  (`crates/libjpeg-turbo-rs-capi`, `extern "C"` end to end) has its own
+  document, [`UNSAFE_INVENTORY_CAPI.md`](UNSAFE_INVENTORY_CAPI.md), gated by
+  the same test; one file there — `jpeglib.rs`, the classic `jpeg_*`
+  surface — is still deferred, named in the gate's `DEFERRED` list, and is
+  the remaining chunk of criterion 4 in `docs/last_mile/phase4.md` under
+  P4-141.
 - **Site:** one code `unsafe` token — outside comments, strings and
   literals — as found by the lexer in `tests/helpers/unsafe_scan.rs`. Under
   the crate's `#![deny(unsafe_op_in_unsafe_fn)]`, an `unsafe fn` and the

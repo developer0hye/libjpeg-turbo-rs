@@ -1,8 +1,12 @@
 /* sanitizer C harness for libjpeg-turbo-rs-capi (P4-11 closure 2026-05-17).
  *
  * Loads the cdylib at runtime via dlopen, resolves the minimum TJ3 surface
- * (tj3Init / tj3DecompressHeader / tj3Decompress8 / tj3Destroy / tj3Alloc /
- * tj3Free), and decodes a small fixed corpus.  Compiled with
+ * (tj3Init / tj3DecompressHeader / tj3Get / tj3Decompress8 / tj3Destroy),
+ * and decodes a small fixed corpus.  It allocates its own buffers with
+ * malloc/free rather than tj3Alloc/tj3Free, so the shared-allocator contract
+ * those two exist for is NOT exercised across this boundary — recorded in
+ * docs/UNSAFE_INVENTORY_CAPI.md's tj3Free row and in P4-141 criterion 2.
+ * Compiled with
  * `-fsanitize=address,undefined` and run with `ASAN_OPTIONS=...` so any
  * boundary bug at the FFI surface (wrong free, OOB read, undefined behavior
  * in the conversion layer) trips a sanitizer report instead of silently

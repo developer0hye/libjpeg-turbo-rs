@@ -234,9 +234,10 @@ jobs:
           test -f "$LIB" || { echo "cdylib missing: $LIB"; exit 1; }
           # Restrict to a small curated set so the job stays well under
           # 30 minutes even if a regression slows the decoder dramatically.
-          # The four fixtures span baseline + progressive + arithmetic +
-          # 12-bit precision and exercise every code path through the
-          # tj3Decompress8 surface.
+          # The three fixtures span baseline + progressive + arithmetic
+          # through the tj3Decompress8 surface. This comment used to claim a
+          # fourth, 12-bit one; there is none, and no 12-bit path crosses
+          # the C boundary under ASan — tracked under P4-141 criterion 2.
           /tmp/c_boundary_harness "$LIB" \
             references/libjpeg-turbo/testimages/testorig.jpg \
             references/libjpeg-turbo/testimages/testimgint.jpg \

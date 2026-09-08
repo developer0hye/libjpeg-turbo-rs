@@ -1,9 +1,9 @@
-//! P4-141 criterion 4: the root crate's `unsafe` inventory is committed and
-//! gated — CI diffs it against the source tree, so an added, removed or
-//! moved `unsafe` fails the build until `docs/UNSAFE_INVENTORY.md` says
-//! why the site exists, what invariant it relies on, whether a safe caller
-//! can reach it, which test would catch a broken invariant, which tools
-//! exercise it, and who last reviewed it.
+//! P4-141 criterion 4: the workspace's `unsafe` inventories are committed
+//! and gated — CI diffs them against the source tree, so an added, removed
+//! or moved `unsafe` fails the build until the owning document says why the
+//! site exists, what invariant it relies on, whether a safe caller can reach
+//! it, which test would catch a broken invariant, which tools exercise it,
+//! and who last reviewed it.
 //!
 //! **Why an inventory and not a count.** "780 unsafe operations" says
 //! nothing about risk — one precondition-free safe wrapper (P4-135)
@@ -16,13 +16,28 @@
 //! the pull request and not a silent addition behind an existing
 //! justification.
 //!
-//! **What is gated.** Every `.rs` under `src/` — the whole root crate,
-//! `simd/` included. Sites in `#[cfg(test)]` code count too: they say
-//! "test-only" in their *Safe caller* cell rather than being exempt, because
-//! a test that dereferences a raw pointer is still code Miri and ASan need
-//! to see. The C-ABI crate (`crates/libjpeg-turbo-rs-capi`) is not yet
-//! inventoried — it is `extern "C"` end to end and is the next chunk of this
-//! criterion, tracked in `docs/last_mile/phase4.md` under P4-141.
+//! **What is gated.** Two trees, each with the document that owns it (see
+//! [`SCOPES`]): every `.rs` under `src/` — the whole root crate, `simd/`
+//! included — against `docs/UNSAFE_INVENTORY.md`, and every `.rs` under
+//! `crates/libjpeg-turbo-rs-capi/src/` against
+//! `docs/UNSAFE_INVENTORY_CAPI.md`. Sites in `#[cfg(test)]` code count too:
+//! they say "test-only" in their *Safe caller* cell rather than being
+//! exempt, because a test that dereferences a raw pointer is still code Miri
+//! and ASan need to see. Nothing shipped may sit outside those two trees:
+//! [`the_scanned_roots_are_the_whole_workspace`] enumerates `crates/` from
+//! the tree — not from a list — and fails on any `unsafe` in a member's
+//! `src/` or `build.rs` that no inventory covers, so a *new* crate is
+//! gated the day it lands rather than the day someone remembers.
+//!
+//! **What is deferred, in code rather than in prose.** [`DEFERRED`] names
+//! the sources that hold `unsafe` and are not inventoried yet — today only
+//! `crates/libjpeg-turbo-rs-capi/src/jpeglib.rs`, the classic `jpeg_*`
+//! surface, 501 sites in one 12.9k-line file. The list is checked both ways:
+//! a deferred path must exist and must still hold `unsafe` (so a stale entry
+//! fails once the file is inventoried or cleaned), and a file that is
+//! neither inventoried nor deferred fails as before. A new source therefore
+//! cannot slip past by being forgotten — only by an explicit, reviewable
+//! edit to this list, which `.github/CODEOWNERS` routes to the maintainer.
 //!
 //! **How the diff works.** [`unsafe_scan`] lexes each source (comments,
 //! strings and literals cannot hide or fake a site — see that module) and
@@ -52,11 +67,38 @@ use std::path::{Path, PathBuf};
 mod unsafe_scan;
 use unsafe_scan::UnsafeSite;
 
-/// The committed inventory, repository-relative.
-const INVENTORY: &str = "docs/UNSAFE_INVENTORY.md";
+/// One scanned tree and the inventory document that must account for it,
+/// both repository-relative.
+struct Scope {
+    /// Directory to walk for `.rs` sources.
+    scan_root: &'static str,
+    /// Markdown inventory whose sections must match that walk exactly.
+    inventory: &'static str,
+}
 
-/// The tree the inventory must account for, repository-relative.
-const SCAN_ROOT: &str = "src";
+/// Every tree under the gate. Adding a workspace member with `unsafe` means
+/// adding it here *and* writing its inventory; leaving it out is caught by
+/// [`the_scanned_roots_are_the_whole_workspace`], which enumerates `crates/`
+/// from the tree and fails on any `unsafe` outside these roots and
+/// [`DEFERRED`].
+const SCOPES: [Scope; 2] = [
+    Scope {
+        scan_root: "src",
+        inventory: "docs/UNSAFE_INVENTORY.md",
+    },
+    Scope {
+        scan_root: "crates/libjpeg-turbo-rs-capi/src",
+        inventory: "docs/UNSAFE_INVENTORY_CAPI.md",
+    },
+];
+
+/// Sources inside a scanned root that hold `unsafe` and are **not** yet
+/// inventoried. Each entry is a promise with a deadline, not an exemption:
+/// the gate requires the path to exist and to still hold at least one
+/// `unsafe`, so an entry that has been inventoried or cleaned up fails until
+/// it is removed. Shrinking this list is the remaining work of P4-141
+/// criterion 4.
+const DEFERRED: [&str; 1] = ["crates/libjpeg-turbo-rs-capi/src/jpeglib.rs"];
 
 /// The table columns every section must declare, in this order. Renaming
 /// one is an inventory-format change and fails here on purpose.
@@ -93,7 +135,11 @@ fn repo_root() -> PathBuf {
 }
 
 fn repository_tree_is_readable() -> bool {
-    repo_root().join(SCAN_ROOT).is_dir() && repo_root().join("docs").is_dir()
+    // Deliberately *not* every scope root: this answers "is this a
+    // repository checkout or a packaged crate?", and a scope root that has
+    // moved is a bug in SCOPES, asserted where the scope is used, rather
+    // than a reason to skip the gate for the tree that is still here.
+    repo_root().join("src").is_dir() && repo_root().join("docs").is_dir()
 }
 
 fn skip_reason() -> String {
@@ -105,6 +151,12 @@ fn skip_reason() -> String {
         repo_root().display()
     )
 }
+
+/// The document path the parser and diff tests below phrase their
+/// diagnostics with. Those two functions take the path as an argument, so
+/// the fixtures need one; the root crate's is used because its messages are
+/// the ones the assertions quote verbatim.
+const INVENTORY_FIXTURE: &str = SCOPES[0].inventory;
 
 /// The six prose cells [`skeleton`] emits for a new row, in `COLUMNS[2..]`
 /// order. They are the *only* source of those strings: `skeleton` writes
@@ -171,10 +223,12 @@ fn table_cells(line: &str) -> Option<Vec<String>> {
 /// sites`) is an error rather than a silently ignored heading.
 const GATED_REGION_RULE: &str = "---";
 
-/// Read `docs/UNSAFE_INVENTORY.md` into sections. Every structural or
+/// Read an inventory document into sections. `inventory` is only the
+/// repository-relative path used to phrase the diagnostics, so a failure
+/// names the file the reader has to open. Every structural or
 /// completeness problem is reported with its line number; a parse that
 /// returns `Err` lists all of them rather than the first.
-fn parse_inventory(text: &str) -> Result<Vec<InventorySection>, Vec<String>> {
+fn parse_inventory(inventory: &str, text: &str) -> Result<Vec<InventorySection>, Vec<String>> {
     let mut sections: Vec<InventorySection> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
     let mut saw_header_for_current: bool = false;
@@ -205,7 +259,7 @@ fn parse_inventory(text: &str) -> Result<Vec<InventorySection>, Vec<String>> {
             if let Some(previous) = sections.last() {
                 if !saw_header_for_current {
                     errors.push(format!(
-                        "{INVENTORY}:{}: section `{}` has no column header row",
+                        "{inventory}:{}: section `{}` has no column header row",
                         previous.line, previous.path
                     ));
                 }
@@ -214,7 +268,7 @@ fn parse_inventory(text: &str) -> Result<Vec<InventorySection>, Vec<String>> {
                 Some((path, declared_total)) => {
                     if sections.iter().any(|s| s.path == path) {
                         errors.push(format!(
-                            "{INVENTORY}:{lineno}: `{path}` is inventoried twice"
+                            "{inventory}:{lineno}: `{path}` is inventoried twice"
                         ));
                     }
                     sections.push(InventorySection {
@@ -226,7 +280,7 @@ fn parse_inventory(text: &str) -> Result<Vec<InventorySection>, Vec<String>> {
                     saw_header_for_current = false;
                 }
                 None => errors.push(format!(
-                    "{INVENTORY}:{lineno}: a `## ` heading must read \
+                    "{inventory}:{lineno}: a `## ` heading must read \
                      `## `<path>` — <N> sites` (or `1 site`): {line}"
                 )),
             }
@@ -238,7 +292,7 @@ fn parse_inventory(text: &str) -> Result<Vec<InventorySection>, Vec<String>> {
         };
         let Some(section) = sections.last_mut() else {
             errors.push(format!(
-                "{INVENTORY}:{lineno}: table row before any `## ` file section"
+                "{inventory}:{lineno}: table row before any `## ` file section"
             ));
             continue;
         };
@@ -254,7 +308,7 @@ fn parse_inventory(text: &str) -> Result<Vec<InventorySection>, Vec<String>> {
         }
         if cells.len() != COLUMNS.len() {
             errors.push(format!(
-                "{INVENTORY}:{lineno}: expected {} cells ({}), found {}",
+                "{inventory}:{lineno}: expected {} cells ({}), found {}",
                 COLUMNS.len(),
                 COLUMNS.join(" | "),
                 cells.len()
@@ -265,7 +319,7 @@ fn parse_inventory(text: &str) -> Result<Vec<InventorySection>, Vec<String>> {
             Some(item) if !item.is_empty() => item,
             _ => {
                 errors.push(format!(
-                    "{INVENTORY}:{lineno}: the Item cell must be the enclosing item in \
+                    "{inventory}:{lineno}: the Item cell must be the enclosing item in \
                      backticks, e.g. `` `decode_baseline_planes` ``: {}",
                     cells[0]
                 ));
@@ -276,7 +330,7 @@ fn parse_inventory(text: &str) -> Result<Vec<InventorySection>, Vec<String>> {
             Ok(n) if n > 0 => n,
             _ => {
                 errors.push(format!(
-                    "{INVENTORY}:{lineno}: Sites must be a positive integer: {}",
+                    "{inventory}:{lineno}: Sites must be a positive integer: {}",
                     cells[1]
                 ));
                 continue;
@@ -285,14 +339,14 @@ fn parse_inventory(text: &str) -> Result<Vec<InventorySection>, Vec<String>> {
         for (cell, column) in cells[2..].iter().zip(&COLUMNS[2..]) {
             if is_placeholder(cell) {
                 errors.push(format!(
-                    "{INVENTORY}:{lineno}: `{item}` has an empty or placeholder \
+                    "{inventory}:{lineno}: `{item}` has an empty or placeholder \
                      `{column}` cell — every row must be complete"
                 ));
             }
         }
         if section.rows.iter().any(|r| r.item == item) {
             errors.push(format!(
-                "{INVENTORY}:{lineno}: `{item}` is listed twice under `{}`",
+                "{inventory}:{lineno}: `{item}` is listed twice under `{}`",
                 section.path
             ));
         }
@@ -305,7 +359,7 @@ fn parse_inventory(text: &str) -> Result<Vec<InventorySection>, Vec<String>> {
 
     if !in_gated_region {
         errors.push(format!(
-            "{INVENTORY}: no `{GATED_REGION_RULE}` rule — the file must separate its \
+            "{inventory}: no `{GATED_REGION_RULE}` rule — the file must separate its \
              prose preamble from the gated file sections with a horizontal rule on a \
              line of its own; everything after the first one is inventory data"
         ));
@@ -313,7 +367,7 @@ fn parse_inventory(text: &str) -> Result<Vec<InventorySection>, Vec<String>> {
     if let Some(last) = sections.last() {
         if !saw_header_for_current {
             errors.push(format!(
-                "{INVENTORY}:{}: section `{}` has no column header row",
+                "{inventory}:{}: section `{}` has no column header row",
                 last.line, last.path
             ));
         }
@@ -322,7 +376,7 @@ fn parse_inventory(text: &str) -> Result<Vec<InventorySection>, Vec<String>> {
         let sum: usize = section.rows.iter().map(|r| r.sites).sum();
         if sum != section.declared_total {
             errors.push(format!(
-                "{INVENTORY}:{}: `{}` declares {} sites but its rows sum to {sum}",
+                "{inventory}:{}: `{}` declares {} sites but its rows sum to {sum}",
                 section.line, section.path, section.declared_total
             ));
         }
@@ -334,10 +388,12 @@ fn parse_inventory(text: &str) -> Result<Vec<InventorySection>, Vec<String>> {
     }
 }
 
-/// Every `unsafe` site under `root`, keyed by repository-relative path.
-fn scan_sources(root: &Path) -> BTreeMap<String, Vec<UnsafeSite>> {
+/// Every `unsafe` site under `<root>/<scan_root>`, keyed by
+/// repository-relative path, with the [`DEFERRED`] sources removed —
+/// those are accounted for by [`deferrals_are_live_and_named`] instead.
+fn scan_sources(root: &Path, scan_root: &str) -> BTreeMap<String, Vec<UnsafeSite>> {
     let mut files: Vec<PathBuf> = Vec::new();
-    unsafe_scan::rust_sources(&root.join(SCAN_ROOT), &mut files);
+    unsafe_scan::rust_sources(&root.join(scan_root), &mut files);
     files
         .into_iter()
         .map(|path| {
@@ -346,7 +402,7 @@ fn scan_sources(root: &Path) -> BTreeMap<String, Vec<UnsafeSite>> {
                 unsafe_scan::unsafe_sites(&path),
             )
         })
-        .filter(|(_, sites)| !sites.is_empty())
+        .filter(|(path, sites)| !sites.is_empty() && !DEFERRED.contains(&path.as_str()))
         .collect()
 }
 
@@ -380,15 +436,16 @@ fn skeleton(path: &str, sites: &[UnsafeSite]) -> String {
 /// Everything that differs between the inventory and the tree. Empty means
 /// the inventory is exact.
 fn diff(
-    inventory: &[InventorySection],
+    inventory: &str,
+    sections: &[InventorySection],
     scanned: &BTreeMap<String, Vec<UnsafeSite>>,
 ) -> Vec<String> {
     let mut problems: Vec<String> = Vec::new();
 
     for (path, sites) in scanned {
-        let Some(section) = inventory.iter().find(|s| &s.path == path) else {
+        let Some(section) = sections.iter().find(|s| &s.path == path) else {
             problems.push(format!(
-                "`{path}` holds {} `unsafe` site(s) and is not in {INVENTORY}. \
+                "`{path}` holds {} `unsafe` site(s) and is not in {inventory}. \
                  Add this section and fill every cell:\n\n{}",
                 sites.len(),
                 skeleton(path, sites)
@@ -400,12 +457,12 @@ fn diff(
             match section.rows.iter().find(|r| &r.item == item) {
                 None => problems.push(format!(
                     "`{path}`: `{item}` holds {n} `unsafe` site(s) but has no row in \
-                     {INVENTORY} (section at line {}). Sites:\n{}",
+                     {inventory} (section at line {}). Sites:\n{}",
                     section.line,
                     site_list(sites, item)
                 )),
                 Some(row) if row.sites != *n => problems.push(format!(
-                    "`{path}`: `{item}` holds {n} `unsafe` site(s) but {INVENTORY}:{} \
+                    "`{path}`: `{item}` holds {n} `unsafe` site(s) but {inventory}:{} \
                      says {}. Re-justify the row and update its count. Sites:\n{}",
                     row.line,
                     row.sites,
@@ -417,7 +474,7 @@ fn diff(
         for row in &section.rows {
             if !found.iter().any(|(item, _)| item == &row.item) {
                 problems.push(format!(
-                    "`{path}`: {INVENTORY}:{} lists `{}` but no `unsafe` is attributed \
+                    "`{path}`: {inventory}:{} lists `{}` but no `unsafe` is attributed \
                      to it any more — remove the row (or fix the item name; the \
                      attributed items are: {})",
                     row.line,
@@ -432,10 +489,10 @@ fn diff(
         }
     }
 
-    for section in inventory {
+    for section in sections {
         if !scanned.contains_key(&section.path) {
             problems.push(format!(
-                "{INVENTORY}:{}: `{}` is inventoried but holds no `unsafe` (or does not \
+                "{inventory}:{}: `{}` is inventoried but holds no `unsafe` (or does not \
                  exist) — remove the section, or move it to a \"retired\" note outside \
                  the gated format",
                 section.line, section.path
@@ -454,56 +511,204 @@ fn site_list(sites: &[UnsafeSite], item: &str) -> String {
         .join("\n")
 }
 
-/// The gate. Reads the tree and the inventory and requires them to agree
-/// item by item.
+/// The gate. Reads each scanned tree and the inventory that owns it and
+/// requires them to agree item by item.
 #[test]
-fn inventory_matches_every_unsafe_site_in_the_root_crate() {
+fn every_inventory_matches_every_unsafe_site_in_its_tree() {
     if !repository_tree_is_readable() {
         eprintln!("{}", skip_reason());
         return;
     }
     let root: PathBuf = repo_root();
-    let inventory_path: PathBuf = root.join(INVENTORY);
-    let text: String = std::fs::read_to_string(&inventory_path).unwrap_or_else(|e| {
-        panic!(
-            "{INVENTORY} is missing ({e}). P4-141 criterion 4 requires the root \
-             crate's `unsafe` inventory to be committed; see the doc comment of \
-             tests/unsafe_inventory_gate.rs for the format."
-        )
-    });
-    let inventory: Vec<InventorySection> = parse_inventory(&text).unwrap_or_else(|errors| {
-        panic!(
-            "{INVENTORY} is malformed or incomplete ({} problem(s)):\n\n  {}\n",
-            errors.len(),
-            errors.join("\n  ")
-        )
-    });
-    for section in &inventory {
+    for scope in &SCOPES {
+        let inventory: &str = scope.inventory;
         assert!(
-            root.join(&section.path).is_file(),
-            "{INVENTORY}:{}: `{}` does not exist; if the file was renamed or removed, \
-             update the section",
-            section.line,
-            section.path
+            root.join(scope.scan_root).is_dir(),
+            "SCOPES names `{}`, which is not a directory — a scanned tree that moved \
+             must move in SCOPES too, not silently stop being gated",
+            scope.scan_root
+        );
+        let inventory_path: PathBuf = root.join(inventory);
+        let text: String = std::fs::read_to_string(&inventory_path).unwrap_or_else(|e| {
+            panic!(
+                "{inventory} is missing ({e}). P4-141 criterion 4 requires the \
+                 `unsafe` inventory for `{}` to be committed; see the doc comment \
+                 of tests/unsafe_inventory_gate.rs for the format.",
+                scope.scan_root
+            )
+        });
+        let sections: Vec<InventorySection> =
+            parse_inventory(inventory, &text).unwrap_or_else(|errors| {
+                panic!(
+                    "{inventory} is malformed or incomplete ({} problem(s)):\n\n  {}\n",
+                    errors.len(),
+                    errors.join("\n  ")
+                )
+            });
+        for section in &sections {
+            assert!(
+                !DEFERRED.contains(&section.path.as_str()),
+                "{inventory}:{}: `{}` has an inventory section now — remove it from \
+                 DEFERRED in tests/unsafe_inventory_gate.rs so the gate diffs it",
+                section.line,
+                section.path
+            );
+            assert!(
+                root.join(&section.path).is_file(),
+                "{inventory}:{}: `{}` does not exist; if the file was renamed or \
+                 removed, update the section",
+                section.line,
+                section.path
+            );
+            assert!(
+                section.path.starts_with(&format!("{}/", scope.scan_root)),
+                "{inventory}:{}: `{}` is outside `{}`, the tree this document owns — \
+                 a section in the wrong inventory is invisible to the other one's \
+                 diff",
+                section.line,
+                section.path,
+                scope.scan_root
+            );
+        }
+
+        let scanned: BTreeMap<String, Vec<UnsafeSite>> = scan_sources(&root, scope.scan_root);
+        assert!(
+            !scanned.is_empty(),
+            "no `unsafe` found under {} — the scanner is broken, the crate did not \
+             become safe Rust overnight",
+            scope.scan_root
+        );
+
+        let problems: Vec<String> = diff(inventory, &sections, &scanned);
+        assert!(
+            problems.is_empty(),
+            "{inventory} does not match `{}` (P4-141 criterion 4): {} problem(s).\n\n\
+             Every `unsafe` in that tree must have a complete inventory row, and the \
+             row's site count must match. Fix the inventory, not the gate:\n\n{}\n",
+            scope.scan_root,
+            problems.len(),
+            problems.join("\n\n")
         );
     }
+}
 
-    let scanned: BTreeMap<String, Vec<UnsafeSite>> = scan_sources(&root);
-    assert!(
-        !scanned.is_empty(),
-        "no `unsafe` found under {SCAN_ROOT} — the scanner is broken, the crate \
-         did not become safe Rust overnight"
-    );
+/// A deferral is a promise with a deadline. Each [`DEFERRED`] path must
+/// exist, must sit inside a scanned root — otherwise it silences nothing and
+/// only reads as though it does — and must still hold at least one `unsafe`,
+/// so the entry has to be deleted the moment the file is inventoried or made
+/// safe. Without this the list would be a place for stale exemptions to
+/// accumulate, which is the failure mode the inventory exists to prevent.
+#[test]
+fn deferrals_are_live_and_named() {
+    if !repository_tree_is_readable() {
+        eprintln!("{}", skip_reason());
+        return;
+    }
+    let root: PathBuf = repo_root();
+    for deferred in DEFERRED {
+        let path: PathBuf = root.join(deferred);
+        assert!(
+            path.is_file(),
+            "DEFERRED lists `{deferred}`, which does not exist — remove the entry \
+             (tests/unsafe_inventory_gate.rs)"
+        );
+        assert!(
+            SCOPES
+                .iter()
+                .any(|scope| deferred.starts_with(&format!("{}/", scope.scan_root))),
+            "DEFERRED lists `{deferred}`, which is outside every scanned root, so it \
+             defers nothing — remove the entry or add its tree to SCOPES"
+        );
+        assert!(
+            !unsafe_scan::unsafe_sites(&path).is_empty(),
+            "DEFERRED lists `{deferred}`, which no longer holds any `unsafe` — it is \
+             either inventoried or safe now, so remove the entry and let the gate \
+             cover it"
+        );
+    }
+}
 
-    let problems: Vec<String> = diff(&inventory, &scanned);
-    assert!(
-        problems.is_empty(),
-        "{INVENTORY} does not match the tree (P4-141 criterion 4): {} problem(s).\n\n\
-         Every `unsafe` in the root crate must have a complete inventory row, and \
-         the row's site count must match. Fix the inventory, not the gate:\n\n{}\n",
-        problems.len(),
-        problems.join("\n\n")
-    );
+/// The scanned roots plus [`DEFERRED`] are the *whole* workspace: no
+/// `unsafe` may live in a crate this gate never walks. `crates/` is
+/// **enumerated from the tree**, not listed here, because a hard-coded list
+/// makes the completeness claim true only of today's members — a new crate
+/// with an `unsafe` would be neither inventoried, nor deferred, nor
+/// detected. `known` is checked afterwards so a rename is still loud.
+///
+/// The root package is a member too (`members = [".", …]`), so it is
+/// walked alongside `crates/*` — otherwise a root `build.rs` carrying
+/// `unsafe` would be shipped and ungated, which is the hole a first draft
+/// left and `codex review` found.
+///
+/// Each member's `src/` and its `build.rs`: `tests/`, `benches/`,
+/// `examples/` and `fuzz/` are out of scope for the same reason the root
+/// crate's inventory stops at `src/` — they are not shipped. A `build.rs`
+/// is: it runs on the consumer's machine.
+#[test]
+fn the_scanned_roots_are_the_whole_workspace() {
+    if !repository_tree_is_readable() {
+        eprintln!("{}", skip_reason());
+        return;
+    }
+    let root: PathBuf = repo_root();
+    let known: [&str; 3] = [
+        "libjpeg-turbo-rs-capi",
+        "libjpeg-turbo-rs-image",
+        "libjpeg-turbo-rs-wasm",
+    ];
+    let mut members: Vec<PathBuf> = vec![root.clone()];
+    let entries = std::fs::read_dir(root.join("crates")).expect("crates/ must be readable");
+    for entry in entries {
+        members.push(entry.expect("a readable directory entry").path());
+    }
+    members.sort();
+    let mut seen: Vec<String> = Vec::new();
+    for member in members {
+        if !member.join("Cargo.toml").is_file() {
+            continue;
+        }
+        if member != root {
+            seen.push(
+                member
+                    .file_name()
+                    .expect("a named directory")
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
+        let mut files: Vec<PathBuf> = Vec::new();
+        unsafe_scan::rust_sources(&member.join("src"), &mut files);
+        let build_script: PathBuf = member.join("build.rs");
+        if build_script.is_file() {
+            files.push(build_script);
+        }
+        for file in files {
+            let relative: String = unsafe_scan::relative(&root, &file);
+            // A file its own inventory already accounts for, or one this
+            // criterion has explicitly deferred, is covered elsewhere.
+            let covered: bool = SCOPES
+                .iter()
+                .any(|scope| relative.starts_with(&format!("{}/", scope.scan_root)))
+                || DEFERRED.contains(&relative.as_str());
+            if covered {
+                continue;
+            }
+            let sites: Vec<UnsafeSite> = unsafe_scan::unsafe_sites(&file);
+            assert!(
+                sites.is_empty(),
+                "`{relative}` holds {} `unsafe` site(s) and no inventory covers it. \
+                 Add its tree to SCOPES with a document of its own — do not delete \
+                 this assertion.",
+                sites.len()
+            );
+        }
+    }
+    for member in known {
+        assert!(
+            seen.iter().any(|name| name == member),
+            "`crates/{member}` is gone or renamed; update this test and SCOPES together"
+        );
+    }
 }
 
 /// The attribution rule, on the shapes the crate contains and on the ones
@@ -683,7 +888,8 @@ prose
 |---|---|---|---|---|---|---|---|
 | `g` | 1 | intrinsics | AVX2 checked at dispatch | yes: `decode()` | `g_matches_scalar` | ASan (AVX2 leg) | x, 2026-09-08 |
 ";
-    let sections: Vec<InventorySection> = parse_inventory(text).expect("well-formed inventory");
+    let sections: Vec<InventorySection> =
+        parse_inventory(INVENTORY_FIXTURE, text).expect("well-formed inventory");
     assert_eq!(sections.len(), 2);
     assert_eq!(sections[0].path, "src/a.rs");
     assert_eq!(sections[0].declared_total, 3);
@@ -713,8 +919,8 @@ fn parser_rejects_malformed_and_placeholder_rows() {
     // nothing until the `---` rule, so the fixture has to open it.
     let check = |body: &str, expect: &str| {
         let gated: String = format!("---\n{body}");
-        let errors: Vec<String> =
-            parse_inventory(&gated).expect_err(&format!("must be rejected: {body}"));
+        let errors: Vec<String> = parse_inventory(INVENTORY_FIXTURE, &gated)
+            .expect_err(&format!("must be rejected: {body}"));
         assert!(
             errors.iter().any(|e| e.contains(expect)),
             "expected an error containing {expect:?}, got {errors:#?}"
@@ -797,7 +1003,8 @@ fn parser_rejects_malformed_and_placeholder_rows() {
         "# Inventory\n\n## `src/a.rs` — 1 site\n\n{header}\
          | `f` | 1 | why | inv | yes | t | asan | me |\n"
     );
-    let errors: Vec<String> = parse_inventory(&no_rule).expect_err("a file with no rule");
+    let errors: Vec<String> =
+        parse_inventory(INVENTORY_FIXTURE, &no_rule).expect_err("a file with no rule");
     assert!(
         errors.iter().any(|e| e.contains("no `---` rule")),
         "{errors:#?}"
@@ -824,7 +1031,8 @@ fn a_pasted_skeleton_is_still_rejected() {
         },
     ];
     let pasted: String = format!("---\n\n{}", skeleton("src/a.rs", &sites));
-    let errors: Vec<String> = parse_inventory(&pasted).expect_err("an unfilled skeleton");
+    let errors: Vec<String> =
+        parse_inventory(INVENTORY_FIXTURE, &pasted).expect_err("an unfilled skeleton");
     for column in &COLUMNS[2..] {
         assert!(
             errors
@@ -879,7 +1087,7 @@ fn diff_reports_added_removed_moved_and_stale_sites() {
     );
     scanned.insert("src/new.rs".into(), vec![site(7, "k"), site(8, "k")]);
 
-    let problems: Vec<String> = diff(&inventory, &scanned);
+    let problems: Vec<String> = diff(INVENTORY_FIXTURE, &inventory, &scanned);
     let joined: String = problems.join("\n");
     assert_eq!(problems.len(), 5, "{joined}");
     assert!(
@@ -924,5 +1132,5 @@ fn diff_reports_added_removed_moved_and_stale_sites() {
             line: 9,
         },
     ];
-    assert!(diff(&exact, &scanned).is_empty());
+    assert!(diff(INVENTORY_FIXTURE, &exact, &scanned).is_empty());
 }

@@ -3,6 +3,7 @@
 # file routes that edit — and any change to the gate itself — to the
 # maintainer once the repository requires code-owner review.
 docs/UNSAFE_INVENTORY.md        @developer0hye
+docs/UNSAFE_INVENTORY_CAPI.md   @developer0hye
 tests/unsafe_inventory_gate.rs  @developer0hye
 tests/parser_unsafe_gate.rs     @developer0hye
 tests/helpers/unsafe_scan.rs    @developer0hye
