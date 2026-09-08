@@ -309,7 +309,7 @@
 - [x] `write_coefficients()` — Encode from coefficient blocks
 - [x] `transform_jpeg()` — Apply spatial transform
 - [ ] Full classic `jpeg_copy_critical_parameters()` source-table contract — native copy works; P4-101
-- [x] `tjtransform.customFilter` — User callback for coefficient inspection/modification
+- [ ] `tjtransform.customFilter` — User callback for coefficient inspection/modification. The Rust `TransformOptions::custom_filter` implements it; the C ABI does not — `tj3Transform` returns -1 for any non-NULL callback (P4-204)
 - [x] `tj3TransformBufSize()` — Output buffer size estimation (`transform_buf_size()`)
 
 ---

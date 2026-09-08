@@ -8070,7 +8070,7 @@ an infallible constructor and so needs an API decision (panic, or a fallible
   the dispatcher picks (measured locally: `llvm.aarch64.neon.ushl.v8i16`),
   which is why the library's own Miri run passes `--skip simd::`. A
   scalar-only capi build under Miri belongs to
-  [P4-141](#p4-141-soundness-verification-program-mirisanitizerfuzz-coverage-gaps-and-an-unsafe-inventory-gate--partial-criteria-4-and-5-landed-and-gated-criterion-3s-api-sequence-half-landed-criteria-1-2-6-and-7-open-criterion-3s-c-abi-half-open),
+  [P4-141](#p4-141-soundness-verification-program-mirisanitizerfuzz-coverage-gaps-and-an-unsafe-inventory-gate--partial-criteria-3-4-and-5-landed-and-gated-except-criterion-3s-callback-reentry-scenario-criteria-1-2-6-and-7-open),
   not here.
 
 **Also recorded: resource-limit defaults.** `DecodeLimits` currently defaults to
@@ -8146,7 +8146,7 @@ immediately, ahead of the code work.
 
 **Status (2026-08-09): closed.** Landed in #485; `crates/libjpeg-turbo-rs-capi/src/lib.rs` no longer offers the crate as a `libjpeg.so.62` replacement, and `README.md` states the safety scope rather than a guarantee.
 
-## P4-141. Soundness Verification Program: Miri/Sanitizer/Fuzz Coverage Gaps and an `unsafe` Inventory Gate — **PARTIAL: criteria 4 and 5 landed and gated, criterion 3's API-sequence half landed; criteria 1, 2, 6 and 7 open, criterion 3's C-ABI half open**
+## P4-141. Soundness Verification Program: Miri/Sanitizer/Fuzz Coverage Gaps and an `unsafe` Inventory Gate — **PARTIAL: criteria 3, 4 and 5 landed and gated except criterion 3's callback-reentry scenario; criteria 1, 2, 6 and 7 open**
 
 **GitHub:** [#480](https://github.com/developer0hye/libjpeg-turbo-rs/issues/480) — under the [#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481) umbrella.
 
@@ -8176,15 +8176,20 @@ misuse of a public SIMD entry point; none injects allocation failure; none runs
    P4-135 added to `avx2_idct_islow` / `avx2_fdct_quantize` execute there.
    That is the x86 non-AVX2 half for *tests*; the sanitizer legs, `i686` and
    AArch64 NEON remain. Two further gaps the criterion-4 C-ABI inventory
-   measured on 2026-09-08, and that this criterion owns: the C-boundary ASan
-   harness resolves five symbols (`tj3Init`, `tj3DecompressHeader`,
-   `tj3Get`, `tj3Decompress8`, `tj3Destroy`) over three fixtures — baseline,
-   progressive, arithmetic — so no 12-bit path and no compress path crosses
-   the boundary under a sanitizer at all; and it allocates with its own
-   `malloc`/`free`, so `tj3Alloc`/`tj3Free`'s shared-allocator contract is
-   never exercised across the ABI. Both `harness.c`'s header comment and
-   `sanitizers.yml`'s step comment claimed more than that — six symbols and
-   four fixtures including a 12-bit one — until this landing corrected them. Also outstanding from the same closure: the wasm
+   measured on 2026-09-08 — the C-boundary ASan harness resolved five symbols
+   (`tj3Init`, `tj3DecompressHeader`, `tj3Get`, `tj3Decompress8`,
+   `tj3Destroy`) over three baseline/progressive/arithmetic fixtures, so no
+   12-bit and no compress path crossed the boundary under a sanitizer, and it
+   allocated with its own `malloc`/`free`, so `tj3Alloc`/`tj3Free`'s
+   shared-allocator contract was never exercised across the ABI — **closed
+   2026-09-09** by the criterion-3 misuse harness: `sanitizers.yml`'s
+   `c_boundary_asan` job now also runs `precision12` (a 12-bit compress and
+   decompress across the ABI) and `alloc_ownership` (library-allocated
+   destination released through `tj3Free`, and a compress output allocated by
+   the library), each in its own process. Both `harness.c`'s header comment and
+   `sanitizers.yml`'s step comment claimed more than the corpus harness does —
+   six symbols and four fixtures including a 12-bit one — until the 2026-09-08
+   landing corrected them. Also outstanding from the same closure: the wasm
    wrappers' `fits == false` fallback arms have no executing coverage
    anywhere (wasip1 parity uses exact-fit slices, and the panic arm cannot
    be asserted under `panic = "abort"`) — the "pinned by the checks' code,
@@ -8194,12 +8199,20 @@ misuse of a public SIMD entry point; none injects allocation failure; none runs
    orderings — plus a process-isolated C-ABI harness covering
    `init→destroy→destroy`, undersized output buffers, pitch boundaries, maximum
    dimensions, same-handle concurrent calls, and callback reentry.
-   **Half delivered 2026-09-09**: the API-sequence fuzzer exists, is seeded and
-   is in the `Fuzz Smoke` matrix, and its oracle also runs deterministically on
-   every pull request — see *Progress* below. The process-isolated C-ABI
-   harness remains, and it is the half the criterion-4 inventories measured as
-   the larger hole: no TurboJPEG entry point runs under Miri, `sanitizers.yml`
-   is `--workspace --lib`, and no fuzz target crosses the C ABI at all.
+   **Delivered 2026-09-09 except callback reentry, with same-handle concurrency
+   substituted rather than driven**: the API-sequence fuzzer
+   exists, is seeded and is in the `Fuzz Smoke` matrix, and its oracle also runs
+   deterministically on every pull request; the process-isolated C-ABI harness
+   exists and drives four of the six named scenarios differentially against a
+   stock `libturbojpeg`, substituting one handle per thread for **same-handle
+   concurrent calls** — upstream mutates `tjinstance` unsynchronised from every
+   entry point, so a shared handle is a data race in both implementations with
+   no observable contract to compare — see *Progress* below. **Callback reentry
+   remains**, and its blocker is now named rather than deferred: the TurboJPEG surface's
+   only user callback is `tjtransform.customFilter`, which our `tj3Transform`
+   refuses outright ([P4-204](#p4-204-the-c-abis-tjtransformcustomfilter-is-rejected-while-feature_paritymd-and-c_api_referencemd-record-it-as-delivered--open)),
+   so reentry there has nothing to reenter and the scenario falls to the classic
+   `jpeg_*` error, source and destination managers.
 4. **An `unsafe` inventory is committed and gated.** Per site: location,
    why safe Rust cannot express it, the invariant (bounds/lifetime/aliasing/CPU
    feature), whether a safe caller can reach it, the regression test that would
@@ -8371,8 +8384,8 @@ the harness first would only pin current behaviour.
   fact the document now records per site: **no sanitizer executes a single
   site in `jpeglib.rs`** — `sanitizers.yml` is `--workspace --lib`, this
   file's four `#[cfg(test)]` modules parse headers and marker bytes without
-  calling an entry point, and the C-boundary harness resolves five `tj3*`
-  symbols and no `jpeg_*` symbol. Miri is the only instrumented tool that
+  calling an entry point, and the C-boundary harnesses resolve fifteen `tj3*`
+  symbols between them and no `jpeg_*` symbol. Miri is the only instrumented tool that
   reaches it, through `capi_create_abi_guards` and `capi_thread_affinity`.
   That is criterion 2 and criterion 3 restated as measurement.
   **The review round is part of the finding.** The chunk's first draft
@@ -8574,8 +8587,114 @@ the harness first would only pin current behaviour.
   asserts both the reason and the consequence, comparing bytes so a rename does
   not evade it.
   That is five defects from criterion 3, against five from criterion 4.
-- **Criterion 2 — partial since 2026-08-13** (see the criterion text).
-- **Criteria 1, 6, 7 — untouched; criterion 3's C-ABI half untouched.**
+- **Criterion 3 — 2026-09-09, the process-isolated C-ABI half:**
+  `crates/libjpeg-turbo-rs-capi/examples/cabi_misuse_harness.c` is a C driver
+  that `dlopen`s one shared library, runs **one named case**, and exits;
+  `crates/libjpeg-turbo-rs-capi/tests/cabi_misuse_harness.rs` spawns it once per
+  case against our cdylib and once against a stock `libturbojpeg`, and requires
+  the two stdout transcripts to be byte-identical. Because the library is a
+  command-line argument, the *same binary* drives both implementations, so the
+  comparison is between two transcripts rather than between our behaviour and a
+  comment — which is the failure mode this whole item exists to retire.
+  **A child per case is the mechanism, not a convenience.** The scenarios the
+  criterion names are the ones that may fault, and in one process the first that
+  misbehaves takes every later case with it. Ten cases cover four of the six
+  named scenarios and substitute a defensible shape for a fifth: `lifecycle`
+  (`init → destroy → destroy`, in the part that has
+  a contract — a second destroy of the same live pointer is a double free
+  upstream too, and the harness says so rather than driving it), `null_handle`,
+  `pitch_boundaries`, `undersized_output`, `max_dimensions`,
+  `concurrent_handles` (one handle per thread, *not* the criterion's same-handle
+  concurrency: upstream mutates `tjinstance` unsynchronised from every entry
+  point, so a shared handle races in both implementations and has no contract to
+  compare — and its eight threads are parked on a condition variable and
+  released together, so the process's *first* library call is made by eight
+  threads at once and the serial reference is decoded afterwards; the first
+  version probed and decoded on the main thread first, warming every lazily
+  built table, so no worker could have raced the initialisation the case names.
+  `codex review` found that), `alloc_ownership`, `precision12`,
+  `handle_defaults`, which compares the whole 26-parameter vector of a handle
+  that has read nothing, and `parameter_applicability`, which writes every one
+  of those 26 on each of the three instance types.
+  **Every destination a case sizes for a real decode or compress crosses the ABI
+  inside a guard-page buffer**: an `mmap`ed
+  region whose payload ends flush against a `PROT_NONE` page, with the slack
+  before it canary-filled. The two exceptions are deliberate —
+  `alloc_ownership`'s destination has to come from `tj3Alloc` for the case to
+  mean anything, and `null_handle` hands a three-byte stack array to calls that
+  are refused before anything is written. A one-byte overrun is a signal, a short-stride write
+  is a canary mismatch, and neither needs a sanitizer — so the cases keep their
+  meaning in the ordinary `cargo test` run. `selftest_guard_page` and
+  `selftest_canary` are committed proof that both are armed; disarming the
+  `mprotect` calls fails the first and stubbing `canary_intact` to 1 fails the
+  second, both checked before the cases were believed.
+  **The C driver's exit status carries its own invariant checks**, which is not
+  redundancy: the sanitizer leg runs the cases *without* the Rust runner and
+  reads only the exit status, so a case that merely printed `canary=corrupt` and
+  returned 0 left that leg green on real corruption. `codex review` demonstrated
+  it three times — an injected short-stride write into the argument-rejection
+  destination, a valid 12-bit decode made to report failure, and an underrun of
+  the one buffer no case happened to check — and each now exits 2 naming the
+  check. The third moved the canary test into `guarded_free` itself, so the
+  coverage is structural: a case that forgets to ask is still covered. `require()` covers only what holds on *both*
+  implementations; every known divergence is left to the transcript comparison,
+  since failing on one would turn the oracle run red. `every_harness_case_is_driven`
+  reads the C driver's dispatch chain and fails if a case exists that no Rust
+  test runs, and `sanitizers.yml`'s `c_boundary_asan` job runs the same ten
+  cases plus `selftest_guard_page` against an ASan/UBSan-instrumented cdylib
+  with an equivalent count check. That job is also where **criterion 2's two recorded C-boundary gaps
+  close**: `precision12` is the first 12-bit path to cross the boundary under a
+  sanitizer, and `alloc_ownership` the first exercise of the `tj3Alloc` /
+  `tj3Free` shared-allocator contract across it, in both directions.
+  **Six divergences**, each a filed item and a live entry in
+  `KNOWN_DIVERGENCES` — a list every entry of which must *still* diverge, so a
+  fix deletes its entry rather than leaving an exemption that would quietly
+  cover the next regression on the same line:
+  [P4-202](#p4-202-tj3compress8-accepts-a-width-or-height-above-jpeg_max_dimension-and-emits-a-frame-stock-djpeg-refuses--open),
+  where `tj3Compress8` accepts a 65,501-pixel axis and emits an SOF stock
+  `djpeg` refuses to read;
+  [P4-203](#p4-203-tjparam_precision-reports-the-decode-paths-output-precision-not-the-frames-data_precision--open),
+  where `TJPARAM_PRECISION` reports 8 for a 12-bit frame both libraries agree
+  is 12-bit; the initial-value half of
+  [P4-200](#p4-200-jpegwidth--jpegheight-publish-the-scaled-and-cropped-output-dimensions-where-upstream-publishes-the-sofs--open),
+  where a fresh handle's `JPEGWIDTH` / `JPEGHEIGHT` are 0 against upstream's -1
+  sentinel;
+  [P4-205](#p4-205-tj3alloc0-returns-null-where-upstream-returns-a-freeable-pointer-and-the-code-comment-claims-the-opposite--open),
+  `tj3Alloc(0)`;
+  [P4-206](#p4-206-tjparam_norealloc-accepts-a-buffer-exactly-the-size-of-the-output-where-upstream-needs-one-byte-more--open),
+  a `TJPARAM_NOREALLOC` buffer exactly the size of the output; and
+  [P4-207](#p4-207-tj3set-accepts-sixteen-parameterinstance-type-pairs-upstream-refuses-as-not-applicable--open),
+  sixteen `tj3Set` parameter/instance-type pairs upstream refuses as not
+  applicable.
+  **The last three came from the review round, not the first run, and each came
+  from the same question**: what would have to change for this comparison to
+  fail? `rust-code-reviewer` asked it of `alloc_4096_readback` — which read back
+  a byte the harness itself had just written, and could not fail — and probing
+  the `tj3Alloc` contract properly produced P4-205. It asked it of a hard-coded
+  "obviously too small" NOREALLOC capacity; measuring the boundary instead
+  produced P4-206. And it asked it of `reinit_matches_fresh`, which compared two
+  handles neither of which had ever been written to; dirtying the first one
+  before the destroy produced a `dirtied` count that disagreed across the two
+  libraries, and chasing *that* produced P4-207 and the
+  `parameter_applicability` case. Three of the six divergences this harness
+  found were found by making an assertion capable of failing.
+  **The oracle has to be at least the pinned `tool-current` release**, and the
+  harness enforces it by resolving `tj3InitVersion`, which TurboJPEG added in
+  3.2. That is not fastidiousness: 3.1.4.1 *accepts* a pitch below
+  `width * pixelSize` and writes rows at that stride, which `pitch_boundaries`
+  catches with a guard page. Comparing against it would report an upstream
+  defect fixed in the pinned release as this port's.
+  **What remains in this criterion** is callback reentry, and its blocker is
+  named rather than deferred: the TurboJPEG surface's only user callback is
+  `tjtransform.customFilter`, which our `tj3Transform` refuses
+  ([P4-204](#p4-204-the-c-abis-tjtransformcustomfilter-is-rejected-while-feature_paritymd-and-c_api_referencemd-record-it-as-delivered--open)) —
+  a gap `docs/FEATURE_PARITY.md` and `docs/C_API_REFERENCE.md` recorded as
+  delivered until this landing corrected them. Reentry therefore falls to the
+  classic `jpeg_*` error, source and destination managers, which need the
+  installed `jpeglib.h` and are their own milestone.
+- **Criterion 2 — partial since 2026-08-13** (see the criterion text), less the
+  two C-boundary-harness gaps closed above.
+- **Criteria 1, 6, 7 — untouched.**
 
 ## P4-142. `tj3DecompressHeader` Decodes the Entire Image to Read the Header — **OPEN**
 
@@ -11528,6 +11647,25 @@ of a *correct* published value, only of a *consistent* one. That limit is now
 stated in the harness's module doc rather than left to be rediscovered, which
 is the same lesson #320 taught about coverage claims.
 
+**The initial value diverges too — added 2026-09-09.** The P4-141 criterion-3
+process-isolated C-ABI harness compares the whole `TJPARAM` vector of a handle
+that has read nothing (`handle_defaults` in
+`crates/libjpeg-turbo-rs-capi/examples/cabi_misuse_harness.c`). Of the 26
+parameters, on all three init types, exactly these two disagree:
+
+| parameter | stock 3.2.0 | ours |
+|---|---|---|
+| `TJPARAM_JPEGWIDTH` | -1 | **0** |
+| `TJPARAM_JPEGHEIGHT` | -1 | **0** |
+
+`tj3InitVersion` seeds them explicitly — `this->jpegWidth = -1;
+this->jpegHeight = -1;` (`turbojpeg.c:600-601`) — alongside `quality = -1`,
+`subsamp = TJSAMP_UNKNOWN` and `colorspace = TJCS_DEFAULT`, all of which we do
+match. -1 is the documented "not read yet" sentinel; 0 is a value a caller
+cannot distinguish from a legal (if degenerate) dimension. It belongs here
+rather than in a new item because it is the same two fields and any fix touches
+the same publishing path.
+
 **Acceptance criteria.**
 
 1. `TjHandle::decompress`, `decompress_header`, `decompress_12bit` and
@@ -11547,6 +11685,12 @@ is the same lesson #320 taught about coverage claims.
    is already in hand in `exceeds_limits` — rather than from a second handle.
    Until this closes such a property would fail, which is why it is not there
    today.
+6. A fresh `TjHandle` reports `JPEGWIDTH` = `JPEGHEIGHT` = -1 on all three init
+   types, and
+   `crates/libjpeg-turbo-rs-capi/tests/cabi_misuse_harness.rs` drops the six
+   `default_*_JPEG{WIDTH,HEIGHT}` entries from `KNOWN_DIVERGENCES`;
+   `known_divergences_are_live` fails until they go, so the fix cannot land
+   while the record of the defect stays behind.
 
 **Why deferred.** Filed rather than fixed inside the pull request that landed
 the P4-141 criterion-3 harness. Changing what a decode publishes is a
@@ -11618,3 +11762,413 @@ it, which lands test infrastructure for a different item. Criteria 1 and 2
 change what the corpus job admits and how it classifies an outcome, which is a
 release-gate mechanism; criterion 3 is a workflow edit whose value is that it
 *runs*.
+
+---
+
+## P4-202. `tj3Compress8` Accepts a Width or Height Above `JPEG_MAX_DIMENSION` and Emits a Frame Stock `djpeg` Refuses — **OPEN**
+
+**GitHub:** [#624](https://github.com/developer0hye/libjpeg-turbo-rs/issues/624) — found 2026-09-09 by the P4-141 (#480) criterion-3
+process-isolated C-ABI harness, on its first differential run; under the
+[#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481) umbrella.
+
+**What upstream does.** `jpeg_start_compress` reaches `jinit_compress_master`,
+which refuses an image whose width or height exceeds `JPEG_MAX_DIMENSION`
+(65,500) with `JERR_IMAGE_TOO_BIG`
+(`references/libjpeg-turbo/src/jcmaster.c:186-189`). `tj3Compress8` therefore
+returns -1 for a 65,501-pixel axis, with `tj3GetErrorStr` reading "Maximum
+supported image dimension is 65500 pixels".
+
+**What we do.** `tj3Compress8` returns **0** and produces a JPEG whose SOF0
+carries `width = 65501`. Measured 2026-09-09 on this port's debug cdylib, a
+65,501 x 1 grayscale at quality 75:
+
+| | `tj3Compress8(65501, 1)` | `tj3Compress8(1, 65501)` |
+|---|---|---|
+| stock TurboJPEG 3.2.0 | `-1` | `-1` |
+| ours | **`0`**, 6,473 bytes, `SOF0 w=65501` | **`0`** |
+
+The frame is then unreadable by the library it claims parity with:
+`/tmp/ljt8/prefix/bin/djpeg` on that output prints "Maximum supported image
+dimension is 65500 pixels" and exits 1. So the divergence is not a lenience
+that costs nothing — it produces an artifact no stock consumer can decode, and
+it does so silently.
+
+**Where the check is missing.** `TjHandle::decode_limits` (`src/api/tj3.rs`)
+already carries `max_width: 65_500` / `max_height: 65_500` and calls them "C's
+`JPEG_MAX_DIMENSION` … an unconditional library-level cap" — but
+`DecodeLimits`, as the name says, is applied on the **decode** side only. The
+classic `jpeg_*` path raises `JERR_IMAGE_TOO_BIG` (P4-137's span work added
+it); the TurboJPEG compress path goes through the Rust `Encoder` instead and
+has no equivalent.
+
+**Acceptance criteria.**
+
+1. `tj3Compress8`, `tj3Compress12` and `tj3Compress16` refuse a `width` or
+   `height` above `JPEG_MAX_DIMENSION` with -1, and the error string matches
+   upstream's `JERR_IMAGE_TOO_BIG` rendering.
+2. The same holds for the compress-from-YUV entry points, which take their own
+   dimensions.
+3. `crates/libjpeg-turbo-rs-capi/tests/cabi_misuse_harness.rs` drops the
+   `compress_over_max_width_rc` / `compress_over_max_height_rc` entries from
+   `KNOWN_DIVERGENCES`; `known_divergences_are_live` fails until they are
+   removed, so the fix cannot land without closing this item's record of it.
+4. A regression test cross-validates the *rejection* against stock
+   TurboJPEG, not against our own previous output.
+
+**Why deferred.** Filed rather than fixed inside the pull request that surfaced
+it: that PR lands test infrastructure for P4-141, and adding an encoder-side
+dimension gate changes what every compress entry point accepts. It needs its own
+C cross-validation pass across the precisions and the YUV entry points.
+
+---
+
+## P4-203. `TJPARAM_PRECISION` Reports the Decode Path's Output Precision, Not the Frame's `data_precision` — **OPEN**
+
+**GitHub:** [#625](https://github.com/developer0hye/libjpeg-turbo-rs/issues/625) — found 2026-09-09 by the P4-141 (#480) criterion-3
+process-isolated C-ABI harness; under the
+[#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481) umbrella.
+
+**What upstream does.** `setDecompParameters` publishes the *frame's* sample
+precision: `this->precision = dinfo->data_precision`
+(`references/libjpeg-turbo/src/turbojpeg.c:514-536`), which is the value
+`jpeg_read_header` read out of the SOF. `TJPARAM_PRECISION` is documented as
+"the JPEG image's data precision", and callers use it to choose between
+`tj3Decompress8`, `tj3Decompress12` and `tj3Decompress16`.
+
+**What we do.** `TjHandle::decompress` sets `self.precision = img.precision`
+(`src/api/tj3.rs`), where `img` is the **decoded output**. The 8-bit path
+produces an 8-bit image whatever the frame said, so a 12-bit JPEG reports 8.
+
+Measured 2026-09-09, both libraries reading the *same* bytes — a 64 x 48
+grayscale written by `tj3Compress12` at quality 95, byte-identical between the
+two implementations (`md5 9bf50c62…`), SOF precision 12 in both:
+
+| reader | JPEG written by | `tj3DecompressHeader` | `TJPARAM_PRECISION` |
+|---|---|---|---|
+| stock 3.2.0 | stock | 0 | 12 |
+| stock 3.2.0 | ours | 0 | 12 |
+| ours | stock | 0 | **8** |
+| ours | ours | 0 | **8** |
+
+So this is a read-side defect, independent of who produced the stream: a caller
+following the documented "read the header, then pick the entry point that
+matches `TJPARAM_PRECISION`" sequence is routed to `tj3Decompress8` for every
+12-bit input.
+
+**Relation to the two items filed beside it.** [P4-199](#p4-199-setdecompparameters-publishes-thirteen-handle-parameters-our-8-bit-decode-publishes-eight-and-the-1216-bit-ones-publish-three-and-ignore-the-handles-limits--open)
+(#620) is about *which* parameters a decode publishes and explicitly counts
+`Precision` among the eight our 8-bit path already writes — it does not question
+the value. [P4-200](#p4-200-jpegwidth--jpegheight-publish-the-scaled-and-cropped-output-dimensions-where-upstream-publishes-the-sofs--open)
+(#621) is the same *shape* — an output-derived value published where upstream
+publishes the frame's — for `JPEGWIDTH`/`JPEGHEIGHT`. This is the third field
+with that shape, and the three of them together suggest the publishing step
+should read the `FrameInfo` the header parse already produced rather than the
+`Image` the decode returned.
+
+**Acceptance criteria.**
+
+1. `TJPARAM_PRECISION` after `tj3DecompressHeader` and after any
+   `tj3Decompress*` equals the SOF's `data_precision`, cross-validated against
+   stock TurboJPEG on 8-, 12- and 16-bit fixtures.
+2. `crates/libjpeg-turbo-rs-capi/tests/cabi_misuse_harness.rs` drops the
+   `precision12`/`precision` entry from `KNOWN_DIVERGENCES`.
+3. The documented routing works end to end: read the header, branch on
+   `TJPARAM_PRECISION`, call the matching entry point, on all three precisions.
+
+**Why deferred.** Filed rather than fixed inside the pull request that surfaced
+it. Changing a published parameter's value changes what every downstream caller
+reads back, and it overlaps P4-199's re-derivation of the whole published set —
+fixing one field in isolation would have to be redone there.
+
+---
+
+## P4-204. The C ABI's `tjtransform.customFilter` Is Rejected, While `FEATURE_PARITY.md` and `C_API_REFERENCE.md` Record It as Delivered — **OPEN**
+
+**GitHub:** [#626](https://github.com/developer0hye/libjpeg-turbo-rs/issues/626) — found 2026-09-09 while scoping the callback-reentry
+half of P4-141 (#480) criterion 3; under the
+[#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481) umbrella.
+
+**What upstream does.** `tj3Transform` calls `t->customFilter` once per
+coefficient *array* — in this implementation one block row, `barray[y][0]` with
+`arrayRegion.w = width_in_blocks * DCTSIZE` and `arrayRegion.h = DCTSIZE` —
+passing that array, the array region, the plane region, the component index, the
+transform index and the `tjtransform` itself
+(`references/libjpeg-turbo/src/turbojpeg.c:3052-3080`). It is the API's only user callback and the mechanism
+`jpegtran`-style consumers use to inspect or edit coefficients in flight.
+
+**What we do.** `tj3Transform` refuses outright:
+
+```rust
+if t.custom_filter.is_some() {
+    inst.set_error(
+        format!("tj3Transform[{i}]: customFilter callback is not supported yet"),
+        TJERR_FATAL,
+    );
+    return -1;
+}
+```
+
+(`crates/libjpeg-turbo-rs-capi/src/transform.rs:202-207`.) The module doc says
+so plainly. **The parity documents do not**:
+`docs/FEATURE_PARITY.md` carries `- [x] tjtransform.customFilter — User
+callback for coefficient inspection/modification`, and
+`docs/C_API_REFERENCE.md` marks `tjtransform` ✅ with "(all fields incl.
+`custom_filter`)". Both are true of the *Rust* `TransformOptions::custom_filter`
+(`src/transform/mod.rs:157`, applied at `src/api/coefficient.rs:1157`) and false
+of the C ABI, which is the surface those two documents describe. The two
+sentences are corrected by the pull request that filed this item; the gap they
+were hiding is this one.
+
+**Why it matters beyond parity.** It is the C ABI's only callback into caller
+code, so it is the whole of what a "callback reentry" harness — P4-141
+criterion 3's last named scenario — could drive on the TurboJPEG surface. Until
+it is forwarded, reentry testing there has nothing to reenter, and the criterion
+falls back to the classic `jpeg_*` managers.
+
+**Acceptance criteria.**
+
+1. `tj3Transform` forwards a non-NULL `customFilter` to the coefficient
+   pipeline, with the six arguments upstream passes and the same call order
+   (per component, then per block row — one call per row, not per block).
+2. A `-1` return from the callback aborts the transform the way upstream does
+   (`turbojpeg.c:3073-3075` tests `== -1`, and `turbojpeg.h:1235` documents 0 or
+   -1); any other value is ignored, as upstream ignores it.
+3. Cross-validated against stock TurboJPEG: the same filter applied through
+   both libraries produces byte-identical output JPEGs.
+4. `FEATURE_PARITY.md` and `C_API_REFERENCE.md` say "delivered" only once the
+   C ABI does it.
+5. `crates/libjpeg-turbo-rs-capi/examples/cabi_misuse_harness.c` gains a
+   `callback_reentry` case: a filter that calls back into `tj3Transform`,
+   `tj3Destroy` and `tj3Set` on the live handle, compared against upstream.
+
+**Why deferred.** Filed rather than fixed inside the pull request that surfaced
+it: forwarding an arbitrary C function pointer into the coefficient pipeline is
+a feature, not a documentation fix, and the pull request that found it lands
+test infrastructure for a different item.
+
+---
+
+## P4-205. `tj3Alloc(0)` Returns NULL Where Upstream Returns a Freeable Pointer, and the Code Comment Claims the Opposite — **OPEN**
+
+**GitHub:** [#627](https://github.com/developer0hye/libjpeg-turbo-rs/issues/627) — found 2026-09-09 by the
+`rust-code-reviewer` pass on the P4-141 (#480) criterion-3 C-ABI harness, which
+asked what the `tj3Alloc` case would have to see in order to fail; under the
+[#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481) umbrella.
+
+**What upstream does.** `tj3Alloc` is a bare allocation with no zero-size
+special case — `return MALLOC(bytes);`
+(`references/libjpeg-turbo/src/turbojpeg.c:935-938`, where `MALLOC` is
+`malloc`). `malloc(0)` is implementation-defined by ISO C, but on every platform
+this project ships to — glibc, musl and macOS — it returns a unique pointer that
+may be passed to `free`. Measured against the pinned 3.2.0 oracle: `tj3Alloc(0)`
+returns non-NULL.
+
+**What we do.** `libc_malloc` returns NULL for `size == 0` before it reaches
+`malloc` (`crates/libjpeg-turbo-rs-capi/src/alloc.rs:48-51`), so `tj3Alloc(0)`
+returns NULL. A caller writing the ordinary
+`if ((buf = tj3Alloc(n)) == NULL) fail();` sees a spurious allocation failure at
+`n == 0` here and not upstream.
+
+**The comment is the other half of it.** `alloc.rs:45-47` says the NULL is
+"matching TurboJPEG behavior". Upstream has no zero-size branch at all, so that
+is not true of the mechanism — and it is why the divergence survived: anyone
+reading `alloc.rs` was told the question had been answered.
+
+**Acceptance criteria.**
+
+1. Decide, and record the decision where the code is: either `tj3Alloc(0)`
+   returns what `malloc(0)` returns on the host, or the branch stays and the
+   comment says *why it deliberately differs* instead of claiming parity.
+2. If parity is chosen, `tj3Free` must accept the resulting pointer, and the
+   internal `libc_malloc` callers that rely on "NULL means nothing to allocate"
+   have to be audited — that contract is used inside the crate as well as at the
+   ABI.
+3. `crates/libjpeg-turbo-rs-capi/tests/cabi_misuse_harness.rs` drops the
+   `alloc_ownership`/`alloc_zero` entry from `KNOWN_DIVERGENCES`;
+   `known_divergences_are_live` fails until it goes.
+
+**Why deferred.** Filed rather than fixed inside the pull request that surfaced
+it. Criterion 2 makes it a change to an internal invariant several call sites
+depend on, not a one-line edit.
+
+---
+
+## P4-206. `TJPARAM_NOREALLOC` Accepts a Buffer Exactly the Size of the Output, Where Upstream Needs One Byte More — **OPEN**
+
+**GitHub:** [#628](https://github.com/developer0hye/libjpeg-turbo-rs/issues/628) — found 2026-09-09 by the
+P4-141 (#480) criterion-3 C-ABI harness, after the `rust-code-reviewer` pass
+replaced a hard-coded "obviously too small" capacity with the measured boundary;
+under the [#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481)
+umbrella.
+
+**What upstream does.** With `TJPARAM_NOREALLOC` set, `jpeg_mem_dest_tj`
+installs a destination manager whose `empty_output_buffer` is an unconditional
+error when `alloc` is false — `if (!dest->alloc) ERREXIT(cinfo, JERR_BUFFER_SIZE);`
+(`references/libjpeg-turbo/src/jdatadst-tj.c`). libjpeg's `emit_byte` calls
+`dump_buffer` as soon as `free_in_buffer` reaches zero — after writing the byte
+that fills the buffer, not before the next one — so a buffer *exactly* the size
+of the finished JPEG trips it.
+
+**What we do.** We accept it. Measured on a 96 x 64 RGB gradient at quality 80,
+4:2:0, whose compressed output is **1097 bytes on both libraries, byte for
+byte**, binary-searching the smallest capacity each accepts:
+
+| | smallest accepted capacity | at exactly 1097 |
+|---|---|---|
+| stock 3.2.0 | **1098** (output + 1) | `-1`, "Buffer passed to JPEG library is too small" |
+| ours | **1097** (output + 0) | `0` |
+
+Every smaller capacity is refused by both, neither moves the caller's pointer,
+and the guard page after the destination never fires — so this is a
+boundary-condition difference, not an overrun. It is the last byte of the
+`TJPARAM_NOREALLOC` contract [P4-145](#p4-145-tjparam_norealloc-is-honoured-by-tj3compress8-only--closed-2026-08-12)
+established.
+
+**Which way it should go.** Ours is the more permissive side, so a program
+written against upstream keeps working here; the hazard is the reverse — a
+program sized against this port fails when linked against the real library,
+which is the direction a drop-in replacement is judged on. The fix is either to
+reproduce upstream's off-by-one (and say so, since it is an artifact of
+libjpeg's buffering rather than a documented rule) or to record the difference
+in `docs/C_API_REFERENCE.md`. What it must not stay is undocumented.
+
+**Acceptance criteria.**
+
+1. The six compressing entry points agree with upstream on the smallest
+   `TJPARAM_NOREALLOC` capacity they accept, cross-validated by binary search
+   against stock TurboJPEG on at least three images of different sizes — or the
+   difference is documented in `docs/C_API_REFERENCE.md` citing #628.
+2. `crates/libjpeg-turbo-rs-capi/tests/cabi_misuse_harness.rs` drops the three
+   `undersized_output`/`norealloc_exact_*` entries from `KNOWN_DIVERGENCES`.
+3. `tests/norealloc_buffer_capacity.rs`, which today pins "too small is refused"
+   with a generous margin, gains the exact boundary.
+
+**Why deferred.** Filed rather than fixed inside the pull request that surfaced
+it. Criterion 1 is a behaviour change across six entry points and needs its own
+C cross-validation pass.
+
+---
+
+## P4-207. `tj3Set` Accepts Sixteen Parameter/Instance-Type Pairs Upstream Refuses as Not Applicable — **OPEN**
+
+**GitHub:** [#629](https://github.com/developer0hye/libjpeg-turbo-rs/issues/629) — found 2026-09-09 by the
+P4-141 (#480) criterion-3 C-ABI harness, while strengthening a lifecycle check
+that had been writing `TJPARAM_QUALITY` to a decompression handle; under the
+[#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481) umbrella.
+
+**What upstream does.** `tj3Set` is not a plain setter. It refuses a parameter
+that does not apply to the handle's `initType`, returns -1 with a named error
+and leaves the stored value alone
+(`references/libjpeg-turbo/src/turbojpeg.c:731` onward):
+
+```c
+    case TJPARAM_QUALITY:
+      if ((this->init & COMPRESS) == 0)
+        THROW("TJPARAM_QUALITY is not applicable to decompression instances.");
+```
+
+A `TJINIT_TRANSFORM` handle is initialised for both roles, so the
+role-conditioned guards do not fire on it; the read-only parameters are refused
+on every instance type.
+
+**What we do.** We accept every parameter on every instance type. Probing all 26
+`TJPARAM`s against all three init types, each with a value inside its own legal
+range so a rejection is the applicability rule and not a range check,
+**sixteen (init type, parameter) pairs diverge**:
+
+| instance | parameters `tj3Set` accepts and upstream refuses |
+|---|---|
+| `TJINIT_COMPRESS` (2) | `FASTUPSAMPLE`, `SCANLIMIT` |
+| `TJINIT_DECOMPRESS` (14) | `NOREALLOC`, `QUALITY`, `COLORSPACE`, `OPTIMIZE`, `PROGRESSIVE`, `ARITHMETIC`, `LOSSLESS`, `LOSSLESSPSV`, `LOSSLESSPT`, `RESTARTBLOCKS`, `RESTARTROWS`, `XDENSITY`, `YDENSITY`, `DENSITYUNITS` |
+| `TJINIT_TRANSFORM` (0) | — matches upstream exactly |
+
+Out-of-range parameter indices (`-1`, `TJ_NUMPARAM`) are rejected identically by
+both, so the range guard exists; the applicability layer above it is what is
+missing.
+
+**Why it matters.** It is a silent-success divergence, which is the worse
+direction. A program setting `TJPARAM_QUALITY` on a decompression handle has a
+bug; upstream says so on the spot, and here the call succeeds and the value sits
+in the handle until something picks it up. `TjHandle` is one struct for both
+roles, and [P4-198](#p4-198-tjhandle-merges-upstreams-two-icc-buffers-so-a-decode-changes-the-profile-a-later-compress-embeds--open)
+and [P4-199](#p4-199-setdecompparameters-publishes-thirteen-handle-parameters-our-8-bit-decode-publishes-eight-and-the-1216-bit-ones-publish-three-and-ignore-the-handles-limits--open)
+are already about parameters leaking between roles on that struct — this is the
+same seam, from the write side.
+
+**Acceptance criteria.**
+
+1. `tj3Set` refuses each of the sixteen pairs with -1 and the error text
+   upstream produces, leaving the stored value unchanged — cross-validated
+   against stock TurboJPEG across the full 26 x 3 matrix rather than a sample.
+2. `tj3Get`'s own applicability rules are checked the same way in the same
+   change; this item measured `tj3Set` only.
+3. `crates/libjpeg-turbo-rs-capi/tests/cabi_misuse_harness.rs` drops the sixteen
+   `APPLICABILITY_DIVERGENCES` entries.
+
+**Why deferred.** Filed rather than fixed inside the pull request that surfaced
+it. Sixteen new entry-point rejections will fail any existing test or downstream
+harness that has been setting a parameter on the wrong instance type, so it
+needs its own pass over this crate's suites — a test-visible behaviour change,
+not a fix that can ride along.
+
+---
+## P4-208. `c_boundary_asan`'s Header Says Its C Driver Is Un-Instrumented and That This Is Required; Both Drivers Are Compiled With `-fsanitize=address,undefined` — **OPEN**
+
+**GitHub:** [#630](https://github.com/developer0hye/libjpeg-turbo-rs/issues/630) — under the
+[#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481) umbrella.
+Found 2026-09-09 by the `docs-drift-auditor` pass on the P4-141 criterion-3
+C-ABI harness, which added a second compile step in the same shape.
+
+**What the job says.** `.github/workflows/sanitizers.yml`'s `c_boundary_asan`
+header describes "a tiny **un-instrumented** C driver that `dlopen`s an
+ASan-instrumented Rust cdylib", and states the reason as a correctness
+requirement:
+
+> WHY THIS IS THE CORRECT CONFIGURATION: The bidirectional ASan handoff
+> (un-instrumented C → instrumented Rust → un-instrumented C) is exactly what
+> OSS-Fuzz / Pulse / Pizza expect for Rust-codec-via-C-driver enrollment.
+> Un-instrumented C is **actively required** here: instrumenting the harness
+> would re-introduce the parallel-test-runner false positives the `asan` job
+> documents.
+
+**What the job does.** Both C drivers are instrumented. The step is even named
+for it — "Compile C harness with `-fsanitize=address,undefined`" — and its own
+comment gives the opposite rationale ("trip on FFI-boundary memory errors and
+undefined behavior in the C side of the call"). The 2026-09-09 misuse-harness
+step compiles with the same flags. P4-11's own closure record carries both
+halves in one sentence — "a tiny un-instrumented C driver … compiles the harness
+with `-fsanitize=address,undefined`" — and `examples/sanitizer_c_harness/
+harness.c`'s header repeats the "un-instrumented" description, so there are
+three sites to reconcile, not one.
+
+**Why it is not just a stale sentence.** The two claims landed in the *same*
+commit (`8a47439`, 2026-05-17, the P4-11 closure), so the question they disagree
+about has never been answered. Either:
+
+- un-instrumented C really is required, and this job has never had the
+  configuration it documents — in which case what it proves about the FFI
+  boundary is not what the header says it proves; or
+- instrumenting the driver is the better configuration (it is what catches an
+  error on the *C* side of the handoff), and the "actively required" rationale
+  is wrong. The imported reason is suspect on its face: the false positives the
+  `asan` job documents are macOS NEON shadow-map races under a *parallel test
+  runner*, and this job is a single-process `ubuntu-latest` binary.
+
+Nothing here is measured, which is the point — the claim has stood for four
+months and the job passing says nothing about it either way.
+
+**Acceptance criteria.**
+
+1. Decide which configuration the job wants, and make the header say what the
+   steps do — with the reason that actually applies, not the `asan` job's.
+2. If un-instrumented C is kept as a requirement, drop `-fsanitize=` from the
+   two harness compile steps and state what the instrumented Rust side still
+   covers on its own.
+3. Either way, `docs/UNSAFE_INVENTORY_CAPI.md`'s **C-boundary ASan** bullet —
+   which currently records the steps correctly ("both compiled with
+   `-fsanitize=address,undefined`") — must keep agreeing with the workflow.
+
+**Why deferred.** Filed rather than fixed by the documentation pass that found
+it: choosing between the two readings is a decision about what the sanitizer
+leg is for, and the pull request that surfaced it lands test infrastructure for
+P4-141.

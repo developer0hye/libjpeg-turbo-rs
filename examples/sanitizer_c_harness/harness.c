@@ -4,8 +4,11 @@
  * (tj3Init / tj3DecompressHeader / tj3Get / tj3Decompress8 / tj3Destroy),
  * and decodes a small fixed corpus.  It allocates its own buffers with
  * malloc/free rather than tj3Alloc/tj3Free, so the shared-allocator contract
- * those two exist for is NOT exercised across this boundary — recorded in
- * docs/UNSAFE_INVENTORY_CAPI.md's tj3Free row and in P4-141 criterion 2.
+ * those two exist for is not exercised *here*.  Since 2026-09-09 it is, in the
+ * same CI job, by crates/libjpeg-turbo-rs-capi/examples/cabi_misuse_harness.c
+ * (P4-141 criterion 3), which also crosses the boundary at 12-bit precision and
+ * on the compress side.  This harness stays what it is: a well-formed decode
+ * over a real corpus.
  * Compiled with
  * `-fsanitize=address,undefined` and run with `ASAN_OPTIONS=...` so any
  * boundary bug at the FFI surface (wrong free, OOB read, undefined behavior

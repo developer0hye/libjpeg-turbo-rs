@@ -427,7 +427,7 @@
 |---|---|---|---|
 | `tjscalingfactor` | {num, denom} scaling ratio | `ScalingFactor` | ✅ |
 | `tjregion` | {x, y, w, h} crop region | `CropRegion` | ✅ |
-| `tjtransform` | {region, op, options, data, customFilter} | `TransformOptions` (all fields incl. `custom_filter`) | ✅ |
+| `tjtransform` | {region, op, options, data, customFilter} | `TransformOptions` | 🔶 — `region`, `op` and `options` map; `data` and `customFilter` do not. `tj3Transform` returns -1 for a non-NULL callback, so both are unreachable across the C ABI, even though `TransformOptions::custom_filter` gives Rust callers the callback (a closure captures what `data` carries) (P4-204) |
 
 ---
 
