@@ -8070,7 +8070,7 @@ an infallible constructor and so needs an API decision (panic, or a fallible
   the dispatcher picks (measured locally: `llvm.aarch64.neon.ushl.v8i16`),
   which is why the library's own Miri run passes `--skip simd::`. A
   scalar-only capi build under Miri belongs to
-  [P4-141](#p4-141-soundness-verification-program-mirisanitizerfuzz-coverage-gaps-and-an-unsafe-inventory-gate--partial-criterion-5-landed-and-gated-criteria-1-4-6-and-7-open),
+  [P4-141](#p4-141-soundness-verification-program-mirisanitizerfuzz-coverage-gaps-and-an-unsafe-inventory-gate--partial-criteria-4-root-crate-and-5-landed-and-gated-criteria-1-3-6-and-7-open),
   not here.
 
 **Also recorded: resource-limit defaults.** `DecodeLimits` currently defaults to
@@ -8146,7 +8146,7 @@ immediately, ahead of the code work.
 
 **Status (2026-08-09): closed.** Landed in #485; `crates/libjpeg-turbo-rs-capi/src/lib.rs` no longer offers the crate as a `libjpeg.so.62` replacement, and `README.md` states the safety scope rather than a guarantee.
 
-## P4-141. Soundness Verification Program: Miri/Sanitizer/Fuzz Coverage Gaps and an `unsafe` Inventory Gate — **PARTIAL: criterion 5 landed and gated; criteria 1-4, 6 and 7 open**
+## P4-141. Soundness Verification Program: Miri/Sanitizer/Fuzz Coverage Gaps and an `unsafe` Inventory Gate — **PARTIAL: criteria 4 (root crate) and 5 landed and gated; criteria 1-3, 6 and 7 open**
 
 **GitHub:** [#480](https://github.com/developer0hye/libjpeg-turbo-rs/issues/480) — under the [#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481) umbrella.
 
@@ -8192,6 +8192,8 @@ misuse of a public SIMD entry point; none injects allocation failure; none runs
    inventory and requires review for additions. **A raw count is not the
    deliverable** — "780 unsafe operations" says nothing about risk; one
    precondition-free safe wrapper (P4-135) outweighs hundreds of intrinsic calls.
+   **Landed and gated for the root crate 2026-09-08** — see *Progress* below;
+   the C-ABI crate remains.
 5. **Parser and control-plane `unsafe` goes to zero.** Malformed-input handling —
    progressive scan state, restart markers, EOB runs, spectral ranges,
    coefficient indexing, marker length parsing, custom scan scripts — is the
@@ -8255,8 +8257,42 @@ the harness first would only pin current behaviour.
   still hold `unsafe`, but all ten sites are `idct_scaled_strided`
   destination pointers — strided IDCT dispatch, not parsing; they belong to
   the criterion-4 inventory.
+- **Criterion 4 — 2026-09-08, root crate:** `docs/UNSAFE_INVENTORY.md`
+  lists every code `unsafe` token under `src/` — 301 sites in 45 files,
+  224 rows keyed by (file, enclosing item) — with the seven cells the
+  criterion names: why safe Rust cannot express it, the invariant and where
+  it is established, whether a safe caller can reach it, the regression
+  test that would catch the invariant breaking, the CI legs that execute it
+  (and those that do not), and the last reviewer. **The mechanism is
+  `tests/unsafe_inventory_gate.rs`:** it lexes the tree with the scanner
+  the criterion-5 gate uses (`tests/helpers/unsafe_scan.rs`, now shared),
+  attributes each token to its enclosing `fn` or `unsafe impl` header, and
+  fails unless the inventory holds exactly those items at exactly those
+  counts with no empty or placeholder cell — so an added, removed or
+  *moved* `unsafe` is a CI failure until the row changes, and the failure
+  message prints the paste-ready rows. `.github/CODEOWNERS` routes the
+  inventory and both gates to the maintainer, which becomes a hard review
+  requirement once branch protection asks for code-owner review (it does
+  not today — a repository setting, not a code change). Sites in
+  `#[cfg(test)]` code are inventoried and marked test-only rather than
+  exempted. Rows whose honest *Regression test* cell is `**none**` are the
+  gaps this inventory surfaced — thirty-two of the 224 — and they are the
+  criterion's product rather than a defect in it: a raw count could not
+  have named one of them. They are filed together as
+  [P4-191](#p4-191-thirty-two-inventoried-unsafe-items-have-no-regression-test--open)
+  (#609), which includes three uncalled functions holding `unsafe`. Writing
+  one of those cells also produced the criterion's first *defect*:
+  [P4-192](#p4-192-a-custom-scan-script-with-se--63-writes-past-two-stack-arrays-from-safe-rust-on-x86_64--open)
+  (#610), a stack overflow reachable from safe Rust — the answer to the
+  premise of this whole item, which is that no gate had ever found one.
+  **Not yet inventoried:** `crates/libjpeg-turbo-rs-capi` (786 sites in 15
+  files by the same scanner on 2026-09-08 — `extern "C"` end to end), the
+  next chunk of this criterion; the gate's `SCAN_ROOT` widens to it when its
+  rows exist. The workspace's other two crates
+  (`libjpeg-turbo-rs-image`, `libjpeg-turbo-rs-wasm`) hold no `unsafe` at
+  all, so `src/` plus the C-ABI crate is the whole of it.
 - **Criterion 2 — partial since 2026-08-13** (see the criterion text).
-- **Criteria 1, 3, 4, 6, 7 — untouched.**
+- **Criteria 1, 3, 6, 7 — untouched.**
 
 ## P4-142. `tj3DecompressHeader` Decodes the Entire Image to Read the Header — **OPEN**
 
@@ -10516,3 +10552,115 @@ with nothing to catch it.
 PR is a behaviour-preserving refactor plus a gate, and a new C-oracle fixture
 is its own TDD cycle; the fixture must be built and proven discriminating,
 not just committed.
+
+## P4-191. Thirty-Two Inventoried `unsafe` Items Have No Regression Test — **OPEN**
+
+**GitHub:** [#609](https://github.com/developer0hye/libjpeg-turbo-rs/issues/609) — filed 2026-09-08 by the P4-141 criterion-4 landing.
+
+**What produced it.** `docs/UNSAFE_INVENTORY.md` asks every row for the test
+that would fail if the invariant broke. Thirty-two of its 224 rows answer
+`**none**`, for the whole site or for a named sub-invariant. That answer is
+the criterion's product, not a defect in it — a raw count could not have
+named one of them.
+
+Five clusters are actionable; the rest are qualified `**none**`s (a named
+sub-invariant or a CI leg, not an untested site) and are context.
+
+**Acceptance criteria.**
+
+1. **Three uncalled functions holding `unsafe` (7 sites between them)** are
+   deleted, or given a caller *and* a test:
+   `encode_ac_sparse_lsb` (`src/encode/huffman_encode.rs:957`, 2 sites,
+   `#[allow(dead_code)]`), `encode_mcu_420_half_chroma`
+   (`src/encode/pipeline_impl/mcu.rs:1351`, 4 sites, `pub(super)`, never
+   called) and `transpose_8x8_i16` (`src/simd/x86_64/avx2_idct.rs:481`, 1
+   site, `#[allow(dead_code)]`, carrying `#[target_feature(enable = "avx2")]`
+   over SSE2-only intrinsics). Verified by `grep -rn <name> src/ crates/
+   tests/ benches/ examples/`, which finds only the definition. Unreachable
+   `unsafe` can be audited only by reading, never by exercise. If
+   `encode_mcu_420_half_chroma` goes, `tests/regression_dct_method_parity.rs`'s
+   module doc — which names it as if it were live — is corrected with it.
+2. **The three wasm32 fused FDCT kernels** (`wasm_extract_fdct_quantize`,
+   `wasm_downsample_h2v2_fdct_quantize`, `wasm_downsample_h2v1_fdct_quantize`
+   in `src/simd/wasm32/mod.rs`) gain a `src/simd/simd_parity_tests.rs` entry
+   each, against the scalar `fdct_quantize` on a padded plane including the
+   stride-boundary window. Their AArch64 and x86_64 twins already have one;
+   the two progressive ones have nothing that pins bytes today.
+3. **The SSE2 progressive coefficient preparation's bound** is driven by a
+   test: `prepare_ac_first_coeffs` / `prepare_ac_first_sse2` /
+   `prepare_ac_refine_coeffs` / `prepare_ac_refine_sse2`
+   (`src/encode/pipeline_impl/progressive.rs`, 6 sites) at the smallest and
+   largest legal `(Ss, Se)`, asserted equal to the scalar path. In-range
+   output is already byte-exact against `cjpeg`; the bound is not exercised.
+4. **The strided IDCT destination writes** gain direct tests that write into
+   a canary-padded buffer and assert both the pixels and the untouched
+   margins: `sse2_idct_islow_strided` (`src/simd/x86_64/idct.rs`, reached
+   only by the emulated Nehalem leg today) and `idct_1x1_strided`
+   (`src/decode/idct_scaled.rs`, 2 sites, no unit-level test —
+   `idct_1x1_dc_only` covers the safe inner function, not the wrapper).
+5. **`avx2_merged_h2v2_ycbcr_to_rgb` / `avx2_merged_h2v2_inner`**
+   (`src/simd/x86_64/avx2_merged.rs`, 2 sites) are exercised with an
+   under-sized second luma row — the odd-height case their SAFETY contract
+   permits and `parity_merged_upsample_h2v2`, which feeds equal-length rows
+   only, never produces.
+6. Each `**none**` cell that a landed test replaces is rewritten in
+   `docs/UNSAFE_INVENTORY.md` in the same pull request.
+
+**Why deferred.** Filed rather than fixed inside the P4-141 criterion-4 pull
+request, which commits the inventory and its gate: five test programs across
+four backends is its own work, and deleting dead `unsafe` changes the
+compiled surface, which a documentation-and-gate change should not.
+
+## P4-192. A Custom Scan Script With `Se > 63` Writes Past Two Stack Arrays From Safe Rust on x86_64 — **OPEN**
+
+**GitHub:** [#610](https://github.com/developer0hye/libjpeg-turbo-rs/issues/610) — found 2026-09-08 by the P4-141 criterion-4 inventory; under the [#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481) umbrella.
+
+**The defect.** `Encoder::scan_script` (`src/api/encoder.rs:176`) stores a
+`Vec<ScanScript>` verbatim and nothing validates `se`.
+`compress_progressive_custom_with_restart` copies the fields across,
+`band_len = se - ss + 1` (`src/encode/pipeline_impl/progressive.rs:730`) is
+handed to `prepare_ac_first_coeffs`, and on x86_64 with the default `simd`
+feature that forwards it to `prepare_ac_first_sse2`, which indexes `block`,
+`values` and `diffs` through raw pointers with no bound. **100 % safe Rust
+therefore writes past two `[u16; 64]` stack arrays and the call returns
+`Ok`.** Measured on `--target x86_64-apple-darwin`:
+
+| Build | `se = 64` | `se = 200` |
+|---|---|---|
+| x86_64 release | `Ok(273)` | **`Ok(639)`** — 200 `u16` into `[u16; 64]` |
+| x86_64 debug | `Ok(278)` | panic at `progressive.rs:1249`, after the stores |
+| aarch64 (scalar arm) | panic, index out of bounds | same panic |
+
+The non-x86_64 arm of `prepare_ac_first_coeffs` is safe indexing, which is
+why the defect is architecture-specific and why no aarch64 leg can see it.
+The AC-*refine* twin panics at `progressive.rs:975` in both profiles; only
+the AC-first band corrupts.
+
+**How it was found.** By writing the *Invariant* cell for
+`prepare_ac_first_sse2` in `docs/UNSAFE_INVENTORY.md`: the row had to say
+"nothing inside checks it", and the caller turned out not to check it
+either. This is the first defect any P4-141 mechanism has produced — the
+program's whole premise was that P4-135 and P4-143 came from reading code
+and review, never from a gate.
+
+**What C does.** `validate_script` (`references/libjpeg-turbo/src/jcmaster.c:359`)
+rejects `Ss < 0 || Ss >= DCTSIZE2 || Se < Ss || Se >= DCTSIZE2` and the
+`Ah`/`Al` range with `JERR_BAD_PROG_SCRIPT`, then enforces DC/AC
+exclusivity, one component per AC scan, AC-after-DC, and the successive
+approximation chain. This port has no equivalent.
+
+**Acceptance criteria.**
+
+1. A `validate_script` equivalent runs before any encoding work and returns
+   an `Err` — not a panic — for every condition `jcmaster.c:359-381` rejects.
+2. A regression test citing #610 drives the reproducer and asserts `Err`,
+   proven discriminating by failing before the fix, and running on x86_64.
+3. `prepare_ac_first_sse2` and `prepare_ac_refine_sse2` gain a `# Safety`
+   section stating `ss + band_len <= 64`, and their `docs/UNSAFE_INVENTORY.md`
+   rows are rewritten.
+4. The scalar and SSE2 arms reject the same scripts, so the behaviour is not
+   architecture-dependent.
+
+**Why deferred.** Filed rather than fixed inside the P4-141 criterion-4 pull
+request, which changes no file under `src/`; the fix is a behaviour change
+with its own C-parity contract and its own TDD cycle.

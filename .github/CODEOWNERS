@@ -1,0 +1,11 @@
+# P4-141 criterion 4: an `unsafe` addition must be reviewed, not just pass CI.
+# `tests/unsafe_inventory_gate.rs` makes the inventory edit mandatory; this
+# file routes that edit — and any change to the gate itself — to the
+# maintainer once the repository requires code-owner review.
+docs/UNSAFE_INVENTORY.md        @developer0hye
+tests/unsafe_inventory_gate.rs  @developer0hye
+tests/parser_unsafe_gate.rs     @developer0hye
+tests/helpers/unsafe_scan.rs    @developer0hye
+# The rules above are only worth as much as their own review: without this
+# line a pull request deleting them would not be routed anywhere.
+.github/CODEOWNERS              @developer0hye

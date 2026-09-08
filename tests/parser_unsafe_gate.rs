@@ -27,17 +27,21 @@
 //! for `forbid(unsafe_code)` under `not(feature = "simd")`; it joins
 //! `PARSER_FILES` when that lands. The files in `INVENTORY_OWNED` hold
 //! strided-IDCT destination pointers and SIMD kernels — dispatch, not parsing
-//! — and belong to the criterion-4 `unsafe` inventory, not to this gate.
+//! — and are owned by the criterion-4 `unsafe` inventory
+//! (`docs/UNSAFE_INVENTORY.md`, gated by `tests/unsafe_inventory_gate.rs`),
+//! not by this gate.
 //!
-//! **What the scanner understands.** It is a small lexer, not a line
-//! heuristic: `//` comments, nested `/* */` comments, `"…"` strings with
-//! backslash escapes, raw strings (`r"…"`, `r#"…"#`, with `b`/`c` prefixes),
-//! and char/byte literals (including `'"'`) are skipped, so an `unsafe`
-//! hidden after a `"\"//"` or inside a multi-line literal is still found,
-//! and prose about `unsafe` in any comment form is not. Each of those shapes
-//! is pinned by `scanner_distinguishes_code_from_comments_and_literals`. The
-//! deliberate residue: a raw identifier `r#unsafe` is reported (a loud false
-//! positive, and not something these files should contain anyway).
+//! **What the scanner understands.** The lexer lives in
+//! `tests/helpers/unsafe_scan.rs`, shared with the criterion-4 inventory
+//! gate (`tests/unsafe_inventory_gate.rs`): `//` comments, nested `/* */`
+//! comments, `"…"` strings with backslash escapes, raw strings (`r"…"`,
+//! `r#"…"#`, with `b`/`c` prefixes), and char/byte literals (including
+//! `'"'`) are skipped, so an `unsafe` hidden after a `"\"//"` or inside a
+//! multi-line literal is still found, and prose about `unsafe` in any
+//! comment form is not. Each of those shapes is pinned here by
+//! `scanner_distinguishes_code_from_comments_and_literals`. The deliberate
+//! residue: a raw identifier `r#unsafe` is reported (a loud false positive,
+//! and not something these files should contain anyway).
 //!
 //! **Environment:** this reads the repository source tree, so it is skipped
 //! where that tree is not reachable — `wasm32-wasip1` under wasmtime (which
@@ -45,6 +49,10 @@
 //! native leg, which is where the `unsafe` would be introduced.
 
 use std::path::{Path, PathBuf};
+
+#[path = "helpers/unsafe_scan.rs"]
+mod unsafe_scan;
+use unsafe_scan::unsafe_token_lines;
 
 /// Parser and control-plane sources that must stay free of `unsafe`
 /// (P4-141 criterion 5). Repository-relative, forward slashes.
@@ -117,146 +125,14 @@ fn repository_tree_is_readable() -> bool {
 }
 
 fn relative(path: &Path) -> String {
-    path.strip_prefix(repo_root())
-        .unwrap_or(path)
-        .to_string_lossy()
-        .replace('\\', "/")
-}
-
-fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    let mut paths: Vec<PathBuf> = entries.filter_map(|e| e.ok()).map(|e| e.path()).collect();
-    paths.sort();
-    for path in paths {
-        if path.is_dir() {
-            walk(&path, out);
-        } else if path.extension().is_some_and(|e| e == "rs") {
-            out.push(path);
-        }
-    }
-}
-
-/// Line numbers (1-based) of every whole-word `unsafe` token that is code:
-/// outside `//` and nested `/* */` comments, outside string, raw-string,
-/// char and byte literals. A small lexer rather than a line heuristic, so a
-/// `//` or a `"` inside a literal cannot hide what follows it.
-fn unsafe_token_lines(text: &str) -> Vec<usize> {
-    let chars: Vec<char> = text.chars().collect();
-    let len: usize = chars.len();
-    let at = |i: usize| -> char { chars.get(i).copied().unwrap_or('\0') };
-    let is_ident = |c: char| c.is_alphanumeric() || c == '_';
-
-    let mut lines: Vec<usize> = Vec::new();
-    let mut line: usize = 1;
-    let mut i: usize = 0;
-    while i < len {
-        let c: char = at(i);
-        if c == '\n' {
-            line += 1;
-            i += 1;
-        } else if c == '/' && at(i + 1) == '/' {
-            // Line comment: skip to end of line (the `\n` is counted above).
-            while i < len && at(i) != '\n' {
-                i += 1;
-            }
-        } else if c == '/' && at(i + 1) == '*' {
-            // Block comment, nestable per the Rust reference.
-            let mut depth: usize = 1;
-            i += 2;
-            while i < len && depth > 0 {
-                if at(i) == '/' && at(i + 1) == '*' {
-                    depth += 1;
-                    i += 2;
-                } else if at(i) == '*' && at(i + 1) == '/' {
-                    depth -= 1;
-                    i += 2;
-                } else {
-                    if at(i) == '\n' {
-                        line += 1;
-                    }
-                    i += 1;
-                }
-            }
-        } else if c == '"' {
-            // String literal with backslash escapes.
-            i += 1;
-            while i < len && at(i) != '"' {
-                if at(i) == '\\' {
-                    i += 1;
-                }
-                if at(i) == '\n' {
-                    line += 1;
-                }
-                i += 1;
-            }
-            i += 1;
-        } else if c == '\'' {
-            // Char literal (`'x'`, `'\n'`, `'"'`) or a lifetime (`'a`).
-            if at(i + 1) == '\\' {
-                i += 2;
-                while i < len && at(i) != '\'' {
-                    i += 1;
-                }
-                i += 1;
-            } else if at(i + 2) == '\'' {
-                i += 3;
-            } else {
-                i += 1;
-            }
-        } else if is_ident(c) {
-            // Identifier or keyword; also catches raw-string openers.
-            let start: usize = i;
-            while i < len && is_ident(at(i)) {
-                i += 1;
-            }
-            let word: String = chars[start..i].iter().collect();
-            let raw_prefix: bool = word == "r" || word == "br" || word == "cr";
-            if raw_prefix && (at(i) == '"' || at(i) == '#') {
-                // Raw string: `r"…"`, `r#"…"#`, with any number of hashes.
-                let mut hashes: usize = 0;
-                while at(i) == '#' {
-                    hashes += 1;
-                    i += 1;
-                }
-                if at(i) == '"' {
-                    i += 1;
-                    loop {
-                        if i >= len {
-                            break;
-                        }
-                        if at(i) == '"' && (1..=hashes).all(|h| at(i + h) == '#') {
-                            i += 1 + hashes;
-                            break;
-                        }
-                        if at(i) == '\n' {
-                            line += 1;
-                        }
-                        i += 1;
-                    }
-                }
-            } else if word == "unsafe" {
-                lines.push(line);
-            }
-        } else {
-            i += 1;
-        }
-    }
-    lines
+    unsafe_scan::relative(&repo_root(), path)
 }
 
 /// Every code `unsafe` token in `path`, as `line-number: text`.
 fn unsafe_sites(path: &Path) -> Vec<String> {
-    let text: String =
-        std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-    let source_lines: Vec<&str> = text.lines().collect();
-    unsafe_token_lines(&text)
+    unsafe_scan::unsafe_sites(path)
         .into_iter()
-        .map(|lineno| {
-            let shown: &str = source_lines.get(lineno - 1).map_or("", |l| l.trim());
-            format!("{lineno}: {shown}")
-        })
+        .map(|site| format!("{}: {}", site.line, site.text))
         .collect()
 }
 
@@ -264,7 +140,8 @@ fn skip_reason() -> String {
     format!(
         "SKIP: the source tree is not readable from {}. This gate inspects \
          repository sources, which a packaged crate and a sandboxed target \
-         (wasm32-wasip1) do not provide. It runs on every native leg.",
+         (wasm32-wasip1) do not provide. It runs wherever a workflow runs \
+         `cargo test --tests`.",
         repo_root().display()
     )
 }
@@ -311,7 +188,7 @@ fn every_decode_source_is_classified() {
     }
 
     let mut files: Vec<PathBuf> = Vec::new();
-    walk(&repo_root().join(CLASSIFIED_ROOT), &mut files);
+    unsafe_scan::rust_sources(&repo_root().join(CLASSIFIED_ROOT), &mut files);
     assert!(
         !files.is_empty(),
         "no sources found under {CLASSIFIED_ROOT}"
