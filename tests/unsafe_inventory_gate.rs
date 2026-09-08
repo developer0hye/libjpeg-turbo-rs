@@ -30,14 +30,21 @@
 //! gated the day it lands rather than the day someone remembers.
 //!
 //! **What is deferred, in code rather than in prose.** [`DEFERRED`] names
-//! the sources that hold `unsafe` and are not inventoried yet — today only
-//! `crates/libjpeg-turbo-rs-capi/src/jpeglib.rs`, the classic `jpeg_*`
-//! surface, 501 sites in one 12.9k-line file. The list is checked both ways:
-//! a deferred path must exist and must still hold `unsafe` (so a stale entry
-//! fails once the file is inventoried or cleaned), and a file that is
+//! the sources that hold `unsafe` and are not inventoried yet. It is
+//! **empty** since 2026-09-09, when `crates/libjpeg-turbo-rs-capi/src/jpeglib.rs`
+//! — the classic `jpeg_*` surface, 501 sites in one 12.9k-line file, the last
+//! entry — was inventoried. The mechanism stays, because that is what makes a
+//! future deferral reviewable rather than silent: a deferred path must exist,
+//! must sit inside a scanned root and must still hold `unsafe` (so a stale
+//! entry fails once the file is inventoried or cleaned), and a file that is
 //! neither inventoried nor deferred fails as before. A new source therefore
 //! cannot slip past by being forgotten — only by an explicit, reviewable
 //! edit to this list, which `.github/CODEOWNERS` routes to the maintainer.
+//! The rule is [`deferral_problem`] rather than three assertions inside the
+//! loop, because a loop over an empty list enforces nothing:
+//! [`the_deferral_rule_rejects_each_way_an_entry_can_go_stale`] drives it on
+//! fixtures, so emptying the list cannot quietly retire the rule the
+//! paragraph above describes.
 //!
 //! **How the diff works.** [`unsafe_scan`] lexes each source (comments,
 //! strings and literals cannot hide or fake a site — see that module) and
@@ -96,9 +103,15 @@ const SCOPES: [Scope; 2] = [
 /// inventoried. Each entry is a promise with a deadline, not an exemption:
 /// the gate requires the path to exist and to still hold at least one
 /// `unsafe`, so an entry that has been inventoried or cleaned up fails until
-/// it is removed. Shrinking this list is the remaining work of P4-141
-/// criterion 4.
-const DEFERRED: [&str; 1] = ["crates/libjpeg-turbo-rs-capi/src/jpeglib.rs"];
+/// it is removed.
+///
+/// **Empty since 2026-09-09**, when `jpeglib.rs` was inventoried and P4-141
+/// criterion 4 closed. Adding an entry is how a future large file gets
+/// staged, and it is a reviewable edit rather than a silent omission —
+/// [`deferrals_are_live_and_named`] enforces the three conditions above and
+/// [`the_scanned_roots_are_the_whole_workspace`] makes a *missing* entry a
+/// failure rather than a hole.
+const DEFERRED: [&str; 0] = [];
 
 /// The table columns every section must declare, in this order. Renaming
 /// one is an inventory-format change and fails here on purpose.
@@ -592,12 +605,51 @@ fn every_inventory_matches_every_unsafe_site_in_its_tree() {
     }
 }
 
-/// A deferral is a promise with a deadline. Each [`DEFERRED`] path must
-/// exist, must sit inside a scanned root — otherwise it silences nothing and
-/// only reads as though it does — and must still hold at least one `unsafe`,
-/// so the entry has to be deleted the moment the file is inventoried or made
-/// safe. Without this the list would be a place for stale exemptions to
+/// Why a deferral is refused, or `None` when it is legitimate.
+///
+/// A deferral is a promise with a deadline: the path must exist, must sit
+/// inside a scanned root — otherwise it silences nothing and only reads as
+/// though it does — and must still hold at least one `unsafe`, so the entry
+/// has to be deleted the moment the file is inventoried or made safe.
+/// Without that the list would be a place for stale exemptions to
 /// accumulate, which is the failure mode the inventory exists to prevent.
+///
+/// The rule lives here, apart from the loop that applies it, so it stays
+/// *exercised* while [`DEFERRED`] is empty. Since 2026-09-09 it is: a
+/// loop over an empty list runs its assertions zero times, so the three
+/// conditions would be dead code that the module documentation nonetheless
+/// claims are enforced — and the next deferral would be silent after all.
+/// [`the_deferral_rule_rejects_each_way_an_entry_can_go_stale`] drives all
+/// four outcomes on fixtures instead.
+fn deferral_problem(root: &Path, deferred: &str) -> Option<String> {
+    let path: PathBuf = root.join(deferred);
+    if !path.is_file() {
+        return Some(format!(
+            "DEFERRED lists `{deferred}`, which does not exist — remove the entry \
+             (tests/unsafe_inventory_gate.rs)"
+        ));
+    }
+    if !SCOPES
+        .iter()
+        .any(|scope| deferred.starts_with(&format!("{}/", scope.scan_root)))
+    {
+        return Some(format!(
+            "DEFERRED lists `{deferred}`, which is outside every scanned root, so it \
+             defers nothing — remove the entry or add its tree to SCOPES"
+        ));
+    }
+    if unsafe_scan::unsafe_sites(&path).is_empty() {
+        return Some(format!(
+            "DEFERRED lists `{deferred}`, which no longer holds any `unsafe` — it is \
+             either inventoried or safe now, so remove the entry and let the gate \
+             cover it"
+        ));
+    }
+    None
+}
+
+/// Every entry in [`DEFERRED`] satisfies [`deferral_problem`]. Vacuous while
+/// the list is empty, which is the point of the companion test below.
 #[test]
 fn deferrals_are_live_and_named() {
     if !repository_tree_is_readable() {
@@ -606,26 +658,72 @@ fn deferrals_are_live_and_named() {
     }
     let root: PathBuf = repo_root();
     for deferred in DEFERRED {
-        let path: PathBuf = root.join(deferred);
-        assert!(
-            path.is_file(),
-            "DEFERRED lists `{deferred}`, which does not exist — remove the entry \
-             (tests/unsafe_inventory_gate.rs)"
-        );
-        assert!(
-            SCOPES
-                .iter()
-                .any(|scope| deferred.starts_with(&format!("{}/", scope.scan_root))),
-            "DEFERRED lists `{deferred}`, which is outside every scanned root, so it \
-             defers nothing — remove the entry or add its tree to SCOPES"
-        );
-        assert!(
-            !unsafe_scan::unsafe_sites(&path).is_empty(),
-            "DEFERRED lists `{deferred}`, which no longer holds any `unsafe` — it is \
-             either inventoried or safe now, so remove the entry and let the gate \
-             cover it"
-        );
+        if let Some(problem) = deferral_problem(&root, deferred) {
+            panic!("{problem}");
+        }
     }
+}
+
+/// The deferral rule itself, on fixtures rather than on [`DEFERRED`] — so
+/// emptying that list cannot quietly retire it. Each case is a way an entry
+/// goes stale, plus the one shape that is legitimate.
+#[test]
+fn the_deferral_rule_rejects_each_way_an_entry_can_go_stale() {
+    if !repository_tree_is_readable() {
+        eprintln!("{}", skip_reason());
+        return;
+    }
+    let root: PathBuf = repo_root();
+
+    // Legitimate: in a scanned root, present, and still holding `unsafe`.
+    // `jpeglib.rs` was the last real deferral and is the largest such file.
+    let live: &str = "crates/libjpeg-turbo-rs-capi/src/jpeglib.rs";
+    assert!(
+        deferral_problem(&root, live).is_none(),
+        "`{live}` is a file inside a scanned root that still holds `unsafe`, so it \
+         is exactly what a legitimate deferral looks like — the rule must accept it"
+    );
+
+    // Gone: a path no longer in the tree.
+    let missing: &str = "src/this_file_does_not_exist.rs";
+    let problem: String = deferral_problem(&root, missing)
+        .unwrap_or_else(|| panic!("`{missing}` does not exist; the rule must refuse it"));
+    assert!(
+        problem.contains("does not exist"),
+        "wrong refusal for a missing path: {problem}"
+    );
+
+    // Out of scope: a real source the gate never walks, so deferring it
+    // silences nothing. `fuzz/` is outside every SCOPES root by design.
+    let out_of_scope: &str = "fuzz/fuzz_targets/fuzz_decode_diff_c.rs";
+    assert!(
+        root.join(out_of_scope).is_file(),
+        "fixture moved: {out_of_scope} must exist for this case to test scope \
+         rather than existence"
+    );
+    let problem: String = deferral_problem(&root, out_of_scope).unwrap_or_else(|| {
+        panic!("`{out_of_scope}` is outside every scanned root; the rule must refuse it")
+    });
+    assert!(
+        problem.contains("outside every scanned root"),
+        "wrong refusal for an out-of-scope path: {problem}"
+    );
+
+    // Stale: in scope and present, but no longer holds any `unsafe`.
+    // `parser_unsafe_gate` holds this file at zero, so it stays a valid
+    // fixture — and if it ever grows one, that gate fails first and says so.
+    let now_safe: &str = "src/decode/huffman.rs";
+    assert!(
+        unsafe_scan::unsafe_sites(&root.join(now_safe)).is_empty(),
+        "fixture moved: {now_safe} must hold no `unsafe` (tests/parser_unsafe_gate.rs \
+         enforces that) for this case to test liveness rather than scope"
+    );
+    let problem: String = deferral_problem(&root, now_safe)
+        .unwrap_or_else(|| panic!("`{now_safe}` holds no `unsafe`; the rule must refuse it"));
+    assert!(
+        problem.contains("no longer holds any `unsafe`"),
+        "wrong refusal for a now-safe path: {problem}"
+    );
 }
 
 /// The scanned roots plus [`DEFERRED`] are the *whole* workspace: no

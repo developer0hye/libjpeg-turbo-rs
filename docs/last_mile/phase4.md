@@ -8070,7 +8070,7 @@ an infallible constructor and so needs an API decision (panic, or a fallible
   the dispatcher picks (measured locally: `llvm.aarch64.neon.ushl.v8i16`),
   which is why the library's own Miri run passes `--skip simd::`. A
   scalar-only capi build under Miri belongs to
-  [P4-141](#p4-141-soundness-verification-program-mirisanitizerfuzz-coverage-gaps-and-an-unsafe-inventory-gate--partial-criterion-5-landed-and-gated-criterion-4-landed-and-gated-for-the-root-crate-and-for-the-c-abi-crate-except-jpeglibrs-criteria-1-3-6-and-7-open),
+  [P4-141](#p4-141-soundness-verification-program-mirisanitizerfuzz-coverage-gaps-and-an-unsafe-inventory-gate--partial-criteria-4-and-5-landed-and-gated-criteria-1-3-6-and-7-open),
   not here.
 
 **Also recorded: resource-limit defaults.** `DecodeLimits` currently defaults to
@@ -8146,7 +8146,7 @@ immediately, ahead of the code work.
 
 **Status (2026-08-09): closed.** Landed in #485; `crates/libjpeg-turbo-rs-capi/src/lib.rs` no longer offers the crate as a `libjpeg.so.62` replacement, and `README.md` states the safety scope rather than a guarantee.
 
-## P4-141. Soundness Verification Program: Miri/Sanitizer/Fuzz Coverage Gaps and an `unsafe` Inventory Gate — **PARTIAL: criterion 5 landed and gated; criterion 4 landed and gated for the root crate and for the C-ABI crate except `jpeglib.rs`; criteria 1-3, 6 and 7 open**
+## P4-141. Soundness Verification Program: Miri/Sanitizer/Fuzz Coverage Gaps and an `unsafe` Inventory Gate — **PARTIAL: criteria 4 and 5 landed and gated; criteria 1-3, 6 and 7 open**
 
 **GitHub:** [#480](https://github.com/developer0hye/libjpeg-turbo-rs/issues/480) — under the [#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481) umbrella.
 
@@ -8201,9 +8201,8 @@ misuse of a public SIMD entry point; none injects allocation failure; none runs
    inventory and requires review for additions. **A raw count is not the
    deliverable** — "780 unsafe operations" says nothing about risk; one
    precondition-free safe wrapper (P4-135) outweighs hundreds of intrinsic calls.
-   **Landed and gated for the root crate 2026-09-08**, and the same day for
-   the C-ABI crate except `jpeglib.rs` — see *Progress* below; that one file
-   remains.
+   **Landed and gated 2026-09-09**: the root crate and the whole C-ABI crate,
+   `jpeglib.rs` included — see *Progress* below. This criterion is closed.
 5. **Parser and control-plane `unsafe` goes to zero.** Malformed-input handling —
    progressive scan state, restart markers, EOB runs, spectral ranges,
    coefficient indexing, marker length parsing, custom scan scripts — is the
@@ -8289,7 +8288,7 @@ the harness first would only pin current behaviour.
   gaps this inventory surfaced — thirty-two of the 224 — and they are the
   criterion's product rather than a defect in it: a raw count could not
   have named one of them. They are filed together as
-  [P4-191](#p4-191-fifty-seven-inventoried-unsafe-items-have-no-regression-test--open)
+  [P4-191](#p4-191-seventy-one-inventoried-unsafe-items-have-no-regression-test--open)
   (#609), which includes three uncalled functions holding `unsafe`. Writing
   one of those cells also produced the criterion's first *defect*:
   [P4-192](#p4-192-a-custom-scan-script-with-se--63-writes-past-two-stack-arrays-from-safe-rust-on-x86_64--open)
@@ -8319,7 +8318,7 @@ the harness first would only pin current behaviour.
   What the C-ABI rows produced, beyond the inventory itself: twenty-five
   answer `**none**`, four of them entry points no leg executes at all
   (`tj3LoadImage12/16`, `tj3SaveImage12/16`), added to
-  [P4-191](#p4-191-fifty-seven-inventoried-unsafe-items-have-no-regression-test--open)
+  [P4-191](#p4-191-seventy-one-inventoried-unsafe-items-have-no-regression-test--open)
   (#609) as criteria 6 and 7 rather than filed as a sibling; and one
   two defects: [P4-193](#p4-193-the-c-abi-destination-spans-do-not-use-imagelayoutstrided-so-a-decode-forms-a-slice-over-one-rows-padding--open),
   where a destination span is wider than the extent upstream touches, and
@@ -8332,6 +8331,52 @@ the harness first would only pin current behaviour.
   under Miri, `sanitizers.yml` is `--lib` so it sees only this crate's own
   unit tests, and none of the twelve fuzz targets crosses the C ABI at all —
   which is criterion 3, restated as evidence instead of as a plan.
+- **Criterion 4 — 2026-09-09, the C-ABI crate's last file, and the
+  criterion's close:** `docs/UNSAFE_INVENTORY_CAPI.md` gains
+  `crates/libjpeg-turbo-rs-capi/src/jpeglib.rs` — 501 sites in 12.9k lines,
+  144 rows, the classic `jpeg_*` surface and 64 % of the crate's `unsafe`.
+  With it the gate's `DEFERRED` list is **empty**: every `.rs` under `src/`
+  and under the C-ABI crate's `src/` is inventoried, and
+  `the_scanned_roots_are_the_whole_workspace` proves the other two members
+  hold no `unsafe` at all. Mutation-checked both ways before the rows were
+  written — adding one `unsafe` to `write_c_file` fails with "holds 2 site(s)
+  but the inventory says 1", and putting `jpeglib.rs` back in `DEFERRED` now
+  fails with "has an inventory section now", so the deferral mechanism
+  self-destructs rather than rotting.
+  What the rows produced, in three kinds. **Fourteen answer `**none**`** —
+  three exports no leg calls (`jpeg_new_colormap`, `jpeg_alloc_huff_table`,
+  `jpeg_set_linear_quality`), four source-manager callbacks that are
+  installed into the caller-visible slots and never invoked
+  (`noop_init_source`, `stdio_init_source`, `noop_skip_input_data`,
+  `default_resync_to_restart`), five named sub-cases, and the 32-bit
+  dispatch below. All of them went to
+  [P4-191](#p4-191-seventy-one-inventoried-unsafe-items-have-no-regression-test--open)
+  (#609), which is renamed from fifty-seven to seventy-one.
+  **Two defects**, both found by writing an *Invariant* cell and neither
+  tracked anywhere before:
+  [P4-195](#p4-195-jpeg_read_raw_data-copies-mcu-aligned-plane-widths-into-caller-buffers-libjpegtxt-sizes-to-dct-blocks--open)
+  (#615), where `jpeg_read_raw_data` copies an MCU-aligned plane width into
+  a buffer `libjpeg.txt` sizes to DCT blocks — eight bytes past every row of
+  the manual's own 101x101 4:2:0 example, sixteen in the 12-bit twin — and
+  [P4-196](#p4-196-jpeg_abort--jpeg_destroy-and-the-memory-managers-precision-probe-hardcode-is_decompressor-at-byte-32-which-is-an-lp64-only-offset--open)
+  (#616), a literal `.add(32)` for `is_decompressor` that is the LP64 offset
+  only, with the `const _` pinning it gated to 64-bit so it compiles out
+  exactly where it is wrong. And a coverage
+  fact the document now records per site: **no sanitizer executes a single
+  site in `jpeglib.rs`** — `sanitizers.yml` is `--workspace --lib`, this
+  file's four `#[cfg(test)]` modules parse headers and marker bytes without
+  calling an entry point, and the C-boundary harness resolves five `tj3*`
+  symbols and no `jpeg_*` symbol. Miri is the only instrumented tool that
+  reaches it, through `capi_create_abi_guards` and `capi_thread_affinity`.
+  That is criterion 2 and criterion 3 restated as measurement.
+  **The review round is part of the finding.** The chunk's first draft
+  answered "which CI legs execute this site" by reading call graphs, and got
+  six rows wrong in both directions — crediting ARMv7 and the stock-tool link
+  with paths they do not take, and calling two live functions dead. The
+  `docs-drift-auditor` pass re-derived the column with `cargo llvm-cov`
+  instead, and the `rust-code-reviewer` pass produced both defects above. An
+  inventory's coverage column is only as good as its measurement; asserting
+  it from the source is the same mistake #320 named.
 - **Criterion 2 — partial since 2026-08-13** (see the criterion text).
 - **Criteria 1, 3, 6, 7 — untouched.**
 
@@ -10594,19 +10639,19 @@ PR is a behaviour-preserving refactor plus a gate, and a new C-oracle fixture
 is its own TDD cycle; the fixture must be built and proven discriminating,
 not just committed.
 
-## P4-191. Fifty-Seven Inventoried `unsafe` Items Have No Regression Test — **OPEN**
+## P4-191. Seventy-One Inventoried `unsafe` Items Have No Regression Test — **OPEN**
 
 **GitHub:** [#609](https://github.com/developer0hye/libjpeg-turbo-rs/issues/609) — filed 2026-09-08 by the P4-141 criterion-4 landing.
 
 **What produced it.** The P4-141 criterion-4 inventories ask every row for
 the test that would fail if the invariant broke. Thirty-two of
 `docs/UNSAFE_INVENTORY.md`'s 224 rows answer `**none**`, and — since the
-C-ABI chunk landed 2026-09-08 — twenty-five of
-`docs/UNSAFE_INVENTORY_CAPI.md`'s 91 do, for the whole site or for a named
-sub-invariant. Fifty-seven in all. That answer is the criterion's product,
+C-ABI chunks landed 2026-09-08 and 2026-09-09 — thirty-nine of
+`docs/UNSAFE_INVENTORY_CAPI.md`'s 235 do, for the whole site or for a named
+sub-invariant. Seventy-one in all. That answer is the criterion's product,
 not a defect in it — a raw count could not have named one of them.
 
-Six clusters are actionable; the rest are qualified `**none**`s (a named
+Eight clusters are actionable; the rest are qualified `**none**`s (a named
 sub-invariant or a CI leg, not an untested site) and are context.
 
 **Acceptance criteria.**
@@ -10675,7 +10720,39 @@ sub-invariant or a CI leg, not an untested site) and are context.
    would not fault in a release build — and no sanitizer or Miri leg runs it.
    Either the fixture becomes a guard page or the suite reaches a leg that
    would observe the read.
-8. Each `**none**` cell that a landed test replaces is rewritten in
+8. **Three classic-ABI exports are executed by no leg at all**, added
+   2026-09-09 by the `jpeglib.rs` inventory: `jpeg_new_colormap` (an exported
+   no-op — two-pass colour quantisation is unimplemented — that
+   `symbol_inventory` resolves and nothing calls), `jpeg_alloc_huff_table`
+   (no in-workspace caller, and no stock-tool path either: upstream's callers
+   of that symbol are all *library* sources this shim replaces) and
+   `jpeg_set_linear_quality` (a thin wrapper over `jpeg_add_quant_table`
+   whose delegate is covered). Each test is a few lines.
+9. **Four installed source-manager callbacks are never invoked**, also
+   2026-09-09: `noop_init_source`, `stdio_init_source`,
+   `noop_skip_input_data` and `default_resync_to_restart`. They are written
+   into the caller-visible `jpeg_source_mgr` slots and left there — the shim
+   drains a mem source from its own buffer and a stdio source through
+   `stdio_drain_to_eoi`, so no shim path steps the FSM, and no test calls
+   `cinfo->src->…` directly. `classic_source_mgr_matches_stock_libjpeg` pins
+   that they are *installed*, which is a different claim. A C consumer may
+   call any of them, so each wants a direct call plus an assertion on the
+   published window; `default_resync_to_restart` additionally wants the
+   P4-97 identity check driven through the *installed* slot rather than only
+   through the exported `jpeg_resync_to_restart`.
+10. **Five classic-ABI rows name an untested sub-case**, also 2026-09-09:
+   `default_reset_error_mgr` (installed by `jpeg_std_error` and never
+   invoked — call `err->reset_error_mgr` and assert `msg_code` and
+   `num_warnings` return to zero); the clamp arms of `jpeg12_crop_scanline`,
+   which has no counterpart to the 8-bit
+   `crop_scanline_narrows_emitted_window`; the zero-fill in
+   `alloc_through_memmgr_or_heap`, i.e. that a table from
+   `jpeg_alloc_quant_table` arrives with `sent_table == 0`;
+   `jpeg_default_qtables`, whose executed call is the guard case so the
+   live-compressor path is unexercised; and `jpeg_set_marker_processor`,
+   which runs but whose *retention* — the thing the row claims, since this
+   shim deliberately never dispatches the callback — is asserted nowhere.
+11. Each `**none**` cell that a landed test replaces is rewritten in
    `docs/UNSAFE_INVENTORY.md` or `docs/UNSAFE_INVENTORY_CAPI.md` in the same
    pull request.
 
@@ -10872,3 +10949,117 @@ request, which is a documentation-and-gate change: this edits the memory
 manager two stock tools allocate through, and wants its own differential run
 against the stock-tool link gate.
 
+
+## P4-195. `jpeg_read_raw_data` Copies MCU-Aligned Plane Widths Into Caller Buffers `libjpeg.txt` Sizes to DCT Blocks — **OPEN**
+
+**GitHub:** [#615](https://github.com/developer0hye/libjpeg-turbo-rs/issues/615) — found 2026-09-09 by the P4-141 criterion-4 `jpeglib.rs` inventory; under the [#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481) umbrella.
+
+**What it is.** `jpeg_read_raw_data` and `jpeg12_read_raw_data`
+(`crates/libjpeg-turbo-rs-capi/src/jpeglib.rs`) copy `plane_width` samples
+into each caller row pointer. `plane_width` is **MCU-aligned** —
+`mcus_x * h_samp * block_size`, `src/decode/pipeline_impl/raw.rs:101` — but
+the contract the caller sized its buffer against is **DCT-block-aligned**.
+`references/libjpeg-turbo/doc/libjpeg.txt:2977-2981`:
+
+> The buffer you pass must be large enough to hold the actual data plus
+> padding to DCT-block boundaries. As with compression, any entirely dummy
+> DCT blocks are not processed so you need not allocate space for them, but
+> the total scanline count includes them.
+
+Upstream enforces exactly that: `jdcoefct.c:349-350` bounds its column loop
+by `master->last_MCU_col[ci]`, derived from `width_in_blocks`
+(`jdinput.c:129`), and `:336-341` bounds rows by `height_in_blocks`.
+
+**The worked case is the manual's own.** For a 101x101 4:2:0 image
+`libjpeg.txt:2942-2946` computes `width_in_blocks = 13` for Y and tells the
+caller to pad to `13 * 8 = 104` columns. Our `mcus_x` is
+`ceil(101 / 16) = 7`, so `plane_width = 7 * 2 * 8 = 112` and the copy writes
+**eight bytes past every Y row the caller allocated**. `jpeg12_read_raw_data`
+overruns by sixteen, the count being in `i16` items. The condition is
+ordinary rather than exotic: any 4:2:0 width whose `ceil(w / 8)` is odd.
+Rows are affected the same way — the loop breaks on `src_row >=
+plane_height`, and `plane_height` is MCU-aligned too.
+
+**Why no test sees it.** `capi_jpeg_read_raw_data.rs:257` allocates
+`output_width + 16` per row, which absorbs the overrun, and TurboJPEG's own
+consumer pads to 32 (`turbojpeg.c:2639`). No sanitizer runs this file at all
+(see P4-141 criterion 4's `jpeglib.rs` chunk), so nothing else would notice.
+
+**Acceptance criteria.**
+
+1. The copy width becomes the block-aligned extent —
+   `ceil(downsampled_width / block_size) * block_size` per component — and
+   the row loop stops at the real `height_in_blocks` rather than at the
+   MCU-padded plane height, matching `jdcoefct.c`.
+2. A regression test allocates each row at **exactly** the documented size
+   (`width_in_blocks * DCTSIZE`) for the manual's 101x101 4:2:0 case, in both
+   the 8-bit and 12-bit entry points, and asserts the bytes past that extent
+   are untouched — a canary, since the current tests over-allocate by 16 and
+   would pass either way.
+3. The samples inside the block-aligned extent stay byte-identical to
+   `djpeg`'s raw output, so the fix narrows the write without changing pixels.
+4. `docs/UNSAFE_INVENTORY_CAPI.md`'s two raw-data rows drop the P4-195 note
+   and state the corrected bound.
+
+**Why deferred.** Filed rather than fixed inside the P4-141 criterion-4 pull
+request, which is a documentation-and-gate change: this narrows a write in
+the decode path and needs its own C cross-validation run.
+
+## P4-196. `jpeg_abort` / `jpeg_destroy` and the Memory Manager's Precision Probe Hardcode `is_decompressor` at Byte 32, Which Is an LP64-Only Offset — **OPEN**
+
+**GitHub:** [#616](https://github.com/developer0hye/libjpeg-turbo-rs/issues/616) — found 2026-09-09 by the P4-141 criterion-4 `jpeglib.rs` inventory; under the [#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481) umbrella.
+
+**What it is.** Three sites read the `is_decompressor` flag at a **literal**
+byte offset to decide which of the two `#[repr(C)]` mirrors a
+`j_common_ptr` really is:
+
+```rust
+let is_decompressor: CBoolean = unsafe { *(cinfo as *const u8).add(32).cast::<CBoolean>() };
+```
+
+`crates/libjpeg-turbo-rs-capi/src/jpeglib.rs` in `jpeg_abort` and
+`jpeg_destroy`, and `crates/libjpeg-turbo-rs-capi/src/memmgr.rs` in the
+precision probe. The `jpeg_common_fields` prefix is four pointers
+(`err`, `mem`, `progress`, `client_data`) then `is_decompressor`, so the
+offset is 32 on LP64 and **16** on ILP32, where `.add(32)` lands on
+`image_height` in both mirrors. The consequence is not a wrong branch but
+type confusion: a compress object torn down through `jpeg_abort_decompress`
+is then reinterpreted through `JpegDecompressPublic`.
+
+**Why nothing catches it.** The `const _` blocks that pin
+`offset_of!(…, is_decompressor) == 32` are
+`#[cfg(all(target_pointer_width = "64", not(windows)))]`, so they compile out
+on exactly the targets where the literal is wrong — a gate that is silent
+where it is needed. The ungated block asserts only `> 0`.
+`tests/abi_offsets.rs` skips on non-64-bit by design. `armv7.yml` runs
+`-p libjpeg-turbo-rs-capi --lib` plus `capi_layout_adoption` and
+`capi_span_overflow_guards`, and the last calls `jpeg_destroy_compress`
+directly rather than the dispatching `jpeg_destroy`, so the 32-bit leg never
+executes the dispatch.
+
+Note what this is *not*: `phase4.md`'s existing `is_decompressor` discussion
+(P4-149, P4-110) is about the flag being **indeterminate** after a rejected
+create, which `common_mem_is_null` fixed. This is a different bug in the same
+line — the offset, not the value.
+
+**Acceptance criteria.**
+
+1. All three sites use `std::mem::offset_of!(JpegDecompressPublic,
+   is_decompressor)` — the constant `common_mem_is_null` already uses two
+   lines above one of them, which is what makes the literal look deliberate.
+2. A `const _` assertion that the two mirrors agree on that offset, **ungated
+   by pointer width**, alongside the existing `common_mem_offset_is_shared`
+   unit test in `jpeglib.rs` — which asserts the `mem` offset and not this
+   one, and which `docs/UNSAFE_INVENTORY_CAPI.md`'s `jpeg_abort` row wrongly
+   credited until 2026-09-09.
+3. `armv7.yml`'s C-ABI step gains a case that creates a compressor and tears
+   it down through `jpeg_destroy` (not `jpeg_destroy_compress`), and one that
+   does the same for a decompressor through `jpeg_abort`, so the dispatch is
+   executed at 32-bit pointer width.
+4. `docs/UNSAFE_INVENTORY_CAPI.md`'s `jpeg_abort` and `jpeg_destroy` rows drop
+   the P4-196 note and state the corrected derivation.
+
+**Why deferred.** Filed rather than fixed inside the P4-141 criterion-4 pull
+request, which is a documentation-and-gate change: the fix touches three call
+sites plus a CI leg, and criterion 3 of it is a workflow edit whose value is
+that it *runs*, which a documentation PR cannot demonstrate.

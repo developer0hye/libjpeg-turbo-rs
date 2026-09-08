@@ -8,7 +8,7 @@
 
 Pure-Rust reimplementation of [libjpeg-turbo](https://github.com/libjpeg-turbo/libjpeg-turbo) with NEON/AVX2/SSE2/WASM-SIMD128 acceleration. No C dependencies, no FFI to a C codec, `no_std`-capable — and byte-for-byte cross-validated against C libjpeg-turbo in CI.
 
-> **Safety status.** "No C dependencies" is not "no unsafe code" — the SIMD kernels are `unsafe`, and the boundary between them and the safe API is under audit (P4-135..P4-139 in [`docs/LAST_MILE.md`](docs/LAST_MILE.md)). Until those close this project makes **no memory-safety guarantee** and no unqualified drop-in-replacement claim. Every `unsafe` in the root crate is listed, with its invariant and test coverage, in [`docs/UNSAFE_INVENTORY.md`](docs/UNSAFE_INVENTORY.md); CI fails when the code and that inventory disagree.
+> **Safety status.** "No C dependencies" is not "no unsafe code" — the SIMD kernels are `unsafe`, and the boundary between them and the safe API is under audit (P4-135..P4-139 in [`docs/LAST_MILE.md`](docs/LAST_MILE.md)). Until those close this project makes **no memory-safety guarantee** and no unqualified drop-in-replacement claim. Every `unsafe` under a workspace crate's `src/` is listed, with its invariant and test coverage, in [`docs/UNSAFE_INVENTORY.md`](docs/UNSAFE_INVENTORY.md) (root crate) and [`docs/UNSAFE_INVENTORY_CAPI.md`](docs/UNSAFE_INVENTORY_CAPI.md) (C ABI); CI fails when the code and those inventories disagree.
 >
 > **C compatibility tiers.** **TurboJPEG 3 is the primary target.** The classic libjpeg leg targets the **v8 identity only** (`libjpeg.so.8`) and is experimental; **v6b (`libjpeg.so.62`) and v7 are explicit non-goals** — their struct layouts differ, so substituting this library for them corrupts memory rather than merely failing.
 

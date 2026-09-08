@@ -455,7 +455,11 @@ fn decompress_private_remove(cinfo: *mut c_void) -> Option<Box<DecompressPrivate
 /// Execute `f` with a mutable borrow on the private state for `cinfo`.
 /// Returns `None` if no state was registered (caller forgot to invoke
 /// `jpeg_CreateDecompress`, or is operating on a destroyed handle).
-#[allow(dead_code)]
+///
+/// Used by the resync path's `store_resync_discarded` and
+/// `resync_to_restart_impl`; it carried a stale `#[allow(dead_code)]` from
+/// before those call sites existed, which the P4-141 criterion-4 inventory
+/// mistook for evidence that the function was unreachable.
 fn with_decompress_private<F, R>(cinfo: *mut c_void, f: F) -> Option<R>
 where
     F: FnOnce(&mut DecompressPrivate) -> R,
