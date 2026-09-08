@@ -10840,18 +10840,29 @@ saturating counters and bound checks, not these.
 **Acceptance criteria.**
 
 1. `alloc_sarray_impl` and `alloc_barray_impl` compute every size with
-   checked arithmetic, returning NULL — this port's out-of-memory signal,
-   since it has no `j_common_ptr` to `error_exit` through — rather than
-   wrapping.
+   checked arithmetic and report the failure the way upstream reports it —
+   through `error_exit`, not by returning NULL. Both receive `cinfo`, and
+   `realize_virt_arrays_impl` in the same file already shows the call
+   (`crate::jpeglib::invoke_error_exit_parm(cinfo, JERR_OUT_OF_MEMORY,
+   case)`); it is only the lower-level `MemPool::push_block` that has no
+   `j_common_ptr` and must keep signalling with NULL. A stock C consumer
+   does not check these two slots for NULL — `jmemmgr.c` never returns it —
+   so a NULL here is dereferenced by the caller, which is the whole reason
+   upstream raises instead. `JERR_WIDTH_OVERFLOW` is upstream's code for a
+   row that cannot fit and `out_of_memory(cinfo, 9)` for
+   `samplesperrow > MAX_ALLOC_CHUNK`; match both.
 2. `samplesperrow > MAX_ALLOC_CHUNK` is refused as upstream refuses it, and a
    request whose total exceeds `max_alloc_chunk` either chunks as upstream
    does or is refused; whichever is chosen, the vtable field stops
    advertising a limit nothing enforces.
 3. A regression test calls the two vtable slots directly with a `JDIMENSION`
-   pair whose product overflows `usize` and asserts NULL rather than a
-   wrapped allocation, on a 64-bit host and on the 32-bit ARMv7 leg
-   (`capi_layout_adoption` and `capi_span_overflow_guards` are the two
-   suites ARMv7 already runs, so it belongs in one of them).
+   pair whose product overflows `usize` and asserts that the caller's
+   `error_exit` ran with the expected code — not that NULL came back and not
+   that a wrapped allocation succeeded — on a 64-bit host and on the 32-bit
+   ARMv7 leg (`capi_layout_adoption` and `capi_span_overflow_guards` are the
+   two suites ARMv7 already runs, so it belongs in one of them).
+   `capi_alloc_failure_injection.rs` is the shape to copy for observing an
+   `error_exit` from a test.
 4. The `alloc_sarray_impl` / `alloc_barray_impl` rows in
    `docs/UNSAFE_INVENTORY_CAPI.md` cite that test instead of recording the
    obligation as unmet.
