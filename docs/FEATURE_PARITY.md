@@ -192,7 +192,7 @@
 - [x] IPTC IIM accessor from the APP13 Photoshop IRB (`Image::iptc_data`, `Encoder::iptc_data` — #358)
 - [x] Decode into caller-owned buffer (`decompress_into`, `output_buffer_size`, `Decoder::decode_image_into` — #354)
 - [x] Scaled IDCT — all 16 factors: 1/8 through 2/1 (`set_scale`)
-- [x] Crop decode (`decompress_cropped`, `set_crop_region`)
+- [x] Crop decode (`decompress_cropped`, `set_crop_region`) — a region whose left boundary is at or past the scaled width is accepted and degenerates to a zero-column decode where upstream refuses it ([P4-197](last_mile/phase4.md#p4-197-a-cropping-region-whose-left-boundary-exceeds-the-scaled-width-decodes-to-zero-columns-and-trips-a-false-debug_assert--open), #618)
 - [x] `TJPARAM_BOTTOMUP` — Bottom-up row order (`ScanlineDecoder::set_bottom_up()`)
 - [x] Native explicit output colorspace (`Decoder::set_output_colorspace()`)
 - [ ] Classic `out_color_space` translation and error contract — P4-98/P4-99
@@ -214,12 +214,12 @@
 - [x] Lenient / error recovery mode (`decompress_lenient`)
 - [x] `DecodeWarning` list in Image
 - [x] `TJPARAM_STOPONWARNING` — Treat warnings as fatal (`Decoder::set_stop_on_warning()`)
-- [x] `TJPARAM_SCANLIMIT` — Max progressive scans before error (`Decoder::set_scan_limit()`)
+- [x] `TJPARAM_SCANLIMIT` — Max progressive scans before error (`Decoder::set_scan_limit()`); applies to the 8-bit decode path only ([P4-199](last_mile/phase4.md#p4-199-setdecompparameters-publishes-thirteen-handle-parameters-our-8-bit-decode-publishes-eight-and-the-1216-bit-ones-publish-three-and-ignore-the-handles-limits--open), #620)
 - [x] Custom error callbacks — `ErrorHandler` trait
 
 ### Limits
-- [x] `TJPARAM_MAXMEMORY` — Memory limit (`Decoder::set_max_memory()`)
-- [x] `TJPARAM_MAXPIXELS` — Image size limit (`Decoder::set_max_pixels()`)
+- [x] `TJPARAM_MAXMEMORY` — Memory limit (`Decoder::set_max_memory()`); 8-bit decode path only, same as `TJPARAM_SCANLIMIT` (P4-199, #620)
+- [x] `TJPARAM_MAXPIXELS` — Image size limit (`Decoder::set_max_pixels()`); 8-bit decode path only, where upstream applies it on the shared path at every precision (P4-199, #620)
 
 ### Marker Handling
 - [x] ICC profile reassembly from APP2 chunks
@@ -446,10 +446,10 @@
 
 - [x] `tj3Init()` / `tj3Destroy()` — Handle lifecycle (`TjHandle::new()` / Drop)
 - [x] `tj3Set()` / `tj3Get()` — Generic parameter get/set (`TjHandle::set()` / `TjHandle::get()`)
-- [x] All 26 TJPARAM values wired end-to-end (`ColorSpace` with `TJCS_DEFAULT=-1`, `Subsampling`, density, ICC populated by `decompress()`; density and `ColorSpace` wired into `compress()`; `SaveMarkers` 0-4 behaviorally wired in decode; `Precision` read-only; `NoRealloc` N/A for Rust `Vec<u8>`)
+- [x] All 26 TJPARAM values wired end-to-end (`ColorSpace` with `TJCS_DEFAULT=-1`, `Subsampling`, density, ICC populated by `decompress()`; density and `ColorSpace` wired into `compress()`; `SaveMarkers` 0-4 behaviorally wired in decode; `Precision` read-only; `NoRealloc` N/A for Rust `Vec<u8>`). *Wired* is not *published*: a decode writes back 8 of the 13 parameters `setDecompParameters` writes, leaving `Progressive`, `Arithmetic`, `Lossless`, `LosslessPsv` and `LosslessPt` at whatever the caller last set, and the 12/16-bit entry points write 3 and read no handle limits at all ([P4-199](last_mile/phase4.md#p4-199-setdecompparameters-publishes-thirteen-handle-parameters-our-8-bit-decode-publishes-eight-and-the-1216-bit-ones-publish-three-and-ignore-the-handles-limits--open), #620)
 - [x] `tj3Compress12()` / `tj3Compress16()` / `tj3Decompress12()` / `tj3Decompress16()` — Multi-precision via `TjHandle` (`compress_12bit()` / `compress_16bit()` / `decompress_12bit()` / `decompress_16bit()`)
-- [x] `tj3SetICCProfile()` / `tj3GetICCProfile()` — encode-side ICC via handle + decompress populates handle ICC (`TjHandle::set_icc_profile()` / `TjHandle::icc_profile()`)
-- [x] `tj3SetScalingFactor()` / `tj3SetCroppingRegion()` — Decode options via handle (`TjHandle::set_scaling_factor()` / `TjHandle::set_cropping_region()`)
+- [x] `tj3SetICCProfile()` / `tj3GetICCProfile()` — encode-side ICC via handle + decompress populates handle ICC (`TjHandle::set_icc_profile()` / `TjHandle::icc_profile()`); upstream keeps those two in *separate* buffers (`iccBuf` and `decompICCBuf`, `turbojpeg.c:111`) and ours is one field, so a decode changes the profile a later compress embeds ([P4-198](last_mile/phase4.md#p4-198-tjhandle-merges-upstreams-two-icc-buffers-so-a-decode-changes-the-profile-a-later-compress-embeds--open), #619)
+- [x] `tj3SetScalingFactor()` / `tj3SetCroppingRegion()` — Decode options via handle (`TjHandle::set_scaling_factor()` / `TjHandle::set_cropping_region()`); the crop region is accepted where upstream refuses it — a left boundary at or past the scaled width degenerates to a zero-column decode instead of erroring, and an `x` not divisible by the scaled iMCU width is aligned down silently ([P4-197](last_mile/phase4.md#p4-197-a-cropping-region-whose-left-boundary-exceeds-the-scaled-width-decodes-to-zero-columns-and-trips-a-false-debug_assert--open), #618)
 - [x] `tj3GetScalingFactors()` — Query available scaling factors (`TjHandle::scaling_factors()`)
 
 ---

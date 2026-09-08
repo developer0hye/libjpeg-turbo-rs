@@ -106,7 +106,7 @@ The legs, as configured on 2026-09-08 (`.github/workflows/`):
   wasmtime, `+simd128` forced by `.cargo/config.toml`, lib and integration.
 - **ARMv7 (scalar, qemu)** — `armv7.yml`: 32-bit, no NEON backend; the
   non-SIMD sites in 32-bit.
-- **Fuzz Smoke** — `fuzz-smoke.yml`: twelve cargo-fuzz targets (libFuzzer with
+- **Fuzz Smoke** — `fuzz-smoke.yml`: thirteen cargo-fuzz targets (libFuzzer with
   ASan), x86_64 Linux, six-hourly.
 - **Full C Parity** — `full-c-parity.yml`: the exhaustive C matrices, on
   schedule or dispatch, x86_64 and aarch64.

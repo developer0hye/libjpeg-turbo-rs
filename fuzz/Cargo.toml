@@ -93,3 +93,12 @@ doc = false
 name = "fuzz_transform_diff_c"
 path = "fuzz_targets/fuzz_transform_diff_c.rs"
 doc = false
+
+# P4-141 criterion 3 (#480): API-sequence fuzzer. Drives ordered handle
+# lifecycles and compares each result against a fresh handle carrying the
+# same configuration, which is the only way a state-leak defect becomes
+# visible — every other target here uses one handle for one call.
+[[bin]]
+name = "fuzz_api_sequence"
+path = "fuzz_targets/fuzz_api_sequence.rs"
+doc = false
