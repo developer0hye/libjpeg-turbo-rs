@@ -22,9 +22,11 @@
 //! contract assertions below still run; they are read off upstream's source,
 //! cited per case, not off our output.
 //!
-//! **The three divergences this harness found on its first run** are in
-//! [`KNOWN_DIVERGENCES`], each keyed to the LAST_MILE item that owns it, and
-//! each required to *still* diverge by
+//! **The six divergences this harness found** — three on its first run, three
+//! more once the review round made an assertion capable of failing — are in
+//! [`KNOWN_DIVERGENCES`] and, for the sixteen `tj3Set` pairs one item owns, in
+//! [`APPLICABILITY_DIVERGENCES`]. Each is keyed to the LAST_MILE item that owns
+//! it and each is required to *still* diverge by
 //! [`known_divergences_are_live`] — so a fix deletes its entry instead of
 //! leaving a stale exemption behind.
 //!
@@ -150,7 +152,7 @@ const KNOWN_DIVERGENCES: &[KnownDivergence] = &[
         item: "P4-203 (#625)",
     },
     // P4-205 (#627): `tj3Alloc(0)` returns NULL; upstream is a bare
-    // `malloc(bytes)` (`turbojpeg.c:935-938`), which returns a unique freeable
+    // `malloc(bytes)` (`turbojpeg.c:934-937`), which returns a unique freeable
     // pointer for 0 on every platform this project ships to.
     KnownDivergence {
         case: "alloc_ownership",
@@ -538,10 +540,12 @@ fn lifecycle_contract() {
 /// The *values* as a whole are compared against the oracle. What is asserted
 /// here without one is narrower and worth stating exactly: that the harness
 /// printed a line for all 26 parameters on each init type (so a transcript
-/// that lost half its keys is not silently a subset), and that the eleven
-/// sentinels `tj3InitVersion` seeds explicitly are the seeded values rather
-/// than the zeroes a `Default` would give — which is where a port that forgot
-/// to seed one shows up.
+/// that lost half its keys is not silently a subset), and that the sentinels
+/// `tj3InitVersion` seeds explicitly hold the seeded values rather than the
+/// zeroes a `Default` would give — which is where a port that forgot to seed
+/// one shows up. Ten of its eleven assignments name a `TJPARAM`; eight of those
+/// are asserted here, and the other two — `JPEGWIDTH` / `JPEGHEIGHT` — are a
+/// known divergence the oracle comparison owns.
 #[test]
 fn handle_defaults_are_readable() {
     let outcome = run_ours("handle_defaults");
@@ -720,16 +724,24 @@ fn undersized_output_buffers_are_refused() {
         "undersized_output",
         &[
             ("compressed_rc", "0"),
-            // The compressed *bytes*, cross-validated against stock TurboJPEG
-            // by the comparison below — a length and an SOI marker do not
-            // distinguish a valid JPEG from 1097 zeroes behind one.
-            ("norealloc_worst_case_soi", "yes"),
-            // One byte under what the image actually compresses to — the case
-            // measures that first rather than guessing, so the boundary does
-            // not drift when the encoder's output moves.
+            // The compressed *bytes* are not asserted here: a digest can only
+            // be checked against a constant, which would pin our own output.
+            // `compressed_bytes` and every `norealloc_*_bytes` line is carried
+            // by `transcripts_match_stock_turbojpeg` instead, where stock
+            // TurboJPEG supplies the expected value — the two libraries emit
+            // these images byte for byte identically.
+            //
+            // `one_short` is one byte under what the image actually compresses
+            // to and `one_over` one byte above it; the case measures that size
+            // first rather than guessing, so the boundary does not drift when
+            // the encoder's output moves, and `one_over` is what makes the
+            // rule a statement about the output rather than about
+            // `tj3JPEGBufSize`.
             ("norealloc_one_rc", "-1"),
             ("norealloc_tiny_rc", "-1"),
             ("norealloc_one_short_rc", "-1"),
+            ("norealloc_one_over_rc", "0"),
+            ("norealloc_one_over_fits", "yes"),
             ("norealloc_worst_case_rc", "0"),
             ("norealloc_worst_case_fits", "yes"),
             ("norealloc_worst_case_soi", "yes"),
@@ -738,7 +750,14 @@ fn undersized_output_buffers_are_refused() {
     // Whatever the outcome, the caller's pointer is never moved and nothing is
     // written before the payload — that is the NOREALLOC contract (P4-145) and
     // it holds on the refusing capacities too.
-    for label in ["one", "tiny", "one_short", "exact", "worst_case"] {
+    for label in [
+        "one",
+        "tiny",
+        "one_short",
+        "exact",
+        "one_over",
+        "worst_case",
+    ] {
         assert_values(
             &outcome,
             "undersized_output",
@@ -972,7 +991,7 @@ fn transcripts_match_stock_turbojpeg() {
         let mine = run(&ours, case);
         let theirs = run(&oracle, case);
         // A floor, without which two children that both die before printing
-        // anything compare two empty transcripts and pass. The nine contract
+        // anything compare two empty transcripts and pass. The ten contract
         // tests above assert exit 0 per case today, but that backstop is
         // incidental — this one is structural and covers a case added later.
         assert_eq!(
@@ -1040,12 +1059,9 @@ fn transcripts_match_stock_turbojpeg() {
 /// `unsafe`-inventory gate.
 #[test]
 fn known_divergences_are_live() {
-    let Some(oracle) = stock_turbojpeg() else {
-        eprintln!("SKIP: no loadable stock libturbojpeg to compare against");
-        return;
-    };
-    let ours: PathBuf = our_cdylib();
-
+    // Well-formedness needs no oracle, so it is checked before the skip: a
+    // typo'd case name or an entry that names no item would otherwise go
+    // unnoticed on every machine without a 3.2.0 install.
     for (case, key, item) in known_divergences() {
         assert!(
             CASES.contains(&case),
@@ -1056,6 +1072,15 @@ fn known_divergences_are_live() {
             "known divergence `{case}`/`{key}` must name the LAST_MILE item \
              that owns it, got {item:?}"
         );
+    }
+
+    let Some(oracle) = stock_turbojpeg() else {
+        eprintln!("SKIP: no loadable stock libturbojpeg to compare against");
+        return;
+    };
+    let ours: PathBuf = our_cdylib();
+
+    for (case, key, item) in known_divergences() {
         let mine = run(&ours, case);
         let theirs = run(&oracle, case);
         assert_ne!(

@@ -96,8 +96,9 @@ transcript from stock TurboJPEG; that comparison is what
 requires an oracle at or above the `tool-current` release in
 `docs/oracle_versions.tsv` (it checks for `tj3InitVersion`). Lines the two
 implementations are known to disagree on live in that file's
-`KNOWN_DIVERGENCES`, each naming the LAST_MILE item that owns it and each
-required to *still* diverge, so a fix deletes its entry.
+`KNOWN_DIVERGENCES` (and, for the sixteen `tj3Set` pairs one item owns, in
+`APPLICABILITY_DIVERGENCES`), each naming the LAST_MILE item that owns it and
+each required to *still* diverge, so a fix deletes its entry.
 
 The same cases run under ASan and UBSan in `sanitizers.yml`'s `c_boundary_asan`
 job.

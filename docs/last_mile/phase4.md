@@ -8619,10 +8619,11 @@ the harness first would only pin current behaviour.
   **Every destination a case sizes for a real decode or compress crosses the ABI
   inside a guard-page buffer**: an `mmap`ed
   region whose payload ends flush against a `PROT_NONE` page, with the slack
-  before it canary-filled. The two exceptions are deliberate —
+  before it canary-filled. The one exception is deliberate —
   `alloc_ownership`'s destination has to come from `tj3Alloc` for the case to
-  mean anything, and `null_handle` hands a three-byte stack array to calls that
-  are refused before anything is written. A one-byte overrun is a signal, a short-stride write
+  mean anything; even `null_handle`'s three bytes are guarded, because a
+  library that skipped the NULL check would write the fixture's 101 KB into
+  them. A one-byte overrun is a signal, a short-stride write
   is a canary mismatch, and neither needs a sanitizer — so the cases keep their
   meaning in the ordinary `cargo test` run. `selftest_guard_page` and
   `selftest_canary` are committed proof that both are armed; disarming the
@@ -8691,6 +8692,31 @@ the harness first would only pin current behaviour.
   libraries, and chasing *that* produced P4-207 and the
   `parameter_applicability` case. Three of the six divergences this harness
   found were found by making an assertion capable of failing.
+  **A second `rust-code-reviewer` round asked the same question of the
+  instrumentation itself, and found the one place it was answered wrong.**
+  `guarded_alloc` rounded the payload *up* to a page multiple, so a length that
+  is already a multiple got **zero** canary slack — and `canary_intact` then
+  loops zero times and returns 1 without comparing anything. It was not
+  hypothetical: `tj3JPEGBufSize(96, 64, TJSAMP_420)` is 20480, exactly five
+  4 KiB pages, so on Linux — every leg that runs this harness, the sanitizer
+  job included — the two buffers a *successful* compress writes into were the
+  two with no underrun detector at all, while the 16 KiB pages of an Apple
+  Silicon machine hid it locally. `len / page + 1` always leaves 1..page bytes,
+  and `require(g->slack > 0)` now fails inside `guarded_alloc` rather than
+  leaving a later edit to re-open it. Two more of that round's findings were
+  taken as written: `require(parked == WORKERS)` could not fail, because
+  `open_gate` blocks until the count reaches eight — the comments said the
+  number was measured, which was true of the earlier broadcast-on-create design
+  and not of this one, so the assertion is gone and both comments now claim
+  what the gate provides; and `undersized_output`'s rule was stated against
+  the output but keyed off `tj3JPEGBufSize`, with no capacity between the two,
+  so an implementation that refused every buffer below the worst case satisfied
+  every check in the case. A sixth slot at `actual + 1` closes it — both
+  libraries accept 1098 bytes and emit the same 1097, which puts both sides of
+  the P4-206 boundary in one transcript. The same round added `alarm(60)`: a
+  deadlock is what `concurrent_handles` exists to find, and an unbounded one
+  would have surfaced as an unattributed job timeout rather than as one case's
+  exit status, which is this harness's whole premise.
   **The oracle has to be at least the pinned `tool-current` release**, and the
   harness enforces it by resolving `tj3InitVersion`, which TurboJPEG added in
   3.2. That is not fastidiousness: 3.1.4.1 *accepts* a pitch below
@@ -11784,10 +11810,10 @@ release-gate mechanism; criterion 3 is a workflow edit whose value is that it
 process-isolated C-ABI harness, on its first differential run; under the
 [#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481) umbrella.
 
-**What upstream does.** `jpeg_start_compress` reaches `jinit_compress_master`,
-which refuses an image whose width or height exceeds `JPEG_MAX_DIMENSION`
-(65,500) with `JERR_IMAGE_TOO_BIG`
-(`references/libjpeg-turbo/src/jcmaster.c:186-189`). `tj3Compress8` therefore
+**What upstream does.** `jpeg_start_compress` reaches `jinit_compress_master`
+(`jcinit.c:36`) and through it `initial_setup`, which refuses an image whose
+width or height exceeds `JPEG_MAX_DIMENSION` (65,500) with `JERR_IMAGE_TOO_BIG`
+(`references/libjpeg-turbo/src/jcmaster.c:186-188`). `tj3Compress8` therefore
 returns -1 for a 65,501-pixel axis, with `tj3GetErrorStr` reading "Maximum
 supported image dimension is 65500 pixels".
 
@@ -11970,7 +11996,7 @@ asked what the `tj3Alloc` case would have to see in order to fail; under the
 
 **What upstream does.** `tj3Alloc` is a bare allocation with no zero-size
 special case — `return MALLOC(bytes);`
-(`references/libjpeg-turbo/src/turbojpeg.c:935-938`, where `MALLOC` is
+(`references/libjpeg-turbo/src/turbojpeg.c:934-937`, where `MALLOC` is
 `malloc`). `malloc(0)` is implementation-defined by ISO C, but on every platform
 this project ships to — glibc, musl and macOS — it returns a unique pointer that
 may be passed to `free`. Measured against the pinned 3.2.0 oracle: `tj3Alloc(0)`
@@ -12033,7 +12059,9 @@ byte**, binary-searching the smallest capacity each accepts:
 
 Every smaller capacity is refused by both, neither moves the caller's pointer,
 and the guard page after the destination never fires — so this is a
-boundary-condition difference, not an overrun. It is the last byte of the
+boundary-condition difference, not an overrun. The harness pins both sides of
+it in one transcript: at 1097 the return codes diverge, and at 1098 — its
+`one_over` slot — both libraries accept and emit the same bytes. It is the last byte of the
 `TJPARAM_NOREALLOC` contract [P4-145](#p4-145-tjparam_norealloc-is-honoured-by-tj3compress8-only--closed-2026-08-12)
 established.
 
@@ -12051,7 +12079,7 @@ in `docs/C_API_REFERENCE.md`. What it must not stay is undocumented.
    `TJPARAM_NOREALLOC` capacity they accept, cross-validated by binary search
    against stock TurboJPEG on at least three images of different sizes — or the
    difference is documented in `docs/C_API_REFERENCE.md` citing #628.
-2. `crates/libjpeg-turbo-rs-capi/tests/cabi_misuse_harness.rs` drops the three
+2. `crates/libjpeg-turbo-rs-capi/tests/cabi_misuse_harness.rs` drops the four
    `undersized_output`/`norealloc_exact_*` entries from `KNOWN_DIVERGENCES`.
 3. `tests/norealloc_buffer_capacity.rs`, which today pins "too small is refused"
    with a generous margin, gains the exact boundary.
@@ -12075,9 +12103,9 @@ and leaves the stored value alone
 (`references/libjpeg-turbo/src/turbojpeg.c:731` onward):
 
 ```c
-    case TJPARAM_QUALITY:
-      if ((this->init & COMPRESS) == 0)
-        THROW("TJPARAM_QUALITY is not applicable to decompression instances.");
+  case TJPARAM_QUALITY:
+    if (!(this->init & COMPRESS))
+      THROW("TJPARAM_QUALITY is not applicable to decompression instances.");
 ```
 
 A `TJINIT_TRANSFORM` handle is initialised for both roles, so the

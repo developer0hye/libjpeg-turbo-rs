@@ -21,10 +21,12 @@
  * WHAT THE BUFFERS ARE MADE OF.  Every destination a case sizes for a real
  * decode or compress is a `guarded_buf`: an `mmap`ed region whose payload ends
  * flush against a `PROT_NONE` page, with the slack before it filled with a
- * canary byte.  Two destinations are deliberately not: `alloc_ownership`'s has
- * to come from `tj3Alloc` for the case to mean anything, and `null_handle`
- * passes a three-byte stack array to calls that are refused before anything is
- * written.  A one-byte overrun is a SIGSEGV in this process and nothing else's;
+ * canary byte.  One destination is deliberately not: `alloc_ownership`'s has
+ * to come from `tj3Alloc` for the case to mean anything.  (`null_handle`'s is
+ * only three bytes, but it is guarded too, and for the sharpest reason here —
+ * a library that skipped the NULL check would write the fixture's 101 KB into
+ * it, and on the stack that would be silent corruption of this harness's own
+ * frame.)  A one-byte overrun is a SIGSEGV in this process and nothing else's;
  * a write before the payload is a canary mismatch reported on stdout.  Neither
  * needs a sanitizer, so the cases keep their meaning in the ordinary
  * `cargo test` run as well as under ASan.  `selftest_guard_page` and
@@ -282,11 +284,20 @@ static size_t page_size(void) {
  *
  * The payload is flush with the *trailing* guard because an overrun past the
  * caller-declared size is the failure this criterion names.  The leading guard
- * cannot also be flush, so the gap is canary-filled and checked instead. */
+ * cannot also be flush, so the gap is canary-filled and checked instead.
+ *
+ * `len / page + 1` rather than a round-up: rounding up gives a payload that is
+ * an exact page multiple and no slack at all, and `canary_intact` then loops zero times
+ * and returns 1 without comparing anything — a check that cannot fail.  It was
+ * not hypothetical.  `tj3JPEGBufSize(96, 64, TJSAMP_420)` is 20480, exactly
+ * five 4 KiB pages, so on Linux — where every leg that runs this file runs, and
+ * where the sanitizer job runs — the two buffers a *successful* compress writes
+ * into were the two with no underrun detector at all.  The 16 KiB pages of an
+ * Apple Silicon machine hid it locally.  This form always leaves 1..page bytes
+ * of slack. */
 static int guarded_alloc(guarded_buf *g, size_t len, const char *label) {
     size_t page = page_size();
-    size_t payload_pages = (len + page - 1) / page;
-    if (payload_pages == 0) payload_pages = 1;
+    size_t payload_pages = len / page + 1;
 
     memset(g, 0, sizeof(*g));
     g->map_len = (payload_pages + 2) * page;
@@ -303,6 +314,10 @@ static int guarded_alloc(guarded_buf *g, size_t len, const char *label) {
         return -1;
     }
     g->slack = payload_pages * page - len;
+    /* Structural, not belt-and-braces: the whole underrun mechanism is this
+     * many bytes wide, and at zero every `canary_intact` call is vacuously
+     * true. */
+    require(g->slack > 0, "every guarded buffer has canary slack");
     g->data = g->map + page + g->slack;
     g->len = len;
     g->label = label;
@@ -758,9 +773,14 @@ static int case_undersized_output(void) {
     size_t actual = 0;
     tj_handle_t handle = api.init(TJINIT_COMPRESS);
     if (!handle) { free(src); return 2; }
-    api.set(handle, TJPARAM_QUALITY, 80);
-    api.set(handle, TJPARAM_SUBSAMP, TJSAMP_420);
-    api.set(handle, TJPARAM_NOREALLOC, 1);
+    /* Checked rather than assumed, and without `&&` so a refusal cannot skip
+     * the writes after it: a silently refused SUBSAMP would leave both
+     * libraries compressing a different image than the case names, agreeing
+     * with each other the whole way. */
+    int params_ok = api.set(handle, TJPARAM_QUALITY, 80) == 0;
+    params_ok += api.set(handle, TJPARAM_SUBSAMP, TJSAMP_420) == 0;
+    params_ok += api.set(handle, TJPARAM_NOREALLOC, 1) == 0;
+    require(params_ok == 3, "the compress parameters this case measures");
 
     size_t worst_case = api.jpeg_buf_size(width, height, TJSAMP_420);
     printf("bufsize=%zu\n", worst_case);
@@ -805,6 +825,13 @@ static int case_undersized_output(void) {
         { "tiny", 64 },
         { "one_short", actual - 1 },
         { "exact", actual },
+        /* The slot that makes the rule below a statement about the *output*
+         * rather than about `tj3JPEGBufSize`: without a capacity in
+         * (actual, worst_case) an implementation that refused every buffer
+         * smaller than the worst case would satisfy every check here, and the
+         * only symptom would be `norealloc_exact_rc` ceasing to diverge —
+         * which reads as "P4-206 is fixed", the opposite of the truth. */
+        { "one_over", actual + 1 },
         { "worst_case", worst_case },
     };
     for (size_t i = 0; i < sizeof(slots) / sizeof(slots[0]); i++) {
@@ -825,8 +852,12 @@ static int case_undersized_output(void) {
                slot == dst.data ? "unchanged" : "moved");
         printf("norealloc_%s_canary=%s\n", slots[i].label,
                canary_intact(&dst) ? "intact" : "corrupt");
+        /* Three states, not two: `n/a` for a refusal and `over` for a
+         * success that reports more bytes than the buffer holds.  Collapsing
+         * them let a wrong reported size read as an ordinary refusal — the
+         * guard page covers the write, not the number. */
         printf("norealloc_%s_fits=%s\n", slots[i].label,
-               (rc == 0 && size <= slots[i].capacity) ? "yes" : "n/a");
+               rc != 0 ? "n/a" : (size <= slots[i].capacity ? "yes" : "over"));
         printf("norealloc_%s_soi=%s\n", slots[i].label,
                (rc == 0 && size >= 2 && dst.data[0] == 0xFF &&
                 dst.data[1] == 0xD8)
@@ -837,11 +868,12 @@ static int case_undersized_output(void) {
         int intact = canary_intact(&dst);
         require(intact, "NOREALLOC destination canary");
         require(slot == dst.data, "NOREALLOC never moves the caller's pointer");
-        /* `exact` is P4-206: we accept it, upstream refuses. Both of the other
-         * boundaries hold on both implementations. */
+        /* `exact` is P4-206: we accept it, upstream refuses. Every other
+         * boundary holds on both implementations, and the rule is stated
+         * against the *measured* output, which is what the label claims. */
         if (strcmp(slots[i].label, "exact") != 0)
-            require(rc == (slots[i].capacity >= worst_case ? 0 : -1),
-                    "a NOREALLOC capacity below the output is refused");
+            require(rc == (slots[i].capacity > actual ? 0 : -1),
+                    "a NOREALLOC capacity at or below the output is refused");
         guarded_free(&dst);
         if (!intact) { free(src); return 2; }
     }
@@ -870,8 +902,9 @@ static int case_max_dimensions(const unsigned char *jpeg, size_t jpeg_len) {
 
     tj_handle_t compressor = api.init(TJINIT_COMPRESS);
     if (!compressor) return 2;
-    api.set(compressor, TJPARAM_QUALITY, 75);
-    api.set(compressor, TJPARAM_SUBSAMP, TJSAMP_GRAY);
+    int params_ok = api.set(compressor, TJPARAM_QUALITY, 75) == 0;
+    params_ok += api.set(compressor, TJPARAM_SUBSAMP, TJSAMP_GRAY) == 0;
+    require(params_ok == 2, "the compress parameters this case measures");
 
     /* One row of the widest legal image, then one pixel wider.  Both hand the
      * library a source buffer big enough for the *declared* width, so a
@@ -984,13 +1017,14 @@ struct worker {
  * their first library call by however long the loop takes.  macOS has no
  * `pthread_barrier_t`, so this is a mutex and two condition variables.
  *
- * The arrival count is the second half, and it is not belt-and-braces:
- * broadcasting as soon as the last `pthread_create` returns lets a slow-starting
- * thread walk past an already-open gate and find the tables warm.  `codex
- * review` measured seven parked workers in five consecutive runs of the version
- * that did not count.  The count is reported in the transcript rather than
- * asserted in C, so "all eight really were parked" is something the comparison
- * can see. */
+ * The arrival count is the second half: broadcasting as soon as the last
+ * `pthread_create` returned let a slow-starting thread walk past an
+ * already-open gate and find the tables warm — `codex review` measured seven
+ * parked workers in five consecutive runs of that version.  `open_gate` waits
+ * on the count, so with this version `parked` is eight by construction rather
+ * than by observation; it is printed as the mechanism's own record and
+ * deliberately not asserted, because an assertion on a value the loop above
+ * guarantees would be a check no library change can fail. */
 static pthread_mutex_t gate_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t gate_open = PTHREAD_COND_INITIALIZER;
 static pthread_cond_t all_parked = PTHREAD_COND_INITIALIZER;
@@ -1079,7 +1113,6 @@ static int case_concurrent_handles(const unsigned char *jpeg, size_t jpeg_len) {
     }
     printf("workers=%d\n", WORKERS);
     printf("workers_agree=%s\n", all_ok ? "yes" : "no");
-    require(parked == WORKERS, "every worker parked before the gate opened");
     require(all_ok, "every concurrent decode matches the serial one");
     return all_ok ? 0 : 2;
 }
@@ -1104,7 +1137,7 @@ static int case_alloc_ownership(const unsigned char *jpeg, size_t jpeg_len) {
     printf("free_4096=returned\n");
 
     /* The zero-byte edge, which is where the two implementations part:
-     * upstream's `tj3Alloc` is a bare `malloc(bytes)` (`turbojpeg.c:935-937`)
+     * upstream's `tj3Alloc` is a bare `malloc(bytes)` (`turbojpeg.c:934-937`)
      * and both glibc and macOS return a unique freeable pointer for 0. A
      * caller writing `if (!(buf = tj3Alloc(n))) fail();` therefore sees a
      * spurious failure at n == 0 against an implementation that returns NULL.
@@ -1139,8 +1172,9 @@ static int case_alloc_ownership(const unsigned char *jpeg, size_t jpeg_len) {
      * allocator boundary the other way. */
     tj_handle_t compressor = api.init(TJINIT_COMPRESS);
     if (!compressor) return 2;
-    api.set(compressor, TJPARAM_QUALITY, 90);
-    api.set(compressor, TJPARAM_SUBSAMP, TJSAMP_444);
+    int params_ok = api.set(compressor, TJPARAM_QUALITY, 90) == 0;
+    params_ok += api.set(compressor, TJPARAM_SUBSAMP, TJSAMP_444) == 0;
+    require(params_ok == 2, "the compress parameters this case measures");
     unsigned char pixels[16 * 16 * 3];
     for (size_t i = 0; i < sizeof(pixels); i++) pixels[i] = (unsigned char)i;
     unsigned char *out = NULL;
@@ -1179,8 +1213,9 @@ static int case_precision12(void) {
 
     tj_handle_t compressor = api.init(TJINIT_COMPRESS);
     if (!compressor) { free(src); return 2; }
-    api.set(compressor, TJPARAM_QUALITY, 95);
-    api.set(compressor, TJPARAM_SUBSAMP, TJSAMP_GRAY);
+    int params_ok = api.set(compressor, TJPARAM_QUALITY, 95) == 0;
+    params_ok += api.set(compressor, TJPARAM_SUBSAMP, TJSAMP_GRAY) == 0;
+    require(params_ok == 2, "the compress parameters this case measures");
     unsigned char *jpeg = NULL;
     size_t jpeg_len = 0;
     int rc = api.compress12(compressor, src, width, 0, height, TJPF_GRAY,
@@ -1301,6 +1336,17 @@ int main(int argc, char **argv) {
 
     /* Line-buffered so a transcript survives a case that faults on purpose. */
     setvbuf(stdout, NULL, _IOLBF, 0);
+
+    /* A deadlock is exactly the class of defect `concurrent_handles` exists to
+     * find, and an unbounded one would hang this child forever: the Rust
+     * runner blocks on `Command::output()` until EOF and the sanitizer job's
+     * `timeout-minutes` covers all ten cases at once, so a wedge would surface
+     * as an unattributed job timeout — the opposite of one case per process.
+     * Every case runs in well under a second, ASan included; a minute is two
+     * orders of magnitude of headroom, and blowing it reads as `killed by
+     * signal 14` for one named case, with the partial transcript already
+     * flushed. */
+    alarm(60);
 
     unsigned char *jpeg = NULL;
     size_t jpeg_len = 0;

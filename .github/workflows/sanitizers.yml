@@ -196,8 +196,11 @@ jobs:
       # Both C drivers are compiled with `-fsanitize=address,undefined`, but
       # UBSan's default mode prints a diagnostic and *continues*, so a finding
       # in either would leave this step green while the exit status stayed 0.
-      # Measured before adding: both drivers run clean under
-      # `-fno-sanitize-recover=undefined`. (Whether the drivers should be
+      # The halting is compiled in — both `cc` lines below carry
+      # `-fno-sanitize-recover=undefined`, which is the mechanism this comment
+      # was measured against; `halt_on_error` here is the runtime twin, kept so
+      # a driver built without the flag still stops, and `print_stacktrace` is
+      # what makes the report usable. (Whether the drivers should be
       # instrumented at all is the separate question P4-208 records; this only
       # makes the instrumentation that is already here able to fail.)
       UBSAN_OPTIONS: "print_stacktrace=1:halt_on_error=1"
@@ -228,6 +231,7 @@ jobs:
         run: |
           cc -O1 -g \
              -fsanitize=address,undefined \
+             -fno-sanitize-recover=undefined \
              -fno-omit-frame-pointer \
              examples/sanitizer_c_harness/harness.c \
              -ldl \
@@ -266,13 +270,15 @@ jobs:
       # same C source on every pull request and compares each transcript
       # against a stock libturbojpeg.  Here the point is different: the cases
       # run against an ASan-instrumented cdylib, which is the only place a
-      # 12-bit entry point, a compress, or a tj3Alloc/tj3Free pair is executed
-      # under a sanitizer at all — the C-boundary gaps P4-141 criterion 2
-      # records.
+      # 12-bit entry point, a compress, or a tj3Alloc/tj3Free pair crosses the
+      # C boundary under a sanitizer at all — the `asan`/`ubsan` jobs above are
+      # --workspace --lib, so they reach those paths in Rust only. Those are
+      # the C-boundary gaps P4-141 criterion 2 records.
       - name: Compile the C-ABI misuse harness
         run: |
           cc -O1 -g \
              -fsanitize=address,undefined \
+             -fno-sanitize-recover=undefined \
              -fno-omit-frame-pointer \
              crates/libjpeg-turbo-rs-capi/examples/cabi_misuse_harness.c \
              -ldl -lpthread \
