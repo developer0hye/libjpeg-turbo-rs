@@ -635,6 +635,11 @@ fn deferrals_are_live_and_named() {
 /// with an `unsafe` would be neither inventoried, nor deferred, nor
 /// detected. `known` is checked afterwards so a rename is still loud.
 ///
+/// The root package is a member too (`members = [".", …]`), so it is
+/// walked alongside `crates/*` — otherwise a root `build.rs` carrying
+/// `unsafe` would be shipped and ungated, which is the hole a first draft
+/// left and `codex review` found.
+///
 /// Each member's `src/` and its `build.rs`: `tests/`, `benches/`,
 /// `examples/` and `fuzz/` are out of scope for the same reason the root
 /// crate's inventory stops at `src/` — they are not shipped. A `build.rs`
@@ -651,20 +656,26 @@ fn the_scanned_roots_are_the_whole_workspace() {
         "libjpeg-turbo-rs-image",
         "libjpeg-turbo-rs-wasm",
     ];
-    let mut seen: Vec<String> = Vec::new();
+    let mut members: Vec<PathBuf> = vec![root.clone()];
     let entries = std::fs::read_dir(root.join("crates")).expect("crates/ must be readable");
     for entry in entries {
-        let member: PathBuf = entry.expect("a readable directory entry").path();
+        members.push(entry.expect("a readable directory entry").path());
+    }
+    members.sort();
+    let mut seen: Vec<String> = Vec::new();
+    for member in members {
         if !member.join("Cargo.toml").is_file() {
             continue;
         }
-        seen.push(
-            member
-                .file_name()
-                .expect("a named directory")
-                .to_string_lossy()
-                .into_owned(),
-        );
+        if member != root {
+            seen.push(
+                member
+                    .file_name()
+                    .expect("a named directory")
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
         let mut files: Vec<PathBuf> = Vec::new();
         unsafe_scan::rust_sources(&member.join("src"), &mut files);
         let build_script: PathBuf = member.join("build.rs");

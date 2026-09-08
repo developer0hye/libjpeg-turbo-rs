@@ -8321,8 +8321,13 @@ the harness first would only pin current behaviour.
   (`tj3LoadImage12/16`, `tj3SaveImage12/16`), added to
   [P4-191](#p4-191-fifty-seven-inventoried-unsafe-items-have-no-regression-test--open)
   (#609) as criteria 6 and 7 rather than filed as a sibling; and one
-  divergence, [P4-193](#p4-193-the-c-abi-destination-spans-do-not-use-imagelayoutstrided-so-a-decode-forms-a-slice-over-one-rows-padding--open),
-  where a destination span is wider than the extent upstream touches. The
+  two defects: [P4-193](#p4-193-the-c-abi-destination-spans-do-not-use-imagelayoutstrided-so-a-decode-forms-a-slice-over-one-rows-padding--open),
+  where a destination span is wider than the extent upstream touches, and
+  [P4-194](#p4-194-the-memory-managers-alloc_sarray--alloc_barray-multiply-jdimensions-unchecked-where-upstream-guards-and-chunks--open),
+  unchecked `JDIMENSION` products in the memory manager where upstream
+  guards and chunks — the second surfaced only because `codex review`
+  refused the row's first draft, which had named `Layout::from_size_align`
+  as the bound it is not. The
   document also records what *no* leg reaches: no TurboJPEG entry point runs
   under Miri, `sanitizers.yml` is `--lib` so it sees only this crate's own
   unit tests, and none of the twelve fuzz targets crosses the C ABI at all —
@@ -10662,7 +10667,14 @@ sub-invariant or a CI leg, not an untested site) and are context.
    without a registry — P4-137's open decision — so this one is a note, not
    a test); a C-ABI-crate-side test for `tj3GetICCProfile`, today covered
    only from the root crate; and the profile-clearing branch of
-   `tj3SetICCProfile`.
+   `tj3SetICCProfile`. A twelfth is a *non-discriminating* test rather than a
+   missing one: `tj_encode_yuv3_does_not_over_read_padded_input_buffer`
+   (`crates/libjpeg-turbo-rs-capi/tests/legacy_aliases.rs`) allocates an
+   ordinary `Vec` of exactly `(h - 1) * pitch + row_bytes` and asserts a
+   return code, so the over-read it guards `densify_pitched_bytes` against
+   would not fault in a release build — and no sanitizer or Miri leg runs it.
+   Either the fixture becomes a guard page or the suite reaches a leg that
+   would observe the read.
 8. Each `**none**` cell that a landed test replaces is rewritten in
    `docs/UNSAFE_INVENTORY.md` or `docs/UNSAFE_INVENTORY_CAPI.md` in the same
    pull request.
@@ -10782,3 +10794,70 @@ narrow.
 **Why deferred.** Filed rather than fixed inside the P4-141 criterion-4 pull
 request, which is a documentation-and-gate change: this one edits a decode
 entry point and wants its own differential test against the C oracle.
+## P4-194. The Memory Manager's `alloc_sarray` / `alloc_barray` Multiply `JDIMENSION`s Unchecked, Where Upstream Guards and Chunks — **OPEN**
+
+**GitHub:** [#613](https://github.com/developer0hye/libjpeg-turbo-rs/issues/613) — found 2026-09-08 while writing the P4-141 criterion-4 inventory row for `alloc_sarray_impl`, and confirmed by the `codex review` of that landing, which corrected the row's first draft.
+
+**Motivation.** `crates/libjpeg-turbo-rs-capi/src/memmgr.rs`'s
+`alloc_sarray_impl` and `alloc_barray_impl` size their allocations with plain
+`*` over `JDIMENSION` (`u32`) arguments:
+`row_bytes = align_up(samplesperrow as usize * sample_size, 64)`,
+`ptr_array_bytes = rows * size_of::<JSampRow>()`, and
+`push_block(pool_id, row_bytes * rows)`. The last of these reaches
+`2^33 * 2^32` and **overflows a 64-bit `usize`**; on the 32-bit ARMv7 leg the
+smaller products wrap as well — 65500 samples times 4 components rounded up
+is about 2^18, times 65500 rows is about 2^34.
+
+`push_block`'s `Layout::from_size_align` is not the guard the row first
+claimed it was: it receives the already-wrapped product and accepts it. A
+wrapped product under-allocates, and the loop immediately after writes
+`*ptr_array.add(r) = data_raw.add(r * row_bytes)` for every row, handing C
+row pointers past the end of the block.
+
+Upstream does two things here that this port does neither of
+(`jmemmgr.c:435`): it refuses `samplesperrow > MAX_ALLOC_CHUNK` with
+`out_of_memory(cinfo, 9)` — its own comment says this "prevents
+overflow/wrap-around" — and it chunks the rows so no single `alloc_large`
+exceeds `MAX_ALLOC_CHUNK`, raising `JERR_WIDTH_OVERFLOW` when even one row
+cannot fit. Our `JpegMemoryMgr` advertises the same `max_alloc_chunk =
+1_000_000_000` in the vtable and enforces it nowhere.
+
+**Reachability.** Not from the Rust API, which bounds its geometry before any
+allocation. `alloc_sarray` and `alloc_barray` are *vtable slots*: any C
+consumer holding a `cinfo` from this shim can call them with any
+`JDIMENSION` pair, and stock libjpeg modules linked against the shim call
+them with values derived from the frame. `realize_virt_arrays_impl` in the
+same file already does the checked version of this arithmetic
+(`virt_array_maximum_space`, `checked_mul`/`checked_add`, mirroring
+upstream's `maximum_space` guard), so the pattern to follow is local.
+
+**Why it was untracked.** `tests/sizing_arithmetic_gate.rs` (P4-139
+criterion 3) scans for `saturating_mul` / `saturating_add` /
+`saturating_sub` only. These are plain `*`, so the gate never looks at them,
+and `docs/sizing_arithmetic_inventory.tsv`'s four `memmgr.rs` rows are the
+saturating counters and bound checks, not these.
+
+**Acceptance criteria.**
+
+1. `alloc_sarray_impl` and `alloc_barray_impl` compute every size with
+   checked arithmetic, returning NULL — this port's out-of-memory signal,
+   since it has no `j_common_ptr` to `error_exit` through — rather than
+   wrapping.
+2. `samplesperrow > MAX_ALLOC_CHUNK` is refused as upstream refuses it, and a
+   request whose total exceeds `max_alloc_chunk` either chunks as upstream
+   does or is refused; whichever is chosen, the vtable field stops
+   advertising a limit nothing enforces.
+3. A regression test calls the two vtable slots directly with a `JDIMENSION`
+   pair whose product overflows `usize` and asserts NULL rather than a
+   wrapped allocation, on a 64-bit host and on the 32-bit ARMv7 leg
+   (`capi_layout_adoption` and `capi_span_overflow_guards` are the two
+   suites ARMv7 already runs, so it belongs in one of them).
+4. The `alloc_sarray_impl` / `alloc_barray_impl` rows in
+   `docs/UNSAFE_INVENTORY_CAPI.md` cite that test instead of recording the
+   obligation as unmet.
+
+**Why deferred.** Filed rather than fixed inside the P4-141 criterion-4 pull
+request, which is a documentation-and-gate change: this edits the memory
+manager two stock tools allocate through, and wants its own differential run
+against the stock-tool link gate.
+
