@@ -77,3 +77,29 @@ Note: `rustc` does not implement `sanitizer=undefined`; `-Z ub-checks=yes` is th
 
 All three sanitizer jobs (asan, ubsan, and the P4-11 C-boundary asan harness) run on every PR via `.github/workflows/sanitizers.yml`. macOS is excluded because the NEON SIMD paths produce spurious cross-thread ASan shadow-map false positives under parallel test execution.
 
+## The C-ABI misuse harness
+
+`crates/libjpeg-turbo-rs-capi/examples/cabi_misuse_harness.c` is a C driver that
+`dlopen`s one shared library, runs **one named case**, and exits — so a case that
+faults is one child's exit status rather than the whole run's. It needs no
+special toolchain:
+
+```sh
+cc -O1 -g -Wall -Wextra -o /tmp/cabi_misuse_harness   crates/libjpeg-turbo-rs-capi/examples/cabi_misuse_harness.c -ldl -lpthread
+cargo build -p libjpeg-turbo-rs-capi
+/tmp/cabi_misuse_harness target/debug/liblibjpeg_turbo_rs_capi.so   pitch_boundaries references/libjpeg-turbo/testimages/testorig.jpg
+```
+
+Point it at `<prefix>/lib/libturbojpeg.so` instead and you get the same
+transcript from stock TurboJPEG; that comparison is what
+`crates/libjpeg-turbo-rs-capi/tests/cabi_misuse_harness.rs` automates, and it
+requires an oracle at or above the `tool-current` release in
+`docs/oracle_versions.tsv` (it checks for `tj3InitVersion`). Lines the two
+implementations are known to disagree on live in that file's
+`KNOWN_DIVERGENCES` (and, for the sixteen `tj3Set` pairs one item owns, in
+`APPLICABILITY_DIVERGENCES`), each naming the LAST_MILE item that owns it and
+each required to *still* diverge, so a fix deletes its entry.
+
+The same cases run under ASan and UBSan in `sanitizers.yml`'s `c_boundary_asan`
+job.
+

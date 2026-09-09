@@ -193,6 +193,17 @@ jobs:
       # detect_leaks=0: leak-checking is covered by the `asan` job and would
       #                  false-positive on the un-instrumented C harness.
       ASAN_OPTIONS: "detect_leaks=0:abort_on_error=1:halt_on_error=1"
+      # Both C drivers are compiled with `-fsanitize=address,undefined`, but
+      # UBSan's default mode prints a diagnostic and *continues*, so a finding
+      # in either would leave this step green while the exit status stayed 0.
+      # The halting is compiled in — both `cc` lines below carry
+      # `-fno-sanitize-recover=undefined`, which is the mechanism this comment
+      # was measured against; `halt_on_error` here is the runtime twin, kept so
+      # a driver built without the flag still stops, and `print_stacktrace` is
+      # what makes the report usable. (Whether the drivers should be
+      # instrumented at all is the separate question P4-208 records; this only
+      # makes the instrumentation that is already here able to fail.)
+      UBSAN_OPTIONS: "print_stacktrace=1:halt_on_error=1"
     steps:
       - uses: actions/checkout@v7
         with:
@@ -220,6 +231,7 @@ jobs:
         run: |
           cc -O1 -g \
              -fsanitize=address,undefined \
+             -fno-sanitize-recover=undefined \
              -fno-omit-frame-pointer \
              examples/sanitizer_c_harness/harness.c \
              -ldl \
@@ -236,10 +248,83 @@ jobs:
           # 30 minutes even if a regression slows the decoder dramatically.
           # The three fixtures span baseline + progressive + arithmetic
           # through the tj3Decompress8 surface. This comment used to claim a
-          # fourth, 12-bit one; there is none, and no 12-bit path crosses
-          # the C boundary under ASan — tracked under P4-141 criterion 2.
+          # fourth, 12-bit one; there is none. The 12-bit path, the compress
+          # path and the tj3Alloc/tj3Free contract cross the boundary in the
+          # misuse harness below instead.
           /tmp/c_boundary_harness "$LIB" \
             references/libjpeg-turbo/testimages/testorig.jpg \
             references/libjpeg-turbo/testimages/testimgint.jpg \
             references/libjpeg-turbo/testimages/testimgari.jpg
+        timeout-minutes: 10
+
+      # P4-141 criterion 3, second half: the process-isolated C-ABI misuse
+      # harness.  The corpus harness above answers "does a well-formed decode
+      # stay clean at the boundary?".  This one answers what the criterion
+      # actually names — `init→destroy→destroy`, undersized output buffers,
+      # pitch boundaries, maximum dimensions, concurrent handles and the
+      # allocator contract — by driving each of them in its own process, so a
+      # case that faults is one case's exit status rather than the job's only
+      # signal.
+      #
+      # `crates/libjpeg-turbo-rs-capi/tests/cabi_misuse_harness.rs` runs the
+      # same C source on every pull request and compares each transcript
+      # against a stock libturbojpeg.  Here the point is different: the cases
+      # run against an ASan-instrumented cdylib, which is the only place a
+      # 12-bit entry point, a compress, or a tj3Alloc/tj3Free pair crosses the
+      # C boundary under a sanitizer at all — the `asan`/`ubsan` jobs above are
+      # --workspace --lib, so they reach those paths in Rust only. Those are
+      # the C-boundary gaps P4-141 criterion 2 records.
+      - name: Compile the C-ABI misuse harness
+        run: |
+          cc -O1 -g \
+             -fsanitize=address,undefined \
+             -fno-sanitize-recover=undefined \
+             -fno-omit-frame-pointer \
+             crates/libjpeg-turbo-rs-capi/examples/cabi_misuse_harness.c \
+             -ldl -lpthread \
+             -o /tmp/cabi_misuse_harness
+
+      - name: Run every misuse case in its own process
+        run: |
+          set -u
+          LIB="target/x86_64-unknown-linux-gnu/release/liblibjpeg_turbo_rs_capi.so"
+          FIXTURE="references/libjpeg-turbo/testimages/testorig.jpg"
+          test -f "$LIB" || { echo "cdylib missing: $LIB"; exit 1; }
+          # The case list is duplicated from CASES in
+          # cabi_misuse_harness.rs on purpose: that file's
+          # `every_harness_case_is_driven` holds the C driver and the Rust
+          # runner together, and this loop is checked against the driver by
+          # the count assertion below, so a case added to the harness and
+          # forgotten here fails rather than silently dropping out of the
+          # sanitizer leg.
+          CASES="lifecycle handle_defaults parameter_applicability \
+                 null_handle pitch_boundaries undersized_output \
+                 max_dimensions concurrent_handles alloc_ownership \
+                 precision12"
+          ran=0
+          for case in $CASES; do
+            echo "--- $case"
+            /tmp/cabi_misuse_harness "$LIB" "$case" "$FIXTURE" || {
+              echo "case $case failed under ASan/UBSan" >&2
+              exit 1
+            }
+            ran=$((ran + 1))
+          done
+          # The driver dispatches these ten plus two selftests. A mismatch
+          # means the harness grew a case this loop does not run. Counting
+          # distinct names rather than matching lines: the fixture-requirement
+          # block tests some of the same names a second time.
+          dispatched=$(grep -o 'strcmp(case_name, "[a-z0-9_]*"' \
+            crates/libjpeg-turbo-rs-capi/examples/cabi_misuse_harness.c \
+            | cut -d'"' -f2 | sort -u | wc -l)
+          if [ "$dispatched" -ne "$((ran + 2))" ]; then
+            echo "harness dispatches $dispatched cases; this loop ran $ran plus 2 selftests" >&2
+            exit 1
+          fi
+          # The guard page has to be armed here too: without it every overrun
+          # check above passes while measuring nothing.
+          if /tmp/cabi_misuse_harness "$LIB" selftest_guard_page; then
+            echo "the deliberate overrun did not fault under ASan" >&2
+            exit 1
+          fi
         timeout-minutes: 10
