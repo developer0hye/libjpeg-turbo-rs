@@ -490,7 +490,7 @@ fn compress_progressive_with_scans(
     }
 
     // Single BitWriter reused across all scans (reset instead of reallocate).
-    let mut bit_writer: BitWriter = BitWriter::new(width * height / 4);
+    let mut bit_writer: BitWriter = BitWriter::for_progressive_scan(width, height);
 
     // Pre-allocate precomp buffers outside the scan loop (clear+reuse per scan).
     let max_blocks: usize = comp_layouts
