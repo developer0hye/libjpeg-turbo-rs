@@ -8859,25 +8859,30 @@ the harness first would only pin current behaviour.
   Three further withdrawals were found by `rust-code-reviewer` on the way in,
   each one line and each satisfying every rule above, and each now has its own:
   `continue-on-error:` on a step or on the job (it runs, it fails, the job is
-  green), a libtest filter after `--` on a `miri_*` step (the selection name is
-  still there and half the suite stops running), and — the shortest of them — a
-  `cfg` on `miri`. `#![cfg(not(miri))]` at the top of a suite leaves every named
+  green), a libtest filter on a `miri_*` step — after `--`, or as the bare
+  positional word cargo forwards to libtest, which `codex review` added by
+  showing that `--test miri_once_init nonexistent` runs zero tests and exits 0 —
+  and, the shortest of them, a `cfg` on `miri`. `#![cfg(not(miri))]` at the top of a suite leaves every named
   test defined, keeps the native legs green and makes the interpreting step run
   **zero** tests and exit 0; only the per-test `cfg_attr(miri, ignore = …)` is
   allowed, and the ignore rule holds that to citing an issue. The same round
   moved the attribute rules onto a bracket-balanced join, so a `rustfmt`-split
   `#[cfg_attr(\n miri,\n ignore = "flaky"\n)]` is one attribute rather than
   three fragments no rule recognises, and anchored the one listed exemption to
-  the whole reason string.
+  the whole reason string. Every attribute comparison is
+  whitespace-insensitive, because the join's own spacing had made the rule
+  reject a *permitted* split `cfg_attr(miri, ignore = …)` — the rule that
+  exists to allow it (`codex review`).
   `.github/CODEOWNERS` routes the four suites
   and `ci.yml` to the maintainer for the question no gate can ask — whether a
   selected suite still asserts anything.
   Mutation-checked against the real workflow by
   `dropping_a_selection_from_the_real_workflow_is_reported` — drop
   `--test miri_once_init` from `ci.yml`, put `if: false` or
-  `continue-on-error: true` on the job, or narrow a step with `-- --skip`, and
-  the gate reports each — while `the_rules_reject_each_way_the_job_can_go_stale`
-  drives eleven negative fixtures and three positive controls over a synthetic
+  `continue-on-error: true` on the job, or narrow a step with `-- --skip` or a
+  bare test name, and the gate reports each of the five — while
+  `the_rules_reject_each_way_the_job_can_go_stale`
+  drives twelve negative fixtures and four positive controls over a synthetic
   job — `continue-on-error: false` and the `--lib` step's own `--skip simd::`
   among them, so a stricter reading cannot start reporting a healthy job — and
   so the rules cannot rot

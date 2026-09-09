@@ -340,8 +340,31 @@ fn is_truthy(value: &str) -> bool {
     !matches!(value.trim(), "false" | "'false'" | "\"false\"" | "")
 }
 
-/// Arguments a step passes *to libtest* on a step that selects a `miri_*`
-/// suite: everything after the first bare `--`.
+/// Cargo options that take a separate value, so the word after them is not a
+/// test-name filter.
+const OPTIONS_TAKING_A_VALUE: [&str; 12] = [
+    "--test",
+    "--features",
+    "-p",
+    "--package",
+    "--target",
+    "--manifest-path",
+    "--profile",
+    "--bin",
+    "--example",
+    "--bench",
+    "--jobs",
+    "-j",
+];
+
+/// Arguments that narrow what a step *runs* on a step selecting a `miri_*`
+/// suite: everything after a bare `--`, and any bare positional word before it.
+///
+/// Both forms reach libtest. `cargo miri test --test miri_once_init racing`
+/// passes `racing` straight through as a name filter, so a step can be reduced
+/// to one test — or, with a name that matches nothing, to none — while every
+/// selection check above still sees `--test miri_once_init` (codex review,
+/// 2026-09-09).
 ///
 /// Returns nothing for a step that selects no `miri_*` suite, because the
 /// `--lib` run's `--skip simd::` is a filter this job requires.
@@ -349,11 +372,33 @@ fn suite_filters(script: &str) -> Vec<String> {
     if !script.contains("--test miri_") {
         return Vec::new();
     }
+    let mut filters: Vec<String> = Vec::new();
     let mut words = script.split_whitespace();
-    let Some(_) = words.by_ref().find(|word| *word == "--") else {
+    // `cargo miri test` itself, and anything before it (`caffeinate`, an env
+    // assignment), is not a filter.
+    if words.by_ref().find(|word| *word == "test").is_none() {
         return Vec::new();
-    };
-    words.map(str::to_string).collect()
+    }
+    while let Some(word) = words.next() {
+        if word == "--" {
+            filters.extend(words.map(str::to_string));
+            break;
+        }
+        if OPTIONS_TAKING_A_VALUE.contains(&word) {
+            words.next();
+            continue;
+        }
+        if word.starts_with('-') {
+            continue;
+        }
+        // A `|` block writes the command over several lines; the continuation
+        // backslash is shell syntax, not an argument.
+        if word == "\\" {
+            continue;
+        }
+        filters.push(word.to_string());
+    }
+    filters
 }
 
 /// The steps that interpret something, i.e. run `cargo miri test`.
@@ -660,6 +705,17 @@ fn ignore_problems(source: &str, suite: &str) -> Vec<String> {
         .collect()
 }
 
+/// An attribute with every whitespace character removed.
+///
+/// Joining a split attribute leaves `#[cfg_attr( miri, ignore = ...)]`, which
+/// no literal written the way a human writes it can match — so a *permitted*
+/// `cfg_attr(miri, ignore)` formatted across lines was rejected by the rule
+/// that exists to allow it (codex review, 2026-09-09). Both sides of every
+/// comparison below are compacted, so spacing decides nothing.
+fn compact(attribute: &str) -> String {
+    attribute.chars().filter(|c| !c.is_whitespace()).collect()
+}
+
 /// Whether an attribute's ignore reason is *exactly* one of the listed
 /// exemptions.
 ///
@@ -667,9 +723,10 @@ fn ignore_problems(source: &str, suite: &str) -> Vec<String> {
 /// `#[ignore = "flaky; Miri cannot spawn a process"]` (rust-code-reviewer,
 /// 2026-09-09).
 fn is_exempt_ignore(attribute: &str) -> bool {
+    let attribute: String = compact(attribute);
     EXEMPT_IGNORE_REASONS
         .iter()
-        .any(|reason| attribute.contains(&format!("ignore = \"{reason}\"")))
+        .any(|reason| attribute.contains(&compact(&format!("ignore = \"{reason}\""))))
 }
 
 /// A `cfg` on `miri` withdraws a whole suite from the interpreter while every
@@ -686,7 +743,7 @@ fn miri_cfg_problems(source: &str, suite: &str) -> Vec<String> {
     attributes(source)
         .into_iter()
         .filter(|attribute| attribute.contains("miri"))
-        .filter(|attribute| !attribute.contains("cfg_attr(miri, ignore"))
+        .filter(|attribute| !compact(attribute).contains("cfg_attr(miri,ignore"))
         .map(|attribute| {
             format!(
                 "{suite} carries {attribute} — a cfg on `miri` withdraws the suite \
@@ -1029,6 +1086,20 @@ fn the_rules_reject_each_way_the_job_can_go_stale() {
         problems.iter().any(|problem| problem.contains("--skip")),
         "narrowing a miri_* suite with a libtest filter must be reported, got {problems:?}"
     );
+    // The same withdrawal without a `--`: cargo forwards a bare word to libtest
+    // as a name filter, and a name that matches nothing runs zero tests and
+    // exits 0 (codex review, 2026-09-09).
+    let positional: String = healthy_job().replace(
+        "          --test miri_once_init",
+        "          --test miri_once_init racing_but_renamed",
+    );
+    let problems: Vec<String> = selection_problems(&positional, &surfaces);
+    assert!(
+        problems
+            .iter()
+            .any(|problem| problem.contains("racing_but_renamed")),
+        "a positional test-name filter must be reported, got {problems:?}"
+    );
     // ...while the `--lib` step's own filter is required and must not be.
     assert!(
         !selection_problems(&healthy_job(), &surfaces)
@@ -1121,6 +1192,17 @@ fn dropping_a_selection_from_the_real_workflow_is_reported() {
             .iter()
             .any(|problem| problem.contains("libtest")),
         "narrowing a real miri_* step with a libtest filter must be reported"
+    );
+
+    let positional: String = real.replace(
+        "--test miri_once_init",
+        "--test miri_once_init no_such_test",
+    );
+    assert!(
+        selection_problems(&positional, &surfaces)
+            .iter()
+            .any(|problem| problem.contains("no_such_test")),
+        "a positional filter on the real workflow must be reported"
     );
 }
 
@@ -1245,6 +1327,35 @@ fn the_cfg_rule_rejects_every_way_a_suite_can_leave_the_interpreter() {
         miri_cfg_problems(allowed, "tests/fixture.rs"),
         Vec::<String>::new(),
         "a per-test cfg_attr(miri, ignore) and a wasm guard are both allowed"
+    );
+
+    let split_but_permitted: &str = concat!(
+        "#[cfg_attr(\n",
+        "    miri,\n",
+        "    ignore = \"P4-209 (#632): pending\"\n",
+        ")]\n#[test]\nfn alpha() {}\n",
+    );
+    assert_eq!(
+        miri_cfg_problems(split_but_permitted, "tests/fixture.rs"),
+        Vec::<String>::new(),
+        "a permitted cfg_attr(miri, ignore) must stay permitted when rustfmt \
+         splits it (codex review, 2026-09-09)"
+    );
+    assert_eq!(
+        ignore_problems(split_but_permitted, "tests/fixture.rs"),
+        Vec::<String>::new(),
+        "and its citation must still be read across the split"
+    );
+    let split_exempt_reason: &str = concat!(
+        "#[cfg_attr(\n",
+        "    miri,\n",
+        "    ignore = \"Miri cannot spawn a process\"\n",
+        ")]\n#[test]\nfn oracle() {}\n",
+    );
+    assert_eq!(
+        ignore_problems(split_exempt_reason, "tests/fixture.rs"),
+        Vec::<String>::new(),
+        "the listed exemption must survive the split too"
     );
 
     for withdrawal in [
