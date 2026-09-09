@@ -8070,7 +8070,7 @@ an infallible constructor and so needs an API decision (panic, or a fallible
   the dispatcher picks (measured locally: `llvm.aarch64.neon.ushl.v8i16`),
   which is why the library's own Miri run passes `--skip simd::`. A
   scalar-only capi build under Miri belongs to
-  [P4-141](#p4-141-soundness-verification-program-mirisanitizerfuzz-coverage-gaps-and-an-unsafe-inventory-gate--partial-criteria-3-4-and-5-landed-and-gated-except-criterion-3s-callback-reentry-scenario-criteria-1-2-6-and-7-open),
+  [P4-141](#p4-141-soundness-verification-program-mirisanitizerfuzz-coverage-gaps-and-an-unsafe-inventory-gate--partial-criteria-3-4-and-5-landed-and-gated-except-criterion-3s-callback-reentry-scenario-criterion-1-landed-except-the-pre-existing-integration-suites-criteria-2-6-and-7-open),
   not here.
 
 **Also recorded: resource-limit defaults.** `DecodeLimits` currently defaults to
@@ -8146,7 +8146,7 @@ immediately, ahead of the code work.
 
 **Status (2026-08-09): closed.** Landed in #485; `crates/libjpeg-turbo-rs-capi/src/lib.rs` no longer offers the crate as a `libjpeg.so.62` replacement, and `README.md` states the safety scope rather than a guarantee.
 
-## P4-141. Soundness Verification Program: Miri/Sanitizer/Fuzz Coverage Gaps and an `unsafe` Inventory Gate — **PARTIAL: criteria 3, 4 and 5 landed and gated except criterion 3's callback-reentry scenario; criteria 1, 2, 6 and 7 open**
+## P4-141. Soundness Verification Program: Miri/Sanitizer/Fuzz Coverage Gaps and an `unsafe` Inventory Gate — **PARTIAL: criteria 3, 4 and 5 landed and gated except criterion 3's callback-reentry scenario; criterion 1 landed except the pre-existing integration suites; criteria 2, 6 and 7 open**
 
 **GitHub:** [#480](https://github.com/developer0hye/libjpeg-turbo-rs/issues/480) — under the [#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481) umbrella.
 
@@ -8166,6 +8166,19 @@ misuse of a public SIMD entry point; none injects allocation failure; none runs
 1. **Miri** additionally covers non-SIMD integration tests, doctests, progressive
    output (P4-136), `BitWriter` (P4-138), post-allocation-failure state, and
    concurrent one-time initialisation.
+   **Delivered 2026-09-09 except the pre-existing integration suites**: three
+   purpose-built integration suites (`tests/miri_public_api.rs`,
+   `tests/miri_alloc_failure.rs`, `tests/miri_once_init.rs`) and the doctests are
+   in the Miri job, `tests/miri_coverage_gate.rs` fails when a step stops naming
+   one of them, and the allocation-failure injection produced
+   [P4-209](#p4-209-the-mainline-decode-destination-is-allocated-infallibly-so-an-allocator-refusal-aborts-the-process--open)
+   (#632) on its first run. What remains is the *existing* 224 integration
+   suites: most spawn `djpeg`/`cjpeg`, which Miri cannot support — measured, not
+   assumed (`cargo miri test --test decode_limits` interprets its first few tests
+   and then stops with "can't call foreign function `posix_spawnattr_init`"; how
+   many it reaches depends on libtest's scheduling), so adopting
+   them means `#[cfg_attr(miri, ignore)]` on every C-oracle test in each suite,
+   one suite at a time. See *Progress* below.
 2. **Sanitizers** run with SIMD on *and* off; on an AVX2 machine and a
    non-AVX2 one; on 32-bit `i686`; and on AArch64 NEON. Add guard pages either
    side of C destination buffers, short-stride and canary buffers, and repeated
@@ -8304,10 +8317,11 @@ the harness first would only pin current behaviour.
   not today — a repository setting, not a code change). Sites in
   `#[cfg(test)]` code are inventoried and marked test-only rather than
   exempted. Rows whose honest *Regression test* cell is `**none**` are the
-  gaps this inventory surfaced — thirty-two of the 224 — and they are the
+  gaps this inventory surfaced — thirty-two of the 224 when this chunk landed,
+  thirty since the criterion-1 landing gave the two `OnceBox` rows a test — and they are the
   criterion's product rather than a defect in it: a raw count could not
   have named one of them. They are filed together as
-  [P4-191](#p4-191-seventy-one-inventoried-unsafe-items-have-no-regression-test--open)
+  [P4-191](#p4-191-sixty-nine-inventoried-unsafe-items-have-no-regression-test--open)
   (#609), which includes three uncalled functions holding `unsafe`. Writing
   one of those cells also produced the criterion's first *defect*:
   [P4-192](#p4-192-a-custom-scan-script-with-se--63-writes-past-two-stack-arrays-from-safe-rust-on-x86_64--open)
@@ -8337,7 +8351,7 @@ the harness first would only pin current behaviour.
   What the C-ABI rows produced, beyond the inventory itself: twenty-five
   answer `**none**`, four of them entry points no leg executes at all
   (`tj3LoadImage12/16`, `tj3SaveImage12/16`), added to
-  [P4-191](#p4-191-seventy-one-inventoried-unsafe-items-have-no-regression-test--open)
+  [P4-191](#p4-191-sixty-nine-inventoried-unsafe-items-have-no-regression-test--open)
   (#609) as criteria 6 and 7 rather than filed as a sibling; and one
   two defects: [P4-193](#p4-193-the-c-abi-destination-spans-do-not-use-imagelayoutstrided-so-a-decode-forms-a-slice-over-one-rows-padding--open),
   where a destination span is wider than the extent upstream touches, and
@@ -8369,8 +8383,9 @@ the harness first would only pin current behaviour.
   (`noop_init_source`, `stdio_init_source`, `noop_skip_input_data`,
   `default_resync_to_restart`), five named sub-cases, and the 32-bit
   dispatch below. All of them went to
-  [P4-191](#p4-191-seventy-one-inventoried-unsafe-items-have-no-regression-test--open)
-  (#609), which is renamed from fifty-seven to seventy-one.
+  [P4-191](#p4-191-sixty-nine-inventoried-unsafe-items-have-no-regression-test--open)
+  (#609), which is renamed from fifty-seven to seventy-one (and to
+  sixty-nine on 2026-09-09).
   **Two defects**, both found by writing an *Invariant* cell and neither
   tracked anywhere before:
   [P4-195](#p4-195-jpeg_read_raw_data-copies-mcu-aligned-plane-widths-into-caller-buffers-libjpegtxt-sizes-to-dct-blocks--open)
@@ -8731,9 +8746,166 @@ the harness first would only pin current behaviour.
   delivered until this landing corrected them. Reentry therefore falls to the
   classic `jpeg_*` error, source and destination managers, which need the
   installed `jpeglib.h` and are their own milestone.
+- **Criterion 1 — 2026-09-09, the public API, the doctests, allocation refusal
+  and the initialisation race:** the Miri job ran `cargo miri test --lib` plus
+  two C-ABI suites, so everything it interpreted in the root crate was reached
+  from inside — a `#[cfg(test)]` module calling a function with arguments it
+  chose. Four of the six surfaces the criterion names — integration suites,
+  doctests, post-allocation-failure state and *concurrent* one-time
+  initialisation — had no interpreted coverage at all. The other two did, and
+  the delta is narrower than "uncovered" and worth stating precisely, because
+  the first draft of this entry got it wrong and `docs-drift-auditor` measured
+  it: `progressive_output::tests::progressive_output_path_is_miri_covered` walks
+  a `ProgressiveDecoder` under `--lib` but asserts `image.data.len()`; the
+  `BitWriter` lib tests drive the writer with sizes they choose, never through
+  an encode. Three integration suites and one step close all of it:
+  - `tests/miri_public_api.rs` (5 tests, 73 s under Miri on an idle macOS
+    aarch64 host, 150 s with the native suite running alongside — the figures
+    here are wall-clock on one machine, not a budget)
+    walks each intermediate `ProgressiveDecoder::output()` — P4-136's surface —
+    and drives the `BitWriter` arena (P4-138) across a reallocation and through
+    its `0xFF`-stuffing slow path. **What the interpreter checks there, and
+    what it does not, are worth separating**, because the first draft of this
+    entry claimed the stronger one and `rust-code-reviewer` read the allocator
+    (2026-09-09). *Live:* reconstructing a scan runs `decode_progressive_planes`,
+    which writes every block through
+    `component_planes[c].as_mut_ptr().add(dst_offset)` into
+    `idct_scaled_strided` — a raw destination pointer plus a stride, not
+    feature-gated, one of the sites `docs/UNSAFE_INVENTORY.md` owns — and Miri
+    checks each of those writes for bounds and provenance; the baseline decodes
+    reach the three equivalents in `pipeline_impl/baseline.rs`. *A tripwire:*
+    reading every byte of the reconstruction does **not** test initialisation
+    today, because both destinations are initialised by construction
+    (`try_filled_vec` on the colour path, reserve-and-`extend_from_slice` on the
+    grayscale one), so Miri's uninit tracking cannot fire. It guards against a
+    return to the `set_len`-over-spare-capacity shape P4-136 removed, whose
+    bytes a length assertion would pass over. The content assertions are
+    separate and stronger than the read: every row of every intermediate must
+    carry a written byte, and the final reconstruction must equal the one-shot
+    `decompress`.
+    Both `BitWriter` facts are *asserted*, not hoped for: the writer reserves
+    `2 * capacity` and is `reset` rather than reallocated between progressive
+    scans, so the test measures the **longest scan payload** against that
+    reservation. The first draft compared `jpeg.len()` and passed on a
+    progressive fixture whose longest scan was 849 bytes against a 1024-byte
+    reservation — no growth at all. 48×48 (1911 against 1152) is what makes it
+    real, and the baseline case is 4218 against 2048 with 21 stuffed pairs. The
+    suite re-derives that reservation from two figures it does not own, so both
+    are pinned on the library side in `huffman_encode::tests`: the multiplier by
+    `new_reserves_double_the_request_floored_at_1024`, and the capacity each
+    encoder starts from by
+    `frame_and_progressive_reservations_are_what_the_miri_suite_models`, over
+    the named `BitWriter::for_frame` / `for_progressive_scan` constructors the
+    pipelines now call — without which raising a call site's argument would
+    leave the integration test comparing against a stale, smaller number and
+    passing (`rust-code-reviewer`, 2026-09-09). Byte parity with
+    `djpeg` for all four fixtures this suite builds is a separate test in the
+    same file, `#[cfg_attr(miri, ignore)]` because Miri cannot spawn a process.
+    This is also the one suite of the four without a wasm guard, so
+    `wasm.yml`'s `cargo test --target wasm32-wasip1` runs its four
+    interpreter-independent tests under `wasmtime` as well (verified).
+  - `tests/miri_alloc_failure.rs` (4 tests, 35 s under Miri) injects the refusal from a
+    `#[global_allocator]` that fails an allocation of an **exact size**, armed
+    on the calling thread, so one test cannot reach another's, the harness's own
+    allocations are never refused, and a `>=` rule cannot catch an *infallible*
+    allocation and turn the case into a `SIGABRT`.
+    `selftest_the_injector_refuses_exactly_what_it_is_armed_for` is the
+    committed proof the mechanism is armed — the shape the criterion-3 harness
+    needed after its guard pages turned out inert. Two cases pass: a refused
+    progressive destination and a refused ICC reassembly each report
+    `AllocationFailed` **naming the buffer and its size** (a bare `matches!` on
+    the variant would have accepted a refusal from any other call site), and
+    the *same decoder* then produces bytes identical to an unrefused decode.
+  - `tests/miri_once_init.rs` (2 tests, one of them runnable under Miri, ~11 s
+    per seed) races `std_huffman_tables`'s `AtomicPtr` once-cell in a process that
+    has not touched it — which is why it is its own binary:
+    `tests/concurrency.rs` decodes on ten threads but computes its reference
+    decode first, so all ten take the already-published fast path. Six threads
+    behind one barrier, four calling the cell directly and two reaching it
+    through `fill_default_huffman_tables`; the four direct callers must observe
+    the **same four `Arc` pointers**, and the two decoders must agree byte for
+    byte with a decode performed after the join. A `get_or_init` that leaked one
+    box per caller fails exactly that assertion and nothing else — mutation
+    checked locally rather than by a committed artifact: publishing every
+    caller's own box fails with "thread 1 saw a different set of tables … more
+    than one initialiser published" and nothing else changes. The fixture carries **no DHT segments**, which is what
+    makes the second route real: `fill_default_huffman_tables` writes only unset
+    slots, so a decode of an ordinary `compress` output calls the cell and clones
+    nothing — `codex review` found that, and the assertion that pins the fix is
+    that the stripped stream still decodes to bytes identical to the unstripped
+    one, which holds only because the omitted tables are the Annex K tables the
+    cell publishes (`djpeg` agrees on the same stream, diff = 0).
+    `-Zmiri-many-seeds` is the search: instrumenting the `compare_exchange`
+    loser branch and counting on macOS aarch64, the default seed takes it 5
+    times and the eight seeds the step passes take it 40. The figures are
+    scheduler-dependent; that the branch is reached at all is the claim.
+  - `cargo miri test --doc` interprets all seven of the crate's doctests, which
+    `--lib` does not build.
+  **The mechanism is `tests/miri_coverage_gate.rs`** (7 tests, every pull
+  request): the suites are selected by name in one `run:` line each, and a
+  suite dropped from that line keeps compiling, keeps passing on the native legs
+  and stops being interpreted, with no failure anywhere — #320's shape. The gate
+  reads the job out of `ci.yml` and requires each surface's selection, the
+  pre-existing `--lib`/`--skip simd::` and C-ABI selections, `--doc`,
+  `-Zmiri-many-seeds` on the concurrency step,
+  `-Zmiri-disable-isolation` on the steps whose suites read files (requiring it
+  of every step would report a *stronger* configuration as a problem), that no
+  interpreting step is non-executing (`--no-run`, `--list`, or an `if:` on the
+  step or on the **job**, each of which withdraws coverage without touching a
+  command), that every named test exists, is a `#[test]` and leaves at least one
+  runnable per surface, that any `#[ignore]` **anywhere in those suites** cites
+  an issue outside one listed exemption, and that **every** `tests/miri_*.rs` in
+  the tree is selected by some step.
+  Three further withdrawals were found by `rust-code-reviewer` on the way in,
+  each one line and each satisfying every rule above, and each now has its own:
+  `continue-on-error:` on a step or on the job (it runs, it fails, the job is
+  green), a libtest filter after `--` on a `miri_*` step (the selection name is
+  still there and half the suite stops running), and — the shortest of them — a
+  `cfg` on `miri`. `#![cfg(not(miri))]` at the top of a suite leaves every named
+  test defined, keeps the native legs green and makes the interpreting step run
+  **zero** tests and exit 0; only the per-test `cfg_attr(miri, ignore = …)` is
+  allowed, and the ignore rule holds that to citing an issue. The same round
+  moved the attribute rules onto a bracket-balanced join, so a `rustfmt`-split
+  `#[cfg_attr(\n miri,\n ignore = "flaky"\n)]` is one attribute rather than
+  three fragments no rule recognises, and anchored the one listed exemption to
+  the whole reason string.
+  `.github/CODEOWNERS` routes the four suites
+  and `ci.yml` to the maintainer for the question no gate can ask — whether a
+  selected suite still asserts anything.
+  Mutation-checked against the real workflow by
+  `dropping_a_selection_from_the_real_workflow_is_reported` — drop
+  `--test miri_once_init` from `ci.yml`, put `if: false` or
+  `continue-on-error: true` on the job, or narrow a step with `-- --skip`, and
+  the gate reports each — while `the_rules_reject_each_way_the_job_can_go_stale`
+  drives eleven negative fixtures and three positive controls over a synthetic
+  job — `continue-on-error: false` and the `--lib` step's own `--skip simd::`
+  among them, so a stricter reading cannot start reporting a healthy job — and
+  so the rules cannot rot
+  into always-true.
+  **What the injection produced:**
+  [P4-209](#p4-209-the-mainline-decode-destination-is-allocated-infallibly-so-an-allocator-refusal-aborts-the-process--open)
+  (#632) — `decompress` allocates its destination with `vec![0u8; size]`
+  (`decode/pipeline_impl/output.rs`, `take_out_buf`) where `size` comes from the
+  SOF, so a refused allocation **aborts the process** instead of returning
+  `AllocationFailed`. This is the class P4-136 criterion 4 and P4-144 closed
+  everywhere else; the primary entry point was never in it, and no job could see
+  that because none had ever refused an allocation a decode actually makes (the
+  two pre-existing probes ask `try_alloc` for an unservable `isize::MAX` and are
+  Miri-ignored — see P4-209). Verified by patching that one
+  site to `try_filled_vec`, after which the contract test passes unchanged; it is
+  committed `#[ignore]`d citing the issue, so closing P4-209 means deleting the
+  attribute rather than writing a test.
+  **What remains in this criterion** is the pre-existing integration suites.
+  They are not one edit away: `cargo miri test --test decode_limits` interprets
+  the first handful of its tests and then stops with "can't call foreign
+  function `posix_spawnattr_init`" (how many depends on libtest's scheduling,
+  which is why the count is not quoted), because most suites here
+  cross-validate against a spawned `djpeg`. Adopting one means marking every C-oracle test in it
+  `#[cfg_attr(miri, ignore)]` — worth doing suite by suite, not in the landing
+  that built the harness.
 - **Criterion 2 — partial since 2026-08-13** (see the criterion text), less the
   two C-boundary-harness gaps closed above.
-- **Criteria 1, 6, 7 — untouched.**
+- **Criteria 6, 7 — untouched.**
 
 ## P4-142. `tj3DecompressHeader` Decodes the Entire Image to Read the Header — **OPEN**
 
@@ -10994,16 +11166,19 @@ PR is a behaviour-preserving refactor plus a gate, and a new C-oracle fixture
 is its own TDD cycle; the fixture must be built and proven discriminating,
 not just committed.
 
-## P4-191. Seventy-One Inventoried `unsafe` Items Have No Regression Test — **OPEN**
+## P4-191. Sixty-Nine Inventoried `unsafe` Items Have No Regression Test — **OPEN**
 
 **GitHub:** [#609](https://github.com/developer0hye/libjpeg-turbo-rs/issues/609) — filed 2026-09-08 by the P4-141 criterion-4 landing.
 
 **What produced it.** The P4-141 criterion-4 inventories ask every row for
-the test that would fail if the invariant broke. Thirty-two of
+the test that would fail if the invariant broke. Thirty of
 `docs/UNSAFE_INVENTORY.md`'s 224 rows answer `**none**`, and — since the
 C-ABI chunks landed 2026-09-08 and 2026-09-09 — thirty-nine of
 `docs/UNSAFE_INVENTORY_CAPI.md`'s 235 do, for the whole site or for a named
-sub-invariant. Seventy-one in all. That answer is the criterion's product,
+sub-invariant. Sixty-nine in all — thirty-two and seventy-one before this
+landing, less the two `OnceBox` sub-invariants the P4-141 criterion-1 landing
+closed on 2026-09-09 (`tests/miri_once_init.rs` races the first initialisation
+and reaches the losing `compare_exchange` arm). That answer is the criterion's product,
 not a defect in it — a raw count could not have named one of them.
 
 Eight clusters are actionable; the rest are qualified `**none**`s (a named
@@ -12213,3 +12388,71 @@ months and the job passing says nothing about it either way.
 it: choosing between the two readings is a decision about what the sanitizer
 leg is for, and the pull request that surfaced it lands test infrastructure for
 P4-141.
+
+## P4-209. The Mainline Decode Destination Is Allocated Infallibly, So an Allocator Refusal Aborts the Process — **OPEN**
+
+**GitHub:** [#632](https://github.com/developer0hye/libjpeg-turbo-rs/issues/632) — found by [P4-141](#p4-141-soundness-verification-program-mirisanitizerfuzz-coverage-gaps-and-an-unsafe-inventory-gate--partial-criteria-3-4-and-5-landed-and-gated-except-criterion-3s-callback-reentry-scenario-criterion-1-landed-except-the-pre-existing-integration-suites-criteria-2-6-and-7-open) criterion 1.
+
+**What happens.** `decompress()` allocates its destination with
+`vec![0u8; size]` in `take_out_buf` (`src/decode/pipeline_impl/output.rs`),
+where `size` is `output_buffer_size()` — derived from the SOF. `vec![]` calls
+`handle_alloc_error` on refusal, which **aborts the process**: there is no
+`Result` to return and nothing a caller can catch. Measured on `a9f32b0` with a
+`#[global_allocator]` refusing exactly the destination's size, decoding a 64×64 4:2:0 RGB baseline
+JPEG (12,288-byte destination): `memory allocation of 12288 bytes failed`,
+`SIGABRT`. Patching that single site to
+`common::try_alloc::try_filled_vec` turns it into
+`Err(JpegError::AllocationFailed { .. })`, after which the caller continues and
+a later unrefused decode returns byte-identical pixels.
+
+**Why it is a defect.** `src/common/try_alloc.rs`'s own module documentation
+states the rule this violates: an input-derived size that goes through an
+infallible allocation "turns a hostile or merely large file into an uncatchable
+denial of service, so every such size goes through `try_reserve_exact` here and
+surfaces refusal as `JpegError::AllocationFailed`". P4-136 criterion 4 and
+P4-144 applied it to the progressive output, the arithmetic component planes,
+the ICC reassembly and the marker copies. The **primary** decode entry point was
+never brought in, which inverts the risk ordering: the API almost every caller
+uses is the one that aborts.
+
+**Scope.** `take_out_buf` is the site that aborts for the simplest decode and it
+is not alone. Geometry-derived infallible allocations under `src/decode/` —
+`vec![0u8; …]`, `vec![0; …]`, `Vec::with_capacity(…)` whose argument mentions
+`width`/`height`/`size`/`blocks`/`plane` — number **59 in 8 files**
+(`pipeline_impl/output.rs` 23, `merged_upsample.rs` 10,
+`pipeline_impl/colorspace.rs` 8, `pipeline_impl/lossless.rs` 7,
+`pipeline_impl/color.rs` 5, `toggles.rs` 3, `pipeline_impl/raw.rs` 2,
+`pipeline_impl/baseline.rs` 1). Not all are reachable with an attacker-chosen
+size; the count is the search space, not the defect count.
+
+**Why no existing job saw it.** No job in this repository had ever refused an
+allocation a decode actually makes. The two pre-existing refusal probes —
+`try_alloc::tests::reserving_more_than_the_machine_can_serve_is_an_error` and
+`progressive_output::tests::allocator_refusal_is_an_error_not_an_abort` — ask
+`try_alloc`'s helpers directly for an unservable `isize::MAX` and are
+`#[cfg_attr(miri, ignore)]`d, so neither can aim a refusal at a chosen site on a
+real decode path; and `tests/decode_limits.rs` proves the *limit* checks reject
+oversized geometry, which is a different mechanism (a limit refusing a header is
+not an allocator refusing a buffer). The injection harness landed with P4-141
+criterion 1 and this was its first finding.
+
+**Acceptance criteria.**
+
+1. `decompress` / `Decoder::decode_image` report `JpegError::AllocationFailed`
+   rather than aborting when the destination allocation is refused.
+   `tests/miri_alloc_failure.rs::the_mainline_decode_reports_refusal_instead_of_aborting`
+   is the committed regression test, `#[ignore]`d citing #632 and passing with
+   the fix — closing this item means deleting the attribute.
+2. The 59 candidate sites are triaged: each either routed through
+   `common::try_alloc` or documented as bounded by something other than the
+   input.
+3. The rule gets a mechanism in the shape `tests/parser_unsafe_gate.rs` set for
+   `unsafe` — a gate that fails when a new geometry-derived infallible
+   allocation appears under `src/decode/` — or an explicit statement of why that
+   gate cannot be written.
+
+**Why deferred.** Filed rather than fixed by the landing that found it: the fix
+is one line at the site that aborts and an audit of the fifty-eight others, and
+bundling an audit of the decode pipeline's allocation discipline into the pull
+request that built the injection harness would put the harness's own review
+behind it.
