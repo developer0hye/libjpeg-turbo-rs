@@ -7,6 +7,17 @@ docs/UNSAFE_INVENTORY_CAPI.md   @developer0hye
 tests/unsafe_inventory_gate.rs  @developer0hye
 tests/parser_unsafe_gate.rs     @developer0hye
 tests/helpers/unsafe_scan.rs    @developer0hye
+# P4-141 criterion 1: the same argument for the Miri coverage. What a Miri suite
+# proves is a review question no gate can answer — `tests/miri_coverage_gate.rs`
+# can require that the job still *selects* a suite, not that the suite still
+# asserts anything — and the selection itself lives in `ci.yml`, where a deleted
+# step is a one-line diff. The gate's module doc names this file as what routes
+# that review; these lines are what make the claim true.
+tests/miri_public_api.rs        @developer0hye
+tests/miri_alloc_failure.rs     @developer0hye
+tests/miri_once_init.rs         @developer0hye
+tests/miri_coverage_gate.rs     @developer0hye
+.github/workflows/ci.yml        @developer0hye
 # The rules above are only worth as much as their own review: without this
 # line a pull request deleting them would not be routed anywhere.
 .github/CODEOWNERS              @developer0hye

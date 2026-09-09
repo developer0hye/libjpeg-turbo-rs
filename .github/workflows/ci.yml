@@ -273,7 +273,21 @@ jobs:
     # emulate vendor intrinsics — so this checks exactly the safe-Rust +
     # non-SIMD-unsafe surface (uninit-Vec patterns, BitWriter, parsing).
     # -Zmiri-disable-isolation because fixture-reading tests stat files.
-    name: Miri (non-SIMD unit tests)
+    #
+    # P4-141 criterion 1 (#480): the `--lib` run reaches only what a
+    # `#[cfg(test)]` module can call, so the root crate's integration suites,
+    # the doctests, the allocator-refusal paths and *concurrent* one-time
+    # initialisation were interpreted by nothing — the two C-ABI suites below
+    # were the whole of the job's integration coverage. (The public API itself
+    # is not uncovered there —
+    # `progressive_output::tests::progressive_output_path_is_miri_covered` walks
+    # a `ProgressiveDecoder`; what it does not do is read the bytes. See
+    # `tests/miri_public_api.rs` for the delta, stated per surface.) The three
+    # `miri_*` suites and the `--doc` step below close that;
+    # `tests/miri_coverage_gate.rs` fails on every pull request if a step here
+    # stops naming one of them, because a suite that only compiles is
+    # indistinguishable from a suite that passes.
+    name: Miri (non-SIMD unit tests, public API, doctests)
     runs-on: ubuntu-latest
     needs: [check]
     steps:
@@ -313,6 +327,53 @@ jobs:
           cargo miri test -p libjpeg-turbo-rs-capi
           --test capi_create_abi_guards
           --test capi_thread_affinity
+        env:
+          MIRIFLAGS: -Zmiri-disable-isolation
+        timeout-minutes: 25
+      # P4-141 criterion 1: the public API, from outside the crate.
+      # `miri_public_api` walks each intermediate progressive reconstruction
+      # (P4-136), which under the interpreter checks the raw destination
+      # pointers `decode_progressive_planes` hands to `idct_scaled_strided`;
+      # reading the reconstruction back is a tripwire for a return to
+      # `set_len`-over-spare-capacity rather than a live uninit check, because
+      # today's destinations are initialised at allocation (see the suite's
+      # module documentation, which states the split). It also covers the
+      # grayscale branch of `output()`, which has no lib test, and drives the
+      # `BitWriter` arena across a reallocation and through its 0xFF-stuffing
+      # path (P4-138) — states a real encode reaches and the lib tests do not
+      # establish.
+      # `miri_alloc_failure` refuses allocations from a `#[global_allocator]`
+      # and asserts the object is still usable afterwards, which is the
+      # "post-allocation-failure state" the criterion names and which nothing
+      # could aim at a chosen site before.
+      - run: >
+          cargo miri test --no-default-features --features std
+          --test miri_public_api
+          --test miri_alloc_failure
+        env:
+          MIRIFLAGS: -Zmiri-disable-isolation
+        timeout-minutes: 25
+      # Concurrent one-time initialisation, in a process where it has not
+      # happened yet — which is why it is its own binary rather than a test in
+      # one of the two above: whichever test touches `std_huffman_tables`
+      # first would leave the others on the already-published fast path.
+      #
+      # `-Zmiri-many-seeds` is the mechanism, not a flourish: it re-runs the
+      # test under different interleavings, so the `compare_exchange` loser
+      # branch is searched instead of hoped for (instrumented and counted on
+      # macOS aarch64: 5 traversals on the default seed, 40 across these
+      # eight; the exact figures are scheduler-dependent, the point is that
+      # the branch is reached).
+      - run: >
+          cargo miri test --no-default-features --features std
+          --test miri_once_init
+        env:
+          MIRIFLAGS: -Zmiri-disable-isolation -Zmiri-many-seeds=0..8
+        timeout-minutes: 25
+      # The doctests, which `cargo miri test --lib` does not build. All seven
+      # of this crate's doctests compile under `--no-default-features
+      # --features std`, so this is the whole set rather than a subset.
+      - run: "cargo miri test --no-default-features --features std --doc"
         env:
           MIRIFLAGS: -Zmiri-disable-isolation
         timeout-minutes: 25

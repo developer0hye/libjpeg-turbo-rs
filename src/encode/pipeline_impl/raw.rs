@@ -113,7 +113,7 @@ pub fn compress_raw(
     let mcus_y: usize = image_height.div_ceil(mcu_h);
     let enc_simd = crate::simd::detect_encoder();
     let fdct_quantize_fn = enc_simd.fdct_quantize;
-    let mut bit_writer: BitWriter = BitWriter::new(image_width * image_height);
+    let mut bit_writer: BitWriter = BitWriter::for_frame(image_width, image_height);
     let mut prev_dc_y: i16 = 0;
     let mut prev_dc_cb: i16 = 0;
     let mut prev_dc_cr: i16 = 0;

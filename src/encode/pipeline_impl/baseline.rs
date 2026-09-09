@@ -147,7 +147,7 @@ pub fn compress_with_params(params: &CompressParams<'_>) -> Result<Vec<u8>> {
     };
 
     // Entropy encode all MCUs
-    let mut bit_writer = BitWriter::new(width * height);
+    let mut bit_writer = BitWriter::for_frame(width, height);
     let mut prev_dc_y: i16 = 0;
     let mut prev_dc_cb: i16 = 0;
     let mut prev_dc_cr: i16 = 0;
@@ -1323,7 +1323,7 @@ fn compress_direct_planar(params: &CompressParams<'_>, spec: &DirectPlanarSpec) 
         None => default_ac_table,
     };
 
-    let mut bit_writer = BitWriter::new(width * height);
+    let mut bit_writer = BitWriter::for_frame(width, height);
     let mut prev_dc: Vec<i16> = vec![0i16; components];
     let mut restart_marker_index: u8 = 0;
     scan_planar_blocks(

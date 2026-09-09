@@ -777,7 +777,7 @@ pub fn compress_optimized_with_params(params: &CompressParams<'_>) -> Result<Vec
     } = resolved;
 
     // === Pass 2: Encode all buffered blocks with optimal tables ===
-    let mut bit_writer = BitWriter::new(width * height);
+    let mut bit_writer = BitWriter::for_frame(width, height);
     let mut prev_dc_y: i16 = 0;
     let mut prev_dc_cb: i16 = 0;
     let mut prev_dc_cr: i16 = 0;
