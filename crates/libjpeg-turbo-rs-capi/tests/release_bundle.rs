@@ -925,7 +925,7 @@ fn release_bundle_ships_a_cyclonedx_sbom_beside_the_archive() {
         return;
     }
     if !have_cargo_cyclonedx() {
-        eprintln!("SKIP: cargo-cyclonedx is not installed (cargo install cargo-cyclonedx)");
+        eprintln!("SKIP: cargo-cyclonedx is not installed (cargo install --locked cargo-cyclonedx)");
         return;
     }
     let out: tempfile::TempDir = tempfile::tempdir().expect("mkdir outdir");
@@ -966,7 +966,7 @@ fn release_bundle_ships_a_cyclonedx_sbom_beside_the_archive() {
     );
     // cargo-cyclonedx writes one document per workspace member. Only the capi
     // crate's belongs in the bundle, and none may be left in the source tree
-    // where the next `cargo publish --allow-dirty` would ship it.
+    // where the next `cargo publish --locked --allow-dirty` would ship it.
     let strays: Vec<PathBuf> = workspace_member_dirs()
         .into_iter()
         .map(|dir| dir.join(&sbom_name))
