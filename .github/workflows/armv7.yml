@@ -14,6 +14,9 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+permissions:
+  contents: read
+
 jobs:
   # 32-bit ARM (ARMv7-A, hard-float) — issue #424, tracked as P4-78.
   #
@@ -75,7 +78,7 @@ jobs:
       # is unchanged -- naming it here now fails with "no test target named".
       - name: Build lib + dispatch tests for armv7
         run: |
-          cargo test --release --target armv7-unknown-linux-gnueabihf --no-run \
+          cargo test --locked --release --target armv7-unknown-linux-gnueabihf --no-run \
             --lib --test no_std_dispatch
         timeout-minutes: 20
       # Scoped to C-tool-free targets on purpose: the byte-exact
@@ -87,7 +90,7 @@ jobs:
       - name: Run under qemu-arm (ARMv7-A)
         run: |
           set -euo pipefail
-          cargo test --release --target armv7-unknown-linux-gnueabihf --no-run \
+          cargo test --locked --release --target armv7-unknown-linux-gnueabihf --no-run \
             --message-format=json \
             --lib --test no_std_dispatch \
             | jq -r 'select(.executable != null) | .executable' \
@@ -123,7 +126,7 @@ jobs:
       - name: Run C-ABI crate under qemu-arm (P4-139, 32-bit spans)
         run: |
           set -euo pipefail
-          cargo test --release --target armv7-unknown-linux-gnueabihf --no-run \
+          cargo test --locked --release --target armv7-unknown-linux-gnueabihf --no-run \
             --message-format=json \
             -p libjpeg-turbo-rs-capi --lib \
             --test capi_layout_adoption --test capi_span_overflow_guards \
