@@ -1303,7 +1303,8 @@ fn a_value_taking_harness_flag_does_not_look_like_a_filter() {
         Some(&Selection::All)
     );
 
-    let skipping: &str = "      - run: cargo test --locked --test c_croptest -- --skip c_croptest_full\n";
+    let skipping: &str =
+        "      - run: cargo test --locked --test c_croptest -- --skip c_croptest_full\n";
     assert!(matches!(
         root_suites_selected_by(&job_around(skipping)).get("c_croptest"),
         Some(Selection::Unrecognised(_))
@@ -3936,8 +3937,10 @@ fn an_echoed_suite_selection_selects_nothing() {
     ))
     .is_empty());
     assert_eq!(
-        root_suites_selected_by(&job_around("      - run: cargo test --locked --test c_croptest\n"))
-            .get("c_croptest"),
+        root_suites_selected_by(&job_around(
+            "      - run: cargo test --locked --test c_croptest\n"
+        ))
+        .get("c_croptest"),
         Some(&Selection::All)
     );
     // A following invocation's package selector is not this one's: bounding
@@ -3996,7 +3999,11 @@ fn a_shared_whole_root_run_is_what_covers_a_suite_neither_leg_names() {
     // target. A review's mutation put `cargo test --locked --lib` on both legs: it
     // looks whole-crate and runs no integration test at all, so crediting it
     // would vouch for every root oracle suite over a pair that runs none.
-    for command in ["cargo test --locked --lib", "cargo test --locked --doc", "cargo test --locked --bins"] {
+    for command in [
+        "cargo test --locked --lib",
+        "cargo test --locked --doc",
+        "cargo test --locked --bins",
+    ] {
         assert!(
             !runs_the_root_integration_matrix(command),
             "{command:?} runs no integration test"
@@ -4013,7 +4020,9 @@ fn a_shared_whole_root_run_is_what_covers_a_suite_neither_leg_names() {
     assert!(!runs_the_root_integration_matrix(
         "cargo test --locked -p libjpeg-turbo-rs-capi --tests"
     ));
-    assert!(!runs_the_root_integration_matrix("echo cargo test --locked --tests"));
+    assert!(!runs_the_root_integration_matrix(
+        "echo cargo test --locked --tests"
+    ));
 
     // The credit reaches exactly what a default run selects. `--include-ignored`
     // is the one widening it still covers — the default half runs on both legs,
@@ -4165,7 +4174,9 @@ fn a_control_operator_glued_to_an_argument_does_not_eat_it() {
         measurement_commands_in("cargo test --locked; echo done"),
         BTreeSet::from(["cargo test --locked".to_string()])
     );
-    assert!(runs_the_root_integration_matrix("cargo test --locked; echo done"));
+    assert!(runs_the_root_integration_matrix(
+        "cargo test --locked; echo done"
+    ));
     // A suite name with a redirect stuck to it is still a suite name; only a
     // bare file descriptor in that position is not.
     assert_eq!(
@@ -4367,7 +4378,8 @@ fn a_measurement_is_any_cargo_command_that_can_reach_the_oracle() {
     // empty set. That is the same class as "an echo is not a run", one
     // subcommand over: the scanner decides what a leg measures, and a shape it
     // cannot see is a shape the pairing gate never asks about.
-    let corpus: &str = "cargo run --locked --release --example corpus_test -- --corpus-dir tests/corpus/";
+    let corpus: &str =
+        "cargo run --locked --release --example corpus_test -- --corpus-dir tests/corpus/";
     assert_eq!(
         measurement_commands_in(corpus),
         BTreeSet::from([corpus.to_string()])
@@ -4479,7 +4491,8 @@ fn a_run_whose_failure_the_shell_swallows_is_not_a_measurement() {
     // version-check gate already refuses, arriving at the measurement. Found
     // by the review of the corpus pairing, the first pair whose whole
     // measurement is a `cargo run`.
-    let corpus: &str = "cargo run --locked --release --example corpus_test -- --corpus-dir tests/corpus/";
+    let corpus: &str =
+        "cargo run --locked --release --example corpus_test -- --corpus-dir tests/corpus/";
     for swallowed in [
         format!("{corpus} || true"),
         format!("{corpus}|| true"),

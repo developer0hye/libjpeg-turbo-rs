@@ -925,7 +925,9 @@ fn release_bundle_ships_a_cyclonedx_sbom_beside_the_archive() {
         return;
     }
     if !have_cargo_cyclonedx() {
-        eprintln!("SKIP: cargo-cyclonedx is not installed (cargo install --locked cargo-cyclonedx)");
+        eprintln!(
+            "SKIP: cargo-cyclonedx is not installed (cargo install --locked cargo-cyclonedx)"
+        );
         return;
     }
     let out: tempfile::TempDir = tempfile::tempdir().expect("mkdir outdir");
