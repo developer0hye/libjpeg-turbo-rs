@@ -20,7 +20,6 @@ crates/libjpeg-turbo-rs-wasm/pkg/
 # which kept Codex review's auto-scope stuck on the working tree instead of
 # the actual branch diff against origin/main.
 /tests/corpus/
-fuzz/Cargo.lock
 
 # cargo-mutants run output (mutation-testing reports, regenerated on demand)
 /mutants.out/

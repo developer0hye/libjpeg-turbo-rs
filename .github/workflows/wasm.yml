@@ -19,6 +19,9 @@ on:
       - '.cargo/config.toml'
       - '.github/workflows/wasm.yml'
 
+permissions:
+  contents: read
+
 jobs:
   build:
     name: Build & Test
@@ -38,7 +41,7 @@ jobs:
         uses: bytecodealliance/actions/wasmtime/setup@v1
 
       - name: Check main crate compiles for wasm32
-        run: cargo check --target wasm32-unknown-unknown
+        run: cargo check --locked --target wasm32-unknown-unknown
 
       # P4-143 (#474): `.cargo/config.toml` forces `+simd128` on every in-tree
       # build, so without this leg no job ever compiles the baseline wasm32
@@ -52,19 +55,19 @@ jobs:
         env:
           RUSTFLAGS: -D warnings
         run: |
-          cargo check --target wasm32-unknown-unknown -p libjpeg-turbo-rs
-          cargo check --target wasm32-wasip1 -p libjpeg-turbo-rs
-          cargo check --target wasm32-unknown-unknown -p libjpeg-turbo-rs --no-default-features --features std
-          cargo check --target wasm32-unknown-unknown -p libjpeg-turbo-rs --no-default-features --features simd
+          cargo check --locked --target wasm32-unknown-unknown -p libjpeg-turbo-rs
+          cargo check --locked --target wasm32-wasip1 -p libjpeg-turbo-rs
+          cargo check --locked --target wasm32-unknown-unknown -p libjpeg-turbo-rs --no-default-features --features std
+          cargo check --locked --target wasm32-unknown-unknown -p libjpeg-turbo-rs --no-default-features --features simd
 
       - name: Check wrapper crate compiles for wasm32
-        run: cargo check --target wasm32-unknown-unknown -p libjpeg-turbo-rs-wasm --tests
+        run: cargo check --locked --target wasm32-unknown-unknown -p libjpeg-turbo-rs-wasm --tests
 
       - name: Run existing test suite on WASM (wasm32-wasip1 + wasmtime)
-        run: cargo test --target wasm32-wasip1
+        run: cargo test --locked --target wasm32-wasip1
 
       - name: Install wasm-pack
-        run: cargo install wasm-pack
+        run: cargo install --locked wasm-pack
 
       - name: Build wasm-pack (web target)
         run: cd crates/libjpeg-turbo-rs-wasm && wasm-pack build --target web

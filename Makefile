@@ -26,22 +26,22 @@ fmt-check:
 	cargo fmt -- --check
 
 clippy:
-	cargo clippy --all-targets -- -D warnings
+	cargo clippy --locked --all-targets -- -D warnings
 
 test-lib:
-	cargo test --lib
+	cargo test --locked --lib
 
 test-integration:
-	cargo test --tests
+	cargo test --locked --tests
 
 test-all:
-	cargo test
+	cargo test --locked
 
 test-cross:
-	cargo test cross_encode cross_check --tests
+	cargo test --locked cross_encode cross_check --tests
 
 bench:
-	cargo bench -- decode_640x480
+	cargo bench --locked -- decode_640x480
 
 install-hooks:
 	bash .github/hooks/install.sh

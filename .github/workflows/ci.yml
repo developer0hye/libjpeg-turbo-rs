@@ -9,6 +9,9 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+permissions:
+  contents: read
+
 jobs:
   check:
     name: Check
@@ -17,10 +20,10 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo check --lib
+      - run: cargo check --locked --lib
       # The user-facing examples are documentation (issue #388); keep
       # them compiling.
-      - run: cargo check --examples
+      - run: cargo check --locked --examples
 
   fmt:
     name: Format
@@ -125,12 +128,12 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       # Library and bin code: zero allowances.
-      - run: cargo clippy --workspace -- -D warnings
+      - run: cargo clippy --locked --workspace -- -D warnings
       # Tests/benches/examples too (issue #390). Three structural lints are
       # allowed in test code only — the sites are enumerated in
       # docs/last_mile/phase4.md P4-70; do not grow the list.
       - run: >
-          cargo clippy --workspace --all-targets -- -D warnings
+          cargo clippy --locked --workspace --all-targets -- -D warnings
           -A clippy::needless_range_loop
           -A clippy::too_many_arguments
           -A clippy::type_complexity
@@ -170,10 +173,10 @@ jobs:
         with:
           toolchain: "1.88"
       - uses: Swatinem/rust-cache@v2
-      - run: cargo +1.87 check -p libjpeg-turbo-rs --all-features
-      - run: cargo +1.87 check -p libjpeg-turbo-rs --no-default-features
-      - run: cargo +1.87 check -p libjpeg-turbo-rs-capi
-      - run: cargo +1.88 check -p libjpeg-turbo-rs-image
+      - run: cargo +1.87 check --locked -p libjpeg-turbo-rs --all-features
+      - run: cargo +1.87 check --locked -p libjpeg-turbo-rs --no-default-features
+      - run: cargo +1.87 check --locked -p libjpeg-turbo-rs-capi
+      - run: cargo +1.88 check --locked -p libjpeg-turbo-rs-image
 
   # Supply-chain gate (issue #390): advisories, licenses, duplicate majors,
   # untrusted sources. Policy lives in deny.toml. `--workspace` because the
@@ -188,7 +191,7 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check advisories bans licenses sources
-          arguments: --all-features --workspace
+          arguments: --all-features --workspace --locked
 
   no-std:
     name: no_std + alloc build (thumbv7em-none-eabihf)
@@ -202,12 +205,12 @@ jobs:
       # Bare-metal target: proves the core codec links without std,
       # not merely that it compiles on a std-capable host (issue #356).
       - name: Build core codec without std
-        run: cargo build --lib --no-default-features --target thumbv7em-none-eabihf
+        run: cargo build --locked --lib --no-default-features --target thumbv7em-none-eabihf
       - name: Build without std but with SIMD feature
-        run: cargo build --lib --no-default-features --features simd --target thumbv7em-none-eabihf
+        run: cargo build --locked --lib --no-default-features --features simd --target thumbv7em-none-eabihf
       # The default (std) build must be unaffected.
       - name: Default features still build
-        run: cargo build --lib
+        run: cargo build --locked --lib
 
   publish-check:
     # Issue #380: the image/wasm bridge crates shipped with path-only
@@ -257,7 +260,7 @@ jobs:
           set -euo pipefail
           for crate in libjpeg-turbo-rs libjpeg-turbo-rs-capi libjpeg-turbo-rs-image libjpeg-turbo-rs-wasm; do
             echo "::group::$crate"
-            cargo package --no-verify --exclude-lockfile -p "$crate"
+            cargo package --locked --no-verify --exclude-lockfile -p "$crate"
             echo "::endgroup::"
           done
       - name: Bridge feature wiring (isolated resolution, issue #381)
@@ -265,7 +268,7 @@ jobs:
         # default `std` feature and would mask a bridge manifest that
         # drops it. `-p` resolves features exactly like a crates.io
         # consumer of the bridge does.
-        run: cargo test -p libjpeg-turbo-rs-image
+        run: cargo test --locked -p libjpeg-turbo-rs-image
 
   miri:
     # Issue #389: interpret the non-SIMD unit tests under Miri. The simd
@@ -324,7 +327,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --lib
+      - run: cargo test --locked --lib
 
   test-integration:
     name: Integration Tests
@@ -356,7 +359,7 @@ jobs:
           grep -q "version 3.1.4.1" /tmp/oracle-version.txt
           /opt/libjpeg-turbo/bin/cjpeg -version 2>&1 | grep -q "version 3.1.4.1"
           /opt/libjpeg-turbo/bin/jpegtran -version 2>&1 | grep -q "version 3.1.4.1"
-      - run: cargo test --tests
+      - run: cargo test --locked --tests
         timeout-minutes: 30
       # P4-82/P4-83 live in the non-default C-ABI workspace member, so the
       # root-only command above does not select their stock-cjpeg matrix. Run
@@ -364,7 +367,7 @@ jobs:
       # zero-test positional-filter match (P4-61).
       - name: Classic C-ABI scanline option parity
         run: >
-          cargo test -p libjpeg-turbo-rs-capi
+          cargo test --locked -p libjpeg-turbo-rs-capi
           --test capi_jpeglib_encode -- --nocapture
       # P4-139's span guards, named explicitly as an early, focused failure
       # signal. Every capi suite — this one included — also executes in the
@@ -373,7 +376,7 @@ jobs:
       # note below records from experience).
       - name: Classic C-ABI span overflow guards (P4-139)
         run: >
-          cargo test -p libjpeg-turbo-rs-capi
+          cargo test --locked -p libjpeg-turbo-rs-capi
           --test capi_span_overflow_guards
           --test norealloc_buffer_capacity
           --test yuv_packed_length_overflow -- --nocapture
@@ -384,7 +387,7 @@ jobs:
       # rendered as "bogus message code".
       - name: Classic C-ABI error codes and message rendering (P4-146)
         run: >
-          cargo test -p libjpeg-turbo-rs-capi
+          cargo test --locked -p libjpeg-turbo-rs-capi
           --test capi_classic_error_codes
           --test capi_error_message_rendering
           --test capi_output_message
@@ -403,13 +406,13 @@ jobs:
       # `jpegint.h` with exact accounting, so a 16th upstream state fails
       # rather than passing unnoticed.
       - name: C-ABI crate unit tests (stable, uninstrumented)
-        run: cargo test -p libjpeg-turbo-rs-capi --lib
+        run: cargo test --locked -p libjpeg-turbo-rs-capi --lib
       # P4-13/P4-17's documented suspension proof is also in the C-ABI
       # workspace member. Its helper requires cjpeg/djpeg in CI and compilation
       # or oracle failures are fatal, so this cannot report green after a skip.
       - name: Classic C-ABI pathological lifecycle parity
         run: >
-          cargo test -p libjpeg-turbo-rs-capi
+          cargo test --locked -p libjpeg-turbo-rs-capi
           --test capi_classic_lifecycle_pathological
           --test capi_suspended_body_cap -- --nocapture
         env:
@@ -431,7 +434,7 @@ jobs:
       - name: Classic C-ABI GNU symbol versions (P4-81)
         run: |
           set -o pipefail
-          cargo test -p libjpeg-turbo-rs-capi \
+          cargo test --locked -p libjpeg-turbo-rs-capi \
             --test capi_symbol_versions -- --nocapture 2>&1 | tee p481.log
           # The ELF assertions are the point of this leg; a skip means they did
           # not run and the nodes are unverified.
@@ -500,7 +503,7 @@ jobs:
       # its own answer to "what is the deterministic measure?".
       - name: Timing ratios, serial (P4-147, P4-152)
         run: >
-          cargo test --release
+          cargo test --locked --release
           --test worker_b8_restart_bomb
           --test worker_b8_progressive_bomb
           --test hard_case_x_byte_and_restart --
@@ -523,7 +526,7 @@ jobs:
 
       - name: TurboJPEG NOREALLOC ownership (P4-145)
         run: >
-          cargo test -p libjpeg-turbo-rs-capi
+          cargo test --locked -p libjpeg-turbo-rs-capi
           --test norealloc_all_entry_points
           --test norealloc_buffer_capacity -- --nocapture
         env:
@@ -535,7 +538,7 @@ jobs:
 
       - name: TurboJPEG compress precision rules (P4-150)
         run: >
-          cargo test -p libjpeg-turbo-rs-capi
+          cargo test --locked -p libjpeg-turbo-rs-capi
           --test capi_compress_precision -- --nocapture
         env:
           # Which precisions upstream accepts is decided by libjpeg two calls
@@ -553,7 +556,7 @@ jobs:
       # the bound is sized from that, not guessed (P4-179).
       - name: Complete C-ABI integration inventory (P4-175)
         run: >
-          cargo test -p libjpeg-turbo-rs-capi --tests --features png --no-fail-fast
+          cargo test --locked -p libjpeg-turbo-rs-capi --tests --features png --no-fail-fast
         env:
           LIBJPEG_TURBO_PREFIX: /tmp/ljt8/prefix
           LIBJPEG_TURBO_REFERENCE_DIR: /tmp/ljt8/prefix
@@ -561,7 +564,7 @@ jobs:
 
       - name: Classic C-ABI create guards (P4-110)
         run: >
-          cargo test -p libjpeg-turbo-rs-capi
+          cargo test --locked -p libjpeg-turbo-rs-capi
           --test capi_create_abi_guards -- --nocapture
         env:
           LIBJPEG_TURBO_PREFIX: /tmp/ljt8/prefix
@@ -572,14 +575,14 @@ jobs:
       # runs and reports green forever.
       - name: Classic C-ABI data_precision gates (P4-154)
         run: >
-          cargo test -p libjpeg-turbo-rs-capi
+          cargo test --locked -p libjpeg-turbo-rs-capi
           --test capi_classic_compress_precision -- --nocapture
         env:
           LIBJPEG_TURBO_PREFIX: /tmp/ljt8/prefix
 
       - name: Classic C-ABI state transitions (P4-104)
         run: >
-          cargo test -p libjpeg-turbo-rs-capi
+          cargo test --locked -p libjpeg-turbo-rs-capi
           --test capi_input_complete_contract
           --test capi_consume_input_states
           --test capi_preload_resume
@@ -602,7 +605,7 @@ jobs:
           LIBJPEG_TURBO_REFERENCE_DIR: /tmp/ljt8/prefix
         run: |
           set -o pipefail
-          cargo test -p libjpeg-turbo-rs-capi \
+          cargo test --locked -p libjpeg-turbo-rs-capi \
             --test capi_classic_dest_ownership -- --nocapture 2>&1 | tee p4108.log
           # A missing reference build would silently drop the differential half
           # of every case, so fail closed on any skip line.
@@ -625,7 +628,7 @@ jobs:
       # TurboJPEG-2.x install fails this step instead of skipping it.
       - name: TurboJPEG YUV component-count guard and C parity
         run: >
-          cargo test -p libjpeg-turbo-rs-capi
+          cargo test --locked -p libjpeg-turbo-rs-capi
           --test yuv_four_component_guard
           --test yuv_decompress_planes_component_guard
           --test yuv_four_component_c_parity
@@ -696,7 +699,7 @@ jobs:
              2>/dev/null | grep -q .
           ls /opt/libjpeg-turbo/lib64/libturbojpeg.* /opt/libjpeg-turbo/lib/libturbojpeg.* \
              2>/dev/null | grep -q .
-      - run: cargo test --tests
+      - run: cargo test --locked --tests
         env:
           LIBJPEG_TURBO_PREFIX: /opt/libjpeg-turbo
         timeout-minutes: 30
@@ -725,7 +728,7 @@ jobs:
       # below, which is what guarantees no suite is left unrun anywhere.
       - name: C-ABI TurboJPEG and stock-tool oracles (3.2.0)
         run: >
-          cargo test -p libjpeg-turbo-rs-capi
+          cargo test --locked -p libjpeg-turbo-rs-capi
           --test capi_jpeglib_encode
           --test capi_classic_lifecycle_pathological
           --test capi_compress_precision
@@ -779,7 +782,7 @@ jobs:
 
       - name: Classic C-ABI state, create and precision traces (3.2.0)
         run: >
-          cargo test -p libjpeg-turbo-rs-capi
+          cargo test --locked -p libjpeg-turbo-rs-capi
           --test capi_create_abi_guards
           --test capi_classic_compress_precision
           --test capi_consume_input_states
@@ -795,7 +798,7 @@ jobs:
       # PR that added it; the bound is sized from that (P4-179).
       - name: Complete C-ABI integration inventory (P4-175)
         run: >
-          cargo test -p libjpeg-turbo-rs-capi --tests --features png --no-fail-fast
+          cargo test --locked -p libjpeg-turbo-rs-capi --tests --features png --no-fail-fast
         env:
           LIBJPEG_TURBO_PREFIX: /tmp/ljt320v8/prefix
           LIBJPEG_TURBO_REFERENCE_DIR: /tmp/ljt320v8/prefix
@@ -806,7 +809,7 @@ jobs:
           LIBJPEG_TURBO_REFERENCE_DIR: /tmp/ljt320v8/prefix
         run: |
           set -o pipefail
-          cargo test -p libjpeg-turbo-rs-capi \
+          cargo test --locked -p libjpeg-turbo-rs-capi \
             --test capi_classic_dest_ownership -- --nocapture 2>&1 | tee p4108-320.log
           # Same fail-closed rule as the baseline leg: a missing reference build
           # drops the differential half of every case silently.
@@ -832,7 +835,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --lib
+      - run: cargo test --locked --lib
 
   test-windows-workspace:
     # Issue #378 / P4-62: no job built the integration or capi test
@@ -859,13 +862,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build every workspace test target
-        run: cargo test --workspace --no-run
+        run: cargo test --locked --workspace --no-run
         timeout-minutes: 30
       - name: Printf-expansion oracle (issue #378 fix)
-        run: cargo test -p libjpeg-turbo-rs-capi --test format_message -- --nocapture
+        run: cargo test --locked -p libjpeg-turbo-rs-capi --test format_message -- --nocapture
         timeout-minutes: 10
       - name: Allocation budgets (P4-62 sibling re-measure)
-        run: cargo test -p libjpeg-turbo-rs --test alloc_budget_small_decode -- --nocapture
+        run: cargo test --locked -p libjpeg-turbo-rs --test alloc_budget_small_decode -- --nocapture
         timeout-minutes: 10
 
   capi-abi-checks:
@@ -905,10 +908,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: ABI offset cross-check (P2-4)
-        run: cargo test -p libjpeg-turbo-rs-capi --release --test abi_offsets -- --nocapture
+        run: cargo test --locked -p libjpeg-turbo-rs-capi --release --test abi_offsets -- --nocapture
         timeout-minutes: 10
       - name: Symbol inventory diff (P2-5)
-        run: cargo test -p libjpeg-turbo-rs-capi --release --test symbol_inventory -- --nocapture
+        run: cargo test --locked -p libjpeg-turbo-rs-capi --release --test symbol_inventory -- --nocapture
         timeout-minutes: 10
       # P2-8 / P4-131: the artifact we ship, as opposed to the cdylib cargo
       # emits. `install_layout` asserts the staged prefix — both SONAME
@@ -949,7 +952,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y patchelf
       - name: Shipped install layout and release bundle (P2-8, P4-131)
         run: >
-          cargo test -p libjpeg-turbo-rs-capi --release
+          cargo test --locked -p libjpeg-turbo-rs-capi --release
           --test install_layout
           --test release_bundle -- --nocapture
         timeout-minutes: 15
@@ -1019,7 +1022,7 @@ jobs:
       # run (tests feed SOF3/12-bit streams to djpeg unconditionally), and
       # installing the official 3.1.4.1 deb would make it an exact duplicate
       # of the Integration Tests job.
-      - run: cargo test --tests
+      - run: cargo test --locked --tests
         timeout-minutes: 30
 
   # The C Interop leg's `-current-oracle` twin (P4-130). Same runner, same
@@ -1081,7 +1084,7 @@ jobs:
       # The identical command to the baseline leg's, which is what
       # `every_leg_pair_is_compared_and_a_twin_runs_what_its_baseline_runs`
       # compares: the pair differs in the oracle release and in nothing else.
-      - run: cargo test --tests
+      - run: cargo test --locked --tests
         timeout-minutes: 30
 
   test-corpus:
@@ -1119,11 +1122,11 @@ jobs:
           /usr/local/bin/cjpeg -version 2>&1 | grep -q "version 3.1.4.1"
           /usr/local/bin/jpegtran -version 2>&1 | grep -q "version 3.1.4.1"
       - name: Generate corpus
-        run: cargo run --release --example generate_corpus
+        run: cargo run --locked --release --example generate_corpus
         timeout-minutes: 15
       - name: Run corpus test
         run: |
-          if ! cargo run --release --example corpus_test -- --corpus-dir tests/corpus/ > corpus-test.tsv 2>&1; then
+          if ! cargo run --locked --release --example corpus_test -- --corpus-dir tests/corpus/ > corpus-test.tsv 2>&1; then
             tail -200 corpus-test.tsv
             exit 1
           fi
@@ -1186,11 +1189,11 @@ jobs:
       # compares: the corpus is regenerated by *this* leg's cjpeg, so the pair
       # differs in the oracle release and in nothing else.
       - name: Generate corpus
-        run: cargo run --release --example generate_corpus
+        run: cargo run --locked --release --example generate_corpus
         timeout-minutes: 15
       - name: Run corpus test
         run: |
-          if ! cargo run --release --example corpus_test -- --corpus-dir tests/corpus/ > corpus-test.tsv 2>&1; then
+          if ! cargo run --locked --release --example corpus_test -- --corpus-dir tests/corpus/ > corpus-test.tsv 2>&1; then
             tail -200 corpus-test.tsv
             exit 1
           fi
@@ -1203,4 +1206,4 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo doc --no-deps
+      - run: cargo doc --locked --no-deps
