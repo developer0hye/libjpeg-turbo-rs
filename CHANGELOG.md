@@ -169,6 +169,21 @@ and `git log` between tags.
   runs system/Rust bidirectional cross-decodes.
 
 ### Fixed
+- An allocator refusal during a decode is reported as
+  `JpegError::AllocationFailed` instead of aborting the process (P4-209,
+  #632). `decompress` / `Decoder::decode_image` allocated their destination
+  with `vec![0u8; size]`, sized by the SOF, so a large or hostile file on a
+  memory-constrained host ended in an uncatchable `SIGABRT`. That buffer and
+  every other full-plane or destination allocation under `src/decode/` —
+  component planes, the merged-upsample, 12-bit, lossless, CMYK/YCCK and
+  colourspace-override outputs, full-plane chroma upsampling, crop copies and
+  the block-smoothing DC snapshot — now go through the crate's fallible
+  allocator helpers. A successful decode is byte-identical. A 12-bit source
+  still decodes its samples through `api::precision`, which this change does
+  not cover. `tests/decode_alloc_gate.rs` with
+  `docs/decode_alloc_inventory.tsv` fails CI when a new infallible allocation
+  under `src/decode/` is not classified as bounded by something other than the
+  input.
 - **Security — a custom scan script could write past the stack from safe
   Rust on x86_64** (P4-192, #610). `Encoder::scan_script` stored the script
   verbatim; an AC band with `se > 63` reached an unchecked SSE2 kernel that

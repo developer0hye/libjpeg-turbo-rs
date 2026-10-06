@@ -45,7 +45,8 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
 use libjpeg_turbo_rs::{
-    compress, decompress, Encoder, Image, JpegError, PixelFormat, ProgressiveDecoder, Subsampling,
+    compress, decompress, Decoder, Encoder, Image, JpegError, PixelFormat, ProgressiveDecoder,
+    Subsampling,
 };
 
 thread_local! {
@@ -54,7 +55,7 @@ thread_local! {
     /// An exact size rather than a threshold. A `size >= threshold` rule refuses
     /// whatever else happens to be large, and every *infallible* allocation it
     /// catches aborts the process — which is a `SIGABRT` with no assertion
-    /// message, the failure mode P4-209 demonstrates. Every size this suite
+    /// message, the failure mode P4-209 demonstrated. Every size this suite
     /// refuses comes from `try_reserve_exact` or `try_filled_vec`, so it is
     /// exactly predictable, and naming it means an unrelated allocation of a
     /// different size cannot be caught by accident (rust-code-reviewer,
@@ -191,7 +192,7 @@ fn gradient_rgb(width: usize, height: usize) -> Vec<u8> {
     pixels
 }
 
-/// Side of the fixture in the ignored mainline test. 64 rather than 32 so its
+/// Side of the fixture in the mainline and vertical-crop tests. 64 rather than 32 so its
 /// 12288-byte destination is a size nothing else in that decode allocates —
 /// at 32x32 the destination is 3072 bytes, and the ICC case already refuses on
 /// that path's numbers.
@@ -347,22 +348,22 @@ fn a_refused_icc_reassembly_leaves_the_decoder_usable() {
     );
 }
 
-/// The contract for the *primary* decode entry point, which does not hold today.
+/// The contract for the *primary* decode entry point (P4-209, #632).
 ///
-/// `decompress` allocates its destination with `vec![0u8; size]`
-/// (`decode/pipeline_impl/output.rs`, `take_out_buf`) where `size` comes from
-/// the SOF, so an allocator refusal aborts the process instead of reporting
-/// [`JpegError::AllocationFailed`] — the uncatchable denial of service P4-136
-/// criterion 4 and P4-144 removed from the progressive, arithmetic, ICC and
-/// marker paths. Verified by patching that one site to `try_filled_vec`, after
-/// which this test passes unchanged.
+/// `decompress` allocates its destination in `take_out_buf`
+/// (`decode/pipeline_impl/output.rs`), sized by the SOF. Until P4-209 that was
+/// `vec![0u8; size]`, so an allocator refusal aborted the process instead of
+/// reporting [`JpegError::AllocationFailed`] — the uncatchable denial of service
+/// P4-136 criterion 4 and P4-144 had already removed from the progressive,
+/// arithmetic, ICC and marker paths, still live on the API almost every caller
+/// uses. This test was committed `#[ignore]`d with the harness (P4-141) and
+/// aborted with `SIGABRT` when run; it now passes, and the site is
+/// `try_filled_vec`.
 ///
-/// Ignored rather than deleted, and rather than asserting the abort: an
-/// assertion that the process dies would pin the defect as the contract. This is
-/// the regression test for P4-209 (#632), and deleting the `#[ignore]` is what
-/// closes it.
+/// The fixture is 4:2:0, which takes the row-streamed H2V2 path (merged
+/// upsampling is off by default), so the refused buffer is the caller-visible
+/// destination itself and nothing else in the decode is that size.
 #[test]
-#[ignore = "P4-209 (#632): the mainline decode destination is allocated infallibly, so an allocator refusal aborts"]
 fn the_mainline_decode_reports_refusal_instead_of_aborting() {
     let side: usize = MAINLINE_SIDE;
     let jpeg: Vec<u8> = compress(
@@ -380,11 +381,158 @@ fn the_mainline_decode_reports_refusal_instead_of_aborting() {
     let (result, refusals) = with_refusals_of(side * side * 3, || decompress(&jpeg));
     let error: JpegError = result.expect_err("a refused allocation must not decode");
     assert!(
-        matches!(error, JpegError::AllocationFailed { .. }),
-        "want AllocationFailed, got {error:?}"
+        matches!(
+            &error,
+            JpegError::AllocationFailed { what, bytes }
+                if *what == "decode output buffer" && *bytes == (side * side * 3) as u64
+        ),
+        "want the destination refused, got {error:?}"
     );
     assert_eq!(refusals, 1, "exactly the destination must be refused");
 
     let again: Image = decompress(&jpeg).expect("decode after a refused decode");
     assert_eq!(again.data, reference.data);
+}
+
+/// Run one configured decode three times on the *same* [`Decoder`]: unrefused
+/// for a reference, refused at exactly `refuse_bytes`, and unrefused again.
+/// Returns the refused call's error and refusal count after asserting that the
+/// third decode reproduces the first byte for byte.
+///
+/// The reference is our own decoder: what this suite checks is that a refusal
+/// changes nothing about the next decode, not pixel parity, which the C
+/// cross-validation suites own for these same paths.
+fn refuse_once_on(decoder: &Decoder<'_>, refuse_bytes: usize) -> (JpegError, usize) {
+    let reference: Image = decoder.decode_image().expect("unrefused reference decode");
+    let (result, refusals) = with_refusals_of(refuse_bytes, || decoder.decode_image());
+    let error: JpegError = result.expect_err("a refused allocation must not decode");
+    let again: Image = decoder
+        .decode_image()
+        .expect("decode after a refused decode");
+    assert_eq!(again.width, reference.width);
+    assert_eq!(again.height, reference.height);
+    assert_eq!(again.data, reference.data);
+    (error, refusals)
+}
+
+/// Fixture for the merged-upsampling case: 4:2:0, and neither side a multiple
+/// of the 16-pixel MCU, so the merged RGB buffer (`56 * 40 * 3` = 6720 bytes)
+/// is a size no plane (`64 * 48` luma, `32 * 24` chroma) or row scratch in the
+/// same decode shares.
+const MERGED_WIDTH: usize = 56;
+const MERGED_HEIGHT: usize = 40;
+
+/// Issue #632: the merged-upsampling path (`Decoder::set_merged_upsample`)
+/// builds its RGB image in a buffer of its own rather than through
+/// `take_out_buf`, so fixing the mainline destination left it aborting. It is a
+/// second, distinct converted site on a public API: before P4-209 this test
+/// died with `SIGABRT` (`memory allocation of 6720 bytes failed`).
+#[test]
+fn a_refused_merged_upsample_buffer_reports_instead_of_aborting() {
+    let jpeg: Vec<u8> = compress(
+        &gradient_rgb(MERGED_WIDTH, MERGED_HEIGHT),
+        MERGED_WIDTH,
+        MERGED_HEIGHT,
+        PixelFormat::Rgb,
+        75,
+        Subsampling::S420,
+    )
+    .expect("baseline encode");
+    let mut decoder: Decoder<'_> = Decoder::new(&jpeg).expect("parse headers");
+    decoder.set_merged_upsample(true);
+
+    let bytes: usize = MERGED_WIDTH * MERGED_HEIGHT * 3;
+    let (error, refusals) = refuse_once_on(&decoder, bytes);
+    assert!(
+        matches!(
+            &error,
+            JpegError::AllocationFailed { what, bytes: refused }
+                if *what == "merged upsample RGB buffer" && *refused == bytes as u64
+        ),
+        "want the merged RGB buffer refused, got {error:?}"
+    );
+    assert_eq!(refusals, 1, "exactly the merged RGB buffer must be refused");
+}
+
+/// Lossless fixture: a grayscale SOF3 frame whose sample plane is `u16`, so the
+/// plane is `50 * 30 * 2` = 3000 bytes against a 1500-byte 8-bit destination
+/// and 100-byte row scratch.
+const LOSSLESS_WIDTH: usize = 50;
+const LOSSLESS_HEIGHT: usize = 30;
+
+/// Issue #632: the lossless pipeline (`decode/pipeline_impl/lossless.rs`)
+/// allocates its reconstructed sample plane at frame geometry before any output
+/// exists. Before P4-209 that was `vec![0u16; width * height]` and this test
+/// died with `SIGABRT` (`memory allocation of 3000 bytes failed`).
+#[test]
+fn a_refused_lossless_sample_plane_reports_instead_of_aborting() {
+    let pixels: Vec<u8> = (0..LOSSLESS_WIDTH * LOSSLESS_HEIGHT)
+        .map(|i| ((i * 7) % 251) as u8)
+        .collect();
+    let jpeg: Vec<u8> = Encoder::new(
+        &pixels,
+        LOSSLESS_WIDTH,
+        LOSSLESS_HEIGHT,
+        PixelFormat::Grayscale,
+    )
+    .lossless(true)
+    .encode()
+    .expect("lossless encode");
+    let decoder: Decoder<'_> = Decoder::new(&jpeg).expect("parse headers");
+
+    let bytes: usize = LOSSLESS_WIDTH * LOSSLESS_HEIGHT * 2;
+    let (error, refusals) = refuse_once_on(&decoder, bytes);
+    assert!(
+        matches!(
+            &error,
+            JpegError::AllocationFailed { what, bytes: refused }
+                if *what == "lossless sample plane" && *refused == bytes as u64
+        ),
+        "want the lossless sample plane refused, got {error:?}"
+    );
+    assert_eq!(refusals, 1, "exactly the sample plane must be refused");
+
+    // And the lossless round trip is still exact after the refusal.
+    let image: Image = decoder.decode_image().expect("decode after refusal");
+    assert_eq!(image.data, pixels);
+}
+
+/// Vertical-crop window for the cropped case on the 64x64 mainline fixture: 20
+/// rows of RGB, `20 * 64 * 3` = 3840 bytes, against a 9216-byte staged decode
+/// (rows 0..48, the extended MCU range), a 4096-byte luma plane and 1024-byte
+/// chroma planes.
+const CROP_Y: usize = 8;
+const CROP_HEIGHT: usize = 20;
+
+/// Issue #632: a vertical crop decodes into a staging buffer and then copies
+/// the requested rows out (`decode_image_with_sink`). That copy was
+/// `image.data[start..end].to_vec()` — a third input-sized site, reached only
+/// through `Decoder::set_crop_y` / `set_crop_region`. Before P4-209 this test
+/// died with `SIGABRT` (`memory allocation of 3840 bytes failed`).
+#[test]
+fn a_refused_vertical_crop_copy_reports_instead_of_aborting() {
+    let side: usize = MAINLINE_SIDE;
+    let jpeg: Vec<u8> = compress(
+        &gradient_rgb(side, side),
+        side,
+        side,
+        PixelFormat::Rgb,
+        75,
+        Subsampling::S420,
+    )
+    .expect("baseline encode");
+    let mut decoder: Decoder<'_> = Decoder::new(&jpeg).expect("parse headers");
+    decoder.set_crop_y(CROP_Y, CROP_HEIGHT);
+
+    let bytes: usize = CROP_HEIGHT * side * 3;
+    let (error, refusals) = refuse_once_on(&decoder, bytes);
+    assert!(
+        matches!(
+            &error,
+            JpegError::AllocationFailed { what, bytes: refused }
+                if *what == "vertically cropped output" && *refused == bytes as u64
+        ),
+        "want the vertical-crop copy refused, got {error:?}"
+    );
+    assert_eq!(refusals, 1, "exactly the cropped copy must be refused");
 }
