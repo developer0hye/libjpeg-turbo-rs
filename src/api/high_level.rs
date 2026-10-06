@@ -61,7 +61,11 @@ pub fn decompress_lenient(data: &[u8]) -> Result<Image> {
 ///
 /// Uses MCU-level IDCT skip to avoid unnecessary computation on rows
 /// outside the crop region, then extracts the exact pixel region.
-/// Coordinates that exceed image bounds are clamped.
+/// Coordinates that exceed image bounds are clamped — deliberately unlike
+/// [`Decoder::set_crop_region`], which refuses such a region the way
+/// `djpeg -crop` does (P4-197, #618). A region starting at or past the bottom
+/// edge clamps to zero rows; one starting at or past the right edge clamps to
+/// the columns between the last iMCU boundary and the edge, which may be none.
 pub fn decompress_cropped(data: &[u8], region: CropRegion) -> Result<Image> {
     let mut decoder = Decoder::new(data)?;
     let header = decoder.header();
