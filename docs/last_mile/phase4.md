@@ -13171,7 +13171,8 @@ from a smoke run.
   produces the oriented 192x256. P4-212 fixed both the eager decode and the
   missing metadata (PR #643, merged and CLOSED 2026-10-07), so on a
   candidate that includes it the adapter's thumbnail row should become
-  192x256; not yet re-run.
+  192x256. The first measured report (`main@80c15d2`, below) confirms it:
+  every thumbnail row is 192x256.
 - `decompress_into` still allocates whole-image component planes: a 17.5 MiB
   peak on 12 MP 4:2:0 RGB (zune `decode_into`: 0.65 MiB) and 2.0 MiB on
   grayscale 1080p. Filed as
@@ -13213,7 +13214,8 @@ run 37542461917, reproduced by run 37543406684; the candidate library is
 - BUDGETS.md applies the README's predeclared rules: same-run ratios with a
   `max(2 × spread, 3 %)` band, zero budget for allocations, identical encode
   bytes, and 5 % for size. `experiments/downstream/budgets.py` checks any
-  later report against them.
+  later report's timing ratios against them; the allocation, encode-byte
+  and size rules are checked by reading the report.
 - It lists every case the candidate loses. Three were filed:
   [P4-228](#p4-228-the-candidate-is-6--slower-than-080-on-the-thumbnail-workload--open)
   (thumbnail 1.060 vs 0.8.0, reproduced),
@@ -13224,6 +13226,10 @@ run 37542461917, reproduced by run 37543406684; the candidate library is
   (binary size +10–15 % vs 0.8.0, unattributed).
 - The hosted runs carry no C oracle. The C contract rests on the local runs
   above against stock 3.2.0.
+- Only the `default` variant has a committed report. Criterion 1's thin-LTO,
+  fat-LTO and `target-cpu=native` tables exist as labelled `VARIANT` runs of
+  the same harness and dispatch input. #635 calls them optional tables.
+  None is committed, so none carries a budget.
 
 ## P4-218. The Buffer-Reuse Decode Still Allocates Whole-Image Component Planes — **OPEN**
 
@@ -13386,7 +13392,7 @@ What is known:
   in both runs, while the buffer-reuse rows are flat (0.990–0.992).
   `try_filled_vec` (`src/common/try_alloc.rs`, P4-209) replaced
   `vec![0; n]`, which can take zeroed pages straight from `calloc`, with
-  `try_reserve` + `resize`, which touches every page. That fits a cost that
+  `try_reserve_exact` + `resize`, which touches every page. That fits a cost that
   grows with output size, and is the first hypothesis to test.
 
 **Acceptance criteria.**
@@ -13410,10 +13416,11 @@ loaded when the report was taken.
 **Found 2026-10-07** taking P4-214's first report. Both `downstream-bench.yml`
 dispatches (runs 37542461917 and 37543406684) put the aarch64 leg on a
 3-vCPU `macos-latest` runner whose own pre-run sample showed a load average of
-50 and 29 and, in the first run, 0.3 % idle. Its p10–p90 spreads were 15–134 %
-of the median, against 0.1–11 % on the x86_64 leg, so its report is committed
-as `experiments/downstream/reports/2026-10-07-aarch64-macos-contaminated/` and
-sets no budget. The harness captured the sample and printed it, then
+50 and 29 and, in the first run, 0.3 % idle. Its p10–p90 spreads were 13–80 %
+and 6–159 % of the median, against 0.1–6 % and 0.3–8 % on the x86_64 leg, so
+both reports are committed as
+`experiments/downstream/reports/2026-10-07-aarch64-macos-contaminated/` and
+`…-contaminated-run2/` and set no budget. The harness captured the sample and printed it, then
 benchmarked anyway and wrote a report that reads like any other.
 
 **Acceptance criteria.**

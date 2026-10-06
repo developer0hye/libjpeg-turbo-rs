@@ -10,8 +10,10 @@ for why only same-run ratios are budgeted.
 
 `--first` names the report the bands and lead budgets were set from (the
 committed first report); without it the report under test is its own first.
-Exit status is 0 when every budgeted row is within budget, 1 when one is
-over, 2 on a usage error. Standard library only.
+Both reports must be full runs (not `--smoke`) of the same architecture and
+build variant. Exit status is 0 when every budgeted row is within budget, 1
+when one is over, 2 on a usage error or an unusable pair. Standard library
+only.
 """
 
 import json
@@ -24,7 +26,7 @@ MIN_BAND = 0.03
 
 # Same-run pairs. `parity` pairs hold the candidate to the published release
 # (ratio 1.0 plus the band); `lead` pairs hold it to the lead it had over a
-# competitor in the first report (measured ratio plus the band).
+# competitor in the first report (measured ratio times 1 + the band).
 DECODE_PAIRS = [
     ("candidate-fresh", "baseline-fresh", "parity"),
     ("candidate-reuse", "baseline-reuse", "parity"),
@@ -80,6 +82,30 @@ def all_ratios(report):
     return ratios
 
 
+def runner_key(report):
+    """The architecture and build variant a report's ratios belong to.
+
+    Ratios move with the ISA (the SIMD paths differ) and with the build
+    variant, so a band set on one does not apply to another.
+    """
+    architecture = report["environment"]["runtime_cpu_features"].split()[0]
+    return architecture, report["build"]["variant"]
+
+
+def unusable(report, first_report):
+    """Why the pair cannot be scored, or None."""
+    for name, candidate in (("report", report), ("first report", first_report)):
+        # A smoke run times two iterations and says it is not a measurement.
+        if candidate.get("smoke"):
+            return f"the {name} is a --smoke run, not a measurement"
+    if runner_key(report) != runner_key(first_report):
+        return (
+            f"the report is {runner_key(report)} but the first report is "
+            f"{runner_key(first_report)}; budgets are per architecture and variant"
+        )
+    return None
+
+
 def load(path):
     with open(path) as handle:
         return json.load(handle)
@@ -101,8 +127,14 @@ def main(argv):
     if len(args) != 1:
         print(__doc__.strip(), file=sys.stderr)
         return 2
-    ratios = all_ratios(load(args[0]))
-    first = all_ratios(load(first_path)) if first_path else ratios
+    report = load(args[0])
+    first_report = load(first_path) if first_path else report
+    problem = unusable(report, first_report)
+    if problem:
+        print(f"budgets.py: {problem}", file=sys.stderr)
+        return 2
+    ratios = all_ratios(report)
+    first = all_ratios(first_report)
     # README.md: the first report's spread is the noise floor for every
     # later report, so bands come from it, not from the run under test.
     first_band = {(entry["case"], entry["pair"]): entry["band"] for entry in first}
@@ -118,7 +150,7 @@ def main(argv):
         print("|---|---|---:|---:|---:|---|")
     for entry in ratios:
         # Parity: the release's speed plus the first report's band. Lead: the
-        # first report's ratio plus its band, so a lead can shrink only by
+        # first report's ratio times (1 + its band), so a lead can shrink only by
         # what the first run could not resolve.
         key = (entry["case"], entry["pair"])
         if entry["kind"] == "parity":

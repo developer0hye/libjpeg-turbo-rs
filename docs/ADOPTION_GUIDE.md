@@ -80,9 +80,9 @@ and threading policy. Two points matter most when adopting:
 - **Only the root re-exports and the named re-export modules are covered
   API.** The `pub` low-level modules (`api`, `common`, `decode`, `encode`,
   `simd`, `transform`) are not, and 0.9.0 already changes some of them. The
-  review that classifies their items (P4-222) is in PR
-  [#649](https://github.com/developer0hye/libjpeg-turbo-rs/pull/649),
-  forthcoming.
+  review that classifies their items (P4-222, PR
+  [#649](https://github.com/developer0hye/libjpeg-turbo-rs/pull/649)) is
+  [`PUBLIC_API_REVIEW.md`](PUBLIC_API_REVIEW.md).
 - **Set your own resource budget for untrusted input.** The defaults accept
   what `djpeg` accepts and set no memory ceiling, by design
   ([`STABILITY.md#resource-limits`](STABILITY.md#resource-limits)). Pass the
@@ -175,7 +175,7 @@ Open on `main` (the [OPEN Items table](LAST_MILE.md#open-items) is the full list
 | [P4-217](last_mile/phase4.md#p4-217-no-written-release-semver-msrv-or-security-policy-no-private-reporting-route-and-no-api-check-before-publish--partial-policy-api-gate-and-affected-version-record-landed-private-reporting-route-not-enabled-oss-fuzz-not-submitted) | GitHub private vulnerability reporting is not enabled yet; [`SECURITY.md`](../SECURITY.md) gives the fallback. |
 | [P4-170](last_mile/phase4.md#p4-170-classic-source-manager-parity-fails-in---release-and-passes-in-debug-so-ci-never-sees-it--open) | Classic source-manager parity fails in `--release` builds. |
 
-Filed in open pull requests, not yet on `main`:
+Also open on `main`, filed by the pull requests linked:
 
 - **P4-218** ([#646](https://github.com/developer0hye/libjpeg-turbo-rs/pull/646)):
   `decompress_into` still allocates whole-image component planes, so the

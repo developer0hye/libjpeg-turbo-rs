@@ -1,0 +1,26 @@
+variant=default
+profile=release; consumer manifest has no [profile] section (checked)
+CARGO_PROFILE_RELEASE_LTO=<unset: Cargo default lto=false>
+RUSTFLAGS=<unset>
+CARGO_BUILD_JOBS=<unset: one job per CPU>
+scrubbed_env=CARGO_INCREMENTAL
+cargo=cargo 1.99.0 (5f94df478 2026-08-27)
+cargo_home_config=<none>
+env_CARGO_TERM_COLOR=always
+candidate_sha=e56ace42e181fc1e4712d67bb383a8e4ccdb89fd
+candidate_tracked_changes=0
+work_dir=/Users/runner/work/_temp/downstream-work
+clean_build_seconds=33.3 (all dependencies, fresh target dir, downloads excluded)
+binary_bytes=2769504 (downstream-consumer, unstripped)
+probe_none_bytes=453888 (contribution over probe-none: 0)
+probe_none_clean_build_seconds=0.3
+probe_baseline_bytes=920992 (contribution over probe-none: 467104)
+probe_baseline_clean_build_seconds=12.2
+probe_candidate_bytes=968256 (contribution over probe-none: 514368)
+probe_candidate_clean_build_seconds=12.4
+probe_adapter_bytes=993488 (contribution over probe-none: 539600)
+probe_adapter_clean_build_seconds=20.7
+probe_image_bytes=677680 (contribution over probe-none: 223792)
+probe_image_clean_build_seconds=13.7
+probe_zune_bytes=627136 (contribution over probe-none: 173248)
+probe_zune_clean_build_seconds=2.5
