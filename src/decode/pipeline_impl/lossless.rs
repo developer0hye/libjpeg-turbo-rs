@@ -2,22 +2,15 @@ use super::output::pad_alpha_offset;
 use super::{Decoder, Image};
 use crate::common::error::{JpegError, Result};
 use crate::common::huffman_table::HuffmanTable;
-use crate::common::icc;
-use crate::common::try_alloc::{try_clone_opt, try_clone_opt_string, try_clone_saved_markers};
+use crate::common::try_alloc::{
+    try_clone_opt, try_clone_opt_string, try_clone_saved_markers, try_filled_vec, try_reserved_vec,
+};
 use crate::common::types::{FrameHeader, PixelFormat};
 use crate::decode::bitstream::BitReader;
 use crate::decode::{huffman, lossless as lossless_codec};
 use alloc::{format, string::ToString, vec, vec::Vec};
 
 impl<'a> Decoder<'a> {
-    /// Reassemble ICC profile from parsed APP2 chunks.
-    ///
-    /// `Err` only when the allocator refuses the reassembly buffer; a malformed
-    /// or absent profile is `Ok(None)` and must not fail the decode (P4-144).
-    pub(super) fn icc_profile(&self) -> crate::common::error::Result<Option<Vec<u8>>> {
-        icc::try_reassemble_icc_profile(&self.metadata.icc_chunks)
-    }
-
     /// Decode a lossless JPEG (SOF3).
     ///
     /// Lossless JPEG uses Huffman-coded differences + prediction instead of DCT.
@@ -78,7 +71,9 @@ impl<'a> Decoder<'a> {
         if num_components == 1 {
             // Single-component (grayscale) lossless decode
             let dc_table = dc_tables[0];
-            let mut output = vec![0u16; width * height];
+            // P4-209: frame-geometry sized; refusal must be an error.
+            let mut output: Vec<u16> =
+                try_filled_vec(width * height, 0u16, "lossless sample plane")?;
             let mut prev_row: Option<Vec<u16>> = None;
             let ri: u32 = self.metadata.restart_interval as u32;
             let mut mcu_count: u32 = 0;
@@ -121,8 +116,9 @@ impl<'a> Decoder<'a> {
                     dc_tables.len()
                 )));
             }
-            let mut comp_planes: Vec<Vec<u16>> =
-                (0..3).map(|_| vec![0u16; width * height]).collect();
+            let mut comp_planes: Vec<Vec<u16>> = (0..3)
+                .map(|_| try_filled_vec(width * height, 0u16, "lossless sample plane"))
+                .collect::<Result<Vec<Vec<u16>>>>()?;
             let mut prev_rows: Vec<Option<Vec<u16>>> = vec![None; 3];
             let ri: u32 = self.metadata.restart_interval as u32;
             let mut mcu_count: u32 = 0;
@@ -226,7 +222,9 @@ impl<'a> Decoder<'a> {
 
         if num_components == 1 {
             let dc_tbl = dc_tbl_indices[0];
-            let mut output = vec![0u16; width * height];
+            // P4-209: frame-geometry sized; refusal must be an error.
+            let mut output: Vec<u16> =
+                try_filled_vec(width * height, 0u16, "lossless sample plane")?;
             let mut prev_row: Option<Vec<u16>> = None;
 
             for y in 0..height {
@@ -254,8 +252,9 @@ impl<'a> Decoder<'a> {
 
             self.lossless_output_grayscale(&output, width, height, pt, icc_profile, exif_data)
         } else if num_components == 3 {
-            let mut comp_planes: Vec<Vec<u16>> =
-                (0..3).map(|_| vec![0u16; width * height]).collect();
+            let mut comp_planes: Vec<Vec<u16>> = (0..3)
+                .map(|_| try_filled_vec(width * height, 0u16, "lossless sample plane"))
+                .collect::<Result<Vec<Vec<u16>>>>()?;
             let mut prev_rows: Vec<Option<Vec<u16>>> = vec![None; 3];
 
             for y in 0..height {
@@ -312,7 +311,7 @@ impl<'a> Decoder<'a> {
         let bpp = out_format.bytes_per_pixel();
 
         if out_format == PixelFormat::Grayscale {
-            let mut data = Vec::with_capacity(width * height);
+            let mut data: Vec<u8> = try_reserved_vec(width * height, "lossless output")?;
             for &sample in output {
                 let val = if pt > 0 {
                     ((sample as u32) << pt) as u8
@@ -344,7 +343,7 @@ impl<'a> Decoder<'a> {
             // grayscale path below (issue #369 had Argb/Abgr grouped
             // alpha-last here).
             let pad_off: Option<usize> = pad_alpha_offset(out_format);
-            let mut data = Vec::with_capacity(width * height * bpp);
+            let mut data: Vec<u8> = try_reserved_vec(width * height * bpp, "lossless output")?;
             for &sample in output {
                 let val = if pt > 0 {
                     ((sample as u32) << pt) as u8
@@ -413,7 +412,7 @@ impl<'a> Decoder<'a> {
     ) -> Result<Image> {
         let out_format = self.output_format.unwrap_or(PixelFormat::Rgb);
         let bpp = out_format.bytes_per_pixel();
-        let mut data = Vec::with_capacity(width * height * bpp);
+        let mut data: Vec<u8> = try_reserved_vec(width * height * bpp, "lossless output")?;
 
         // C jdlossls.c simple_upscale/noscale: every component sample is
         // scaled by `<< Al` and truncated to the sample type

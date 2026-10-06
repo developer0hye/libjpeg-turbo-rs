@@ -209,7 +209,6 @@ pub fn smoothing_useful_for_component(coef_bits: &[i32; SAVED_COEFS]) -> bool {
 /// writes it back, so its neighbor reads always see original DC values.
 /// Without the snapshot the `change_dc` path (DC interpolation) would feed
 /// already-smoothed DC values into later blocks' predictions.
-#[allow(clippy::too_many_lines)]
 pub fn apply_block_smoothing_coeffs(
     coeff_buf: &mut [[i16; 64]],
     row_stride: usize,
@@ -218,6 +217,79 @@ pub fn apply_block_smoothing_coeffs(
     v_samp: usize,
     coef_bits: &[i32; SAVED_COEFS],
     quant: &QuantTable,
+) {
+    // This public signature returns nothing, so the snapshot cannot report a
+    // refused allocation and is reserved infallibly here, as it always was.
+    // The decode pipeline calls `try_apply_block_smoothing_coeffs` instead
+    // (P4-209): there the size comes from a hostile stream's block grid.
+    let mut dc_snapshot: Vec<i32> =
+        Vec::with_capacity(dc_snapshot_len(coeff_buf.len(), row_stride, blocks_x));
+    smooth_with_dc_snapshot(
+        coeff_buf,
+        row_stride,
+        blocks_x,
+        blocks_y,
+        v_samp,
+        coef_bits,
+        quant,
+        &mut dc_snapshot,
+    );
+}
+
+/// [`apply_block_smoothing_coeffs`] with the DC snapshot reserved through
+/// `common::try_alloc`, so an allocator refusal is
+/// [`JpegError::AllocationFailed`] rather than an abort (P4-209). The
+/// snapshot holds one `i32` per block of the component's padded grid.
+pub(crate) fn try_apply_block_smoothing_coeffs(
+    coeff_buf: &mut [[i16; 64]],
+    row_stride: usize,
+    blocks_x: usize,
+    blocks_y: usize,
+    v_samp: usize,
+    coef_bits: &[i32; SAVED_COEFS],
+    quant: &QuantTable,
+) -> Result<()> {
+    let mut dc_snapshot: Vec<i32> = crate::common::try_alloc::try_with_capacity(
+        dc_snapshot_len(coeff_buf.len(), row_stride, blocks_x),
+        "block smoothing DC snapshot",
+    )?;
+    smooth_with_dc_snapshot(
+        coeff_buf,
+        row_stride,
+        blocks_x,
+        blocks_y,
+        v_samp,
+        coef_bits,
+        quant,
+        &mut dc_snapshot,
+    );
+    Ok(())
+}
+
+/// Entries `smooth_with_dc_snapshot` pushes: one per real column of every
+/// padded block row. Zero when `row_stride` or `blocks_x` is zero; the other
+/// degenerate grids it returns early for (`blocks_y`, `v_samp` or the iMCU
+/// row count zero) still reserve, which costs a small allocation on input
+/// that is never smoothed, never a short one.
+fn dc_snapshot_len(coeff_len: usize, row_stride: usize, blocks_x: usize) -> usize {
+    coeff_len
+        .checked_div(row_stride)
+        .map_or(0, |padded_rows: usize| blocks_x * padded_rows)
+}
+
+/// The smoothing pass itself. `dc_snapshot` arrives empty with capacity for
+/// [`dc_snapshot_len`] entries, so filling it never reallocates — which is
+/// what lets the fallible caller's reservation be the only allocation.
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+fn smooth_with_dc_snapshot(
+    coeff_buf: &mut [[i16; 64]],
+    row_stride: usize,
+    blocks_x: usize,
+    blocks_y: usize,
+    v_samp: usize,
+    coef_bits: &[i32; SAVED_COEFS],
+    quant: &QuantTable,
+    dc_snapshot: &mut Vec<i32>,
 ) {
     // Determine if we do DC interpolation (all AC bits unknown)
     let change_dc: bool = coef_bits[1] == -1
@@ -280,12 +352,17 @@ pub fn apply_block_smoothing_coeffs(
     // are unaffected by blocks already smoothed this pass (C never writes
     // the smoothed workspace back to the buffer it reads DC neighbors
     // from).
-    let mut dc_snapshot: Vec<i32> = Vec::with_capacity(blocks_x * padded_rows);
+    debug_assert!(
+        dc_snapshot.is_empty() && dc_snapshot.capacity() >= blocks_x * padded_rows,
+        "caller must reserve dc_snapshot_len() entries"
+    );
     for by in 0..padded_rows {
         for bx in 0..blocks_x {
             dc_snapshot.push(coeff_buf[by * row_stride + bx][0] as i32);
         }
     }
+    // Read-only from here on, as the local `Vec` it replaced was.
+    let dc_snapshot: &[i32] = dc_snapshot.as_slice();
 
     /// Helper: get an original (pre-smoothing) DC value from the snapshot.
     #[inline(always)]
@@ -367,35 +444,35 @@ pub fn apply_block_smoothing_coeffs(
             };
 
             // Gather 25 DC values from the 5x5 neighborhood
-            let dc01: i32 = dc_val(&dc_snapshot, blocks_x, row_pp, col_pp);
-            let dc02: i32 = dc_val(&dc_snapshot, blocks_x, row_pp, col_p);
-            let dc03: i32 = dc_val(&dc_snapshot, blocks_x, row_pp, bx);
-            let dc04: i32 = dc_val(&dc_snapshot, blocks_x, row_pp, col_n);
-            let dc05: i32 = dc_val(&dc_snapshot, blocks_x, row_pp, col_nn);
+            let dc01: i32 = dc_val(dc_snapshot, blocks_x, row_pp, col_pp);
+            let dc02: i32 = dc_val(dc_snapshot, blocks_x, row_pp, col_p);
+            let dc03: i32 = dc_val(dc_snapshot, blocks_x, row_pp, bx);
+            let dc04: i32 = dc_val(dc_snapshot, blocks_x, row_pp, col_n);
+            let dc05: i32 = dc_val(dc_snapshot, blocks_x, row_pp, col_nn);
 
-            let dc06: i32 = dc_val(&dc_snapshot, blocks_x, row_p, col_pp);
-            let dc07: i32 = dc_val(&dc_snapshot, blocks_x, row_p, col_p);
-            let dc08: i32 = dc_val(&dc_snapshot, blocks_x, row_p, bx);
-            let dc09: i32 = dc_val(&dc_snapshot, blocks_x, row_p, col_n);
-            let dc10: i32 = dc_val(&dc_snapshot, blocks_x, row_p, col_nn);
+            let dc06: i32 = dc_val(dc_snapshot, blocks_x, row_p, col_pp);
+            let dc07: i32 = dc_val(dc_snapshot, blocks_x, row_p, col_p);
+            let dc08: i32 = dc_val(dc_snapshot, blocks_x, row_p, bx);
+            let dc09: i32 = dc_val(dc_snapshot, blocks_x, row_p, col_n);
+            let dc10: i32 = dc_val(dc_snapshot, blocks_x, row_p, col_nn);
 
-            let dc11: i32 = dc_val(&dc_snapshot, blocks_x, by, col_pp);
-            let dc12: i32 = dc_val(&dc_snapshot, blocks_x, by, col_p);
-            let dc13: i32 = dc_val(&dc_snapshot, blocks_x, by, bx);
-            let dc14: i32 = dc_val(&dc_snapshot, blocks_x, by, col_n);
-            let dc15: i32 = dc_val(&dc_snapshot, blocks_x, by, col_nn);
+            let dc11: i32 = dc_val(dc_snapshot, blocks_x, by, col_pp);
+            let dc12: i32 = dc_val(dc_snapshot, blocks_x, by, col_p);
+            let dc13: i32 = dc_val(dc_snapshot, blocks_x, by, bx);
+            let dc14: i32 = dc_val(dc_snapshot, blocks_x, by, col_n);
+            let dc15: i32 = dc_val(dc_snapshot, blocks_x, by, col_nn);
 
-            let dc16: i32 = dc_val(&dc_snapshot, blocks_x, row_n, col_pp);
-            let dc17: i32 = dc_val(&dc_snapshot, blocks_x, row_n, col_p);
-            let dc18: i32 = dc_val(&dc_snapshot, blocks_x, row_n, bx);
-            let dc19: i32 = dc_val(&dc_snapshot, blocks_x, row_n, col_n);
-            let dc20: i32 = dc_val(&dc_snapshot, blocks_x, row_n, col_nn);
+            let dc16: i32 = dc_val(dc_snapshot, blocks_x, row_n, col_pp);
+            let dc17: i32 = dc_val(dc_snapshot, blocks_x, row_n, col_p);
+            let dc18: i32 = dc_val(dc_snapshot, blocks_x, row_n, bx);
+            let dc19: i32 = dc_val(dc_snapshot, blocks_x, row_n, col_n);
+            let dc20: i32 = dc_val(dc_snapshot, blocks_x, row_n, col_nn);
 
-            let dc21: i32 = dc_val(&dc_snapshot, blocks_x, row_nn, col_pp);
-            let dc22: i32 = dc_val(&dc_snapshot, blocks_x, row_nn, col_p);
-            let dc23: i32 = dc_val(&dc_snapshot, blocks_x, row_nn, bx);
-            let dc24: i32 = dc_val(&dc_snapshot, blocks_x, row_nn, col_n);
-            let dc25: i32 = dc_val(&dc_snapshot, blocks_x, row_nn, col_nn);
+            let dc21: i32 = dc_val(dc_snapshot, blocks_x, row_nn, col_pp);
+            let dc22: i32 = dc_val(dc_snapshot, blocks_x, row_nn, col_p);
+            let dc23: i32 = dc_val(dc_snapshot, blocks_x, row_nn, bx);
+            let dc24: i32 = dc_val(dc_snapshot, blocks_x, row_nn, col_n);
+            let dc25: i32 = dc_val(dc_snapshot, blocks_x, row_nn, col_nn);
 
             // AC01 (natural position 1)
             let al: i32 = coef_bits[1];
@@ -593,7 +670,10 @@ pub fn decode_with_colorspace_override(
                 "legacy grayscale override requires a full-resolution component 0 plane (plane width {cw} vs output {out_width}x{out_height}); use Decoder's grayscale output instead"
             )));
         }
-        let mut data: Vec<u8> = Vec::with_capacity(out_width * out_height);
+        let mut data: Vec<u8> = crate::common::try_alloc::try_reserved_vec(
+            out_width * out_height,
+            "colorspace override output",
+        )?;
         for y in 0..out_height {
             data.extend_from_slice(&component_planes[0][y * cw..y * cw + out_width]);
         }
@@ -630,7 +710,10 @@ pub fn decode_with_colorspace_override(
     let hf: usize = cw / cbw;
     let vf: usize = (frame.components[0].vertical_sampling as usize * comp_block_sizes[0])
         / (frame.components[1].vertical_sampling as usize * comp_block_sizes[1]);
-    let mut data: Vec<u8> = Vec::with_capacity(out_width * out_height * 3);
+    let mut data: Vec<u8> = crate::common::try_alloc::try_reserved_vec(
+        out_width * out_height * 3,
+        "colorspace override output",
+    )?;
     for y in 0..out_height {
         for x in 0..out_width {
             data.push(component_planes[0][y * cw + x]);

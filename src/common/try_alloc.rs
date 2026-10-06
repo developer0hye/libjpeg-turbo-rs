@@ -68,11 +68,49 @@ pub(crate) fn try_filled_vec<T: Clone>(len: usize, value: T, what: &'static str)
 /// still owe `common::layout::checked_span` on whatever geometry produced
 /// `len`.
 pub(crate) fn try_reserved_vec(len: usize, what: &'static str) -> Result<Vec<u8>> {
+    // Past `isize::MAX` no allocator is ever asked, so this is the geometry
+    // limit, as [`try_filled_vec`] and [`try_with_capacity`] report it.
+    if len > isize::MAX as usize {
+        return Err(JpegError::LimitExceeded {
+            what,
+            actual: len as u64,
+            limit: isize::MAX as u64,
+        });
+    }
     let mut buf: Vec<u8> = Vec::new();
     buf.try_reserve_exact(len)
         .map_err(|_| JpegError::AllocationFailed {
             what,
             bytes: len as u64,
+        })?;
+    Ok(buf)
+}
+
+/// Empty `Vec<T>` with room for exactly `len` elements — the fallible
+/// counterpart to `Vec::with_capacity` for element types other than bytes
+/// (P4-209).
+///
+/// [`try_reserved_vec`] covers `u8`, where `len` already *is* the byte count.
+/// For a wider `T` the byte count is `len * size_of::<T>()`, which can fail to
+/// be expressible before the allocator is ever asked, so this reports that as
+/// the geometry limit it is — the same split [`try_filled_vec`] makes — and
+/// only a request the machine actually refused as `AllocationFailed`.
+pub(crate) fn try_with_capacity<T>(len: usize, what: &'static str) -> Result<Vec<T>> {
+    let elem_size: usize = core::mem::size_of::<T>();
+    let bytes: usize = len
+        .checked_mul(elem_size)
+        .filter(|total| *total <= isize::MAX as usize)
+        .ok_or(JpegError::LimitExceeded {
+            what,
+            // Widened, not saturated, for the reason `try_filled_vec` gives.
+            actual: ((len as u128) * (elem_size as u128)).min(u64::MAX as u128) as u64,
+            limit: isize::MAX as u64,
+        })?;
+    let mut buf: Vec<T> = Vec::new();
+    buf.try_reserve_exact(len)
+        .map_err(|_| JpegError::AllocationFailed {
+            what,
+            bytes: bytes as u64,
         })?;
     Ok(buf)
 }
@@ -175,6 +213,36 @@ mod tests {
             matches!(err, JpegError::AllocationFailed { what, bytes }
                 if what == "test buffer" && bytes == isize::MAX as u64),
             "expected AllocationFailed, got {err:?}"
+        );
+    }
+
+    /// The capacity is real: pushing `len` elements must not reallocate, or
+    /// the infallible growth path `with_capacity` was replaced to avoid would
+    /// simply move into the first `push` past the reservation.
+    #[test]
+    fn a_reservation_holds_its_length_without_reallocating() {
+        let mut buf: Vec<u16> = try_with_capacity(300, "u16 plane").expect("small reservation");
+        assert!(buf.is_empty());
+        assert!(buf.capacity() >= 300);
+        let base: *const u16 = buf.as_ptr();
+        buf.extend(0..300u16);
+        assert_eq!(buf.as_ptr(), base, "filling the reservation reallocated");
+        assert_eq!(buf[299], 299);
+    }
+
+    /// A length whose *byte* count is not expressible is the geometry limit,
+    /// not a refused allocation — no allocator was asked. This is the case
+    /// `try_reserved_vec` cannot reach, because for `u8` the two counts are the
+    /// same number.
+    #[test]
+    fn an_inexpressible_byte_count_is_a_limit_not_an_allocation_failure() {
+        let len: usize = usize::MAX / 2;
+        let err: JpegError =
+            try_with_capacity::<u32>(len, "u32 plane").expect_err("byte count overflows");
+        assert!(
+            matches!(err, JpegError::LimitExceeded { what, limit, .. }
+                if what == "u32 plane" && limit == isize::MAX as u64),
+            "expected LimitExceeded, got {err:?}"
         );
     }
 

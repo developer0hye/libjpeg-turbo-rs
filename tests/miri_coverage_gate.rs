@@ -25,8 +25,8 @@
 //! * every `#[ignore]` **anywhere in those suites** cites an issue — not only
 //!   the ones a surface names — so a surface cannot be quietly switched off. One
 //!   exemption exists and is named in code, the C-oracle tests Miri cannot spawn
-//!   a process for; `miri_alloc_failure`'s cited ignore is the mainline decode
-//!   contract that P4-209 (#632) breaks;
+//!   a process for. (`miri_alloc_failure` carried one cited ignore, the
+//!   mainline decode contract, until P4-209 (#632) fixed it and deleted it.)
 //! * no interpreting step is *non-executing*: `--no-run` and `--list` compile the
 //!   suite while satisfying every selection above, and an `if:` — on the step or
 //!   on the **job**, which switches all of them off at once — is coverage that can
@@ -127,6 +127,11 @@ const SURFACES: [Surface; 4] = [
             "a_refused_progressive_output_leaves_the_decoder_usable",
             "a_refused_icc_reassembly_leaves_the_decoder_usable",
             "the_mainline_decode_reports_refusal_instead_of_aborting",
+            // P4-209 (#632): three more converted decode sites, each reached
+            // through a different public configuration.
+            "a_refused_merged_upsample_buffer_reports_instead_of_aborting",
+            "a_refused_lossless_sample_plane_reports_instead_of_aborting",
+            "a_refused_vertical_crop_copy_reports_instead_of_aborting",
         ],
     },
 ];

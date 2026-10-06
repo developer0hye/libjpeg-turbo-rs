@@ -1,9 +1,11 @@
 use super::{Decoder, Image};
 use crate::common::error::{DecodeWarning, JpegError, Result};
-use crate::common::try_alloc::{try_clone_opt, try_clone_opt_string, try_clone_saved_markers};
+use crate::common::try_alloc::{
+    try_clone_opt, try_clone_opt_string, try_clone_saved_markers, try_filled_vec, try_reserved_vec,
+};
 use crate::common::types::{ColorSpace, DctMethod, FrameHeader, PixelFormat};
 use crate::decode::{idct_extended, idct_scaled};
-use alloc::{borrow::Cow, format, vec, vec::Vec};
+use alloc::{borrow::Cow, format, vec::Vec};
 
 /// Generic nearest-neighbor upsampling for arbitrary h/v factor combinations.
 ///
@@ -801,13 +803,15 @@ impl<'a> Decoder<'a> {
                  active={active_width}x{active_height}, plane={component_width}x{component_height}"
             )));
         }
-        let mut active = Vec::with_capacity(active_width * active_height);
+        let mut active: Vec<u8> =
+            try_reserved_vec(active_width * active_height, "active component area")?;
         for row in 0..active_height {
             let start = row * component_width;
             active.extend_from_slice(&component_plane[start..start + active_width]);
         }
 
-        let mut full = vec![0u8; full_width * full_height];
+        let mut full: Vec<u8> =
+            try_filled_vec(full_width * full_height, 0u8, "upsampled component plane")?;
         // C disables fancy upsampling for a 1x1 scaled IDCT, and for the
         // horizontal 2:1 kernels when the active input is at most two pixels.
         let horizontal_fancy_too_narrow = horizontal_factor == 2 && active_width <= 2;
@@ -980,7 +984,8 @@ impl<'a> Decoder<'a> {
                 "grayscale output region {output_x_offset}+{out_width}x{out_height} exceeds {full_width}x{full_height}"
             )));
         }
-        let mut data = Vec::with_capacity(out_width * out_height);
+        let mut data: Vec<u8> =
+            try_reserved_vec(out_width * out_height, "grayscale override output")?;
         if jpeg_color_space == ColorSpace::Rgb {
             for y in 0..out_height {
                 let red_row = &full_planes[0][y * strides[0]..];

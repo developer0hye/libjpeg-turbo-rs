@@ -10,6 +10,9 @@ and `git log` between tags.
 
 ### Added
 
+- **`Decoder::icc_profile`, `exif_data`, `xmp_data` and `iptc_data`** read
+  metadata from the parsed header without decoding pixels, returning the same
+  bytes a decode reports (#637).
 - **`SECURITY.md`, `docs/STABILITY.md`, `docs/RELEASE.md` and
   `docs/security/AFFECTED_VERSIONS.md`** (P4-217, #638): supported versions and
   private reporting, the SemVer/MSRV/feature/deprecation/error/thread policy
@@ -19,7 +22,6 @@ and `git log` between tags.
   `release.yml`'s `semver-check` job runs `scripts/semver_check_release.sh`,
   which compares each crate with the previous release tag on `cargo rustdoc
   --locked` output and fails a version bump that does not allow the change.
-
 - **Prebuilt native bundles on every tagged release** (P4-131, #462).
   `libjpeg-turbo-rs-capi-<version>-<target>.tar.gz` for
   `x86_64`/`aarch64-unknown-linux-gnu` and `x86_64`/`aarch64-apple-darwin`,
@@ -58,6 +60,27 @@ and `git log` between tags.
 
 ### Changed
 
+- **`libjpeg-turbo-rs-image`: the `image` adapter decodes lazily, honours
+  `image::Limits`, and reports metadata** (P4-212, #637, under #635).
+  `JpegDecoder::new` now parses headers only and `read_image` decodes into
+  the caller's buffer; for 8-bit grayscale and YCbCr/RGB streams no second
+  decoded image exists (measured at 2048x1536 4:2:0: construction 37 KB, read
+  working set 4.7 MB against a 9.4 MB image — CMYK, 12-bit and lossless are
+  still staged, P4-213). `set_limits` applies `max_image_width`,
+  `max_image_height` and `max_alloc` before any pixel allocation.
+  `exif_metadata`, `xmp_metadata`, `iptc_metadata` and `orientation` return
+  what `image`'s built-in JPEG decoder returns for the same file. New:
+  `JpegDecoder::from_vec` (no input copy), `set_lenient`, and
+  `original_color_type()` (`Cmyk8` for four-component streams).
+  **Breaking for the adapter (next version 0.2.0):** `new`/`from_vec` no
+  longer validate entropy data, so a corrupt stream constructs and fails in
+  `read_image`; `read_image` and `JpegEncoder::write_image` require buffers of
+  exactly the image's size (both accepted longer ones); error categories moved
+  from `Decoding` (`Encoding` for the encoder) to `Limits` (limits,
+  allocation refusal), `Unsupported`, `Parameter` (buffer sizes) and
+  `IoError`, and the format hint is now
+  `ImageFormatHint::Exact(ImageFormat::Jpeg)`; asking `new_with_format` for
+  `Grayscale` from a CMYK/YCCK stream is refused at construction.
 - **Portable x86_64 builds reach the BMI2 Huffman tier and the FMA float
   FDCT by runtime detection** (P4-133, #464). The 2026-09-08 portable-vs-native
   A/B found only two wins a `target-cpu=native` build had over a stock
@@ -154,6 +177,37 @@ and `git log` between tags.
   runs system/Rust bidirectional cross-decodes.
 
 ### Fixed
+- An allocator refusal during a decode is reported as
+  `JpegError::AllocationFailed` instead of aborting the process (P4-209,
+  #632). `decompress` / `Decoder::decode_image` allocated their destination
+  with `vec![0u8; size]`, sized by the SOF, so a large or hostile file on a
+  memory-constrained host ended in an uncatchable `SIGABRT`. That buffer and
+  every other full-plane or destination allocation under `src/decode/` —
+  component planes, the merged-upsample, 12-bit, lossless, CMYK/YCCK and
+  colourspace-override outputs, full-plane chroma upsampling, crop copies and
+  the block-smoothing DC snapshot — now go through the crate's fallible
+  allocator helpers. A successful decode is byte-identical. A 12-bit source
+  still decodes its samples through `api::precision`, which this change does
+  not cover. `tests/decode_alloc_gate.rs` with
+  `docs/decode_alloc_inventory.tsv` fails CI when a new infallible allocation
+  under `src/decode/` is not classified as bounded by something other than the
+  input.
+- **Security — a custom scan script could write past the stack from safe
+  Rust on x86_64** (P4-192, #610). `Encoder::scan_script` stored the script
+  verbatim; an AC band with `se > 63` reached an unchecked SSE2 kernel that
+  wrote past two `[u16; 64]` stack arrays and the encode returned `Ok` (other
+  architectures panicked instead). Scripts are now checked before any
+  encoding work by the rules C's `validate_script` applies to a progressive
+  script, and a refused script returns the new
+  `JpegError::InvalidScanScript { entry, reason }` on every architecture.
+  Affects 0.4.0 through 0.8.0 on x86_64 with the default `simd` feature
+  (the SSE2 kernel first shipped in 0.4.0).
+- **Custom scan scripts with single-component DC scans encoded blocks in the
+  wrong order** (P4-211). A non-interleaved DC scan walked the frame's MCU grid
+  instead of the component's own block grid, and every DC scan wrote both DC
+  table slots even when one was unused. Output from such a script now matches
+  `cjpeg -scans` byte for byte; the built-in scripts are unaffected.
+
 - **Packaging:** `libjpeg-turbo-rs-capi` and `libjpeg-turbo-rs-image` now
   ship their licence files and IJG attribution; the root crate no longer ships
   repository tooling or the reference submodule's READMEs (P4-217).
