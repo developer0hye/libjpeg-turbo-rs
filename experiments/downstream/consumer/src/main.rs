@@ -31,6 +31,7 @@ use std::time::{Duration, Instant};
 use alloc_counter::{AllocStats, CountingAllocator};
 use corpus::{CorpusFile, OutputLayout, SourcePixels};
 use decode::{DecodeBackend, DecodeCase, Preparation, PreparedDecode};
+use ljt_api::Chroma;
 use measure::{FrameFacts, PixelDiff, TimedSamples, TimingSummary};
 use report::{
     CorpusRecord, CorrectnessRecord, DecodeCaseReport, DecodeRow, EncodeCaseReport, EncodeRow,
@@ -52,13 +53,17 @@ struct Options {
     build_info: Option<PathBuf>,
     lockfile: PathBuf,
     only: Option<String>,
+    /// Explicit `--djpeg` until `main` resolves it, then the tool in use.
     djpeg: Option<PathBuf>,
+    /// Explicit `--cjpeg` until `main` resolves it, then the tool in use.
+    cjpeg: Option<PathBuf>,
+    /// `--no-c-oracle` turns off both C tools.
     use_c_oracle: bool,
 }
 
 const USAGE: &str = "usage: downstream-consumer --repo <candidate checkout> [--out-dir DIR] \
 [--iterations N] [--warmup N] [--smoke] [--only SUBSTRING] [--build-info FILE] \
-[--lockfile FILE] [--djpeg PATH | --no-c-oracle]";
+[--lockfile FILE] [--djpeg PATH] [--cjpeg PATH] [--no-c-oracle]";
 
 fn parse_options() -> Options {
     let mut options: Options = Options {
@@ -71,6 +76,7 @@ fn parse_options() -> Options {
         lockfile: Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.lock"),
         only: None,
         djpeg: None,
+        cjpeg: None,
         use_c_oracle: true,
     };
     let mut repo: Option<PathBuf> = None;
@@ -93,6 +99,7 @@ fn parse_options() -> Options {
             "--lockfile" => options.lockfile = PathBuf::from(value("--lockfile")),
             "--only" => options.only = Some(value("--only")),
             "--djpeg" => options.djpeg = Some(PathBuf::from(value("--djpeg"))),
+            "--cjpeg" => options.cjpeg = Some(PathBuf::from(value("--cjpeg"))),
             "--no-c-oracle" => options.use_c_oracle = false,
             "--help" | "-h" => {
                 println!("{USAGE}");
@@ -356,26 +363,43 @@ fn run_decode_case(
             );
         }
     }
+    // C is the contract: the project's goal is output byte-identical to
+    // `djpeg` with default settings, and every case here — baseline,
+    // progressive, grayscale, 1/4 DCT scaling (`djpeg -scale 1/4`) — is inside
+    // it. So with a C decoder present, a difference fails the run. The
+    // published baseline is held to it too: on 2026-10-07 it matched stock
+    // 3.2.0 and Homebrew 3.1.4.1 on all eight cases.
     if let Some(djpeg) = djpeg {
-        let record: CorrectnessRecord =
-            match c_reference(djpeg, jpeg_path, case, &options.out_dir) {
-                Ok((width, height, pixels)) if (width, height) == (reference_width, reference_height) => {
-                    CorrectnessRecord::measured(
-                        "candidate-fresh",
-                        "C djpeg",
-                        measure::pixel_diff(&pixels, &reference_pixels),
-                    )
-                }
-                Ok((width, height, _)) => CorrectnessRecord::note(
-                    "candidate-fresh",
-                    "C djpeg",
-                    format!(
-                        "dimension mismatch: C {width}x{height}, candidate {reference_width}x{reference_height}"
-                    ),
-                ),
-                Err(reason) => CorrectnessRecord::note("candidate-fresh", "C djpeg", reason),
-            };
-        correctness.push(record);
+        let (width, height, c_pixels) = c_reference(djpeg, jpeg_path, case, &options.out_dir)
+            .unwrap_or_else(|reason| panic!("C djpeg could not decode {}: {reason}", case.id));
+        assert_eq!(
+            (width, height),
+            (reference_width, reference_height),
+            "C djpeg and the candidate disagree on dimensions for {}",
+            case.id
+        );
+        let diff: PixelDiff = measure::pixel_diff(&c_pixels, &reference_pixels);
+        assert_eq!(
+            diff.max_abs, 0,
+            "candidate differs from C djpeg on {} ({diff:?}); byte-identical output is the contract",
+            case.id
+        );
+        correctness.push(CorrectnessRecord::note(
+            "candidate-fresh",
+            "C djpeg",
+            "identical (asserted)".to_string(),
+        ));
+        assert_eq!(
+            fingerprint_of(DecodeBackend::BaselineFresh),
+            Some(fingerprint(&c_pixels)),
+            "baseline 0.8.0 differs from C djpeg on {}",
+            case.id
+        );
+        correctness.push(CorrectnessRecord::note(
+            "baseline-fresh",
+            "C djpeg",
+            "identical (asserted)".to_string(),
+        ));
     }
     drop(reference_pixels);
 
@@ -442,10 +466,74 @@ fn run_decode_case(
     }
 }
 
+/// Encode `ppm` with C `cjpeg -quality 85` (4:2:0, cjpeg's default for RGB
+/// input), or `-sample 1x1` for 4:4:4.
+fn c_encode(cjpeg: &Path, ppm: &Path, chroma: Chroma, scratch: &Path) -> Result<Vec<u8>, String> {
+    let output: PathBuf = scratch.join("c-encode.jpg");
+    let mut command: std::process::Command = std::process::Command::new(cjpeg);
+    command
+        .arg("-quality")
+        .arg(workloads::ENCODE_QUALITY.to_string());
+    if chroma == Chroma::S444 {
+        command.arg("-sample").arg("1x1");
+    }
+    command.arg("-outfile").arg(&output).arg(ppm);
+    let result: std::process::Output = command
+        .output()
+        .map_err(|error| format!("cjpeg did not run: {error}"))?;
+    if !result.status.success() {
+        return Err(format!(
+            "cjpeg failed: {}",
+            String::from_utf8_lossy(&result.stderr).trim()
+        ));
+    }
+    let bytes: Vec<u8> = std::fs::read(&output).map_err(|error| error.to_string())?;
+    let _ = std::fs::remove_file(&output);
+    Ok(bytes)
+}
+
+/// Where two JPEG streams first differ, and whether they still differ once
+/// every APP0 (JFIF) segment is removed — so a header-only difference is
+/// reported as such rather than hidden or treated as a codec difference.
+fn describe_byte_difference(ours: &[u8], theirs: &[u8]) -> String {
+    let first: usize = ours
+        .iter()
+        .zip(theirs)
+        .position(|(a, b)| a != b)
+        .unwrap_or(ours.len().min(theirs.len()));
+    let without_app0 = |jpeg: &[u8]| -> Vec<u8> {
+        let mut out: Vec<u8> = jpeg[..2.min(jpeg.len())].to_vec();
+        let mut position: usize = 2;
+        while position + 4 <= jpeg.len() && jpeg[position] == 0xFF && jpeg[position + 1] != 0xDA {
+            let length: usize =
+                u16::from_be_bytes([jpeg[position + 2], jpeg[position + 3]]) as usize;
+            let end: usize = (position + 2 + length).min(jpeg.len());
+            if jpeg[position + 1] != 0xE0 {
+                out.extend_from_slice(&jpeg[position..end]);
+            }
+            position = end;
+        }
+        out.extend_from_slice(&jpeg[position.min(jpeg.len())..]);
+        out
+    };
+    let same_without_app0: bool = without_app0(ours) == without_app0(theirs);
+    format!(
+        "sizes {} vs {} bytes, first difference at offset {first}; {}",
+        ours.len(),
+        theirs.len(),
+        if same_without_app0 {
+            "identical once APP0 is removed (header-only difference)"
+        } else {
+            "still different once APP0 is removed"
+        }
+    )
+}
+
 fn run_encode_case(source: &SourcePixels, options: &Options) -> EncodeCaseReport {
     eprintln!("[encode] {}", source.id);
     let mut rows: Vec<EncodeRow> = Vec::new();
     let mut fingerprints: Vec<(EncodeBackend, (usize, u64))> = Vec::new();
+    let mut outputs: Vec<(EncodeBackend, Vec<u8>)> = Vec::new();
     for backend in EncodeBackend::ALL {
         let jpeg: Vec<u8> = backend.encode(&source.rgb, source.width, source.height);
         // One reference decoder for every row's PSNR — the pinned published
@@ -472,6 +560,7 @@ fn run_encode_case(source: &SourcePixels, options: &Options) -> EncodeCaseReport
             alloc: AllocStats::default(),
         });
         fingerprints.push((backend, fingerprint(&jpeg)));
+        outputs.push((backend, jpeg));
     }
     // The adapter is a thin wrapper over the candidate's `compress` with the
     // same quality and subsampling: identical bytes, or the wrapper changed
@@ -488,6 +577,74 @@ fn run_encode_case(source: &SourcePixels, options: &Options) -> EncodeCaseReport
         "the image adapter's encoder must produce the candidate's exact bytes on {}",
         source.id
     );
+
+    // C cross-check. `compress` at q85 is documented to match `cjpeg
+    // -quality 85` byte for byte (4:2:0 by default, `-sample 1x1` for 4:4:4),
+    // so with a C encoder present a candidate difference fails the run.
+    let mut c_comparison: Vec<CorrectnessRecord> = Vec::new();
+    match &options.cjpeg {
+        None => c_comparison.push(CorrectnessRecord::note(
+            "all rows",
+            "C cjpeg",
+            "C encode comparison: skipped (no cjpeg)".to_string(),
+        )),
+        Some(cjpeg) => {
+            let ppm: PathBuf = options.out_dir.join(format!("{}.ppm", source.id));
+            let mut ppm_bytes: Vec<u8> =
+                format!("P6\n{} {}\n255\n", source.width, source.height).into_bytes();
+            ppm_bytes.extend_from_slice(&source.rgb);
+            std::fs::write(&ppm, &ppm_bytes)
+                .unwrap_or_else(|error| panic!("write {}: {error}", ppm.display()));
+            drop(ppm_bytes);
+            for chroma in [Chroma::S420, Chroma::S444] {
+                let c_bytes: Vec<u8> = c_encode(cjpeg, &ppm, chroma, &options.out_dir)
+                    .unwrap_or_else(|reason| {
+                        panic!("C cjpeg could not encode {}: {reason}", source.id)
+                    });
+                let label: &str = match chroma {
+                    Chroma::S420 => "C cjpeg -quality 85",
+                    Chroma::S444 => "C cjpeg -quality 85 -sample 1x1",
+                };
+                let (baseline, candidate) = match chroma {
+                    Chroma::S420 => (EncodeBackend::Baseline, EncodeBackend::Candidate),
+                    Chroma::S444 => (EncodeBackend::Baseline444, EncodeBackend::Candidate444),
+                };
+                for backend in [baseline, candidate] {
+                    let ours: &[u8] = &outputs
+                        .iter()
+                        .find(|(b, _)| *b == backend)
+                        .expect("every backend encoded")
+                        .1;
+                    if ours != c_bytes.as_slice() {
+                        panic!(
+                            "{} differs from {label} on {}: {}",
+                            backend.id(),
+                            source.id,
+                            describe_byte_difference(ours, &c_bytes)
+                        );
+                    }
+                    c_comparison.push(CorrectnessRecord::note(
+                        backend.id(),
+                        label,
+                        "byte-identical (asserted)".to_string(),
+                    ));
+                }
+            }
+            let _ = std::fs::remove_file(&ppm);
+            c_comparison.push(CorrectnessRecord::note(
+                "candidate-image-adapter",
+                "candidate",
+                "byte-identical (asserted above), hence identical to C".to_string(),
+            ));
+            c_comparison.push(CorrectnessRecord::note(
+                "image-builtin",
+                "—",
+                "not compared: image's own encoder makes no libjpeg-compatibility claim"
+                    .to_string(),
+            ));
+        }
+    }
+    drop(outputs);
 
     for (row, backend) in rows.iter_mut().zip(EncodeBackend::ALL) {
         let (jpeg, stats) =
@@ -518,6 +675,7 @@ fn run_encode_case(source: &SourcePixels, options: &Options) -> EncodeCaseReport
         id: source.id.clone(),
         width: source.width,
         height: source.height,
+        c_comparison,
         rows,
     }
 }
@@ -710,7 +868,7 @@ fn corpus_file(corpus_id: &str, repo: &Path) -> CorpusFile {
 }
 
 fn main() {
-    let options: Options = parse_options();
+    let mut options: Options = parse_options();
     // Sample the machine before this process does anything heavy.
     let load_sample: String = environment::load_sample();
     let started_at: String = environment::shell("date -u +%Y-%m-%dT%H:%M:%SZ");
@@ -719,21 +877,27 @@ fn main() {
         dir: options.out_dir.join("corpus"),
         records: Vec::new(),
     };
-    let djpeg: Option<PathBuf> = if options.use_c_oracle {
-        environment::find_djpeg(options.djpeg.as_deref())
+    if options.use_c_oracle {
+        options.djpeg = environment::find_c_tool("djpeg", options.djpeg.as_deref(), "DJPEG");
+        options.cjpeg = environment::find_c_tool("cjpeg", options.cjpeg.as_deref(), "CJPEG");
     } else {
-        None
+        options.djpeg = None;
+        options.cjpeg = None;
+    }
+    let describe_tool = |tool: &Option<PathBuf>, name: &str, variable: &str| -> String {
+        match tool {
+            Some(path) => format!("{} — {}", path.display(), environment::c_tool_version(path)),
+            None if !options.use_c_oracle => "disabled (--no-c-oracle)".to_string(),
+            None => format!("not found (set {variable} or pass --{name} to add the C comparison)"),
+        }
     };
-    let c_oracle: String = match &djpeg {
-        Some(path) => format!(
-            "{} — {}",
-            path.display(),
-            environment::shell(&format!("'{}' -version 2>&1 | head -1", path.display()))
-        ),
-        None if !options.use_c_oracle => "disabled (--no-c-oracle)".to_string(),
-        None => "not found (set DJPEG or pass --djpeg to add candidate-vs-C rows)".to_string(),
-    };
-    let c_oracle_link_map: Option<String> = djpeg.as_deref().map(environment::djpeg_link_map);
+    let c_oracle: String = describe_tool(&options.djpeg, "djpeg", "DJPEG");
+    let c_encoder: String = describe_tool(&options.cjpeg, "cjpeg", "CJPEG");
+    let c_oracle_link_map: Option<String> =
+        options.djpeg.as_deref().map(environment::c_tool_link_map);
+    let c_encoder_link_map: Option<String> =
+        options.cjpeg.as_deref().map(environment::c_tool_link_map);
+    let djpeg: Option<PathBuf> = options.djpeg.clone();
 
     // Decode cases. A corpus file is generated only when a selected case uses
     // it, so `--only` also keeps a run small.
@@ -820,6 +984,8 @@ fn main() {
         load_sample,
         c_oracle,
         c_oracle_link_map,
+        c_encoder,
+        c_encoder_link_map,
         corpus: store.records,
         decode: decode_reports,
         encode: encode_reports,
@@ -831,4 +997,23 @@ fn main() {
     std::fs::write(&json_path, report.json().render()).expect("write report.json");
     println!("report: {}", markdown_path.display());
     println!("json:   {}", json_path.display());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_jfif_header_only_difference_is_named_as_such() {
+        // SOI, APP0 (len 4, payload differs), DQT stub, SOS stub + data, EOI.
+        let ours: [u8; 14] = [
+            0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x04, 0x01, 0x01, 0xFF, 0xDA, 0x00, 0x02, 0xFF, 0xD9,
+        ];
+        let mut theirs: [u8; 14] = ours;
+        theirs[7] = 0x02;
+        assert!(describe_byte_difference(&ours, &theirs).contains("header-only"));
+        theirs = ours;
+        theirs[11] = 0x03;
+        assert!(describe_byte_difference(&ours, &theirs).contains("still different"));
+    }
 }

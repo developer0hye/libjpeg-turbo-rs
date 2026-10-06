@@ -101,6 +101,8 @@ pub struct EncodeCaseReport {
     pub id: String,
     pub width: usize,
     pub height: usize,
+    /// Byte-for-byte comparison with C `cjpeg`, or why it was skipped.
+    pub c_comparison: Vec<CorrectnessRecord>,
     pub rows: Vec<EncodeRow>,
 }
 
@@ -162,6 +164,8 @@ pub struct Report {
     pub load_sample: String,
     pub c_oracle: String,
     pub c_oracle_link_map: Option<String>,
+    pub c_encoder: String,
+    pub c_encoder_link_map: Option<String>,
     pub corpus: Vec<CorpusRecord>,
     pub decode: Vec<DecodeCaseReport>,
     pub encode: Vec<EncodeCaseReport>,
@@ -332,6 +336,7 @@ impl Report {
             self.baseline_simd_and_std, self.candidate_simd_and_std
         );
         let _ = writeln!(out, "- C reference decoder: {}", self.c_oracle);
+        let _ = writeln!(out, "- C reference encoder: {}", self.c_encoder);
         let _ = writeln!(out, "- Dependency features (from the consumer manifest):");
         for (crate_name, features) in DECLARED_FEATURES {
             let _ = writeln!(out, "  - {crate_name}: {features}");
@@ -341,6 +346,12 @@ impl Report {
             let _ = writeln!(
                 out,
                 "\nC reference decoder's link map:\n\n```\n{link_map}\n```"
+            );
+        }
+        if let Some(link_map) = &self.c_encoder_link_map {
+            let _ = writeln!(
+                out,
+                "\nC reference encoder's link map:\n\n```\n{link_map}\n```"
             );
         }
 
@@ -495,6 +506,19 @@ impl Report {
                     alloc_cells(Some(&row.alloc))
                 );
             }
+            let _ = writeln!(
+                out,
+                "\nC cross-check (outside the timed region):\n\n| row | compared with | result |\n|---|---|---|"
+            );
+            for record in &case.c_comparison {
+                let _ = writeln!(
+                    out,
+                    "| {} | {} | {} |",
+                    record.subject,
+                    record.compared_to,
+                    record.note.as_deref().unwrap_or("—")
+                );
+            }
         }
 
         if let Some(thumbnail) = &self.thumbnail {
@@ -621,6 +645,21 @@ impl Report {
                     ("width", Json::int(case.width as u64)),
                     ("height", Json::int(case.height as u64)),
                     (
+                        "c_comparison",
+                        Json::Array(
+                            case.c_comparison
+                                .iter()
+                                .map(|record| {
+                                    Json::object(vec![
+                                        ("subject", Json::str(&record.subject)),
+                                        ("compared_to", Json::str(&record.compared_to)),
+                                        ("result", Json::opt(record.note.as_deref(), Json::str)),
+                                    ])
+                                })
+                                .collect(),
+                        ),
+                    ),
+                    (
                         "rows",
                         Json::Array(
                             case.rows
@@ -726,6 +765,11 @@ impl Report {
                     (
                         "c_oracle_link_map",
                         Json::opt(self.c_oracle_link_map.as_deref(), Json::str),
+                    ),
+                    ("c_encoder", Json::str(&self.c_encoder)),
+                    (
+                        "c_encoder_link_map",
+                        Json::opt(self.c_encoder_link_map.as_deref(), Json::str),
                     ),
                     (
                         "declared_features",

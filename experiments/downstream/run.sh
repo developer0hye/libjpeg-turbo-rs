@@ -193,13 +193,42 @@ build_info="$work_dir/build-info.txt"
   echo "scrubbed_env=$(printf '%s' "$scrubbed" | tr '\n' ' ')"
   echo "cargo=$(cd "$consumer" && cargo -V)"
   echo "cargo_home_config=${home_configs:-<none>}"
+  # The report is uploaded as an artifact, and a cargo config can hold
+  # registry tokens, proxy URLs with credentials, or private index URLs. So
+  # only its *shape* is recorded: table names and key names, with every value
+  # redacted except two harmless build-affecting ones ([build] jobs and
+  # [net] offline). Lines that are not `[table]` or `key = ...` (continuation
+  # lines of a multi-line array or string) are skipped, never echoed.
   for config in $home_configs; do
-    grep -Ev '^[[:space:]]*(#|$)' "$config" | sed "s|^|cargo_home_config_line=|" || true
+    awk '
+      /^[[:space:]]*(#|$)/ { next }
+      /^[[:space:]]*\[/ {
+        table = $0
+        sub(/^[[:space:]]*\[+[[:space:]]*/, "", table)
+        sub(/[[:space:]]*\]+.*$/, "", table)
+        print "cargo_home_config_table=" table
+        next
+      }
+      /^[[:space:]]*[A-Za-z0-9_."-]+[[:space:]]*=/ {
+        key = $0
+        sub(/^[[:space:]]*/, "", key)
+        sub(/[[:space:]]*=.*$/, "", key)
+        full = (table == "" ? key : table "." key)
+        value = "<redacted>"
+        if (full == "build.jobs" || full == "net.offline") {
+          value = $0
+          sub(/^[^=]*=[[:space:]]*/, "", value)
+          sub(/[[:space:]]*#.*$/, "", value)
+        }
+        print "cargo_home_config_key=" full " = " value
+      }
+    ' "$config"
   done
-  # Names only filter out credentials (CARGO_REGISTRY_TOKEN and kin) — the
-  # report is uploaded as an artifact.
+  # Credentials by name (CARGO_REGISTRY_TOKEN and kin) and any value that is
+  # a URL with userinfo (`scheme://user:pass@host`) are dropped.
   env | grep -E '^(CARGO_|RUST)' | grep -v '^CARGO_HOME=' |
-    grep -Ev '^[A-Z0-9_]*(TOKEN|SECRET|PASSWORD|CREDENTIAL)[A-Z0-9_]*=' | sort | sed 's|^|env_|' || true
+    grep -Ev '^[A-Z0-9_]*(TOKEN|SECRET|PASSWORD|CREDENTIAL)[A-Z0-9_]*=' |
+    grep -Ev '=.*://.*@' | sort | sed 's|^|env_|' || true
   echo "candidate_sha=$candidate_sha"
   echo "candidate_tracked_changes=$candidate_dirty"
   echo "work_dir=$work_dir"

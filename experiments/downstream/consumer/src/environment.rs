@@ -1,26 +1,44 @@
 //! What the report records about the machine, toolchain and build.
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output};
 
-/// Run a shell command and return its combined output; a missing tool is
-/// reported in the text rather than failing the run (the report says what
-/// could not be sampled instead of omitting the row).
-pub fn shell(command: &str) -> String {
+fn combined_output(output: &Output) -> String {
+    let mut text: String = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr: String = String::from_utf8_lossy(&output.stderr).into_owned();
+    if !stderr.trim().is_empty() {
+        text.push_str(&stderr);
+    }
+    if !output.status.success() {
+        text.push_str(&format!("[exit status: {}]\n", output.status));
+    }
+    text.trim_end().to_string()
+}
+
+/// Run a **fixed, literal** shell pipeline and return its combined output; a
+/// missing tool is reported in the text rather than failing the run (the
+/// report says what could not be sampled instead of omitting the row).
+///
+/// Never pass a string with an interpolated value here — a path or an
+/// environment variable can carry shell metacharacters. Anything that names a
+/// file goes through [`run`], which takes an argument vector.
+pub fn shell(command: &'static str) -> String {
     match Command::new("sh").arg("-c").arg(command).output() {
-        Ok(output) => {
-            let mut text: String = String::from_utf8_lossy(&output.stdout).into_owned();
-            let stderr: String = String::from_utf8_lossy(&output.stderr).into_owned();
-            if !stderr.trim().is_empty() {
-                text.push_str(&stderr);
-            }
-            if !output.status.success() {
-                text.push_str(&format!("[exit status: {}]\n", output.status));
-            }
-            text.trim_end().to_string()
-        }
+        Ok(output) => combined_output(&output),
         Err(error) => format!("[could not run `{command}`: {error}]"),
     }
+}
+
+/// Run `program` with an argument vector (no shell) and return its combined
+/// output, or why it could not start.
+pub fn run<P: AsRef<OsStr>, A: AsRef<OsStr>>(program: P, args: &[A]) -> Result<String, String> {
+    let program: &OsStr = program.as_ref();
+    Command::new(program)
+        .args(args)
+        .output()
+        .map(|output| combined_output(&output))
+        .map_err(|error| format!("could not run {}: {error}", program.to_string_lossy()))
 }
 
 /// CPU and memory load immediately before the measurement. A number without
@@ -143,10 +161,16 @@ pub fn read_lock(path: &Path) -> Vec<LockedPackage> {
 }
 
 pub fn sha256_hex(path: &Path) -> String {
-    let quoted: String = format!("'{}'", path.display().to_string().replace('\'', "'\\''"));
-    let output: String = shell(&format!(
-        "if command -v sha256sum >/dev/null 2>&1; then sha256sum {quoted}; else shasum -a 256 {quoted}; fi"
-    ));
+    // GNU coreutils on Linux, Perl's shasum on macOS; both print the digest
+    // first. Argument vectors, so the path is never parsed by a shell.
+    let output: String = run("sha256sum", &[path.as_os_str()])
+        .or_else(|_| {
+            run(
+                "shasum",
+                &[OsStr::new("-a"), OsStr::new("256"), path.as_os_str()],
+            )
+        })
+        .unwrap_or_else(|error| panic!("no sha256sum or shasum: {error}"));
     let digest: &str = output.split_whitespace().next().unwrap_or("");
     assert!(
         digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_hexdigit()),
@@ -177,49 +201,79 @@ pub fn read_build_info(path: Option<&Path>) -> Vec<(String, String)> {
         .collect()
 }
 
-/// The C reference decoder, if one is installed. It is the contract for the
-/// libjpeg-turbo-rs rows (pixel-identical to `djpeg` is the project's goal),
-/// so where present the report adds candidate-vs-C. Absence is reported, not
-/// fatal: hosted runners do not ship djpeg and this harness installs nothing.
+/// A C reference tool (`djpeg` or `cjpeg`), if one is available. C
+/// libjpeg-turbo is the contract for the libjpeg-turbo-rs rows, so where the
+/// tool is present the report adds — and asserts — candidate-vs-C. Absence is
+/// reported, not fatal: hosted runners do not ship these tools and this
+/// harness installs nothing.
 ///
-/// `/usr/local` is deliberately not probed: it is where this repository's own
-/// C-ABI shim gets installed, and a `djpeg` linked against the shim would make
-/// the "oracle" our own code. Pass `--djpeg` or `DJPEG=` to use one there.
-/// The returned path is canonicalised so the report names the real binary,
-/// not a symlink in `bin/`.
-pub fn find_djpeg(explicit: Option<&Path>) -> Option<PathBuf> {
+/// Selection: the explicit `--djpeg`/`--cjpeg` path, else the `DJPEG`/`CJPEG`
+/// environment variable, else the first of `/opt/homebrew/bin`,
+/// `/opt/libjpeg-turbo/bin` and `/usr/bin` that has it. `/usr/local` is
+/// deliberately not probed: it is where this repository's own C-ABI shim gets
+/// installed, and a tool linked against the shim would make the "oracle" our
+/// own code. The returned path is canonicalised so the report names the real
+/// binary, not a symlink in `bin/`.
+pub fn find_c_tool(
+    tool: &str,
+    explicit: Option<&Path>,
+    environment_variable: &str,
+) -> Option<PathBuf> {
     let chosen: PathBuf = if let Some(path) = explicit {
         path.to_path_buf()
-    } else if let Ok(path) = std::env::var("DJPEG") {
+    } else if let Ok(path) = std::env::var(environment_variable) {
         PathBuf::from(path)
     } else {
-        [
-            "/opt/homebrew/bin/djpeg",
-            "/opt/libjpeg-turbo/bin/djpeg",
-            "/usr/bin/djpeg",
-        ]
-        .into_iter()
-        .map(PathBuf::from)
-        .find(|candidate| candidate.is_file())?
+        ["/opt/homebrew/bin", "/opt/libjpeg-turbo/bin", "/usr/bin"]
+            .into_iter()
+            .map(|dir| Path::new(dir).join(tool))
+            .find(|candidate| candidate.is_file())?
     };
     Some(std::fs::canonicalize(&chosen).unwrap_or(chosen))
 }
 
-/// The dynamic libraries `djpeg` resolves, so the report shows which libjpeg
-/// actually produced the C pixels (a `djpeg` binary says nothing about the
+/// First line of `<tool> -version`.
+pub fn c_tool_version(path: &Path) -> String {
+    match run(path, &["-version"]) {
+        Ok(text) => text.lines().next().unwrap_or("").to_string(),
+        Err(error) => error,
+    }
+}
+
+/// The dynamic libraries a C tool resolves, so the report shows which libjpeg
+/// actually produced the C output (a `djpeg` binary says nothing about the
 /// library it loads).
-pub fn djpeg_link_map(path: &Path) -> String {
-    let quoted: String = format!("'{}'", path.display().to_string().replace('\'', "'\\''"));
+pub fn c_tool_link_map(path: &Path) -> String {
+    let shown: String = path.display().to_string();
     if cfg!(target_os = "macos") {
-        // `@rpath/...` entries resolve through the binary's LC_RPATH list.
+        let libraries: String =
+            run("otool", &[OsStr::new("-L"), path.as_os_str()]).unwrap_or_else(|e| e);
+        // `@rpath/...` entries resolve through the binary's LC_RPATH list:
+        // the `path` line that follows each `cmd LC_RPATH` load command.
+        let load_commands: String =
+            run("otool", &[OsStr::new("-l"), path.as_os_str()]).unwrap_or_else(|e| e);
+        let mut rpaths: Vec<String> = Vec::new();
+        let mut in_rpath: bool = false;
+        for line in load_commands.lines() {
+            let trimmed: &str = line.trim();
+            if trimmed.starts_with("cmd ") {
+                in_rpath = trimmed == "cmd LC_RPATH";
+            } else if in_rpath && trimmed.starts_with("path ") {
+                rpaths.push(trimmed.to_string());
+            }
+        }
         format!(
-            "$ otool -L {quoted}\n{}\n$ otool -l {quoted} | grep -A2 LC_RPATH | grep path\n{}",
-            shell(&format!("otool -L {quoted}")),
-            shell(&format!(
-                "otool -l {quoted} | grep -A2 LC_RPATH | grep path || true"
-            ))
+            "$ otool -L {shown}\n{libraries}\n$ otool -l {shown} (LC_RPATH entries)\n{}",
+            if rpaths.is_empty() {
+                "<none>".to_string()
+            } else {
+                rpaths.join("\n")
+            }
         )
     } else {
-        format!("$ ldd {quoted}\n{}", shell(&format!("ldd {quoted}")))
+        format!(
+            "$ ldd {shown}\n{}",
+            run("ldd", &[path.as_os_str()]).unwrap_or_else(|e| e)
+        )
     }
 }

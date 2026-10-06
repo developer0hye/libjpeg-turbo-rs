@@ -12546,6 +12546,16 @@ A re-run after review (`--smoke`, with stock 3.2.0 `djpeg` passed via
 the 4:4:4 encode rows, the baseline / adapter / image size probes, batched
 timing for sub-millisecond rows, and a `run.sh --check` mode.
 
+After the codex review, C became a hard contract wherever a C tool is
+available:
+- every decode case asserts candidate and baseline pixel-identical to
+  `djpeg`;
+- every encode case asserts candidate and baseline `compress`
+  byte-identical to `cjpeg -quality 85`, and to `cjpeg -quality 85 -sample
+  1x1` for the 4:4:4 rows.
+
+Against stock 3.2.0, all of these held on 2026-10-07.
+
 **Status (2026-10-07): harness landed; first measured report pending.**
 Criterion 6 needs a quiet machine and the first dispatch of the hosted job.
 GitHub registers a dispatch-only workflow only after the file reaches the

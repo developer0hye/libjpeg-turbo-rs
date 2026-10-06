@@ -13,10 +13,10 @@ name: Downstream consumer benchmark
 # Manual only. Hosted runners are shared and their CPU model, frequency and
 # neighbours vary between runs, so a single dispatch is evidence of within-run
 # ratios, not an absolute number; see experiments/downstream/README.md
-# ("Hosted-runner noise"). The harness runs with `--no-c-oracle`: this job
-# provisions no C reference, and whatever `djpeg` a runner image happens to
-# carry is an unpinned release, so the reports carry no candidate-vs-C rows
-# and say so.
+# ("Hosted-runner noise"). The harness runs with `--no-c-oracle`, which
+# turns off both C tools (`djpeg` for decode, `cjpeg` for encode): this job
+# provisions no C reference, and whatever a runner image happens to carry is
+# an unpinned release, so the reports carry no candidate-vs-C rows and say so.
 
 on:
   workflow_dispatch:

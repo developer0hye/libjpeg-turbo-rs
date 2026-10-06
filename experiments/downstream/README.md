@@ -85,20 +85,35 @@ These run outside every timed region.
   difference is a behaviour change to explain. zune-jpeg does not claim
   libjpeg-identical output, so its difference is reported but never fails the
   run.
-- **Candidate vs C.** If `djpeg` is available, every decode case also compares
-  the candidate with C, which is the project's contract. `--djpeg <path>` or
-  `DJPEG=<path>` selects one; otherwise the harness probes
-  `/opt/homebrew/bin`, `/opt/libjpeg-turbo/bin` and `/usr/bin`, but never
-  `/usr/local`, where this repository's own C-ABI shim gets installed. The
-  report records the resolved (canonical) path, `djpeg -version` and the
-  binary's link map (`otool -L` or `ldd`), so it shows which libjpeg actually
-  produced the C pixels. The first local smoke run (2026-10-07) compared
-  against Homebrew's 3.1.4.1. The re-run after review compared against a
-  stock 3.2.0 build, passed as
-  `DJPEG=/Volumes/T7/scratch/ljt320/prefix/bin/djpeg` (a local build on the
-  maintainer's machine). The workflow passes `--no-c-oracle`: it provisions
-  no C reference, and a `djpeg` that happens to be on a runner image is an
-  unpinned release.
+- **Candidate vs C (asserted).** C libjpeg-turbo is the contract, so when a
+  C tool is available a difference **fails the run**:
+  - decode: candidate `decompress_to` and baseline 0.8.0 must be
+    pixel-identical to `djpeg` on every case, including `-grayscale` and
+    `-scale 1/4`. Both matched stock 3.2.0 and Homebrew 3.1.4.1 on all eight
+    cases on 2026-10-07;
+  - encode: candidate and baseline `compress` must be byte-identical to
+    `cjpeg -quality 85` (4:2:0) and to `cjpeg -quality 85 -sample 1x1` for the
+    `-444` rows, fed the same pixels as a PPM. A failure says whether the
+    streams still differ once APP0 is removed, so a JFIF-header-only
+    difference is reported as one rather than loosened silently.
+    `image-builtin` makes no libjpeg-compatibility claim and is not compared.
+
+  Tool selection: `--djpeg` / `--cjpeg`, else `DJPEG` / `CJPEG`, else the
+  first of `/opt/homebrew/bin`, `/opt/libjpeg-turbo/bin` and `/usr/bin` that
+  has the tool. `/usr/local` is never probed, because this repository's own
+  C-ABI shim gets installed there. The report records each tool's resolved
+  (canonical) path, its `-version` line and its link map (`otool -L` plus
+  `LC_RPATH`, or `ldd`), so it shows which libjpeg actually produced the C
+  output. Without a tool, the report says so explicitly ("C encode
+  comparison: skipped (no cjpeg)").
+
+  The first local smoke run (2026-10-07) compared against Homebrew's 3.1.4.1.
+  Later runs used a stock 3.2.0 build, passed as
+  `DJPEG=/Volumes/T7/scratch/ljt320/prefix/bin/djpeg
+  CJPEG=/Volumes/T7/scratch/ljt320/prefix/bin/cjpeg` (a local build on the
+  maintainer's machine). `--no-c-oracle` turns off both tools. The workflow
+  passes it, because it provisions no C reference and a tool that happens
+  to be on a runner image is an unpinned release.
 - **Encode PSNR.** PSNR is measured against the source pixels. The published
   baseline decodes every row's output. Each output's real subsampling is read
   back from its SOF marker. `image`'s encoder writes **4:4:4** at q85 even
@@ -133,13 +148,15 @@ the sizes, so a finished work dir holds only the copied consumer, the binary,
    ancestors has a `.cargo/config.toml`. `CARGO_HOME`'s config is the one
    exception, because it applies to every build on the machine, downstream
    builds included. `run.sh` refuses it too if it sets a profile, rustflags,
-   a rustc wrapper or `[target]` options; otherwise its contents go into
-   `build-info.txt`.
+   a rustc wrapper or `[target]` options.
 4. Unsets every `CARGO_PROFILE_*`, `CARGO_BUILD_*` (except `CARGO_BUILD_JOBS`),
    `CARGO_TARGET_*`, `CARGO_INCREMENTAL`, `RUSTC_WRAPPER`,
    `RUSTC_WORKSPACE_WRAPPER`, `RUSTFLAGS` and `CARGO_ENCODED_RUSTFLAGS`, and
    records which ones it cleared. It also records the remaining `CARGO_*` /
-   `RUST*` environment, with credentials filtered out.
+   `RUST*` environment, dropping credential-named variables and any value
+   that is a URL with userinfo. Only the *shape* of `CARGO_HOME`'s config
+   goes into `build-info.txt`: table and key names, with every value redacted
+   except `[build] jobs` and `[net] offline`.
 5. Runs `cargo fetch --locked` so downloads are not counted as build time,
    then `cargo build --release --locked` in a fresh target directory. It
    records the clean build time and the binary size.
@@ -169,7 +186,8 @@ Build variants are separate, labelled runs. The default is the stock profile.
 
 Harness options: `--iterations N`, `--warmup N`, `--smoke` (2 iterations after
 1 warmup; this proves the harness works and measures nothing), `--only
-<substring>` (case filter), `--djpeg <path>`, `--no-c-oracle`.
+<substring>` (case filter), `--djpeg <path>`, `--cjpeg <path>`,
+`--no-c-oracle`.
 
 **Before a measured run,** follow the timing-experiment rules in the global
 CLAUDE.md: profile the machine first, wait until two consecutive samples are
