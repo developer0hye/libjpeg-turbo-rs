@@ -11842,7 +11842,7 @@ behind a test-infrastructure review.
 Verification (2026-10-07, aarch64-darwin): `cargo test --locked
 --no-fail-fast` for the root crate, 2487 passed / 0 failed / 5 ignored across
 233 binaries; `cargo test --locked -p libjpeg-turbo-rs-capi --tests` with
-`LIBJPEG_TURBO_PREFIX` on a stock 3.2.0 install, 361 passed / 0 failed,
+`LIBJPEG_TURBO_PREFIX` on a stock 3.2.0 install, 363 passed / 0 failed,
 `transcripts_match_stock_turbojpeg` included; the #618 regression and the
 `TjHandle` suite also in `--release`; workspace and `--lib` clippy clean. The
 first full run failed four tests that had asserted the old clamping —
