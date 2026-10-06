@@ -144,6 +144,21 @@ and `git log` between tags.
   runs system/Rust bidirectional cross-decodes.
 
 ### Fixed
+- An allocator refusal during a decode is reported as
+  `JpegError::AllocationFailed` instead of aborting the process (P4-209,
+  #632). `decompress` / `Decoder::decode_image` allocated their destination
+  with `vec![0u8; size]`, sized by the SOF, so a large or hostile file on a
+  memory-constrained host ended in an uncatchable `SIGABRT`. That buffer and
+  every other full-plane or destination allocation under `src/decode/` —
+  component planes, the merged-upsample, 12-bit, lossless, CMYK/YCCK and
+  colourspace-override outputs, full-plane chroma upsampling, crop copies and
+  the block-smoothing DC snapshot — now go through the crate's fallible
+  allocator helpers. A successful decode is byte-identical. A 12-bit source
+  still decodes its samples through `api::precision`, which this change does
+  not cover. `tests/decode_alloc_gate.rs` with
+  `docs/decode_alloc_inventory.tsv` fails CI when a new infallible allocation
+  under `src/decode/` is not classified as bounded by something other than the
+  input.
 - `Encoder::encode` validates the caller's pixel buffer against
   `width x height x bytes_per_pixel` **before** it rearranges it (P4-139,
   #478). `bottom_up`, `fancy_downsampling` and `grayscale_from_color` each

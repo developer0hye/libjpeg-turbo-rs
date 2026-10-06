@@ -8171,8 +8171,8 @@ misuse of a public SIMD entry point; none injects allocation failure; none runs
    `tests/miri_alloc_failure.rs`, `tests/miri_once_init.rs`) and the doctests are
    in the Miri job, `tests/miri_coverage_gate.rs` fails when a step stops naming
    one of them, and the allocation-failure injection produced
-   [P4-209](#p4-209-the-mainline-decode-destination-is-allocated-infallibly-so-an-allocator-refusal-aborts-the-process--open)
-   (#632) on its first run. What remains is the *existing* 224 integration
+   [P4-209](#p4-209-the-mainline-decode-destination-is-allocated-infallibly-so-an-allocator-refusal-aborts-the-process--closed-2026-10-07)
+   (#632, closed 2026-10-07) on its first run. What remains is the *existing* 224 integration
    suites: most spawn `djpeg`/`cjpeg`, which Miri cannot support — measured, not
    assumed (`cargo miri test --test decode_limits` interprets its first few tests
    and then stops with "can't call foreign function `posix_spawnattr_init`"; how
@@ -8888,8 +8888,8 @@ the harness first would only pin current behaviour.
   so the rules cannot rot
   into always-true.
   **What the injection produced:**
-  [P4-209](#p4-209-the-mainline-decode-destination-is-allocated-infallibly-so-an-allocator-refusal-aborts-the-process--open)
-  (#632) — `decompress` allocates its destination with `vec![0u8; size]`
+  [P4-209](#p4-209-the-mainline-decode-destination-is-allocated-infallibly-so-an-allocator-refusal-aborts-the-process--closed-2026-10-07)
+  (#632, closed 2026-10-07) — `decompress` allocated its destination with `vec![0u8; size]`
   (`decode/pipeline_impl/output.rs`, `take_out_buf`) where `size` comes from the
   SOF, so a refused allocation **aborts the process** instead of returning
   `AllocationFailed`. This is the class P4-136 criterion 4 and P4-144 closed
@@ -8897,9 +8897,10 @@ the harness first would only pin current behaviour.
   that because none had ever refused an allocation a decode actually makes (the
   two pre-existing probes ask `try_alloc` for an unservable `isize::MAX` and are
   Miri-ignored — see P4-209). Verified by patching that one
-  site to `try_filled_vec`, after which the contract test passes unchanged; it is
-  committed `#[ignore]`d citing the issue, so closing P4-209 means deleting the
-  attribute rather than writing a test.
+  site to `try_filled_vec`, after which the contract test passes unchanged; it was
+  committed `#[ignore]`d citing the issue, and P4-209 closed 2026-10-07 by
+  deleting the attribute, converting the other geometry-sized decode
+  allocations, and gating the rest with `tests/decode_alloc_gate.rs`.
   **What remains in this criterion** is the pre-existing integration suites.
   They are not one edit away: `cargo miri test --test decode_limits` interprets
   the first handful of its tests and then stops with "can't call foreign
@@ -12394,7 +12395,7 @@ it: choosing between the two readings is a decision about what the sanitizer
 leg is for, and the pull request that surfaced it lands test infrastructure for
 P4-141.
 
-## P4-209. The Mainline Decode Destination Is Allocated Infallibly, So an Allocator Refusal Aborts the Process — **OPEN**
+## P4-209. The Mainline Decode Destination Is Allocated Infallibly, So an Allocator Refusal Aborts the Process — **CLOSED 2026-10-07**
 
 **GitHub:** [#632](https://github.com/developer0hye/libjpeg-turbo-rs/issues/632) — found by [P4-141](#p4-141-soundness-verification-program-mirisanitizerfuzz-coverage-gaps-and-an-unsafe-inventory-gate--partial-criteria-3-4-and-5-landed-and-gated-except-criterion-3s-callback-reentry-scenario-criterion-1-landed-except-the-pre-existing-integration-suites-criteria-2-6-and-7-open) criterion 1.
 
@@ -12461,3 +12462,63 @@ is one line at the site that aborts and an audit of the fifty-eight others, and
 bundling an audit of the decode pipeline's allocation discipline into the pull
 request that built the injection harness would put the harness's own review
 behind it.
+
+**Status (2026-10-07): closed.** Criterion 1:
+`take_out_buf` (`decode/pipeline_impl/output.rs`) allocates through
+`try_filled_vec(size, 0u8, "decode output buffer")`, and
+`tests/miri_alloc_failure.rs::the_mainline_decode_reports_refusal_instead_of_aborting`
+runs without its `#[ignore]`, now also pinning the refused buffer's name and
+size; un-ignored on the unfixed tree it died with
+`memory allocation of 12288 bytes failed` / `SIGABRT`. Criterion 2: the
+triage measured **78** infallible-allocation lines (`vec![…]`,
+`Vec::with_capacity(…)`, `.to_vec()`) in non-test `src/decode/` code — the
+issue's 59 was a narrower grep, and counting inline `#[cfg(test)]` modules
+gives 115 — and **36 were converted** to `common::try_alloc`: every
+component plane not already fallible (baseline ×2, the arithmetic multi-scan
+twin, the windowed-streaming planes, lossless ×4), every destination
+(`take_out_buf`, the 12-bit downscale ×5, the grayscale exact-copy, the lenient
+neutral raster, the merged-upsample RGB and RGB565 buffers, the 4-component
+output, the lossless outputs ×3, the grayscale and legacy colourspace
+overrides ×3), the full-plane upsample buffers (`cb_full`/`cr_full`, the YCCK
+chroma planes, `upsample_component_plane`'s `active`/`full`), the crop copies
+(three `cropped` chroma planes, the crop-shifted planes, the vertical-crop
+`.to_vec()`), plus two input-sized allocations the patterns do not match on the
+same paths (the 12-bit grayscale `collect()` and the crop-shift
+`plane.clone()`). Block smoothing's DC snapshot is fallible on the decode path
+through a new `try_apply_block_smoothing_coeffs`; the public
+`apply_block_smoothing_coeffs` keeps its `()` signature. A new
+`try_alloc::try_with_capacity::<T>` covers non-byte element types, with unit
+tests for the reservation and the inexpressible-byte-count limit. The **42**
+remaining lines are classified in `docs/decode_alloc_inventory.tsv` as
+`fixed-size`, `component-count` (≤ `MAX_COMPONENTS`), `row-scratch` (one row,
+≤ 512 KiB by the SOF's 16-bit width) or `infallible-public-signature` (two:
+`Image::apply_orientation_value` and the public smoothing wrapper). Criterion 3:
+`tests/decode_alloc_gate.rs` diffs that inventory against the sources on every
+native leg — unlisted, stale and miscounted rows fail with the rows to add or
+delete — skipping comment lines, `*_tests.rs` and inline `#[cfg(test)] mod`
+blocks (brace-counted outside literals, pinned by
+`the_test_module_skip_resumes_after_the_module`, and
+`every_scanned_file_ends_with_balanced_braces` fails if the scanner ends any
+file with a brace, string or skip open), with
+`the_gate_actually_scans_the_library_sources` as the non-vacuity check; adding a
+`vec![0u8; n]` to `pipeline_impl/raw.rs` was reported as an unlisted row.
+Beyond the mainline, three more converted sites are pinned through distinct
+public configurations, each red with `SIGABRT` on the unfixed tree at the
+predicted size and green after:
+`a_refused_merged_upsample_buffer_reports_instead_of_aborting` (6720 bytes,
+`set_merged_upsample`),
+`a_refused_lossless_sample_plane_reports_instead_of_aborting` (3000 bytes, SOF3)
+and `a_refused_vertical_crop_copy_reports_instead_of_aborting` (3840 bytes,
+`set_crop_y`), each requiring exactly one refusal and identical bytes from the
+same `Decoder` afterwards; `tests/miri_coverage_gate.rs` lists all four. The
+gate sees only the three textual patterns, so an input-sized `.clone()` or
+`.collect()` elsewhere in the decoder remains possible by construction; the
+gate's module documentation says so rather than claiming the class closed.
+Out of scope by the item's own wording (`src/decode/`): the sample decode of a
+12-bit source, which `decode_12bit_as_8bit` delegates to
+`api::precision::decompress_12bit`, still allocates its planes with `vec![]`,
+as do other `src/api/` modules. Not measured here: the converted zero-filled
+buffers trade `vec![0; n]`'s `alloc_zeroed` for `try_reserve_exact` plus an
+explicit fill. `experiments/progressive.tsv` measured that exact swap neutral on
+an 8K progressive decode (P4-136 criterion 4); the baseline mainline has no row
+of its own yet.
