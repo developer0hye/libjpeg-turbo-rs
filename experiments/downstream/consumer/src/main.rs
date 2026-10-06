@@ -13,8 +13,12 @@
 //! 2. allocation pass — one decode per backend under the counting allocator;
 //! 3. warmup, then N timed rounds in which every backend runs once, in a
 //!    rotating order, so slow drift in machine load hits all rows alike.
+//!
+//! The concurrent decode section (`concurrent.rs`) follows the same three
+//! passes with a batch of T threads × K decodes in place of one decode.
 
 mod alloc_counter;
+mod concurrent;
 mod corpus;
 mod decode;
 mod environment;
@@ -34,8 +38,8 @@ use decode::{DecodeBackend, DecodeCase, Preparation, PreparedDecode};
 use ljt_api::Chroma;
 use measure::{FrameFacts, PixelDiff, TimedSamples, TimingSummary};
 use report::{
-    CorpusRecord, CorrectnessRecord, DecodeCaseReport, DecodeRow, EncodeCaseReport, EncodeRow,
-    Report, ThumbnailReport, ThumbnailRow,
+    ConcurrentReport, ConcurrentRow, CorpusRecord, CorrectnessRecord, DecodeCaseReport, DecodeRow,
+    EncodeCaseReport, EncodeRow, Report, ThumbnailReport, ThumbnailRow,
 };
 use workloads::{EncodeBackend, ThumbnailBackend};
 
@@ -788,6 +792,129 @@ fn run_thumbnail(
     }
 }
 
+/// T threads × K decodes of the 12 MP photo per backend; see `concurrent.rs`.
+fn run_concurrent_decode(case: &DecodeCase, options: &Options) -> ConcurrentReport {
+    let threads: usize = concurrent::worker_count(
+        std::thread::available_parallelism()
+            .map(|count| count.get())
+            .unwrap_or(1),
+    );
+    let decodes: usize = concurrent::decodes_per_thread(options.smoke);
+    eprintln!("[concurrent] {} ({threads} threads x {decodes})", case.id);
+    // One PreparedDecode per thread, so each reuse thread owns its buffer.
+    // All rows' pools coexist because the timing rounds interleave rows.
+    let mut pools: Vec<Vec<PreparedDecode>> = Vec::new();
+    let mut rows: Vec<ConcurrentRow> = Vec::new();
+    for backend in DecodeBackend::ALL {
+        let mut pool: Vec<PreparedDecode> = Vec::with_capacity(threads);
+        let mut not_applicable: Option<&'static str> = None;
+        for _ in 0..threads {
+            match PreparedDecode::prepare(backend, case) {
+                Preparation::Ready(ready) => pool.push(ready),
+                Preparation::NotApplicable(reason) => {
+                    not_applicable = Some(reason);
+                    break;
+                }
+            }
+        }
+        match not_applicable {
+            Some(reason) => rows.push(ConcurrentRow {
+                backend: backend.id().to_string(),
+                path: backend.path().to_string(),
+                timing: None,
+                megapixels_per_second: None,
+                alloc: None,
+                caller_buffer_bytes: None,
+                outputs_compared: None,
+                not_applicable: Some(reason.to_string()),
+            }),
+            None => pools.push(pool),
+        }
+    }
+
+    // 1. Correctness: the single-threaded output of the same backend is the
+    //    reference for every output of one concurrent batch.
+    let mut outputs_compared: Vec<usize> = Vec::with_capacity(pools.len());
+    for pool in pools.iter_mut() {
+        let backend: DecodeBackend = pool[0].backend;
+        let (width, height, reference) = {
+            let decoded = pool[0].decode();
+            let pixels: Vec<u8> = pool[0].pixels(&decoded).to_vec();
+            (decoded.width, decoded.height, pixels)
+        };
+        let compared: usize = concurrent::check_batch(pool, decodes, (width, height, &reference))
+            .unwrap_or_else(|difference| {
+                panic!(
+                    "{} differs from its single-threaded output under {threads} threads on {}: {difference}",
+                    backend.id(),
+                    case.id
+                )
+            });
+        outputs_compared.push(compared);
+    }
+
+    // 2. Allocation pass: one batch, all threads in one window. run_batch
+    //    joins every thread before returning, so the counts are exact.
+    let allocations: Vec<AllocStats> = pools
+        .iter_mut()
+        .map(|pool| alloc_counter::measure(|| concurrent::run_batch(pool, decodes)).1)
+        .collect();
+
+    // 3. Timing: one runner per backend runs a whole batch.
+    let samples: Vec<TimedSamples> = {
+        let mut runners: Vec<Box<dyn FnMut() + '_>> = pools
+            .iter_mut()
+            .map(|pool| {
+                Box::new(move || concurrent::run_batch(pool, decodes)) as Box<dyn FnMut() + '_>
+            })
+            .collect();
+        time_interleaved(&mut runners, options.warmup, options.iterations)
+    };
+    for (((pool, samples), stats), compared) in pools
+        .iter()
+        .zip(&samples)
+        .zip(&allocations)
+        .zip(&outputs_compared)
+    {
+        let backend: DecodeBackend = pool[0].backend;
+        let timing: TimingSummary = measure::summarize(samples);
+        rows.push(ConcurrentRow {
+            backend: backend.id().to_string(),
+            path: backend.path().to_string(),
+            timing: Some(timing),
+            megapixels_per_second: Some(concurrent::aggregate_megapixels_per_second(
+                case.source_width,
+                case.source_height,
+                threads,
+                decodes,
+                &timing,
+            )),
+            alloc: Some(*stats),
+            caller_buffer_bytes: Some(
+                pool.iter()
+                    .map(|ready| ready.caller_buffer_bytes() as u64)
+                    .sum(),
+            ),
+            outputs_compared: Some(*compared),
+            not_applicable: None,
+        });
+    }
+    rows.sort_by_key(|row| {
+        DecodeBackend::ALL
+            .iter()
+            .position(|backend| backend.id() == row.backend)
+    });
+    ConcurrentReport {
+        id: concurrent::SECTION_ID.to_string(),
+        corpus_id: case.corpus_id.clone(),
+        source_width: case.source_width,
+        source_height: case.source_height,
+        threads,
+        decodes_per_thread: decodes,
+        rows,
+    }
+}
+
 /// `(case id, corpus id, description, output layout, DCT scale)`.
 type DecodeSpec = (
     &'static str,
@@ -968,6 +1095,27 @@ fn main() {
         thumbnail_report = Some(run_thumbnail(&file, 4032, 3024, &options));
     }
 
+    let mut concurrent_report: Option<ConcurrentReport> = None;
+    if selected(&options, concurrent::SECTION_ID) {
+        // Regenerated rather than kept from the decode loop, whose one-entry
+        // cache holds at most one file; `store.add` records it once.
+        let file: CorpusFile = corpus_file(concurrent::CORPUS_ID, &options.repo);
+        store.add(&file);
+        let facts: FrameFacts =
+            measure::inspect_frame(&file.jpeg).expect("corpus files have a frame header");
+        let case: DecodeCase = DecodeCase {
+            id: concurrent::SECTION_ID.to_string(),
+            corpus_id: file.id.clone(),
+            description: "12 MP phone-size photo, 4:2:0, decoded concurrently".to_string(),
+            jpeg: file.jpeg,
+            layout: OutputLayout::Rgb,
+            scale: None,
+            source_width: facts.width as usize,
+            source_height: facts.height as usize,
+        };
+        concurrent_report = Some(run_concurrent_decode(&case, &options));
+    }
+
     let report: Report = Report {
         started_at,
         smoke: options.smoke,
@@ -994,6 +1142,7 @@ fn main() {
         decode: decode_reports,
         encode: encode_reports,
         thumbnail: thumbnail_report,
+        concurrent: concurrent_report,
     };
     let markdown_path: PathBuf = options.out_dir.join("report.md");
     let json_path: PathBuf = options.out_dir.join("report.json");

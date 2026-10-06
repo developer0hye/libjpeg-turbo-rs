@@ -15,13 +15,31 @@
 //! is the highest that delta reached, i.e. the closure's working set above
 //! the heap it started with.
 //!
-//! The counters are atomics with `Relaxed` ordering. The harness is
-//! single-threaded and none of the measured backends spawn threads in the
-//! configuration built here (image without `rayon`; zune-jpeg 0.5 has no
-//! threading feature; libjpeg-turbo-rs is single-threaded), so the counts are
-//! exact. Atomics are used only because `GlobalAlloc` must be `Sync`; if a
-//! backend ever did allocate from another thread the totals would still be
-//! correct, but "peak live" would be an approximation.
+//! The counters are `Relaxed` atomics, and every figure is exact even when the
+//! measured closure allocates and frees from several threads, provided the
+//! closure joins every thread it starts before it returns. The concurrent
+//! workload's `std::thread::scope` does, and the measured libraries start no
+//! threads in this build (image without `rayon`; zune-jpeg 0.5 has no
+//! threading feature; libjpeg-turbo-rs is single-threaded):
+//!
+//! - count and cumulative bytes are sums of `fetch_add`, which loses no update;
+//! - every update of `LIVE_DELTA` is a read-modify-write on one atomic, so they
+//!   form a single modification order and each `fetch_add` returns the value
+//!   immediately before its own. `previous + delta` is therefore exactly the
+//!   next value in that order, every value the counter ever holds is passed to
+//!   `fetch_max`, and a maximum does not depend on the order those calls land
+//!   in. A block allocated on one thread and freed on another moves the same
+//!   global delta, so it needs no per-thread bookkeeping;
+//! - joining the threads orders all their updates before the final loads.
+//!
+//! "Exact" is about the counter: a call is counted a few instructions after
+//! `System` returns. The peak is the true peak of the live heap in the
+//! interleaving where each call takes effect at its counter update — one the
+//! same threads could have run. The allocator's own instantaneous state can
+//! differ from it only by calls caught between `System` returning and their
+//! update, at most one per thread. The figure is heap requested through
+//! `GlobalAlloc`: thread stacks (mapped directly), allocator overhead and
+//! retention, and code pages are not in it, so it is not resident memory.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
@@ -125,14 +143,23 @@ pub fn measure<R>(work: impl FnOnce() -> R) -> (R, AllocStats) {
     (result, stats)
 }
 
+/// The counters are process-wide and `cargo test` runs tests on parallel
+/// threads, so a test that allocates heavily (a decode) holds this while the
+/// window test below runs, or its allocations would land in that window.
+#[cfg(test)]
+pub static HEAVY_ALLOCATION_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     // Lower bounds only: the test harness runs other tests on other threads,
-    // and their allocations land in an open window too.
+    // and their small allocations land in an open window too.
     #[test]
     fn a_window_sees_the_closures_allocation_and_is_closed_afterwards() {
+        let _serial = HEAVY_ALLOCATION_TESTS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let (buffer, stats) = measure(|| vec![7u8; 100_000]);
         assert!(stats.count >= 1);
         assert!(stats.bytes >= 100_000);

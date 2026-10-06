@@ -311,6 +311,13 @@ impl<'case> PreparedDecode<'case> {
         }
     }
 
+    /// The caller-owned output buffer this backend decodes into (0 for the
+    /// fresh rows). It is allocated in [`PreparedDecode::prepare`], before any
+    /// allocation window opens, so reports state it beside the peak.
+    pub fn caller_buffer_bytes(&self) -> usize {
+        self.reuse_buffer.len()
+    }
+
     pub fn pixels<'a>(&'a self, decoded: &'a Decoded) -> &'a [u8] {
         match &decoded.owned {
             Some(pixels) => pixels,
