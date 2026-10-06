@@ -1,6 +1,8 @@
 use super::{upsample_generic_nearest, Decoder, Image};
 use crate::common::error::{DecodeWarning, JpegError, Result};
-use crate::common::try_alloc::{try_clone_opt, try_clone_opt_string, try_clone_saved_markers};
+use crate::common::try_alloc::{
+    try_clone_opt, try_clone_opt_string, try_clone_saved_markers, try_filled_vec,
+};
 use crate::common::types::{ColorSpace, FrameHeader, PixelFormat};
 use alloc::{format, string::ToString, vec, vec::Vec};
 
@@ -89,8 +91,10 @@ impl<'a> Decoder<'a> {
             p2_stride = comp1_w;
         } else {
             let alloc_size = full_width * full_height;
-            let mut p1_full = vec![0u8; alloc_size];
-            let mut p2_full = vec![0u8; alloc_size];
+            let mut p1_full: Vec<u8> =
+                try_filled_vec(alloc_size, 0u8, "upsampled YCCK chroma plane")?;
+            let mut p2_full: Vec<u8> =
+                try_filled_vec(alloc_size, 0u8, "upsampled YCCK chroma plane")?;
 
             // Honor TJPARAM_FASTUPSAMPLE: when set, use the box-filter
             // (nearest-neighbor) upsample instead of the fancy triangle
@@ -231,7 +235,7 @@ impl<'a> Decoder<'a> {
 
         let bpp = out_format.bytes_per_pixel();
         let data_size = width * height * bpp;
-        let mut data = vec![0u8; data_size];
+        let mut data: Vec<u8> = try_filled_vec(data_size, 0u8, "4-component output")?;
 
         for y in 0..height {
             let p0 = &plane0[y * p0_stride..];

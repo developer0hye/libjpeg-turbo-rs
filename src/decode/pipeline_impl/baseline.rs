@@ -2,10 +2,11 @@ use super::Decoder;
 use crate::common::error::{DecodeWarning, JpegError, Result};
 use crate::common::huffman_table::HuffmanTable;
 use crate::common::quant_table::QuantTable;
+use crate::common::try_alloc::try_filled_vec;
 use crate::common::types::FrameHeader;
 use crate::decode::bitstream::BitReader;
 use crate::decode::entropy::{self, McuDecoder};
-use alloc::{format, string::ToString, vec, vec::Vec};
+use alloc::{format, string::ToString, vec::Vec};
 
 impl<'a> Decoder<'a> {
     /// Decode baseline (single-scan) into component planes.
@@ -78,9 +79,10 @@ impl<'a> Decoder<'a> {
                 let comp_w = mcus_x * comp.horizontal_sampling as usize * comp_block_sizes[ci];
                 let comp_h = mcus_y * comp.vertical_sampling as usize * comp_block_sizes[ci];
                 let size: usize = comp_w * comp_h;
-                vec![0u8; size]
+                // P4-209: frame-geometry sized, so refusal must be an error.
+                try_filled_vec(size, 0u8, "baseline component plane")
             })
-            .collect();
+            .collect::<Result<Vec<Vec<u8>>>>()?;
 
         let mcu_plan = entropy::resolve_mcu_plan(
             frame,
@@ -315,9 +317,9 @@ impl<'a> Decoder<'a> {
                     mcus_x * comp.horizontal_sampling as usize * comp_block_sizes[ci];
                 let comp_h: usize = mcus_y * comp.vertical_sampling as usize * comp_block_sizes[ci];
                 let size: usize = comp_w * comp_h;
-                vec![128u8; size]
+                try_filled_vec(size, 128u8, "baseline component plane")
             })
-            .collect();
+            .collect::<Result<Vec<Vec<u8>>>>()?;
 
         // Process each scan independently
         let mut warnings: Vec<DecodeWarning> = Vec::new();
