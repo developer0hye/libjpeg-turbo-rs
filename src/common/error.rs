@@ -41,7 +41,7 @@ pub enum JpegError {
     AllocationFailed { what: &'static str, bytes: u64 },
 
     /// A caller-supplied progressive scan script breaks a rule C's
-    /// `validate_script` (`jcmaster.c:279-439`) enforces, so it was refused
+    /// `validate_script` (`jcmaster.c:276-436`) enforces, so it was refused
     /// before any encoding work ran (issue #610).
     ///
     /// `entry` is the 1-based script entry, as C's `scanno` is; `0` means the

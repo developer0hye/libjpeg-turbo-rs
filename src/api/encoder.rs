@@ -178,7 +178,9 @@ impl<'a> Encoder<'a> {
     /// grayscale output — [`progressive`](Self::progressive) on, with no
     /// arithmetic coding, no RGB-direct [`colorspace`](Self::colorspace) and
     /// no custom per-component sampling factors. Those three paths still use
-    /// C's default script and ignore this one (tracked as P4-210, #636). Where
+    /// C's default script and ignore this one (tracked as P4-210, #636);
+    /// [`lossless`](Self::lossless) ignores it too, because lossless JPEG has no
+    /// progressive mode for a script to describe. Where
     /// it is honoured, the script is checked at [`encode`](Self::encode) time,
     /// before any entropy coding, by the rules C's `validate_script` applies to
     /// a progressive script (`jcmaster.c`), and a script C would refuse

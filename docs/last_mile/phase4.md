@@ -11006,6 +11006,16 @@ C-ABI chunks landed 2026-09-08 and 2026-09-09 — thirty-nine of
 sub-invariant. Seventy-one in all. That answer is the criterion's product,
 not a defect in it — a raw count could not have named one of them.
 
+**Progress (2026-10-07).** The P4-192 fix (#610) rewrote the four rows of
+criterion 3 — `prepare_ac_first_coeffs`, `prepare_ac_first_sse2`,
+`prepare_ac_refine_coeffs`, `prepare_ac_refine_sse2` — to name tests: the
+bound is now asserted in both safe wrappers, pinned by `band_bound_tests`
+(`src/encode/pipeline_impl/progressive.rs`) and driven through the public API
+by `tests/scan_script_validation.rs`. `docs/UNSAFE_INVENTORY.md` now has
+twenty-eight `**none**` rows, sixty-seven in all. Criterion 3 is not met as
+written: no test compares the SSE2 and scalar arms at the smallest and largest
+legal `(Ss, Se)`.
+
 Eight clusters are actionable; the rest are qualified `**none**`s (a named
 sub-invariant or a CI leg, not an untested site) and are context.
 

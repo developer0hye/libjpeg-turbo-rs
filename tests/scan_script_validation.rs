@@ -1,5 +1,5 @@
 //! Custom progressive scan scripts are validated the way C's `validate_script`
-//! (`references/libjpeg-turbo/src/jcmaster.c:279-439`) validates them, before
+//! (`references/libjpeg-turbo/src/jcmaster.c:276-436`) validates them, before
 //! any encoding work runs.
 //!
 //! Issue #610 (P4-192): `Encoder::scan_script` used to store the script
@@ -12,7 +12,7 @@
 //! The C oracle is `cjpeg -scans`, whose script file goes through the same
 //! `validate_script`. Every case that file format can express is run through
 //! it: a script C refuses must be refused here at the same entry, and a script
-//! C accepts must be accepted here.
+//! C accepts must be accepted here and encoded to the same bytes.
 
 mod helpers;
 
@@ -297,7 +297,8 @@ fn refused_cases() -> Vec<RefusedCase> {
     ]
 }
 
-/// Scripts C accepts: the encode must succeed and decode to the frame size.
+/// Scripts C accepts: the encode must succeed, decode to the frame size and
+/// match `cjpeg -scans` byte for byte.
 fn accepted_cases() -> Vec<(&'static str, bool, Vec<ScanScript>)> {
     vec![
         (
@@ -422,7 +423,8 @@ fn refusals_name_the_offending_entry() {
     }
 }
 
-/// Every script C accepts is accepted here and decodes to the frame.
+/// Every script C accepts is accepted here, decodes to the frame, and is
+/// byte-identical to `cjpeg -scans`'s stream.
 #[test]
 fn accepted_scripts_match_cjpeg() {
     let cjpeg = require_c_tool!("cjpeg");

@@ -25,7 +25,7 @@ pub struct ProgressiveScan {
     pub al: u8,
 }
 
-/// The highest `Ah`/`Al` C allows for 8-bit data (`jcmaster.c:349`): an `Al`
+/// The highest `Ah`/`Al` C allows for 8-bit data (`jcmaster.c:357`): an `Al`
 /// above 10 drives first-scan DC values out of range.
 const MAX_AH_AL_8BIT: u8 = 10;
 
@@ -33,7 +33,7 @@ const MAX_AH_AL_8BIT: u8 = 10;
 const MAX_COMPS_IN_SCAN: usize = 4;
 
 /// Refuse a caller-supplied progressive scan script that C's `validate_script`
-/// (`jcmaster.c:279-439`) would refuse, before any encoding work runs.
+/// (`jcmaster.c:276-436`) would refuse, before any encoding work runs.
 ///
 /// This is the primary guard between `Encoder::scan_script` and the AC kernels
 /// (the kernels' safe wrappers also assert the band):
@@ -60,14 +60,14 @@ pub(crate) fn validate_scan_script(script: &[ScanScript], num_components: usize)
     for (index, entry) in script.iter().enumerate() {
         let scan_number: usize = index + 1;
         let components: &[u8] = &entry.components;
-        // jcmaster.c:330-332, JERR_COMPONENT_COUNT.
+        // jcmaster.c:333-334, JERR_COMPONENT_COUNT.
         if components.is_empty() || components.len() > MAX_COMPS_IN_SCAN {
             return Err(invalid(
                 scan_number,
                 "a scan carries one to four components",
             ));
         }
-        // jcmaster.c:333-340, JERR_BAD_SCAN_SCRIPT.
+        // jcmaster.c:335-341, JERR_BAD_SCAN_SCRIPT.
         for (position, &component) in components.iter().enumerate() {
             if usize::from(component) >= num_components {
                 return Err(invalid(scan_number, "component index past the frame"));
@@ -80,7 +80,7 @@ pub(crate) fn validate_scan_script(script: &[ScanScript], num_components: usize)
             }
         }
         let (ss, se, ah, al) = (entry.ss, entry.se, entry.ah, entry.al);
-        // jcmaster.c:355-357, JERR_BAD_PROG_SCRIPT from here to the loop's end.
+        // jcmaster.c:359-385, JERR_BAD_PROG_SCRIPT from here to the loop's end.
         if ss >= 64 || se < ss || se >= 64 || ah > MAX_AH_AL_8BIT || al > MAX_AH_AL_8BIT {
             return Err(invalid(
                 scan_number,
@@ -126,7 +126,7 @@ pub(crate) fn validate_scan_script(script: &[ScanScript], num_components: usize)
             }
         }
     }
-    // jcmaster.c:422-430: progressive mode only requires some DC per component.
+    // jcmaster.c:425-427: progressive mode only requires some DC per component.
     if last_bitpos.iter().any(|bitpos: &[i16; 64]| bitpos[0] < 0) {
         return Err(invalid(
             0,
