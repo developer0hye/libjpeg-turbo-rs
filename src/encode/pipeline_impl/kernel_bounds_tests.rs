@@ -122,7 +122,8 @@ fn note_when_avx2_absent() {
 /// last load ends on the last byte; a 24x16 plane walked block by block to
 /// (16, 8), the last interior block; and planes one column (23x16) or one row
 /// (24x15) short of that, where the final block is *not* interior and must take
-/// the border arm. Loosening either half of the interior test to `+ 7` would
+/// the border arm; and 9x9, one interior block beside border blocks one pixel
+/// wide or tall. Loosening either half of the interior test to `+ 7` would
 /// send that final block into the kernel, which then reads past the allocation.
 #[test]
 fn fdct_quantize_block_avx2_arm_matches_scalar_at_the_interior_edge() {
@@ -170,7 +171,8 @@ fn fdct_quantize_block_avx2_arm_matches_scalar_at_the_interior_edge() {
 /// Geometries: 16x8, the minimum interior window, whose last load ends on the
 /// last byte; 48x16 walked to (32, 8), the last interior window; and 47x16 /
 /// 48x15, where the final window is one column or one row short and must take
-/// the border arm. 4:2:2 chroma windows are 16 source columns wide, so the
+/// the border arm; and 17x9, one interior window beside border windows one
+/// pixel wide or tall. 4:2:2 chroma windows are 16 source columns wide, so the
 /// bound is `block_x + 16 <= plane_width`.
 #[test]
 fn fdct_quantize_chroma_h2v1_avx2_arm_matches_scalar_at_the_interior_edge() {

@@ -62,11 +62,13 @@
 #   do not: NEON and wasm kernels never compile here, SSE2 arms lose to the
 #   AVX2 dispatch, and several AVX2 arms are unreachable from the encoder's
 #   padded strips. `docs/UNSAFE_INVENTORY.md`'s *Tool coverage* column says,
-#   per item, whether this workflow executes it. The SIMD kernels Miri never
-#   interprets get direct tests in modules named `kernel_bounds_tests`
-#   (P4-191, #609), which put each footprint flush against the end of an
-#   exact-size allocation so a one-byte overrun is a sanitizer report; the
-#   `kernel_bounds_tests` steps below check that those tests really ran.
+#   per item, whether this workflow executes it. Some SIMD kernels Miri never
+#   interprets — the strided islow IDCTs, the AVX2 merged H2V2 wrapper and
+#   the encoder fdct helpers' AVX2 arms — get direct tests in modules named
+#   `kernel_bounds_tests` (P4-191, #609), which put each footprint flush
+#   against the end of an exact-size allocation so a one-byte overrun is an
+#   ASan report; the `kernel_bounds_tests` steps below check that those tests
+#   really ran.
 #
 # NOTE ON LSAN:
 #   LeakSanitizer runs automatically as part of ASan on Linux.  False

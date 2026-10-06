@@ -3,11 +3,14 @@
 //! native sanitizer sees the exact footprint.
 //!
 //! Miri never interprets anything under `src/simd/` (its `--lib` step skips
-//! `simd::` and builds with the `simd` feature off), so for these kernels the
-//! only memory checker is the `asan` / `ubsan` pair in
-//! `.github/workflows/sanitizers.yml`, which runs every lib unit test on an
-//! x86_64 AVX2 runner. Production callers reach these kernels only with
-//! comfortably sized planes, which is why the dispatch-level suites never put
+//! `simd::` and builds with the `simd` feature off), so for the x86_64 kernels
+//! here the only memory checker is the `asan` job in
+//! `.github/workflows/sanitizers.yml` (its `ubsan` twin's `-Z ub-checks` does
+//! not see an overrun), which runs every lib unit test on an x86_64 AVX2
+//! runner. The NEON arm has no CI memory checker: it runs uninstrumented on
+//! the aarch64 legs, where only the canary comparison catches an overrun.
+//! Production callers reach these kernels only with comfortably sized planes,
+//! which is why the dispatch-level suites never put
 //! a footprint flush against the end of an allocation. These tests do: each
 //! destination is a heap allocation of *exactly* the documented footprint, so
 //! one byte too many is a heap-buffer-overflow under ASan, and a canary-padded
@@ -185,8 +188,9 @@ fn strided_islow_idct_writes_exactly_its_footprint() {
 #[cfg(target_arch = "x86_64")]
 const MERGED_WIDTHS: [usize; 6] = [32, 33, 47, 63, 64, 97];
 
-/// Random rows sized *exactly* for `width`, so the last SIMD load or store
-/// ends at the allocation's end.
+/// Random rows sized *exactly* for `width`, so at a multiple of 32 (32, 64)
+/// the last SIMD load and store end at the allocation's end; other widths
+/// leave a scalar tail after the last SIMD step.
 #[cfg(target_arch = "x86_64")]
 fn merged_h2v2_rows(rng: &mut Mulberry32, width: usize) -> [Vec<u8>; 4] {
     use crate::simd::simd_parity_tests::random_plane_u8;

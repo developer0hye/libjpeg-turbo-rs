@@ -8217,9 +8217,10 @@ misuse of a public SIMD entry point; none injects allocation failure; none runs
    be asserted under `panic = "abort"`) — the "pinned by the checks' code,
    not by a gate" shape this item exists to retire. **Short-stride and canary
    buffers for the SIMD kernels, 2026-10-07** (P4-191's sanitizer-coverage
-   landing): the `kernel_bounds_tests` modules write the strided IDCTs, the
-   merged H2V2 kernel and the fdct helpers' AVX2 arms into exact-size and
-   canary-padded allocations, and `sanitizers.yml`'s ASan/UBSan jobs now
+   landing): the `kernel_bounds_tests` modules write the strided IDCTs into
+   exact-size and canary-padded allocations and drive the merged H2V2 kernel
+   and the fdct helpers' AVX2 arms over exact-size rows and planes (no
+   canaries there), and `sanitizers.yml`'s ASan/UBSan jobs now
    require AVX2 and confirm those tests ran (`tests/sanitizer_coverage_gate.rs`)
    — so `sse2_idct_islow_strided` and the two fdct AVX2 arms execute under a
    sanitizer for the first time. The non-AVX2 sanitizer leg, `i686`,
@@ -11235,7 +11236,8 @@ and the two inventories **fifty-nine** in all (thirty-nine C-ABI, unchanged).
 The mechanism is two test modules named `kernel_bounds_tests`
 (`src/simd/`, `src/encode/pipeline_impl/`) whose destinations and planes are
 heap allocations of *exactly* the documented footprint, so a one-byte overrun
-leaves the block, plus canary-padded twins for legs without a sanitizer:
+leaves the block, plus — for the strided IDCT writes only — canary-padded
+twins for legs without a sanitizer:
 
 - `strided_islow_idct_writes_exactly_its_footprint` drives
   `neon_` / `sse2_` / `avx2_idct_islow_strided` at strides 8 to 641, random
@@ -11262,9 +11264,11 @@ count to the modules' `#[test]`s and rejects, each driven over a mutation of
 the real workflow: a dropped `pull_request` trigger or an added `paths`
 filter; a job's `RUSTFLAGS` dropped or overridden at step level; a filter,
 `--skip` or positional `TESTNAME` on the full `--lib` run (its cargo
-arguments are allowlisted); `--no-run`; a confirmation step without its
-`pipefail`, count comparison or `exit 1`; and `if:` or `continue-on-error:` on
-either job. `.github/CODEOWNERS` routes the gate, both test modules and the
+arguments are allowlisted); `--no-run`; a dropped AVX2 requirement; a
+confirmation step without its `-- kernel_bounds_tests` filter, count
+comparison or `exit 1`; and `if:` or `continue-on-error:` on either job. It
+also requires the step's `set -o pipefail`, `tee` and `passed=` lines by text
+match, with no mutation driving those three. `.github/CODEOWNERS` routes the gate, both test modules and the
 workflow to the maintainer. The workflow header's claim that "the lib tests already cover every
 unsafe block" is corrected.
 
@@ -11316,7 +11320,7 @@ sub-invariant or a CI leg, not an untested site) and are context.
 4. **The strided IDCT destination writes** gain direct tests that write into
    a canary-padded buffer and assert both the pixels and the untouched
    margins: `sse2_idct_islow_strided` (`src/simd/x86_64/idct.rs`, reached
-   only by the emulated Nehalem leg today) and `idct_1x1_strided`
+   only by the emulated Nehalem leg when filed) and `idct_1x1_strided`
    (`src/decode/idct_scaled.rs`, 2 sites, no unit-level test —
    `idct_1x1_dc_only` covers the safe inner function, not the wrapper).
    **Delivered 2026-10-07** by `strided_islow_idct_writes_exactly_its_footprint`

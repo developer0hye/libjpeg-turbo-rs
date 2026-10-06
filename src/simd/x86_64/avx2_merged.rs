@@ -83,7 +83,8 @@ pub fn avx2_merged_h2v2_ycbcr_to_rgb(
     // Both rows of each pair are checked: the kernel reads 32 luma bytes per
     // step from `y_row1` and stores 96 into `rgb_out1` by raw pointer exactly
     // as it does for row 0. This check once covered row 0 only, so a safe
-    // caller passing a short second row reached past it (P4-191 criterion 5;
+    // in-crate caller (the module is `pub(crate)`) passing a short second
+    // row reached past it (P4-191 criterion 5;
     // `avx2_merged_h2v2_short_second_*_is_refused` in
     // src/simd/kernel_bounds_tests.rs pin it).
     let chroma_needed: usize = width.div_ceil(2);

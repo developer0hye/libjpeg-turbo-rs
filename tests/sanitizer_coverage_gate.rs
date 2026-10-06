@@ -1,7 +1,9 @@
 //! P4-191 (#609): the sanitizer jobs really run the `kernel_bounds_tests`.
 //!
-//! The SIMD kernels Miri never interprets have direct tests in modules named
-//! `kernel_bounds_tests` (`src/simd/kernel_bounds_tests.rs`,
+//! Some SIMD kernels Miri never interprets — the strided islow IDCTs, the AVX2
+//! merged H2V2 wrapper and the encoder fdct helpers' AVX2 arms — have direct
+//! tests in modules named `kernel_bounds_tests`
+//! (`src/simd/kernel_bounds_tests.rs`,
 //! `src/encode/pipeline_impl/kernel_bounds_tests.rs`). Each puts a kernel's
 //! footprint flush against the end of an exact-size allocation, which is worth
 //! something only where AddressSanitizer or `-Z ub-checks` is watching — the
