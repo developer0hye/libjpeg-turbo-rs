@@ -11,9 +11,10 @@ criterion 6.
 | [`reports/2026-10-07-x86_64-linux/`](reports/2026-10-07-x86_64-linux/report.md) (the first report) | run 37542461917 | `c33650c` |
 | [`reports/2026-10-07-x86_64-linux-run2/`](reports/2026-10-07-x86_64-linux-run2/report.md) (reproduction) | run 37543406684 | `e56ace4` |
 | [`reports/2026-10-07-aarch64-macos-contaminated/`](reports/2026-10-07-aarch64-macos-contaminated/report.md) (no budget; see below) | run 37542461917 | `c33650c` |
+| [`reports/2026-10-07-aarch64-macos-contaminated-run2/`](reports/2026-10-07-aarch64-macos-contaminated-run2/report.md) (no budget; see below) | run 37543406684 | `e56ace4` |
 
-Both candidate commits are `main@80c15d2` plus consumer and documentation
-changes only, so the candidate *library* in every report is `main@80c15d2`.
+Both candidate commits are `main@80c15d2` plus consumer, CI and documentation
+changes only (nothing under `src/`), so the candidate *library* in every report is `main@80c15d2`.
 The baseline is the published `libjpeg-turbo-rs` 0.8.0.
 
 **What the hosted reports do not check.** The workflow runs the harness with
@@ -28,15 +29,20 @@ byte-identical to `cjpeg -quality 85` (`-sample 1x1` for the 4:4:4 rows).
 **aarch64 sets no budget.** Both dispatches gave the arm64 leg a 3-vCPU
 `macos-latest` runner that its own pre-run sample showed saturated: load
 average 50 (0.3 % idle in the second frame), then 29. Its p10–p90 spreads were
-15–134 % of the median. The first of the two is committed as a record of the
-attempt, and none of its ratios is budget-grade. The aarch64 budget waits for a
+13–80 % of the median in the first dispatch and 6–159 % in the second. Both
+are committed as a record of the attempt, and none of their ratios is
+budget-grade. `budgets.py` refuses to score an aarch64 report against the
+x86_64 first report. The aarch64 budget waits for a
 run that passes a load check:
 [P4-229](../../docs/last_mile/phase4.md#p4-229-the-downstream-harness-records-machine-load-but-never-acts-on-it-and-the-hosted-macos-runner-was-saturated--open).
 
 ## Rules
 
 These are the rules `README.md` "Regression budget" fixed before any data
-existed. `budgets.py` applies the timing rules to any `report.json`:
+existed, plus the *lead pairs* below, which that section does not name.
+`budgets.py` applies the timing rules to a `report.json` from a full run (no
+`--smoke`, no `--only`) whose runtime CPU features and build variant match
+the first report's, and refuses any other pair:
 
 ```sh
 python3 experiments/downstream/budgets.py <new report.json> \
