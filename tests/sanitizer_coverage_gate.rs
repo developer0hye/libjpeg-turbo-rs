@@ -34,6 +34,18 @@ const INSTRUMENTATION: [(&str, &str); 2] = [
     ("asan", "RUSTFLAGS: \"-Z sanitizer=address\""),
     ("ubsan", "RUSTFLAGS: \"-Z ub-checks=yes\""),
 ];
+/// Every token the unfiltered `--lib` run may carry before `--`.
+const FULL_RUN_CARGO_ARGS: [&str; 9] = [
+    "cargo",
+    "+nightly",
+    "test",
+    "--locked",
+    "--workspace",
+    "--lib",
+    "--no-fail-fast",
+    "--target",
+    "x86_64-unknown-linux-gnu",
+];
 /// The lines that turn the confirmation run into an assertion. `cargo test`
 /// exits 0 when a filter selects nothing, so the run alone proves nothing;
 /// `pipefail` keeps a failing test from hiding behind `tee`.
@@ -239,8 +251,13 @@ fn problems(workflow: &str, declared: usize) -> Vec<String> {
         }
         let full_lib_run: bool = invocations.iter().any(|tokens| {
             let (cargo_args, libtest_args) = split_at_double_dash(tokens);
+            // An allowlist, not a denylist: a positional `TESTNAME` or any
+            // other narrowing option before `--` filters as surely as one after.
             cargo_args.iter().any(|t| t == "--workspace")
                 && cargo_args.iter().any(|t| t == "--lib")
+                && cargo_args
+                    .iter()
+                    .all(|t| FULL_RUN_CARGO_ARGS.contains(&t.as_str()))
                 && libtest_args.iter().all(|t| t == "--test-threads=1")
         });
         if !full_lib_run {
@@ -336,7 +353,14 @@ fn each_way_the_jobs_can_go_stale_is_reported() {
         "real workflow must pass"
     );
 
-    let mutations: [(&str, String); 13] = [
+    let mutations: [(&str, String); 14] = [
+        (
+            "full run narrowed by a positional cargo filter",
+            workflow.replace(
+                "--no-fail-fast \\\n            -- --test-threads=1",
+                "--no-fail-fast \\\n            kernel_bounds_tests -- --test-threads=1",
+            ),
+        ),
         (
             "pull_request trigger removed",
             workflow.replacen(
