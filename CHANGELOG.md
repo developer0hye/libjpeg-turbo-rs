@@ -161,7 +161,9 @@ and `git log` between tags.
   (P4-197, #618). `TjHandle::decompress` refuses a left boundary not divisible
   by the scaled iMCU width (it was aligned down) and a region past the scaled
   image (it was clamped), and a `width`/`height` of 0 now means "to the edge"
-  instead of an empty crop. The new `TjHandle::resolve_cropping_region` runs
+  instead of an empty crop, and the subsampling a crop is checked against is
+  classified exactly as upstream's `getSubsamp` does. The new
+  `TjHandle::resolve_cropping_region` runs
   upstream's set-time checks against the last header read; the C ABI's
   `tj3SetCroppingRegion` uses it, so it now refuses before a header has been
   read, for a lossless frame, off the iMCU grid and past the scaled image —

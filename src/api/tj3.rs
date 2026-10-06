@@ -124,19 +124,7 @@ struct CroppingGeometry {
 impl CroppingGeometry {
     fn of(decoder: &Decoder<'_>) -> Self {
         let frame = decoder.header();
-        // getSubsamp reports TJSAMP_GRAY for a grayscale frame whatever its
-        // sampling factors say; `decompress` publishes the same mapping.
-        // `to_tjsamp` folds `Unknown` into TJSAMP_444 (the value a buffer-size
-        // query wants); cropping needs upstream's TJSAMP_UNKNOWN, which
-        // `tj3SetCroppingRegion` refuses (`turbojpeg.c:2090-2091`).
-        let subsampling: i32 = if decoder.jpeg_color_space() == ColorSpace::Grayscale {
-            3
-        } else {
-            match decoder.jpeg_subsampling() {
-                Subsampling::Unknown => -1,
-                known => known.to_tjsamp(),
-            }
-        };
+        let subsampling: i32 = Self::turbojpeg_subsampling(decoder);
         Self {
             width: frame.width as usize,
             height: frame.height as usize,
@@ -144,6 +132,99 @@ impl CroppingGeometry {
             precision: frame.precision,
             lossless: frame.is_lossless,
         }
+    }
+
+    /// Upstream's `getSubsamp` (`turbojpeg.c:431-510`), ported as written:
+    /// the iMCU width a crop is checked against comes from this
+    /// classification, so it has to agree with upstream's on every frame,
+    /// including the non-standard sampling layouts it deliberately accepts
+    /// (4:2:2 and 4:4:0 spelled with a 2x2 luma, 4:4:4 with equal non-unit
+    /// factors) and the ones it leaves at TJSAMP_UNKNOWN. `Decoder::
+    /// jpeg_subsampling` compares only luma with the first chroma component,
+    /// so `2x2,1x1,2x2` read as 4:2:0 there where upstream refuses to crop it
+    /// (codex review of P4-197). `numSamp` is TJ_NUMSAMP, as for a 3.2 handle
+    /// (`:611`).
+    fn turbojpeg_subsampling(decoder: &Decoder<'_>) -> i32 {
+        // tjMCUWidth[] / tjMCUHeight[] (turbojpeg.h:247, :277).
+        const MCU_WIDTH: [usize; 9] = [8, 16, 16, 8, 8, 32, 8, 32, 16];
+        const MCU_HEIGHT: [usize; 9] = [8, 8, 16, 8, 16, 8, 32, 16, 32];
+        const TJSAMP_444: usize = 0;
+        const TJSAMP_422: usize = 1;
+        const TJSAMP_GRAY: usize = 3;
+        const TJSAMP_440: usize = 4;
+        // jpeglib.h D_MAX_BLOCKS_IN_MCU.
+        const MAX_BLOCKS_IN_MCU: usize = 10;
+
+        let components = &decoder.header().components;
+        let color_space: ColorSpace = decoder.jpeg_color_space();
+        let num_components: usize = components.len();
+        if num_components == 1 && color_space == ColorSpace::Grayscale {
+            return TJSAMP_GRAY as i32;
+        }
+        let is_cmyk_like: bool = matches!(color_space, ColorSpace::Cmyk | ColorSpace::Ycck);
+        let factors = |k: usize| -> (usize, usize) {
+            (
+                components[k].horizontal_sampling as usize,
+                components[k].vertical_sampling as usize,
+            )
+        };
+        let mut result: i32 = -1;
+        for i in 0..MCU_WIDTH.len() {
+            if i == TJSAMP_GRAY {
+                continue;
+            }
+            if !(num_components == 3 || (is_cmyk_like && num_components == 4)) {
+                continue;
+            }
+            let (h0, v0): (usize, usize) = factors(0);
+            if h0 == MCU_WIDTH[i] / 8 && v0 == MCU_HEIGHT[i] / 8 {
+                let matched: usize = (1..num_components)
+                    .filter(|&k| {
+                        let (href, vref): (usize, usize) = if is_cmyk_like && k == 3 {
+                            (MCU_WIDTH[i] / 8, MCU_HEIGHT[i] / 8)
+                        } else {
+                            (1, 1)
+                        };
+                        factors(k) == (href, vref)
+                    })
+                    .count();
+                if matched == num_components - 1 {
+                    result = i as i32;
+                    break;
+                }
+            }
+            // 4:2:2 and 4:4:0 images whose sampling factors are specified in
+            // non-standard ways.
+            if h0 == 2 && v0 == 2 && (i == TJSAMP_422 || i == TJSAMP_440) {
+                let matched: usize = (1..num_components)
+                    .filter(|&k| {
+                        let (href, vref): (usize, usize) = if is_cmyk_like && k == 3 {
+                            (2, 2)
+                        } else {
+                            (MCU_HEIGHT[i] / 8, MCU_WIDTH[i] / 8)
+                        };
+                        factors(k) == (href, vref)
+                    })
+                    .count();
+                if matched == num_components - 1 {
+                    result = i as i32;
+                    break;
+                }
+            }
+            // 4:4:4 images whose sampling factors are specified in
+            // non-standard ways. Upstream's `break` here leaves only the inner
+            // loop, so the outer one keeps going; `matched` counting to the
+            // end gives the same answer, since the test is "all matched".
+            if h0 * v0 <= MAX_BLOCKS_IN_MCU / 3 && i == TJSAMP_444 {
+                let matched: usize = (1..num_components)
+                    .filter(|&k| factors(k) == (h0, v0))
+                    .count();
+                if matched == num_components - 1 {
+                    result = i as i32;
+                }
+            }
+        }
+        result
     }
 
     /// `tj3SetCroppingRegion`'s checks after its sign and header-read guards,

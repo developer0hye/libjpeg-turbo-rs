@@ -11759,7 +11759,10 @@ behind a test-infrastructure review.
    refused with "Unexplained mismatch … left boundary" (a `cjpeg -sample
    2x1,2x1,2x1` frame is TJSAMP_444 to TurboJPEG but decodes in 16-pixel
    columns; stock 3.2.0 refuses `x = 8` with the same text, measured with a C
-   probe), and a decode whose size differs from the region is refused rather
+   probe; `tests/tj3_handle.rs::
+   handle_cropping_region_follows_turbojpeg_on_nonstandard_sampling` pins four
+   `cjpeg -sample` layouts against the probe's results), and a decode whose
+   size differs from the region is refused rather
    than returned — before this, both reached the C ABI as an image wider than
    the caller's buffer. `decompress_12bit` / `decompress_16bit` take no region
    yet, so they refuse a stored one ([P4-219](#p4-219-12-bit-decodes-ignore-the-horizontal-crop-and-tjhandles-1216-bit-decompress-ignores-the-cropping-region-entirely--open),
@@ -11779,7 +11782,11 @@ behind a test-infrastructure review.
 2. Upstream validates at set time because its handle has read a header; ours
    now records the same facts. `TjHandle::decompress` stores a private
    `CroppingGeometry` (SOF width/height, `TJSAMP_*`, precision, lossless —
-   what `setDecompParameters` records, `turbojpeg.c:514-536`) and the new
+   what `setDecompParameters` records, `turbojpeg.c:514-536`; the `TJSAMP_*`
+   comes from a line-for-line port of `getSubsamp`, `:431-510`, because
+   `Decoder::jpeg_subsampling` compares luma with the first chroma component
+   only and read `2x2,1x1,2x2` as 4:2:0 where upstream refuses to crop it —
+   codex review) and the new
    `TjHandle::resolve_cropping_region` applies `tj3SetCroppingRegion`'s checks
    in upstream's order (`:2083-2111`). The C ABI's `tj3SetCroppingRegion`
    keeps the all-zero and negative checks and calls it, so it refuses before
