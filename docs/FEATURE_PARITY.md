@@ -191,7 +191,7 @@
 - [x] XMP metadata accessor with Extended XMP reassembly (`Image::xmp_data`, `Encoder::xmp_data` — #358)
 - [x] IPTC IIM accessor from the APP13 Photoshop IRB (`Image::iptc_data`, `Encoder::iptc_data` — #358)
 - [x] Decode into caller-owned buffer (`decompress_into`, `output_buffer_size`, `Decoder::decode_image_into` — #354)
-- [x] Scaled IDCT — all 16 factors: 1/8 through 2/1 (`set_scale`)
+- [x] Scaled IDCT — all 16 factors: 1/8 through 2/1 (`set_scale` with a `ScalingFactor::try_new` value; exactly upstream's `tj3SetScalingFactor` set)
 - [x] Crop decode (`decompress_cropped`, `set_crop_region`) — a region whose left boundary is at or past the scaled width is accepted and degenerates to a zero-column decode where upstream refuses it ([P4-197](last_mile/phase4.md#p4-197-a-cropping-region-whose-left-boundary-exceeds-the-scaled-width-decodes-to-zero-columns-and-trips-a-false-debug_assert--open), #618)
 - [x] `TJPARAM_BOTTOMUP` — Bottom-up row order (`ScanlineDecoder::set_bottom_up()`)
 - [x] Native explicit output colorspace (`Decoder::set_output_colorspace()`)

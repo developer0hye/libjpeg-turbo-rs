@@ -372,39 +372,124 @@ pub struct ScanComponentSelector {
 
 /// Decompression scaling factor.
 ///
-/// Controls the output size via scaled IDCT. All 16 libjpeg-turbo factors are
-/// supported: 2/1, 15/8, 7/4, 13/8, 3/2, 11/8, 5/4, 9/8, 1/1, 7/8, 3/4,
-/// 5/8, 1/2, 3/8, 1/4, 1/8. Each factor maps to an IDCT block output size
-/// from 16×16 (2/1) down to 1×1 (1/8).
+/// Controls the output size via scaled IDCT. Exactly the 16 libjpeg-turbo
+/// factors are representable — [`ScalingFactor::SUPPORTED`]: 2/1, 15/8, 7/4,
+/// 13/8, 3/2, 11/8, 5/4, 9/8, 1/1, 7/8, 3/4, 5/8, 1/2, 3/8, 1/4, 1/8. Each is
+/// `N/8` in lowest terms and maps to an `N×N` IDCT block, from 16×16 (2/1)
+/// down to 1×1 (1/8).
+///
+/// The fields are private so that every value is one of those sixteen: build
+/// one with [`ScalingFactor::try_new`] or take it from
+/// [`ScalingFactor::SUPPORTED`] (P4-139 criterion 4, #478).
+///
+/// ```
+/// use libjpeg_turbo_rs::ScalingFactor;
+///
+/// let half: ScalingFactor = ScalingFactor::try_new(1, 2)?;
+/// assert_eq!((half.num(), half.denom()), (1, 2));
+/// assert_eq!(half.scale_dim(641), 321);
+/// assert!(ScalingFactor::try_new(4, 8).is_err()); // equal to 1/2, not upstream's form
+/// assert!(ScalingFactor::try_new(1, 0).is_err());
+/// # Ok::<(), libjpeg_turbo_rs::JpegError>(())
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScalingFactor {
-    pub num: u32,
-    pub denom: u32,
+    num: u32,
+    denom: u32,
 }
 
 impl ScalingFactor {
-    pub fn new(num: u32, denom: u32) -> Self {
+    /// Every factor [`ScalingFactor::try_new`] accepts, in the order
+    /// `tj3GetScalingFactors` reports them (upstream's `sf` table,
+    /// `turbojpeg.c:199-217`).
+    pub const SUPPORTED: [ScalingFactor; 16] = [
+        Self::table_entry(2, 1),
+        Self::table_entry(15, 8),
+        Self::table_entry(7, 4),
+        Self::table_entry(13, 8),
+        Self::table_entry(3, 2),
+        Self::table_entry(11, 8),
+        Self::table_entry(5, 4),
+        Self::table_entry(9, 8),
+        Self::table_entry(1, 1),
+        Self::table_entry(7, 8),
+        Self::table_entry(3, 4),
+        Self::table_entry(5, 8),
+        Self::table_entry(1, 2),
+        Self::table_entry(3, 8),
+        Self::table_entry(1, 4),
+        Self::table_entry(1, 8),
+    ];
+
+    /// Private, so the table above is the only place an unvalidated pair
+    /// becomes a value.
+    const fn table_entry(num: u32, denom: u32) -> Self {
         Self { num, denom }
     }
 
-    /// The IDCT block output size for this scaling factor.
-    /// Ranges from 16 (for 2/1) through 8 (for 1/1) down to 1 (for 1/8).
-    pub fn block_size(self) -> usize {
-        assert!(
-            self.denom != 0,
-            "ScalingFactor denominator must not be zero"
-        );
-        let ratio_x8 = (self.num * 8).div_ceil(self.denom);
-        (ratio_x8 as usize).clamp(1, 16)
+    /// Validate `num/denom` against the factors libjpeg-turbo supports.
+    ///
+    /// Accepts exactly the sixteen entries of [`ScalingFactor::SUPPORTED`] and
+    /// refuses everything else with [`JpegError::Unsupported`]. This is
+    /// upstream's rule: `tj3SetScalingFactor` (`turbojpeg.c:2053-2058`)
+    /// compares both fields against its table, so a factor *equal in value* to
+    /// a supported one but not in its lowest terms — `4/8`, `2/2`, `16/8` — is
+    /// refused, as is any zero numerator or denominator.
+    ///
+    /// [`JpegError::Unsupported`]: crate::JpegError::Unsupported
+    pub fn try_new(num: u32, denom: u32) -> crate::common::error::Result<Self> {
+        let candidate: Self = Self { num, denom };
+        if Self::SUPPORTED.contains(&candidate) {
+            Ok(candidate)
+        } else {
+            Err(crate::common::error::JpegError::Unsupported(
+                alloc::format!(
+                    "scaling factor {num}/{denom}; libjpeg-turbo supports only N/8 \
+                     for N in 1..=16, in lowest terms"
+                ),
+            ))
+        }
     }
 
-    /// Compute scaled output dimension: ceil(input_dim * num / denom).
+    /// The numerator.
+    pub const fn num(self) -> u32 {
+        self.num
+    }
+
+    /// The denominator. Never zero.
+    pub const fn denom(self) -> u32 {
+        self.denom
+    }
+
+    /// The IDCT block output size for this scaling factor: `N` for `N/8`.
+    /// Ranges from 16 (for 2/1) through 8 (for 1/1) down to 1 (for 1/8).
+    pub const fn block_size(self) -> usize {
+        // Exact for every member of `SUPPORTED`: `num <= 15`, `denom >= 1`,
+        // and `denom` divides `num * 8`.
+        (self.num * 8 / self.denom) as usize
+    }
+
+    /// Scaled output dimension: `ceil(input_dim * num / denom)`, which for
+    /// `N/8` is upstream's `jdiv_round_up(dim * N, 8)` (`jdmaster.c`).
+    ///
+    /// Returns 0 when the result is not representable as `usize` — possible
+    /// only for an upscaling factor and an `input_dim` far beyond any JPEG
+    /// dimension. 0 is the crate's refusal value for an unrepresentable size
+    /// (see the `bufsize` helpers such as [`crate::jpeg_buf_size`]); it never
+    /// wraps.
     pub fn scale_dim(self, input_dim: usize) -> usize {
-        assert!(
-            self.denom != 0,
-            "ScalingFactor denominator must not be zero"
-        );
-        (input_dim * self.num as usize).div_ceil(self.denom as usize)
+        let num: usize = self.num as usize;
+        let denom: usize = self.denom as usize;
+        // Split `input_dim` so the only product that can overflow is the one
+        // whose overflow means the *result* is unrepresentable:
+        // ceil(d * n / q) = (d / q) * n + ceil((d % q) * n / q), and
+        // (d % q) * n < 8 * 15.
+        let whole: usize = input_dim / denom;
+        let remainder: usize = input_dim % denom;
+        whole
+            .checked_mul(num)
+            .and_then(|scaled: usize| scaled.checked_add((remainder * num).div_ceil(denom)))
+            .unwrap_or(0)
     }
 }
 

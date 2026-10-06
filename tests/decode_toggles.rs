@@ -426,7 +426,7 @@ fn c_djpeg_cross_validation_decode_toggles() {
     {
         let label: &str = "scale_1_2";
         let mut dec = api::streaming::StreamingDecoder::new(jpeg_data).unwrap();
-        dec.set_scale(ScalingFactor::new(1, 2));
+        dec.set_scale(ScalingFactor::try_new(1, 2).expect("supported scaling factor"));
         dec.set_output_format(PixelFormat::Rgb);
         let rust_img: Image = dec
             .decode()
@@ -480,7 +480,7 @@ fn c_djpeg_cross_validation_decode_toggles() {
     {
         let label: &str = "scale_1_4";
         let mut dec = api::streaming::StreamingDecoder::new(jpeg_data).unwrap();
-        dec.set_scale(ScalingFactor::new(1, 4));
+        dec.set_scale(ScalingFactor::try_new(1, 4).expect("supported scaling factor"));
         dec.set_output_format(PixelFormat::Rgb);
         let rust_img: Image = dec
             .decode()
@@ -534,7 +534,7 @@ fn c_djpeg_cross_validation_decode_toggles() {
     {
         let label: &str = "scale_1_8";
         let mut dec = api::streaming::StreamingDecoder::new(jpeg_data).unwrap();
-        dec.set_scale(ScalingFactor::new(1, 8));
+        dec.set_scale(ScalingFactor::try_new(1, 8).expect("supported scaling factor"));
         dec.set_output_format(PixelFormat::Rgb);
         let rust_img: Image = dec
             .decode()

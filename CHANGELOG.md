@@ -134,6 +134,46 @@ and `git log` between tags.
   them (P4-155, #539). Code that relied on the old silent 75 / 4:2:0 defaults
   must set both explicitly; a lossless compress consults neither. `tj3Get` on
   a fresh handle reports the unset values.
+- **Breaking (Rust API):** `ScalingFactor`'s fields are private and its only
+  constructor is the fallible `ScalingFactor::try_new(num, denom) ->
+  Result<ScalingFactor>` (P4-139 criterion 4, #478). It accepts exactly the
+  sixteen factors upstream's `tj3SetScalingFactor` accepts — the entries of
+  the new `ScalingFactor::SUPPORTED` table, matched field by field, so `4/8`
+  is refused although it equals `1/2` — and refuses everything else, zero
+  denominators included, with `JpegError::Unsupported`. `block_size()` and
+  `scale_dim()` therefore no longer panic on any value a caller can build: a
+  `{ num: 1, denom: 0 }` used to reach an `assert!`, and `scale_dim` now
+  reports 0 instead of wrapping when the scaled size does not fit `usize`.
+  `ScalingFactor::new` is removed rather than deprecated — it could not be
+  both infallible and correct. Migration:
+  - `ScalingFactor::new(n, d)` / `ScalingFactor { num: n, denom: d }` →
+    `ScalingFactor::try_new(n, d)?` (or an entry of `ScalingFactor::SUPPORTED`);
+  - `sf.num` / `sf.denom` → `sf.num()` / `sf.denom()`;
+  - a factor not in lowest terms (`4/8`, `2/8`, `16/8`) → the supported factor
+    of equal value, found the way `tjdecomp -scale` finds it
+    (`tjdecomp.c:233-241`): refuse a zero `num` or `denom` first — otherwise
+    `0/0` matches every entry — then compare
+    `u64::from(num) * u64::from(sf.denom()) == u64::from(sf.num()) * u64::from(denom)`
+    over `ScalingFactor::SUPPORTED`. Such factors used to decode like their reduced form; anything else outside
+    the table (`1/3`) used to produce an output size that disagreed with the
+    IDCT block size and with C.
+
+  `TjHandle::set_scaling_factor` now returns `try_new`'s
+  `JpegError::Unsupported` instead of `JpegError::CorruptData`.
+- **C ABI, error text:** `tj3SetScalingFactor` refuses every unsupported
+  factor — non-positive values included — with upstream's message,
+  `tj3SetScalingFactor: Unsupported scaling factor` (P4-139, #478). It used to
+  report `... corrupt data: unsupported scaling factor N/D`, or a
+  `non-positive ratio` message upstream has no equivalent of. The accepted set
+  is unchanged and is now checked against real TurboJPEG
+  (`capi_scaling_factor`).
+- `calc_output_dimensions(width, height, scale_num, scale_denom)` follows
+  `jpeg_core_output_dimensions` (`jdmaster.c`): it picks the smallest IDCT
+  block size `N` with `scale_num * 8 <= scale_denom * N` (16 if none) and
+  returns `ceil(dim * N / 8)` (P4-139, #478). It used to panic on
+  `scale_denom == 0` and to apply an unsupported ratio literally — `1/3` of
+  320 gave 107 where `djpeg -scale 1/3` gives 120. Every one of the sixteen
+  supported factors gives the same answer as before.
 
 ### Added
 - `Decoder::output_width()`, the horizontal twin of the existing

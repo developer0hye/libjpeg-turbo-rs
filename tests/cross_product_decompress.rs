@@ -111,10 +111,10 @@ fn crop_regions() -> Vec<Option<CropRegion>> {
 /// Supported scaling factors: 1/1, 1/2, 1/4, 1/8.
 fn scaling_factors() -> Vec<ScalingFactor> {
     vec![
-        ScalingFactor::new(1, 1),
-        ScalingFactor::new(1, 2),
-        ScalingFactor::new(1, 4),
-        ScalingFactor::new(1, 8),
+        ScalingFactor::try_new(1, 1).expect("supported scaling factor"),
+        ScalingFactor::try_new(1, 2).expect("supported scaling factor"),
+        ScalingFactor::try_new(1, 4).expect("supported scaling factor"),
+        ScalingFactor::try_new(1, 8).expect("supported scaling factor"),
     ]
 }
 
@@ -133,7 +133,13 @@ fn combo_label(
     };
     format!(
         "subsamp={} crop={} scale={}/{} fast_up={} fast_dct={} output={}",
-        subsamp, crop_str, scale.num, scale.denom, fast_upsample, fast_dct, output_mode
+        subsamp,
+        crop_str,
+        scale.num(),
+        scale.denom(),
+        fast_upsample,
+        fast_dct,
+        output_mode
     )
 }
 
@@ -152,11 +158,11 @@ fn nosmooth_applicable(subsamp: Subsampling) -> bool {
 /// - no scaling (scale = 1/1), OR
 /// - scale = 1/2 AND subsampling is 420
 fn should_skip_fast_dct(scale: &ScalingFactor, subsamp: Subsampling) -> bool {
-    if scale.num == 1 && scale.denom == 1 {
+    if scale.num() == 1 && scale.denom() == 1 {
         // No scaling — always test fast DCT
         return false;
     }
-    if scale.num == 1 && scale.denom == 2 && subsamp == Subsampling::S420 {
+    if scale.num() == 1 && scale.denom() == 2 && subsamp == Subsampling::S420 {
         // scale 1/2 + 420 — test fast DCT
         return false;
     }
@@ -168,7 +174,7 @@ fn should_skip_fast_dct(scale: &ScalingFactor, subsamp: Subsampling) -> bool {
 /// C skips scales 1/8, 2/8 (1/4), 3/8 when crop is present.
 /// Our supported scales in that range: 1/4 (denom=4) and 1/8 (denom=8).
 fn should_skip_crop_scale(crop: &Option<CropRegion>, scale: &ScalingFactor) -> bool {
-    crop.is_some() && scale.denom >= 4
+    crop.is_some() && scale.denom() >= 4
 }
 
 // ---------------------------------------------------------------------------
@@ -458,7 +464,10 @@ fn tjdecomptest_output_format_cross_product() {
             for format in &output_formats {
                 let label: String = format!(
                     "subsamp={:?} scale={}/{} format={:?}",
-                    subsamp, scale.num, scale.denom, format
+                    subsamp,
+                    scale.num(),
+                    scale.denom(),
+                    format
                 );
 
                 match try_decode_with_format(&jpeg, *scale, &None, false, false, Some(*format)) {
@@ -497,7 +506,9 @@ fn tjdecomptest_output_format_cross_product() {
         for format in &gray_formats {
             let label: String = format!(
                 "subsamp=gray scale={}/{} format={:?}",
-                scale.num, scale.denom, format
+                scale.num(),
+                scale.denom(),
+                format
             );
             match try_decode_with_format(&gray_jpeg, *scale, &None, false, false, Some(*format)) {
                 Ok(img) => {
@@ -572,7 +583,10 @@ fn tjdecomptest_grayscale_output_cross_product() {
                 };
                 let label: String = format!(
                     "subsamp={:?} crop={} scale={}/{} -> grayscale",
-                    subsamp, crop_str, scale.num, scale.denom
+                    subsamp,
+                    crop_str,
+                    scale.num(),
+                    scale.denom()
                 );
 
                 match try_decode(
@@ -670,7 +684,11 @@ fn tjdecomptest_decoder_toggles_cross_product() {
 
                     let label: String = format!(
                         "subsamp={:?} scale={}/{} block_smooth={} merged_up={}",
-                        subsamp, scale.num, scale.denom, block_smoothing, merged_upsample
+                        subsamp,
+                        scale.num(),
+                        scale.denom(),
+                        block_smoothing,
+                        merged_upsample
                     );
 
                     match try_decode_toggles(&jpeg, *scale, block_smoothing, merged_upsample) {
@@ -702,7 +720,9 @@ fn tjdecomptest_decoder_toggles_cross_product() {
         for block_smoothing in [false, true] {
             let label: String = format!(
                 "subsamp=gray scale={}/{} block_smooth={}",
-                scale.num, scale.denom, block_smoothing
+                scale.num(),
+                scale.denom(),
+                block_smoothing
             );
 
             match try_decode_toggles(&gray_jpeg, *scale, block_smoothing, false) {
@@ -766,7 +786,10 @@ fn tjdecomptest_dct_method_cross_product() {
             for dct in &dct_methods {
                 let label: String = format!(
                     "subsamp={:?} scale={}/{} dct={:?}",
-                    subsamp, scale.num, scale.denom, dct
+                    subsamp,
+                    scale.num(),
+                    scale.denom(),
+                    dct
                 );
 
                 match try_decode_dct_method(&jpeg, *scale, *dct) {
@@ -797,7 +820,9 @@ fn tjdecomptest_dct_method_cross_product() {
         for dct in &dct_methods {
             let label: String = format!(
                 "subsamp=gray scale={}/{} dct={:?}",
-                scale.num, scale.denom, dct
+                scale.num(),
+                scale.denom(),
+                dct
             );
 
             match try_decode_dct_method(&gray_jpeg, *scale, *dct) {
@@ -858,7 +883,7 @@ fn tjdecomptest_crop_format_cross_product() {
     ];
 
     let crops: Vec<Option<CropRegion>> = crop_regions();
-    let scale_1x: ScalingFactor = ScalingFactor::new(1, 1);
+    let scale_1x: ScalingFactor = ScalingFactor::try_new(1, 1).expect("supported scaling factor");
 
     let mut tested: u32 = 0;
     let mut failed: u32 = 0;
@@ -975,8 +1000,8 @@ fn tjdecomptest_quality_subsamp_scale_dct_format() {
                                 "q={} subsamp={:?} scale={}/{} fast_up={} dct={:?} fmt={:?}",
                                 quality,
                                 subsamp,
-                                scale.num,
-                                scale.denom,
+                                scale.num(),
+                                scale.denom(),
                                 use_fast_upsample,
                                 dct,
                                 format
@@ -1007,7 +1032,12 @@ fn tjdecomptest_quality_subsamp_scale_dct_format() {
                         // Grayscale output
                         let label_gray: String = format!(
                             "q={} subsamp={:?} scale={}/{} fast_up={} dct={:?} fmt=gray",
-                            quality, subsamp, scale.num, scale.denom, use_fast_upsample, dct
+                            quality,
+                            subsamp,
+                            scale.num(),
+                            scale.denom(),
+                            use_fast_upsample,
+                            dct
                         );
                         match try_decode(
                             &jpeg,
@@ -1051,7 +1081,10 @@ fn tjdecomptest_quality_subsamp_scale_dct_format() {
             for dct in &dct_methods {
                 let label: String = format!(
                     "q={} subsamp=gray scale={}/{} dct={:?}",
-                    quality, scale.num, scale.denom, dct
+                    quality,
+                    scale.num(),
+                    scale.denom(),
+                    dct
                 );
                 match try_decode_dct_method(&gray_jpeg, *scale, *dct) {
                     Ok(img) => {
@@ -1124,8 +1157,8 @@ fn tjdecomptest_toggles_dct_format_cross_product() {
                             let label: String = format!(
                                 "subsamp={:?} scale={}/{} bs={} merged={} dct={:?} fmt={:?}",
                                 subsamp,
-                                scale.num,
-                                scale.denom,
+                                scale.num(),
+                                scale.denom(),
                                 block_smoothing,
                                 merged_upsample,
                                 dct,
@@ -1142,7 +1175,7 @@ fn tjdecomptest_toggles_dct_format_cross_product() {
                                 }
                             };
 
-                            if scale.num != 1 || scale.denom != 1 {
+                            if scale.num() != 1 || scale.denom() != 1 {
                                 decoder.set_scale(*scale);
                             }
                             decoder.set_block_smoothing(block_smoothing);
@@ -1200,7 +1233,7 @@ fn try_decode(
 ) -> libjpeg_turbo_rs::Result<Image> {
     let mut decoder: Decoder = Decoder::new(jpeg)?;
 
-    if scale.num != 1 || scale.denom != 1 {
+    if scale.num() != 1 || scale.denom() != 1 {
         decoder.set_scale(scale);
     }
 
@@ -1236,7 +1269,7 @@ fn try_decode_with_format(
 ) -> libjpeg_turbo_rs::Result<Image> {
     let mut decoder: Decoder = Decoder::new(jpeg)?;
 
-    if scale.num != 1 || scale.denom != 1 {
+    if scale.num() != 1 || scale.denom() != 1 {
         decoder.set_scale(scale);
     }
 
@@ -1269,7 +1302,7 @@ fn try_decode_toggles(
 ) -> libjpeg_turbo_rs::Result<Image> {
     let mut decoder: Decoder = Decoder::new(jpeg)?;
 
-    if scale.num != 1 || scale.denom != 1 {
+    if scale.num() != 1 || scale.denom() != 1 {
         decoder.set_scale(scale);
     }
 
@@ -1287,7 +1320,7 @@ fn try_decode_dct_method(
 ) -> libjpeg_turbo_rs::Result<Image> {
     let mut decoder: Decoder = Decoder::new(jpeg)?;
 
-    if scale.num != 1 || scale.denom != 1 {
+    if scale.num() != 1 || scale.denom() != 1 {
         decoder.set_scale(scale);
     }
 
@@ -1350,7 +1383,11 @@ fn tjdecomptest_arithmetic_progressive_sources() {
                     // Native output
                     let label: String = format!(
                         "subsamp={:?} source={} scale={}/{} dct={:?} output=rgb",
-                        subsamp, source_label, scale.num, scale.denom, dct
+                        subsamp,
+                        source_label,
+                        scale.num(),
+                        scale.denom(),
+                        dct
                     );
 
                     match try_decode_dct_method(jpeg, *scale, *dct) {
@@ -1375,7 +1412,11 @@ fn tjdecomptest_arithmetic_progressive_sources() {
                     // Grayscale output
                     let label_gray: String = format!(
                         "subsamp={:?} source={} scale={}/{} dct={:?} output=gray",
-                        subsamp, source_label, scale.num, scale.denom, dct
+                        subsamp,
+                        source_label,
+                        scale.num(),
+                        scale.denom(),
+                        dct
                     );
 
                     match try_decode(
@@ -1418,7 +1459,9 @@ fn tjdecomptest_arithmetic_progressive_sources() {
             for dct in &dct_methods {
                 let _label: String = format!(
                     "subsamp=gray source=arithmetic scale={}/{} dct={:?}",
-                    scale.num, scale.denom, dct
+                    scale.num(),
+                    scale.denom(),
+                    dct
                 );
                 match try_decode_dct_method(&arith_gray, *scale, *dct) {
                     Ok(_) => {}
@@ -1508,7 +1551,12 @@ fn tjdecomptest_extended_sources_cross_product() {
                     for format in &output_formats {
                         let label: String = format!(
                             "subsamp={:?} source={} scale={}/{} dct={:?} fmt={:?}",
-                            subsamp, source_label, scale.num, scale.denom, dct, format
+                            subsamp,
+                            source_label,
+                            scale.num(),
+                            scale.denom(),
+                            dct,
+                            format
                         );
 
                         match try_decode_with_format(
@@ -1544,7 +1592,11 @@ fn tjdecomptest_extended_sources_cross_product() {
                     // Grayscale output variant
                     let label_gray: String = format!(
                         "subsamp={:?} source={} scale={}/{} dct={:?} fmt=gray",
-                        subsamp, source_label, scale.num, scale.denom, dct
+                        subsamp,
+                        source_label,
+                        scale.num(),
+                        scale.denom(),
+                        dct
                     );
                     match try_decode(
                         jpeg,
@@ -1595,7 +1647,10 @@ fn tjdecomptest_extended_sources_cross_product() {
             for format in &gray_formats {
                 let label: String = format!(
                     "subsamp=gray scale={}/{} dct={:?} fmt={:?}",
-                    scale.num, scale.denom, dct, format
+                    scale.num(),
+                    scale.denom(),
+                    dct,
+                    format
                 );
                 match try_decode_with_format(
                     &gray_jpeg,
@@ -1678,7 +1733,12 @@ fn tjdecomptest_upsample_dct_format_cross_product() {
                     for format in &output_formats {
                         let label: String = format!(
                             "subsamp={:?} scale={}/{} fast_up={} dct={:?} fmt={:?}",
-                            subsamp, scale.num, scale.denom, use_fast_upsample, dct, format
+                            subsamp,
+                            scale.num(),
+                            scale.denom(),
+                            use_fast_upsample,
+                            dct,
+                            format
                         );
 
                         match try_decode_with_format(
