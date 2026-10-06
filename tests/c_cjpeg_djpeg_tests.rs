@@ -739,7 +739,7 @@ fn c_djpeg_420m_islow_scaled_down() {
 
         let mut decoder =
             libjpeg_turbo_rs::decode::pipeline::Decoder::new(&jpeg_data).expect("decoder init");
-        decoder.set_scale(ScalingFactor { num, denom });
+        decoder.set_scale(ScalingFactor::try_new(num, denom).expect("supported scaling factor"));
         decoder.set_fast_upsample(true);
         let img = decoder.decode_image().expect("decode failed");
         let rust_out =
@@ -782,7 +782,7 @@ fn c_djpeg_420m_islow_scaled_up() {
         // to match C djpeg -nosmooth
         let mut decoder =
             libjpeg_turbo_rs::decode::pipeline::Decoder::new(&jpeg_data).expect("decoder init");
-        decoder.set_scale(ScalingFactor { num, denom });
+        decoder.set_scale(ScalingFactor::try_new(num, denom).expect("supported scaling factor"));
         decoder.set_fast_upsample(true);
         let img = decoder.decode_image().expect("decode failed");
         let rust_out =

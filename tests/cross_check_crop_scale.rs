@@ -366,7 +366,7 @@ fn c_xval_crop_scale_half_420() {
     let jpeg: Vec<u8> = make_test_jpeg(128, 128, Subsampling::S420);
 
     let mut dec = Decoder::new(&jpeg).expect("Decoder::new failed");
-    dec.set_scale(ScalingFactor::new(1, 2));
+    dec.set_scale(ScalingFactor::try_new(1, 2).expect("supported scaling factor"));
     let rust_img = dec.decode_image().expect("scaled decode failed");
 
     let tmp_jpg = TempFile::new("scale_half_420.jpg");
@@ -405,7 +405,7 @@ fn c_xval_crop_scale_half_444() {
     let jpeg: Vec<u8> = make_test_jpeg(128, 128, Subsampling::S444);
 
     let mut dec = Decoder::new(&jpeg).expect("Decoder::new failed");
-    dec.set_scale(ScalingFactor::new(1, 2));
+    dec.set_scale(ScalingFactor::try_new(1, 2).expect("supported scaling factor"));
     let rust_img = dec.decode_image().expect("scaled decode failed");
 
     let tmp_jpg = TempFile::new("scale_half_444.jpg");
@@ -503,7 +503,7 @@ fn c_xval_crop_scale_matrix() {
         let jpeg: Vec<u8> = make_test_jpeg(128, 128, ss);
         for &(num, den, scale_name) in &[(1, 2, "1_2"), (1, 4, "1_4")] {
             let mut dec = Decoder::new(&jpeg).expect("Decoder::new failed");
-            dec.set_scale(ScalingFactor::new(num, den));
+            dec.set_scale(ScalingFactor::try_new(num, den).expect("supported scaling factor"));
             let rust_img = dec.decode_image().expect("scaled decode failed");
 
             let tmp_jpg = TempFile::new(&format!("matrix_{ss_name}_{scale_name}.jpg"));

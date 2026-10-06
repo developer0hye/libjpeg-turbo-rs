@@ -119,12 +119,20 @@ const SMALL_SCALES_NO_CROP: &[&str] = &["1/8", "2/8", "3/8"];
 // Helpers
 // ===========================================================================
 
-/// Parse a scale string like "4/8" into (num, denom).
-fn parse_scale(s: &str) -> (u32, u32) {
+/// Parse a scale string like "4/8" into the supported factor of equal value.
+///
+/// The script passes `-scale M/N` to `tjdecomp`, which matches by *value*
+/// against `tj3GetScalingFactors` (`tjdecomp.c:235-241`), so "4/8" selects
+/// 1/2. The library itself only takes the table's own form, so this does the
+/// same lookup the C tool does before handing the factor over.
+fn parse_scale(s: &str) -> ScalingFactor {
     let mut parts = s.splitn(2, '/');
     let num: u32 = parts.next().unwrap().parse().unwrap();
     let denom: u32 = parts.next().unwrap().parse().unwrap();
-    (num, denom)
+    ScalingFactor::SUPPORTED
+        .into_iter()
+        .find(|sf: &ScalingFactor| num * sf.denom() == sf.num() * denom)
+        .unwrap_or_else(|| panic!("tjdecomp would reject -scale {s}"))
 }
 
 /// Parse a crop string like "14x14+23+23" into (w, h, x, y).
@@ -169,8 +177,7 @@ fn rust_decode_rgb(
         .unwrap_or_else(|e| panic!("Decoder::new failed for {:?}: {:?}", jpeg_path, e));
 
     if !scale_arg.is_empty() {
-        let (num, denom) = parse_scale(scale_arg);
-        dec.set_scale(ScalingFactor::new(num, denom));
+        dec.set_scale(parse_scale(scale_arg));
     }
 
     if !crop_arg.is_empty() {
@@ -217,8 +224,7 @@ fn rust_decode_gray(
     dec.set_output_colorspace(ColorSpace::Grayscale);
 
     if !scale_arg.is_empty() {
-        let (num, denom) = parse_scale(scale_arg);
-        dec.set_scale(ScalingFactor::new(num, denom));
+        dec.set_scale(parse_scale(scale_arg));
     }
 
     if !crop_arg.is_empty() {

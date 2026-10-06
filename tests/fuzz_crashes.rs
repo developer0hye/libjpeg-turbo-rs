@@ -89,7 +89,9 @@ fn drive_decompress(data: &[u8]) {
         }
         // The reduced-size IDCT lives behind this arm only; five of the
         // 2026-07-29 crash seeds panic on i32 overflow without it.
-        3 => decoder.set_scale(libjpeg_turbo_rs::ScalingFactor::new(1, 2)),
+        3 => decoder.set_scale(
+            libjpeg_turbo_rs::ScalingFactor::try_new(1, 2).expect("supported scaling factor"),
+        ),
         4 => decoder.set_crop_region(3, 0, 40, frame_h as usize),
         5 => decoder.set_output_format(PixelFormat::Xrgb),
         6 => decoder.set_output_format(PixelFormat::Grayscale),

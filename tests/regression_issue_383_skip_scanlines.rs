@@ -223,7 +223,9 @@ fn issue_383_scaled_skip_clamps_and_matches_c() {
     // Clamp is in scaled rows: requesting more than the scaled height
     // returns the scaled remaining count, not the requested count.
     let mut over = StreamingDecoder::new(&jpeg).expect("header");
-    over.set_scale(libjpeg_turbo_rs::ScalingFactor::new(1, 2));
+    over.set_scale(
+        libjpeg_turbo_rs::ScalingFactor::try_new(1, 2).expect("supported scaling factor"),
+    );
     assert_eq!(
         over.skip_scanlines(height).expect("overskip"),
         scaled_h,
@@ -262,7 +264,9 @@ fn issue_383_scaled_skip_clamps_and_matches_c() {
     assert_eq!((cw, ch), (width / 2, scaled_h - skip), "djpeg dims");
 
     let mut dec = StreamingDecoder::new(&jpeg).expect("header");
-    dec.set_scale(libjpeg_turbo_rs::ScalingFactor::new(1, 2));
+    dec.set_scale(
+        libjpeg_turbo_rs::ScalingFactor::try_new(1, 2).expect("supported scaling factor"),
+    );
     assert_eq!(dec.skip_scanlines(skip).expect("skip"), skip);
     let img = dec.decode().expect("decode");
     assert_eq!((img.width, img.height), (cw, ch));

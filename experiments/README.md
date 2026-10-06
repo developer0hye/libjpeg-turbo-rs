@@ -9,6 +9,7 @@ experiments/
 ├── README.md          # This file
 ├── baseline.txt       # Reference: C libjpeg-turbo benchmark results
 ├── <target>.tsv       # Per-target experiment log (one file per optimization area)
+├── downstream/        # Stock-profile downstream-consumer benchmark (P4-214); see downstream/README.md
 └── ...
 ```
 
