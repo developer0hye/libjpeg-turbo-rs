@@ -75,7 +75,7 @@ them yourself:
          ${TARGET_DIR}/F-1.JPG
          ...
 
-  4. Re-run: cargo test --test conformance_t83 -- --include-ignored
+  4. Re-run: cargo test --locked --test conformance_t83 -- --include-ignored
      Tests for T.83 vectors will activate automatically once the files exist.
      If still absent, tests skip gracefully with the same message.
 

@@ -10,6 +10,18 @@ and `git log` between tags.
 
 ### Added
 
+- **`Decoder::icc_profile`, `exif_data`, `xmp_data` and `iptc_data`** read
+  metadata from the parsed header without decoding pixels, returning the same
+  bytes a decode reports (#637).
+- **`SECURITY.md`, `docs/STABILITY.md`, `docs/RELEASE.md` and
+  `docs/security/AFFECTED_VERSIONS.md`** (P4-217, #638): supported versions and
+  private reporting, the SemVer/MSRV/feature/deprecation/error/thread policy
+  and what counts as public API, the release procedure, and which published
+  versions each known memory-safety or abort finding affects.
+- **API compatibility gate before every crates.io publish** (P4-217):
+  `release.yml`'s `semver-check` job runs `scripts/semver_check_release.sh`,
+  which compares each crate with the previous release tag on `cargo rustdoc
+  --locked` output and fails a version bump that does not allow the change.
 - **Prebuilt native bundles on every tagged release** (P4-131, #462).
   `libjpeg-turbo-rs-capi-<version>-<target>.tar.gz` for
   `x86_64`/`aarch64-unknown-linux-gnu` and `x86_64`/`aarch64-apple-darwin`,
@@ -21,16 +33,120 @@ and `git log` between tags.
   which is what P4-124 needs before the downstream harnesses can test the tree
   you download; today they still stage the raw cargo cdylib. See
   [`docs/RELEASE_ARTIFACTS.md`](docs/RELEASE_ARTIFACTS.md) for verification and
-  install steps, and for what is still missing: no Windows bundle, no
-  signature or SBOM, and no first-party deb/rpm.
+  install steps, and for what is still missing: no first-party deb/rpm.
+- **Every native bundle is attested** (P4-131, #462). The job that builds a
+  bundle signs it through Sigstore with its own identity: SLSA build
+  provenance from `actions/attest-build-provenance`, and a CycloneDX SBOM of
+  the capi crate for the bundle's target — `<bundle>.cdx.json`, written by
+  `scripts/package_capi_release.sh --sbom` and attached with its checksum —
+  from `actions/attest`. `gh attestation verify <bundle> --repo
+  developer0hye/libjpeg-turbo-rs` checks where a download came from, which a
+  checksum beside the file never could; the Sigstore bundles are attached as
+  `<bundle>.tar.gz.{provenance,sbom}.sigstore.json` for offline use, and
+  `SHA256SUMS` now covers the SBOMs as well as the archives.
+- **A Windows bundle** (P4-131, #462).
+  `libjpeg-turbo-rs-capi-<version>-x86_64-pc-windows-msvc.tar.gz` ships
+  upstream's Visual C++ layout: `bin/jpeg8.dll` and `bin/turbojpeg.dll` (one
+  DLL under both names) with import libraries `lib/jpeg.lib` and
+  `lib/turbojpeg.lib` regenerated from the DLL's export table so that they
+  bind to the shipped names rather than to cargo's `libjpeg_turbo_rs_capi.dll`,
+  plus the same headers, `.pc` files, CMake config and licence texts as the
+  Unix bundles. It is staged by the same `scripts/install_capi.sh` (now run
+  under Git for Windows' bash; `--soname jpeg62.dll` is the v6b opt-in there),
+  checksummed and attested like the others, and the `install_layout` and
+  `release_bundle` suites now run for real on the Windows CI leg instead of
+  skipping. MSVC only — no MinGW bundle — and the DLL links the dynamic
+  Visual C++ runtime, as upstream's does.
 
 ### Changed
+
+- **Breaking (Rust API): low-level modules and two exhaustively constructible
+  structs changed since 0.8.0** — the evidence for the next root release being
+  0.9.0 (`cargo-semver-checks` on `cargo rustdoc --locked` output,
+  `docs/RELEASE.md`). Covered API: `JpegCoefficients` (re-exported at the root)
+  gained the public field `saw_jfif_marker`, so a struct literal needs it.
+  Outside the covered API (`docs/STABILITY.md#what-is-public-api`): about
+  forty `simd::aarch64::*` / `simd::scalar::*` kernel entry points and
+  `encode::huffman_encode::BitWriter` are no longer public, `SimdRoutines` and
+  `EncoderSimdRoutines` lost or gained function-pointer fields, and
+  `decode::marker::JpegMetadata` gained fields. Use the root-level `Decoder`,
+  `Encoder` and `decompress*`/`compress*` APIs instead of these internals.
+
+- **`libjpeg-turbo-rs-image`: the `image` adapter decodes lazily, honours
+  `image::Limits`, and reports metadata** (P4-212, #637, under #635).
+  `JpegDecoder::new` now parses headers only and `read_image` decodes into
+  the caller's buffer; for 8-bit grayscale and YCbCr/RGB streams no second
+  decoded image exists (measured at 2048x1536 4:2:0: construction 37 KB, read
+  working set 4.7 MB against a 9.4 MB image — CMYK, 12-bit and lossless are
+  still staged, P4-213). `set_limits` applies `max_image_width`,
+  `max_image_height` and `max_alloc` before any pixel allocation.
+  `exif_metadata`, `xmp_metadata`, `iptc_metadata` and `orientation` return
+  what `image`'s built-in JPEG decoder returns for the same file. New:
+  `JpegDecoder::from_vec` (no input copy), `set_lenient`, and
+  `original_color_type()` (`Cmyk8` for four-component streams).
+  **Breaking for the adapter (next version 0.2.0):** `new`/`from_vec` no
+  longer validate entropy data, so a corrupt stream constructs and fails in
+  `read_image`; `read_image` and `JpegEncoder::write_image` require buffers of
+  exactly the image's size (both accepted longer ones); error categories moved
+  from `Decoding` (`Encoding` for the encoder) to `Limits` (limits,
+  allocation refusal), `Unsupported`, `Parameter` (buffer sizes) and
+  `IoError`, and the format hint is now
+  `ImageFormatHint::Exact(ImageFormat::Jpeg)`; asking `new_with_format` for
+  `Grayscale` from a CMYK/YCCK stream is refused at construction.
+- **Portable x86_64 builds reach the BMI2 Huffman tier and the FMA float
+  FDCT by runtime detection** (P4-133, #464). The 2026-09-08 portable-vs-native
+  A/B found only two wins a `target-cpu=native` build had over a stock
+  `cargo build --release`: BMI2's `SHLX`-family shifts in the Huffman bit
+  packer (1.3–2.9 % of a 1080p encode) and FMA in the `-dct float` FDCT
+  (18–23 %, because `f32::mul_add` is a libm call on a baseline build). Both
+  are now compiled as `target_feature` twins of the same bodies and selected
+  with the crate's `cpu_has!` pattern — the FMA twin once per encode in
+  `EncoderSimdRoutines::fdct_float_quantize`, the Huffman tier once per
+  encode on the operation's `BitWriter` — so a packaged library gets them
+  on the CPUs that have them. Output is unchanged: `mul_add` rounds once either way, and
+  the three Huffman tiers are one body, both asserted by new tests.
+  `EncoderSimdRoutines` gained a public `fdct_float_quantize` field; the type
+  has a private field and cannot be constructed outside the crate, so this is
+  additive. `HuffmanEncoder::encode_block_hoisted` is now `pub(crate)`: it
+  gained the writer's `AcTier`, which is crate-private. It took raw hoisted
+  `BitWriter` state that only the in-crate MCU loops can produce, so nothing
+  downstream could call it, but it was nameable, so this is a removal from
+  the public surface.
+- **The C reference submodule is libjpeg-turbo 3.2.0** (P4-130, #461).
+  `references/libjpeg-turbo` moved from 3.1.90 (3.2 beta1) to the 3.2.0 tag,
+  so the classic-ABI trace oracle built from it and every `j*.c:NNN` citation
+  in this repository now quote current upstream stable; the 207 citations the
+  tag's diff moved were remapped with it, and `docs/oracle_versions.tsv`
+  records the new row. One behaviour delta came with the sources: the classic
+  memory destination now reports a failed buffer doubling as
+  `JERR_OUT_OF_MEMORY` case 12 (3.2.0's number; it was 10) and a doubling that
+  would overflow `size_t` as case 13, matching `jdatadst.c` in the tree the
+  shim cites.
+- **Transcode header markers follow the colorspace classification, not the
+  source's Adobe byte** (P4-181, #581). `write_coefficients` and its
+  progressive/arithmetic/optimized siblings, and therefore
+  `transform_jpeg_with_options`, now classify the coefficient set the way
+  libjpeg's `default_decompress_parms` does — from the JFIF/Adobe state at
+  the *first* SOS — and emit the header `jpeg_set_colorspace` +
+  `write_file_header` would: JFIF for grayscale/YCbCr, Adobe APP14 with
+  transform 0 for RGB/CMYK and 2 for YCCK. A source Adobe transform byte is
+  no longer re-emitted verbatim (a bogus 255 made stock `djpeg` warn on our
+  output where `jpegtran`'s decoded cleanly), a JFIF+Adobe source no longer
+  gets a second, synthesized Adobe segment under `MarkerCopyMode::All`, that
+  mode now keeps non-JFIF APP0 segments (only a `JFIF\0` duplicate of the
+  written header is dropped, as `jcopy_markers_execute` does), and saved
+  markers — on the `Encoder` path too — are inserted after the writer's own
+  JFIF/Adobe header rather than before an Adobe segment. The `Decoder`
+  classifies from the same first-SOS state, so an Adobe marker that only
+  appears between scans no longer changes the decoded colorspace. The capi's
+  `jpeg_write_coefficients` no longer prepends its own Adobe APP14 on top of
+  the writer's.
 
 - **Breaking (C ABI, argument validation):** `tj3SaveImage8` now refuses a
   negative `pitch` instead of reading it as "tightly packed", and
   `tj3LoadImage8` now requires `align` to be a positive power of two instead
   of clamping it with `align.max(1)` (P4-139, #478). Both match upstream,
-  which rejects the same values (`turbojpeg-mp.c:511-513` and `:317-321`);
+  which rejects the same values (`turbojpeg-mp.c:515-517` and `:321-325`);
   `pitch == 0` still means dense and `align == 1` still means no padding.
   A caller passing `-1` or `0` previously got a success return and a buffer
   whose row stride they could not have predicted.
@@ -73,6 +189,74 @@ and `git log` between tags.
   runs system/Rust bidirectional cross-decodes.
 
 ### Fixed
+- An allocator refusal during a decode is reported as
+  `JpegError::AllocationFailed` instead of aborting the process (P4-209,
+  #632). `decompress` / `Decoder::decode_image` allocated their destination
+  with `vec![0u8; size]`, sized by the SOF, so a large or hostile file on a
+  memory-constrained host ended in an uncatchable `SIGABRT`. That buffer and
+  every other full-plane or destination allocation under `src/decode/` —
+  component planes, the merged-upsample, 12-bit, lossless, CMYK/YCCK and
+  colourspace-override outputs, full-plane chroma upsampling, crop copies and
+  the block-smoothing DC snapshot — now go through the crate's fallible
+  allocator helpers. A successful decode is byte-identical. A 12-bit source
+  still decodes its samples through `api::precision`, which this change does
+  not cover. `tests/decode_alloc_gate.rs` with
+  `docs/decode_alloc_inventory.tsv` fails CI when a new infallible allocation
+  under `src/decode/` is not classified as bounded by something other than the
+  input.
+
+- **Breaking (behaviour): a cropping region past the scaled output decoded to a
+  degenerate image** (P4-197, #618). A region that used to decode (to zero or
+  clamped columns) now returns `JpegError::InvalidCropRegion`. `Decoder::set_crop_region(10, 1, 16, 2)` on an 8x8 image
+  tripped a `debug_assert!` in debug builds and in release returned `Ok` with
+  zero columns and the requested crop height silently dropped; any region
+  ending past the right or bottom edge was clamped. `Decoder::decode_image`,
+  `decode_image_into` and `output_buffer_size` now refuse a region with
+  `x + width` past `output_width()` or `y + height` past `output_height()`,
+  as `djpeg -crop` does, with the new
+  `JpegError::InvalidCropRegion { reason }` carrying upstream's message. The
+  left boundary still aligns down to the iMCU boundary, as
+  `jpeg_crop_scanline` does; a zero width is now refused as it refuses it
+  (it used to widen into the columns left of `x`), while a zero height stays
+  accepted; `decompress_cropped` still clamps, as documented.
+- **Breaking (behaviour): `TjHandle` and `tj3SetCroppingRegion` follow
+  TurboJPEG's cropping rules** (P4-197, #618). C callers see three return-code
+  changes: setting a region before a header is read now fails (-1), `w`/`h` = 0
+  now means "to the edge" (0, was -1), and `tj3Decompress12` with a stored
+  region now fails instead of ignoring it. `TjHandle::decompress` refuses a left boundary not divisible
+  by the scaled iMCU width (it was aligned down) and a region past the scaled
+  image (it was clamped), and a `width`/`height` of 0 now means "to the edge"
+  instead of an empty crop, and the subsampling a crop is checked against is
+  classified exactly as upstream's `getSubsamp` does. The new
+  `TjHandle::resolve_cropping_region` runs
+  upstream's set-time checks against the last header read; the C ABI's
+  `tj3SetCroppingRegion` uses it, so it now refuses before a header has been
+  read, for a lossless frame, off the iMCU grid and past the scaled image —
+  each with stock TurboJPEG's `tj3GetErrorStr` text — and accepts the zero
+  width/height it used to refuse. `TjHandle::decompress` also refuses a
+  decode that would not match the region — upstream's "Unexplained mismatch"
+  errors — where it used to return a wider image than a C caller's buffer;
+  `decompress_12bit` / `decompress_16bit`, which cannot crop yet (P4-219),
+  refuse a stored region instead of ignoring it. `TjHandle::decompress_header`
+  ignores the cropping region, as `tj3DecompressHeader` does.
+- **Security — a custom scan script could write past the stack from safe
+  Rust on x86_64** (P4-192, #610). `Encoder::scan_script` stored the script
+  verbatim; an AC band with `se > 63` reached an unchecked SSE2 kernel that
+  wrote past two `[u16; 64]` stack arrays and the encode returned `Ok` (other
+  architectures panicked instead). Scripts are now checked before any
+  encoding work by the rules C's `validate_script` applies to a progressive
+  script, and a refused script returns the new
+  `JpegError::InvalidScanScript { entry, reason }` on every architecture.
+  Affects 0.4.0 through 0.8.0 on x86_64 with the default `simd` feature
+  (the SSE2 kernel first shipped in 0.4.0).
+- **Custom scan scripts with single-component DC scans encoded blocks in the
+  wrong order** (P4-211). A non-interleaved DC scan walked the frame's MCU grid
+  instead of the component's own block grid, and every DC scan wrote both DC
+  table slots even when one was unused. Output from such a script now matches
+  `cjpeg -scans` byte for byte; the built-in scripts are unaffected.
+- **Packaging:** `libjpeg-turbo-rs-capi` and `libjpeg-turbo-rs-image` now
+  ship their licence files and IJG attribution; the root crate no longer ships
+  repository tooling or the reference submodule's READMEs (P4-217).
 - `Encoder::encode` validates the caller's pixel buffer against
   `width x height x bytes_per_pixel` **before** it rearranges it (P4-139,
   #478). `bottom_up`, `fancy_downsampling` and `grayscale_from_color` each

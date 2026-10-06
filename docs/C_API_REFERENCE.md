@@ -33,15 +33,15 @@
 | `NOREALLOC` | Disable output buffer realloc | `TjHandle::compress_into(&buf)` honors NOREALLOC, returns `BufferTooSmall{need,got}` on overflow | ✅ |
 | `QUALITY` | Lossy quality 1-100 | `quality: u8` param | ✅ |
 | `SUBSAMP` | Chroma subsampling | `subsampling: Subsampling` param | ✅ |
-| `JPEGWIDTH` | JPEG image width (read-only) | `Image.width` | ✅ |
-| `JPEGHEIGHT` | JPEG image height (read-only) | `Image.height` | ✅ |
+| `JPEGWIDTH` | JPEG image width (read-only) | `Image.width` — published from the *decoded output*, so a scaled or cropped decode reports the output width where C reports the SOF's (P4-200, #621) | 🔶 |
+| `JPEGHEIGHT` | JPEG image height (read-only) | `Image.height` — same divergence as `JPEGWIDTH` (P4-200, #621) | 🔶 |
 | `PRECISION` | Sample precision 2-16 bits | `compress_12bit()`, `compress_16bit()`, `decompress_12bit()`, `decompress_16bit()`, `compress_lossless_arbitrary()` / `decompress_lossless_arbitrary()` | 🔶 |
 | `COLORSPACE` | JPEG colorspace | `Encoder::colorspace()` / `Decoder::set_output_colorspace()` | 🔶 |
 | `FASTUPSAMPLE` | Nearest-neighbor upsampling | `Decoder::set_fast_upsample()` | ✅ |
 | `FASTDCT` | Fast DCT/IDCT algorithm | `Decoder::set_fast_dct()` | ✅ |
 | `OPTIMIZE` | Optimized Huffman tables | `compress_optimized()` | ✅ |
 | `PROGRESSIVE` | Progressive JPEG mode | `compress_progressive()` | ✅ |
-| `SCANLIMIT` | Max progressive scans | `Decoder::set_scan_limit()` | ✅ |
+| `SCANLIMIT` | Max progressive scans | `Decoder::set_scan_limit()` — reaches the 8-bit decode path only; `tj3Decompress12`/`16` build their own decoder with default limits (P4-199, #620) | 🔶 |
 | `ARITHMETIC` | Arithmetic entropy coding | `compress_arithmetic()`, `TransformOptions::arithmetic` | ✅ |
 | `LOSSLESS` | Lossless JPEG mode | `compress_lossless()` | ✅ |
 | `LOSSLESSPSV` | Lossless predictor 1-7 | `Encoder::lossless_predictor()` | ✅ |
@@ -51,8 +51,8 @@
 | `XDENSITY` | Horizontal pixel density | `Encoder::density()` + `TjHandle` compress/decompress wiring | ✅ |
 | `YDENSITY` | Vertical pixel density | `Encoder::density()` + `TjHandle` compress/decompress wiring | ✅ |
 | `DENSITYUNITS` | 0=unknown, 1=ppi, 2=ppcm | `Encoder::density()` + `TjHandle` compress/decompress wiring | ✅ |
-| `MAXMEMORY` | Memory limit | `Decoder::set_max_memory()` | ✅ |
-| `MAXPIXELS` | Image size limit | `Decoder::set_max_pixels()` | ✅ |
+| `MAXMEMORY` | Memory limit | `Decoder::set_max_memory()` — 8-bit decode path only, same as `SCANLIMIT` (P4-199, #620) | 🔶 |
+| `MAXPIXELS` | Image size limit | `Decoder::set_max_pixels()` — 8-bit decode path only; upstream applies it on the shared path at every precision (`turbojpeg-mp.c:195-198`) (P4-199, #620) | 🔶 |
 | `SAVEMARKERS` | Marker preservation level 0-4 | `TjHandle` `TJPARAM_SAVEMARKERS` wired through `decompress()` → `Decoder::save_markers()` | ✅ |
 
 ### Memory
@@ -76,8 +76,8 @@
 
 | C Function | Description | Rust | Status |
 |---|---|---|---|
-| `tj3SetICCProfile(handle, buf, size)` | Set ICC for encoding | `TjHandle::set_icc_profile()` / `Encoder::icc_profile()` | ✅ |
-| `tj3GetICCProfile(handle, &buf, &size)` | Get ICC after decode | `TjHandle::icc_profile()` populated by `decompress()` + symmetric with `Image.icc_profile()` — upstream 3.2 also allows repeated calls and retrieval from a *compression* instance, neither verified here (P4-172) | 🔶 |
+| `tj3SetICCProfile(handle, buf, size)` | Set ICC for encoding | `TjHandle::set_icc_profile()` / `Encoder::icc_profile()` — upstream keeps the compress-side profile in a separate buffer a decode cannot touch; ours is one field a decode overwrites (P4-198, #619) | 🔶 |
+| `tj3GetICCProfile(handle, &buf, &size)` | Get ICC after decode | `TjHandle::icc_profile()` populated by `decompress()` + symmetric with `Image.icc_profile()` — upstream 3.2 also allows repeated calls and retrieval from a *compression* instance, neither verified here (P4-172); and it answers from the same field `tj3SetICCProfile` writes rather than from a decompress-side buffer (P4-198, #619) | 🔶 |
 
 ### Compression (8-bit)
 
@@ -105,7 +105,7 @@
 
 | C Function | Description | Rust | Status |
 |---|---|---|---|
-| `tj3DecompressHeader(handle, jpeg, size)` | Parse JPEG headers, populate params | `Decoder::new()` / `ScanlineDecoder::new()` | ✅ |
+| `tj3DecompressHeader(handle, jpeg, size)` | Parse JPEG headers, populate params | `Decoder::new()` / `ScanlineDecoder::new()` — publishes 8 of the 13 parameters `setDecompParameters` writes (P4-199, #620) | 🔶 |
 
 ### Scaling & Cropping
 
@@ -113,15 +113,15 @@
 |---|---|---|---|
 | `tj3GetScalingFactors(&count)` | Get list of supported scaling factors | `TjHandle::scaling_factors()` / `ScalingFactor` | ✅ |
 | `tj3SetScalingFactor(handle, sf)` | Set output scaling | `Decoder::set_scale()` / `TjHandle::set_scaling_factor()` | ✅ |
-| `tj3SetCroppingRegion(handle, region)` | Set crop region | `Decoder::set_crop_region()` / `TjHandle::set_cropping_region()` | ✅ |
+| `tj3SetCroppingRegion(handle, region)` | Set crop region | `TjHandle::set_cropping_region()` + `TjHandle::resolve_cropping_region()` (upstream's set-time checks and messages except the "not initialized for decompression" guard, `turbojpeg.c:2074-2075` — P4-220 —, cross-validated against stock 3.2.0 by `cabi_misuse_harness`'s `cropping_region` case); `Decoder::set_crop_region()` refuses a region past the scaled output and aligns `x` down like `jpeg_crop_scanline` (P4-197, #618). The 12-bit decode paths do not yet honour the region (P4-219) | 🔶 |
 
 ### Decompression (8-bit)
 
 | C Function | Description | Rust | Status |
 |---|---|---|---|
-| `tj3Decompress8(handle, jpeg, size, dst, pitch, pf)` | Decompress JPEG to 8-bit pixels | `decompress()`, `decompress_to()`, `decompress_into()` (caller buffer, #354) | ✅ |
-| `tj3Decompress12(handle, jpeg, size, dst, pitch, pf)` | Decompress to 12-bit | `TjHandle::decompress_12bit()` / `decompress_12bit()` — **12-bit sources only**: upstream 3.2 also decompresses an 8-bit lossy JPEG to 12-bit output, which we refuse (P4-171) | 🔶 |
-| `tj3Decompress16(handle, jpeg, size, dst, pitch, pf)` | Decompress to 16-bit | `TjHandle::decompress_16bit()` / `decompress_16bit()` | ✅ |
+| `tj3Decompress8(handle, jpeg, size, dst, pitch, pf)` | Decompress JPEG to 8-bit pixels | `decompress()`, `decompress_to()`, `decompress_into()` (caller buffer, #354) — publishes 8 of the 13 parameters `setDecompParameters` writes (P4-199, #620) | 🔶 |
+| `tj3Decompress12(handle, jpeg, size, dst, pitch, pf)` | Decompress to 12-bit | `TjHandle::decompress_12bit()` / `decompress_12bit()` — **12-bit sources only**: upstream 3.2 also decompresses an 8-bit lossy JPEG to 12-bit output, which we refuse (P4-171); publishes 3 of 13 parameters and applies none of the handle's resource limits (P4-199, #620); refuses a stored cropping region instead of applying it (P4-219) | 🔶 |
+| `tj3Decompress16(handle, jpeg, size, dst, pitch, pf)` | Decompress to 16-bit | `TjHandle::decompress_16bit()` / `decompress_16bit()` — publishes 3 of 13 parameters and applies none of the handle's resource limits (P4-199, #620) | 🔶 |
 
 ### Decompression to YUV
 
@@ -170,7 +170,7 @@
 |---|---|---|---|
 | `jpeg_std_error(err)` | Create default error manager | `JpegError` enum | ✅ |
 | `jpeg_create_compress(cinfo)` | Create compression struct | `Encoder` / `ScanlineEncoder`; version/size guards enforced as upstream (P4-110 closed 2026-08-11) | 🔶 |
-| `jpeg_create_decompress(cinfo)` | Create decompression struct | `Decoder::new()` / `ScanlineDecoder::new()`; version/size guards enforced as upstream (P4-110 closed 2026-08-11) | 🔶 |
+| `jpeg_create_decompress(cinfo)` | Create decompression struct | `Decoder::new()` / `ScanlineDecoder::new()`; version/size guards enforced as upstream (P4-110 closed 2026-08-11); private state boxed behind `master`, so the struct may change threads between calls (P4-132 closed 2026-09-08) | 🔶 |
 | `jpeg_destroy_compress(cinfo)` | Destroy compressor | RAII / `Drop` | ✅ |
 | `jpeg_destroy_decompress(cinfo)` | Destroy decompressor | RAII / `Drop` | ✅ |
 | `jpeg_abort_compress(cinfo)` | Abort compression | N/A (RAII) | N/A |
@@ -427,7 +427,7 @@
 |---|---|---|---|
 | `tjscalingfactor` | {num, denom} scaling ratio | `ScalingFactor` | ✅ |
 | `tjregion` | {x, y, w, h} crop region | `CropRegion` | ✅ |
-| `tjtransform` | {region, op, options, data, customFilter} | `TransformOptions` (all fields incl. `custom_filter`) | ✅ |
+| `tjtransform` | {region, op, options, data, customFilter} | `TransformOptions` | 🔶 — `region`, `op` and `options` map; `data` and `customFilter` do not. `tj3Transform` returns -1 for a non-NULL callback, so both are unreachable across the C ABI, even though `TransformOptions::custom_filter` gives Rust callers the callback (a closure captures what `data` carries) (P4-204) |
 
 ---
 
@@ -490,7 +490,7 @@
 | `JQUANT_TBL` | Quantization table (64 values + sent_table) | Internal `[u16; 64]` arrays | ✅ |
 | `JHUFF_TBL` | Huffman table (bits[17] + huffval[256]) | `HuffmanTable` / `HuffTable` | ✅ |
 | `jpeg_component_info` | Per-component metadata | `ComponentInfo` | ✅ |
-| `jpeg_scan_info` | Scan script entry (components, Ss/Se/Ah/Al) | `ScanScript` / `ScanInfo`; classic scanline wiring remains P4-91 | 🔶 |
+| `jpeg_scan_info` | Scan script entry (components, Ss/Se/Ah/Al) | `ScanScript` / `ScanInfo`; `Encoder::scan_script` is ignored on the arithmetic, RGB-direct and custom-sampling progressive paths (P4-210, #636); classic scanline wiring remains P4-91 | 🔶 |
 | `jpeg_marker_struct` | Saved marker (code, length, data, next) | Native markers exist; classic incremental pointer stability remains P4-26 | 🔶 |
 | `jpeg_common_struct` | Common fields (err, mem, progress) | Native equivalents exist; decompressor `global_state` matches stock (P4-104 closed 2026-08-14) except `DSTATE_BUFIMAGE`/`BUFPOST` (P4-13); classic error/progress contracts remain P4-100/P4-111 | 🔶 |
 | `jpeg_compress_struct` | Full compression state (~50 fields) | `Encoder` / `ScanlineEncoder`; residual classic option/state gaps are P4-84..P4-111 | 🔶 |

@@ -2,7 +2,7 @@
 //! `TJPARAM_NOREALLOC` is set (issue #476 review; tracked as P4-145).
 //!
 //! Under NOREALLOC the caller owns the output buffer and `*jpeg_size` carries
-//! its size on input. Upstream refuses to overrun it — `jdatadst-tj.c:92`
+//! its size on input. Upstream refuses to overrun it — `jdatadst-tj.c:95`
 //! raises `JERR_BUFFER_SIZE` when the buffer fills and reallocation is
 //! forbidden.
 //!

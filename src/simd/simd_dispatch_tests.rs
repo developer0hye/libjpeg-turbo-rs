@@ -129,3 +129,49 @@ fn no_simd_feature_compiles_scalar() {
     (routines.idct_islow)(&coeffs, &quant, &mut output);
     assert!(output.iter().all(|&v| v == 128));
 }
+
+/// P4-133 (#464) criteria 2 and 3: the float FDCT's FMA twin is reached from
+/// a baseline build by runtime detection, and the choice is made once, where
+/// the encoder's kernel set is built — not per block.
+#[cfg(all(target_arch = "x86_64", feature = "simd"))]
+mod p4_133_float_fdct_dispatch {
+    use crate::simd::{self, EncoderSimdRoutines};
+
+    fn as_ptr(kernel: fn(&mut [i16; 64], &simd::QuantDivisors, &mut [i16; 64])) -> *const () {
+        kernel as *const ()
+    }
+
+    #[test]
+    fn encoder_kernel_set_installs_the_fma_float_fdct_only_when_the_cpu_has_it() {
+        let routines: EncoderSimdRoutines = simd::x86_64::encoder_routines();
+        let selected: *const () = as_ptr(routines.fdct_float_quantize);
+        let fma_twin: *const () = as_ptr(simd::x86_64::fma_fdct::fma_fdct_float_quantize);
+        let scalar: *const () = as_ptr(simd::scalar::scalar_fdct_float_quantize);
+        let cpu_has_fma: bool = crate::cpu_has!("fma");
+        eprintln!("runtime dispatch: fma={cpu_has_fma}");
+
+        if cpu_has_fma {
+            assert!(
+                core::ptr::eq(selected, fma_twin),
+                "CPU reports FMA but the plan's float FDCT kernel is not the FMA twin"
+            );
+        } else {
+            assert!(
+                core::ptr::eq(selected, scalar),
+                "CPU has no FMA but the plan's float FDCT kernel is not the scalar reference"
+            );
+        }
+    }
+
+    /// The scalar kernel set (what `JSIMD_FORCENONE=1` and a `no_std` build
+    /// without `target_feature = "fma"` get) must stay scalar for the float
+    /// kernel too.
+    #[test]
+    fn scalar_kernel_set_keeps_the_float_fdct_scalar() {
+        let routines: EncoderSimdRoutines = simd::scalar::encoder_routines();
+        assert!(core::ptr::eq(
+            as_ptr(routines.fdct_float_quantize),
+            as_ptr(simd::scalar::scalar_fdct_float_quantize)
+        ));
+    }
+}

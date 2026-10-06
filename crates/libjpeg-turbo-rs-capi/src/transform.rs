@@ -172,7 +172,7 @@ pub unsafe extern "C" fn tj3Transform(
             // Upstream registers marker processors before reading the header
             // whenever any transform in the batch saves markers
             // (`jcopy_markers_setup` with the handle's saveMarkers option,
-            // `turbojpeg.c:2973-2977`); registration is per-handle and
+            // `turbojpeg.c:2988-2992`); registration is per-handle and
             // permanent. Recorded so the legacy NOREALLOC bridge can tell a
             // cold handle — where upstream's capacity pre-read starves marker
             // saving, the P4-156 ordering quirk — from a warm one
@@ -256,7 +256,7 @@ pub unsafe extern "C" fn tj3Transform(
 
                 // Upstream skips destination setup entirely for this option —
                 // `if (!(t[i].options & TJXOPT_NOOUTPUT)) jpeg_mem_dest_tj(...)`
-                // (`turbojpeg.c:3007`) — so the slots stay exactly as the caller
+                // (`turbojpeg.c:3022`) — so the slots stay exactly as the caller
                 // left them and a NULL destination is fine. Delivering here
                 // instead would demand a buffer for output that was never
                 // produced, and would zero a non-NULL slot's size.

@@ -257,7 +257,8 @@ impl<'a> Decoder<'a> {
     /// because the per-slot fill below only writes `None` slots).
     ///
     /// The four Annex K tables are process-global (`std_huffman_tables`,
-    /// built once behind a `OnceLock`) and shared by `Arc` clone — filling
+    /// built once behind the hand-rolled `OnceBox` that replaced `OnceLock`
+    /// for `no_std` in #356) and shared by `Arc` clone — filling
     /// a slot is a refcount bump, not a 4 KB table build (issue #351).
     pub(super) fn fill_default_huffman_tables(metadata: &mut JpegMetadata) {
         use crate::common::huffman_table::std_huffman_tables;
@@ -418,6 +419,38 @@ impl<'a> Decoder<'a> {
             .and_then(crate::common::exif::parse_orientation)
     }
 
+    /// The ICC profile reassembled from the header's APP2 chunks, before
+    /// any pixel decode.
+    ///
+    /// The same bytes a decode reports in [`Image::icc_profile`] /
+    /// [`ImageInfo::icc_profile`]; header-only consumers (an
+    /// `image::ImageDecoder` answering `icc_profile()` before `read_image`)
+    /// would otherwise have to decode pixels to read it. `Ok(None)` when the
+    /// stream carries no profile *or* a malformed one, which must not fail a
+    /// decode (P4-144); `Err` only when the allocator refuses the reassembly
+    /// buffer, because the profile size comes from the stream.
+    pub fn icc_profile(&self) -> Result<Option<Vec<u8>>> {
+        crate::common::icc::try_reassemble_icc_profile(&self.metadata.icc_chunks)
+    }
+
+    /// The raw EXIF TIFF payload (APP1 after `Exif\0\0`), before any pixel
+    /// decode. Same bytes as [`Image::exif_data`].
+    pub fn exif_data(&self) -> Option<&[u8]> {
+        self.metadata.exif_data.as_deref()
+    }
+
+    /// The raw XMP packet, Extended XMP reassembled, before any pixel
+    /// decode. Same bytes and reassembly rules as [`Image::xmp_data`].
+    pub fn xmp_data(&self) -> Option<&[u8]> {
+        self.metadata.xmp_data.as_deref()
+    }
+
+    /// The raw IPTC IIM payload from the APP13 Photoshop IRB, before any
+    /// pixel decode. Same bytes as [`Image::iptc_data`].
+    pub fn iptc_data(&self) -> Option<&[u8]> {
+        self.metadata.iptc_data.as_deref()
+    }
+
     /// The parsed frame header: dimensions, per-component sampling,
     /// precision, progressive/lossless flags. Available immediately
     /// after [`Decoder::new`], before any pixel decode.
@@ -486,7 +519,23 @@ impl<'a> Decoder<'a> {
         self.lenient = lenient;
     }
 
-    /// Set horizontal crop region. Offsets are auto-aligned to iMCU boundaries.
+    /// Set the horizontal crop, in output (post-scale) columns.
+    ///
+    /// `x` is aligned **down** to the scaled iMCU boundary and the width grows
+    /// by the same amount, so the decode starts at or left of `x` and still
+    /// ends at `x + width` — what C's `jpeg_crop_scanline` does
+    /// (`jdapistd.c`), and what `djpeg -crop` reports. TurboJPEG's
+    /// `tj3SetCroppingRegion` refuses an unaligned `x` instead;
+    /// [`crate::tj3::TjHandle`] follows TurboJPEG, this decoder follows
+    /// libjpeg (P4-197, #618).
+    ///
+    /// The region is checked when the decode runs, once
+    /// [`Self::set_scale`] has fixed the output size: `x + width` past
+    /// [`Self::output_width`] makes `decode_image`, `decode_image_into` and
+    /// `output_buffer_size` return [`crate::JpegError::InvalidCropRegion`] —
+    /// the bound `djpeg -crop` enforces — rather than clamping the region to
+    /// what is left of the row. A width of 0 is refused the same way, as
+    /// `jpeg_crop_scanline` refuses it.
     pub fn set_crop(&mut self, x: usize, width: usize) {
         self.crop_x = Some(x);
         self.crop_width = Some(width);
@@ -495,6 +544,12 @@ impl<'a> Decoder<'a> {
     /// Set only the vertical crop range, leaving any horizontal crop
     /// untouched. MCU rows fully outside the range skip IDCT during
     /// decoding (issue #383: backs `StreamingDecoder::skip_scanlines`).
+    ///
+    /// `y + height` past [`Self::output_height`] is refused when the decode
+    /// runs, with [`crate::JpegError::InvalidCropRegion`], as
+    /// [`Self::set_crop`] describes. A height of 0 is not refused:
+    /// `skip_scanlines` uses `y = output_height, height = 0` to skip to the
+    /// bottom.
     pub fn set_crop_y(&mut self, y: usize, height: usize) {
         self.crop_y = Some(y);
         self.crop_height = Some(height);
@@ -542,7 +597,9 @@ impl<'a> Decoder<'a> {
         }
     }
 
-    /// Set full crop region (horizontal + vertical).
+    /// Set full crop region (horizontal + vertical), in output (post-scale)
+    /// pixels: [`Self::set_crop`] and [`Self::set_crop_y`] together, with
+    /// their alignment rule and their decode-time bounds check.
     /// MCU rows outside the vertical range will skip IDCT during decoding.
     pub fn set_crop_region(&mut self, x: usize, y: usize, width: usize, height: usize) {
         self.crop_x = Some(x);

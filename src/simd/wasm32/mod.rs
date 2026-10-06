@@ -33,6 +33,7 @@ pub fn encoder_routines() -> EncoderSimdRoutines {
     EncoderSimdRoutines {
         rgb_to_ycbcr_row: color_encode::wasm_rgb_to_ycbcr_row,
         fdct_quantize: wasm_fdct_quantize,
+        fdct_float_quantize: crate::simd::scalar::scalar_fdct_float_quantize,
     }
 }
 

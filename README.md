@@ -6,171 +6,304 @@
 ![MSRV](https://img.shields.io/badge/MSRV-1.87-blue)
 ![license](https://img.shields.io/crates/l/libjpeg-turbo-rs)
 
-A high-performance, pure-Rust JPEG codec inspired by
-[libjpeg-turbo](https://github.com/libjpeg-turbo/libjpeg-turbo), with
-NEON/AVX2/SSE2/WebAssembly SIMD128 acceleration, `no_std + alloc` support,
-Rust-native streaming and buffer-reuse Application Programming Interfaces
-(APIs), and extensive differential validation against pinned C
-libjpeg-turbo oracles.
+Pure-Rust reimplementation of [libjpeg-turbo](https://github.com/libjpeg-turbo/libjpeg-turbo) with NEON/AVX2/SSE2/WASM-SIMD128 acceleration. No C dependencies, no FFI to a C codec, `no_std`-capable — and byte-for-byte cross-validated against C libjpeg-turbo in CI.
 
-The Rust codec does **not** call a C JPEG implementation through a Foreign
-Function Interface (FFI). "Pure Rust" does not mean "no `unsafe`":
-architecture-specific Single Instruction, Multiple Data (SIMD) kernels and the
-optional C Application Binary Interface (ABI) shim use narrowly scoped unsafe
-code.
+> **Safety status.** "No C dependencies" is not "no unsafe code" — the SIMD kernels are `unsafe`, and the boundary between them and the safe API is under audit (P4-135..P4-139 in [`docs/LAST_MILE.md`](docs/LAST_MILE.md)). Until those close this project makes **no memory-safety guarantee** and no unqualified drop-in-replacement claim. Every `unsafe` under a workspace crate's `src/` is listed, with its invariant and test coverage, in [`docs/UNSAFE_INVENTORY.md`](docs/UNSAFE_INVENTORY.md) (root crate) and [`docs/UNSAFE_INVENTORY_CAPI.md`](docs/UNSAFE_INVENTORY_CAPI.md) (C ABI); CI fails when the code and those inventories disagree.
+>
+> **C compatibility tiers.** **TurboJPEG 3 is the primary target.** The classic libjpeg leg targets the **v8 identity only** (`libjpeg.so.8`) and is experimental; **v6b (`libjpeg.so.62`) and v7 are explicit non-goals** — their struct layouts differ, so substituting this library for them corrupts memory rather than merely failing.
 
-```bash
+```sh
 cargo add libjpeg-turbo-rs
 ```
 
 ```rust
 use libjpeg_turbo_rs::{compress, decompress_to, PixelFormat, Subsampling};
 
-let image = decompress_to(&jpeg_bytes, PixelFormat::Rgb)?;
-let encoded = compress(
-    &image.data,
-    image.width,
-    image.height,
-    PixelFormat::Rgb,
-    85,
-    Subsampling::S420,
-)?;
+let image = decompress_to(&jpeg_bytes, PixelFormat::Rgb)?; // decode any JPEG to RGB
+let jpeg = compress(&image.data, image.width, image.height,
+                    image.pixel_format, 85, Subsampling::S420)?; // re-encode
 ```
 
-## Should I use it?
+The crate-level doctests mirror these snippets and are compile-checked
+(`cargo test --doc`); the doctest decode calls `decompress`, the
+format-defaulting sibling of `decompress_to`. Runnable examples live in
+[`examples/`](examples/README.md).
 
-Choose the interface you actually need. The readiness of one interface does
-not promote the others.
+## How it compares
 
-| Your workload | Path | Current status |
+Measured with the in-repo harnesses (methodology: [#361](https://github.com/developer0hye/libjpeg-turbo-rs/issues/361), [#392](https://github.com/developer0hye/libjpeg-turbo-rs/issues/392); `examples/bench_zune_matrix.rs`, `experiments/image_bridge.md`):
+
+| vs | Result (decode) |
+| --- | --- |
+| **zune-jpeg** (the `image` crate's default) | **31 wins / 3 losses** of 34 scored cases (±2% threshold) across subsampling × progressive × 16×16→8K, quiet aarch64, 2026-07-28; e.g. 4K progressive **0.65×**, 4K 4:2:0 **0.74×** of zune's time. Through the `image`-crate bridge: **1.31× faster** at 1080p. Two losses are 16×16 fixed-cost cases (1.20×, 1.08×); the third is a 64×64 non-interleaved 4:4:0 image (1.78×) on the multi-scan path. Full output: [`experiments/zune_matrix_aarch64_2026-07-28.md`](experiments/zune_matrix_aarch64_2026-07-28.md). |
+| **C libjpeg-turbo** | **Decode** (stock `cargo build --release`): matches or beats C on most benchmarks on x86_64/AVX2 (i5-10400), within a few % on aarch64/NEON (M1 Pro). **Encode**: the x86_64 *portable* table below is a stock `cargo build --release` (1.05–1.10× C 3.2.0 at 1080p on Zen 3 and Zen 4 runners); the i5-10400 table is a `target-cpu=native` build and supplementary — see [Portable vs native builds](#portable-vs-native-builds) before quoting either. Dated per-platform tables below. |
+
+## Performance
+
+### x86_64 (AVX2)
+
+#### Decoding
+
+Intel Core i5-10400 @ 2.90GHz (turbo off, `performance` governor), C libjpeg-turbo 3.1.2, quality 75:
+
+| Image | Subsampling | Rust (us) | C (us) | Ratio |
+|-------|-------------|-----------|--------|-------|
+| 64x64 | 4:2:0 | 60 | 49 | 1.23x |
+| 320x240 | 4:2:0 | 769 | 996 | **0.77x** |
+| 640x480 | 4:2:0 | 929 | 880 | 1.05x |
+| 640x480 | 4:2:2 | 3,267 | 3,480 | **0.94x** |
+| 640x480 | 4:4:4 | 4,794 | 5,525 | **0.87x** |
+| 1280x720 | 4:2:0 | 8,707 | 9,997 | **0.87x** |
+| 1920x1080 | 4:2:0 | 19,736 | 22,031 | **0.90x** |
+| 1920x1080 | 4:2:2 | 25,382 | 26,227 | **0.97x** |
+| 1920x1080 | 4:4:4 | 37,585 | 40,026 | **0.94x** |
+| 2560x1440 | 4:2:0 | 35,137 | 37,918 | **0.93x** |
+| 3840x2160 | 4:2:0 | 78,868 | 89,325 | **0.88x** |
+
+#### Encoding — portable build (stock `cargo build --release`)
+
+The number a packager should judge: no `RUSTFLAGS`, AVX2/SSE2 kernels, the
+BMI1/LZCNT/BMI2 Huffman loop and the FMA float FDCT all reached by runtime
+detection. Measured 2026-09-08 by
+[`perf-portable-vs-native.yml`](.github/workflows/perf-portable-vs-native.yml)
+on a GitHub-hosted AMD EPYC 7763 (Zen 3) runner against upstream's official
+libjpeg-turbo 3.2.0 package, quality 75, on the build as it stood before the
+BMI2 tier and the FMA twin were dispatched; shared runner, governor not
+pinnable, run-to-run noise 0–2.5 % (full tables and the per-feature A/B in
+[`experiments/portable_vs_native_x86_64_2026-09-08.md`](experiments/portable_vs_native_x86_64_2026-09-08.md)).
+
+| Image | Subsampling | Rust (µs) | C (µs) | Ratio |
+|-------|-------------|-----------|--------|-------|
+| 320x240 | 4:2:0 | 303 | 287 | 1.05x |
+| 320x240 | 4:2:2 | 382 | 361 | 1.06x |
+| 320x240 | 4:4:4 | 566 | 566 | 1.00x |
+| 640x480 | 4:2:0 | 1,065 | 1,037 | 1.03x |
+| 640x480 | 4:2:2 | 1,343 | 1,275 | 1.05x |
+| 640x480 | 4:4:4 | 1,920 | 1,890 | 1.02x |
+| 1280x720 | 4:2:0 | 3,619 | 3,501 | 1.03x |
+| 1920x1080 | 4:2:0 | 8,171 | 7,643 | 1.07x |
+| 1920x1080 | 4:2:2 | 10,471 | 9,685 | 1.08x |
+| 1920x1080 | 4:4:4 | 15,496 | 14,806 | 1.05x |
+
+On the same runner `-C target-cpu=native` moved these by 0.7–2.0 % at 1080p
+(1.03–1.07× C). A second sample on an AMD EPYC 9V74 (Zen 4) runner put the
+portable build at 1.09–1.10× C at 1080p and native 2.2–3.5 % faster than
+portable. That was the whole native-only gap for the default integer DCT —
+most of it BMI2, which the portable build now reaches by detection.
+
+#### Encoding — native build (`RUSTFLAGS="-C target-cpu=native"`, supplementary)
+
+Intel Core i5-10400, C libjpeg-turbo 3.1.2, 2026-05; valid only for a binary
+built on the machine it runs on.
+
+| Image | Subsampling | Rust (µs) | C (µs) | Ratio |
+|-------|-------------|-----------|--------|-------|
+| 320x240 | 4:2:0 | 381 | 403 | **0.94x** |
+| 320x240 | 4:2:2 | 474 | 508 | **0.93x** |
+| 320x240 | 4:4:4 | 709 | 764 | **0.93x** |
+| 640x480 | 4:2:2 | 1,653 | 1,731 | **0.96x** |
+| 640x480 | 4:4:4 | 2,397 | 2,558 | **0.94x** |
+| 1920x1080 | 4:2:0 | 10,273 | 10,474 | **0.98x** |
+| 1920x1080 | 4:2:2 | 12,783 | 13,082 | **0.98x** |
+| 1920x1080 | 4:4:4 | 19,057 | 19,873 | **0.96x** |
+
+### aarch64 (NEON)
+
+Apple M1 Pro, C libjpeg-turbo 3.1.0, quality 75:
+
+#### Decoding (1920x1080)
+
+| Subsampling | Rust (µs) | C (µs) | Ratio |
+|-------------|-----------|--------|-------|
+| 4:2:0 | 12,159 | 11,333 | 1.07x |
+| 4:2:2 | 15,246 | 15,329 | **0.99x** |
+| 4:4:4 | 22,972 | 23,130 | **0.99x** |
+
+#### Encoding (1920x1080)
+
+| Subsampling | Rust (µs) | C (µs) | Ratio |
+|-------------|-----------|--------|-------|
+| 4:2:0 | 5,724 | 5,332 | 1.07x |
+| 4:2:2 | 7,148 | 6,766 | 1.06x |
+| 4:4:4 | 10,596 | 10,272 | 1.03x |
+
+**aarch64**: Decoding matches or beats C for 4:2:2 and 4:4:4; 4:2:0 has a 7% gap. Encoding matches or beats C in 7 of 8 configurations (see [`docs/ENCODING_PERFORMANCE.md`](docs/ENCODING_PERFORMANCE.md)); the remaining 1080p 4:2:0 gap (~4%) is structural function-call overhead.
+
+**x86_64**: Decoding beats C across most resolutions. The portable encoder trails C 3.2.0 by 0–14 % (5–10 % at 1080p) on Zen 3 and Zen 4 runners; the 2026-05 native i5-10400 build beat C 3.1.2 by 2–7 %. The encoder runs SSE2 Huffman + AVX2 FDCT/quantize/color/downsample, and the Huffman bitmap-iteration hot path dispatches at runtime on `bmi1 && lzcnt` (P4-8, `src/encode/huffman_encode.rs`), so a stock build already lights up TZCNT/BLSR/LZCNT. What `target-cpu=native` still adds was measured feature by feature in 2026-09 (P4-133 / [#464](https://github.com/developer0hye/libjpeg-turbo-rs/issues/464)): on the default integer DCT, BMI2 (`SHLX`-family shifts in the bit packer) is worth 1.3–2.9 % at 1080p and FMA is noise (≤ 1.7 %); on the non-default float DCT, FMA is worth 18–23 % because `f32::mul_add` is a libm call on a baseline build. Nothing in this port uses PEXT/PDEP. Both are now behind `cpu_has!` — a third BMI2 compilation of the Huffman AC loop, chosen once per encode on the operation's bit writer, and an FMA twin of the float FDCT installed once per encode in the kernel set — so a portable build reaches them. Measured on the branch (Zen 4 runner, C 3.2.0): the float-DCT portable build now sits at 1.39–1.41× C at 1080p where it was 1.72–1.94×, with compile-time `+fma` adding only 1–2 % more; on the integer DCT the remaining `+bmi2` margin over portable is 0.4–2.2 % against a 0.4–0.6 % noise bracket, which is inside cross-run variance; the same-run `main` column added to the A/B afterwards settled the float side (`main` 12–27 % slower than the branch on every case) and landed on a host too noisy to settle a 1–3 % BMI2 effect. A later run on a quiet Zen 3 host (2026-09-08, run 7 in the same file, after the tier moved onto the per-encode bit writer) put compile-time `+bmi2` over the dispatched portable build at 0.99–1.01 — noise — on the CPU model where it had been worth 1.3–2.9 % before the tier existed, and put the writer-carried tier 3–4 % ahead of the process-cached one on every 4:2:0 case.
+
+## Quick Start
+
+```toml
+[dependencies]
+libjpeg-turbo-rs = "0.8"
+
+# Optional: enable PNG support for tj3LoadImage8 / tj3SaveImage8
+# libjpeg-turbo-rs = { version = "0.8", features = ["png"] }
+```
+
+### Build flags
+
+
+#### Portable vs native builds
+
+Two numbers exist and they are not interchangeable (P4-133 / [#464](https://github.com/developer0hye/libjpeg-turbo-rs/issues/464)):
+
+- **Portable** — plain `cargo build --release`. This is what a distribution ships and what a packager should judge the project on. AVX2/NEON/SSE2 kernels are still reached, by runtime detection.
+- **Native** — `RUSTFLAGS="-C target-cpu=native"`. Faster, but the binary is only valid on CPUs matching the build host.
+
+**Measured, not asserted (2026-09-08, Zen 3 and Zen 4 runners, C 3.2.0):** on the default integer DCT the native build is 0.7–3.5 % faster than portable at 1080p, most of it BMI2 in the Huffman bit packer (1.3–2.9 %); FMA changes nothing there. On the float DCT, FMA alone is worth 18–23 %. `-C target-feature=+bmi1,+lzcnt,+bmi2,+fma` is **not** a portable build — it faults on any CPU without BMI2/FMA — so it is an application-only choice, worth 0.8–4.3 % at 1080p *before* the BMI2 and FMA paths were dispatched at runtime; since 2026-09-08 the portable build reaches both by detection, so what compile-time flags still add is the per-block dispatch overhead and the BMI1/LZCNT compile-time margin P4-8 priced at ≤ 1.5 %. The per-feature tables are in [`experiments/portable_vs_native_x86_64_2026-09-08.md`](experiments/portable_vs_native_x86_64_2026-09-08.md).
+
+
+#### x86_64
+
+A package should ship the plain build; an application built for the machine
+it runs on may add the flags:
+
+```sh
+cargo build --release                                  # portable: what a distribution ships
+RUSTFLAGS="-C target-cpu=native" cargo build --release  # application only: +0.7–3.5 % at 1080p (integer DCT), measured before the BMI2/FMA dispatch
+```
+
+The portable build already reaches the AVX2/SSE2 kernels, the
+BMI1/LZCNT/BMI2 Huffman loop and the FMA float FDCT by runtime detection
+(#464). `-C target-feature=+bmi1,+lzcnt,+bmi2,+fma` is not a portable
+baseline — it faults on CPUs without BMI2/FMA — and what it still buys over
+the dispatched portable build was 0.4–2.2 % at 1080p on the integer DCT and
+1–2 % on the float DCT in the branch A/B (noise 0.4–0.6 %), and 0–1 % on
+the integer DCT on a quiet Zen 3 host once the tier rode on the bit writer.
+aarch64 / NEON builds are unaffected.
+
+#### 32-bit ARM (`armv7`) — measure before you ship it
+
+The `armv7-unknown-linux-gnueabihf` target carries `-neon` in its baseline,
+so LLVM's auto-vectoriser never runs on our kernels there — on `x86_64`,
+where SSE2 *is* baseline, the same code vectorises silently. Enabling the
+feature turns it back on with no `unsafe` and no intrinsics:
+
+```sh
+RUSTFLAGS="-C target-feature=+neon -C target-cpu=cortex-a7" cargo build --release \
+  --target armv7-unknown-linux-gnueabihf
+```
+
+Measured effect on the generated code (`experiments/armv7_autovec_2026-07-30.md`):
+`idct_8x8` goes from 0 to 270 vector instructions, `ycbcr_to_rgb_row` 0 to
+140, `fancy_h2v2_row` 0 to 232; 204/204 tests still pass under `qemu-arm`.
+
+**This is not a recommended default, for two reasons.** `target-feature` is
+compile-time, so a `+neon` binary **crashes with SIGILL on an ARMv7 core
+that has no NEON** (C ships one binary for both by probing `/proc/cpuinfo`;
+a compile-time flag cannot). And it is **unmeasured on hardware**: the only
+A/B available was under emulation, which models no pipeline, cache, or
+NEON↔ARM register transfer cost — the very things that make
+auto-vectorised code regress on Cortex-A8 (transfer stalls) and A7/A9
+(64-bit NEON datapath). Set `-C target-cpu=` to your actual core, A/B it
+per kernel on the real device, and keep it off if you cannot.
+
+## Feature flags, MSRV, platforms
+
+**MSRV: 1.87** for the root and capi crates, CI-enforced (`cargo +1.87
+check` job). The `image`-bridge crate is 1.88 (inherited from
+`image@0.25`). MSRV bumps are considered minor, never patch, changes and
+are called out in `CHANGELOG.md`. The full versioning, MSRV, feature,
+deprecation, error and thread-safety policy — and which modules are public
+API — is [`docs/STABILITY.md`](docs/STABILITY.md); to report a vulnerability,
+see [`SECURITY.md`](SECURITY.md).
+
+| Target | SIMD | Notes |
 | --- | --- | --- |
-| Rust application or library | [`libjpeg-turbo-rs`](https://crates.io/crates/libjpeg-turbo-rs) | **T1:** feature-rich and appropriate for evaluation or production use after reviewing the live limitations below |
-| Rust code using `image` traits | [`libjpeg-turbo-rs-image`](crates/libjpeg-turbo-rs-image) | Maintained bridge; validate color mapping and adapter overhead for your workload |
-| Browser or WebAssembly System Interface (WASI) | [`libjpeg-turbo-rs-wasm`](crates/libjpeg-turbo-rs-wasm) | Supported; explicit `+simd128` compiler configuration is required outside this repository for the hand-written SIMD path |
-| C/C++ using TurboJPEG 3 (`tj3*`) | [`libjpeg-turbo-rs-capi`](crates/libjpeg-turbo-rs-capi) | **T2:** primary C ABI target; use the symbol matrix and test the exact packaged artifact |
-| Prebuilt C/C++ using classic libjpeg v8 (`libjpeg.so.8`) | Experimental v8 shim | **T3:** controlled pilots only; not a general system-library replacement |
-| Prebuilt C/C++ using libjpeg v6b or v7 | None | **T4:** unsupported as a drop-in replacement because the exposed C structure layouts differ |
+| `aarch64` (Linux/macOS) | NEON | compile-time selection, CI-tested |
+| `x86_64` (Linux/macOS/Windows) | AVX2/SSE2 | runtime CPUID dispatch (`std`), CI-tested incl. no-AVX2 emulation |
+| `wasm32` (browser/WASI) | SIMD128 | compile-time `target_feature` — see the wasm crate README |
+| RISC-V / POWER / s390x | scalar | works, unoptimized. The ~1.1–1.7× C advantage measured in [#359](https://github.com/developer0hye/libjpeg-turbo-rs/issues/359) was **scalar vs scalar**; libjpeg-turbo **3.2.0 added RISC-V Vector (RVV)**, so on RVV hardware the real gap is larger and **unmeasured on hardware** ([#465](https://github.com/developer0hye/libjpeg-turbo-rs/issues/465)): a 2026-09-08 `qemu-riscv64` run showed the emulator cannot stand in (RVV code runs 3–4× *slower* than scalar under TCG), so the gap stays **inferred at roughly 1.5–4× decode / 4–7× encode** — see [`experiments/riscv64_rvv_2026-09-08.md`](experiments/riscv64_rvv_2026-09-08.md). POWER/s390x remain scalar on both sides. |
+| `armv7` / 32-bit ARM (Cortex-A) | scalar | CI-tested: 204 tests run under `qemu-arm`. Our widest gap by installed base (the riscv64 row's inferred *encode* gap is larger, and equally unmeasured): C *does* vectorize 32-bit ARM (AArch32 NEON), we do not — **estimated** 2–5× slower, not yet measured on hardware ([#424](https://github.com/developer0hye/libjpeg-turbo-rs/issues/424), [P4-78](docs/last_mile/phase4.md#p4-78-no-32-bit-arm-aarch32-neon-backend--armv7-is-our-widest-gap-vs-c--open)) |
+| `thumbv7em` (bare metal) | scalar | `no_std + alloc`, CI-built; no NEON backend is registered for thumb targets |
 
-Read [`docs/ADOPTION_GUIDE.md`](docs/ADOPTION_GUIDE.md) for the decision tree,
-evaluation checklist, migration steps, production rollout, stop conditions,
-and rollback plan.
 
-## Current readiness
+| flag | default | effect |
+|---|---|---|
+| `std` | ✅ | `std::io` streaming API (`decompress_from_reader`, `compress_to_writer`, bounded-memory `decompress_from_reader_incremental`), file-path helpers, PNG image I/O, runtime CPU-feature detection, and `std::io::Error` interop. |
+| `simd` | ✅ | Architecture intrinsics: NEON (aarch64), SSE2/AVX2 (x86_64), SIMD128 (wasm32). |
+| `png` | ❌ | PNG support for `tj3LoadImage8` / `tj3SaveImage8` (implies `std`). |
 
-The canonical, continuously maintained readiness source is
-[`docs/LAST_MILE.md`](docs/LAST_MILE.md). This summary deliberately avoids an
-unqualified "drop-in replacement" claim.
+**`no_std` + `alloc`**: build with `--no-default-features` for the core
+codec — headers, entropy decode, IDCT, upsample, colour convert, and
+encode all work. `alloc` is required (the decoder allocates pixel and
+coefficient buffers). Without `std` there is no CPUID probe, so SIMD
+dispatches on compile-time `target_feature` only; pass `-C
+target-feature=+neon` (or equivalent) to vectorise a bare-metal build.
+CI builds the crate for `thumbv7em-none-eabihf` on every PR.
 
-### Rust API
-
-The major safe-API Undefined Behavior (UB) defects found during the 2026-08
-audit are recorded as closed, and the live gate reports no known remaining UB
-reachable through the safe Rust API. A formal memory-safety guarantee still
-requires the remaining checked-layout centralization and automated unsafe-path
-regression detection tracked by P4-139 and P4-141.
-
-The full release-mode workspace gate is currently **red** because of P4-170:
-two classic source-manager differential tests pass in debug mode and fail in
-release mode. That does not imply that every Rust-native decode or encode path
-fails, but it does mean the complete release gate must not be described as
-green until the issue closes and the matrix is re-measured.
-
-### C compatibility
-
-- **TurboJPEG 3 is the primary C ABI target.** Its opaque handles avoid the
-  version-dependent public-structure risk of classic libjpeg. Legacy
-  TurboJPEG 1.x/2.x aliases are only partially covered; use the migration
-  matrix in [`docs/ABI_COMPATIBILITY.md`](docs/ABI_COMPATIBILITY.md).
-- **Classic libjpeg targets the v8 identity only** (`libjpeg.so.8`) and remains
-  experimental and partial. Open lifecycle, option, error, threading,
-  artifact-validation, and downstream-coverage gaps are tracked in the live
-  gate.
-- **v6b (`libjpeg.so.62`) and v7 (`libjpeg.so.7`) are not drop-in targets.**
-  Renaming a v8-layout library does not make it binary-compatible with a
-  consumer compiled against a different structure layout.
-
-## Why choose it over a C binding?
-
-For workloads that can use a Rust-native API, the project is designed to
-remove adoption costs that codec benchmarks alone do not capture:
-
-- one Cargo dependency rather than a C compiler, CMake/NASM setup, system
-  package discovery, bindings, and platform-specific link configuration;
-- Rust ownership, result types, builders, scanline/streaming APIs, and
-  caller-owned reusable output buffers;
-- one codec codebase for native, `no_std + alloc`, and WebAssembly (Wasm)
-  targets;
-- coefficient-domain transforms, metadata access, high-precision and lossless
-  paths without crossing an FFI boundary;
-- reproducible C-oracle differential tests, fuzzing, sanitizers, corpus tests,
-  and explicit compatibility tiers;
-- competitive measured performance on the strongest current targets: x86_64
-  and aarch64.
-
-The C implementation remains the safer choice when you require its installed
-base, a v6b/v7 ABI, official platform packaging this project does not ship, an
-uncovered architecture SIMD backend, or a classic libjpeg behavior that has
-not passed this project's live replacement gate.
-
-## Quick start
-
-### Decode
+### Decompress
 
 ```rust
 use libjpeg_turbo_rs::{decompress, decompress_to, PixelFormat};
 
-let rgb = decompress(&jpeg_bytes)?;
-println!("{}x{}", rgb.width, rgb.height);
+// Decode to RGB
+let img = decompress(&jpeg_bytes)?;
+println!("{}x{}", img.width, img.height);
 
-let rgba = decompress_to(&jpeg_bytes, PixelFormat::Rgba)?;
+// Decode to specific format
+let img = decompress_to(&jpeg_bytes, PixelFormat::Rgba)?;
+
+// Decode into a caller-owned, reusable buffer (no per-frame output allocation)
+use libjpeg_turbo_rs::{decompress_into, output_buffer_size};
+let size = output_buffer_size(&jpeg_bytes, PixelFormat::Rgb)?;
+let mut out = vec![0u8; size];
+let info = decompress_into(&jpeg_bytes, PixelFormat::Rgb, &mut out)?;
+println!("{}x{} ({} bytes)", info.width, info.height, info.bytes_written);
 ```
 
-### Decode into reusable memory
-
-```rust
-use libjpeg_turbo_rs::{decompress_into, output_buffer_size, PixelFormat};
-
-let required = output_buffer_size(&jpeg_bytes, PixelFormat::Rgb)?;
-let mut output = vec![0_u8; required];
-let info = decompress_into(&jpeg_bytes, PixelFormat::Rgb, &mut output)?;
-let pixels = &output[..info.bytes_written];
-```
-
-Keep and reuse the allocation in frame loops or services instead of measuring
-only the one-shot convenience path.
-
-### Encode
+### Compress
 
 ```rust
 use libjpeg_turbo_rs::{compress, PixelFormat, Subsampling};
 
-let jpeg = compress(
-    &rgb_pixels,
-    width,
-    height,
-    PixelFormat::Rgb,
-    85,
-    Subsampling::S420,
-)?;
+let jpeg = compress(&rgb_pixels, width, height, PixelFormat::Rgb, 85, Subsampling::S420)?;
 ```
 
-### Configure advanced encoding
+### Builder API
 
 ```rust
-use libjpeg_turbo_rs::{Encoder, PixelFormat, Subsampling};
+use libjpeg_turbo_rs::Encoder;
 
 let jpeg = Encoder::new(&pixels, width, height, PixelFormat::Rgb)
     .quality(85)
     .subsampling(Subsampling::S420)
     .progressive(true)
     .optimize_huffman(true)
-    .icc_profile(&icc_profile)
-    .xmp_data(&xmp_packet)
-    .iptc_data(&iptc_iim)
+    .icc_profile(&icc_data)
+    .xmp_data(&xmp_packet)   // APP1 XMP
+    .iptc_data(&iptc_iim)    // APP13 Photoshop IRB
     .encode()?;
 ```
 
-### Lossless coefficient transform
+Every builder option composes with every other, on every colorspace and in
+every mode — including CMYK, and `colorspace(Rgb)` with `progressive`,
+`arithmetic` or `lossless`
+([#313](https://github.com/developer0hye/libjpeg-turbo-rs/issues/313),
+[#322](https://github.com/developer0hye/libjpeg-turbo-rs/issues/322),
+[#343](https://github.com/developer0hye/libjpeg-turbo-rs/issues/343),
+[#345](https://github.com/developer0hye/libjpeg-turbo-rs/issues/345)).
+
+### Composing baseline options
+
+`Encoder` covers the common cases; `CompressParams` is the baseline core
+underneath it, and takes every option at once — on every pixel format, CMYK
+included.
+
+```rust
+use libjpeg_turbo_rs::encode::pipeline::{compress_with_params, CompressParams};
+
+let jpeg = compress_with_params(
+    &CompressParams::new(&rgb_pixels, width, height, PixelFormat::Rgb, 85, Subsampling::S420)
+        .dct_method(DctMethod::IsFast)
+        .restart_interval(8)
+        .custom_quant(&quant_tables)
+        .custom_huffman(&dc_tables, &ac_tables),
+)?;
+```
+
+### Lossless Transform
 
 ```rust
 use libjpeg_turbo_rs::{transform, TransformOp};
@@ -178,243 +311,158 @@ use libjpeg_turbo_rs::{transform, TransformOp};
 let rotated = transform(&jpeg_bytes, TransformOp::Rot90)?;
 ```
 
-Transforms rotate, flip, transpose, or crop Discrete Cosine Transform (DCT)
-coefficients without decoding pixels. Metadata is preserved by default; use
-`transform_jpeg_with_options` when you need an explicit marker-copy policy.
+`transform` preserves metadata (EXIF/ICC/COM markers) by default, matching
+C TurboJPEG's `tjTransform`; use `transform_jpeg_with_options` with
+`MarkerCopyMode::None` to strip markers.
 
-### Scanline processing
+Lossless transforms are coefficient-domain: they entropy-decode to DCT
+coefficients, permute blocks, and entropy-encode — no pixels are ever
+produced, so the pixel-path SIMD (IDCT / color convert / upsample) is not
+involved and transform throughput rides on scalar codegen. Build with the
+default release profile (`opt-level = 3`); a size-optimized profile
+(`opt-level = "z"`) roughly halves transform throughput. `-C
+target-cpu=native` buys only a further ~3% (measured on a 24 MP rot90,
+Zen 4; issue #308 has the full numbers).
+
+### EXIF Orientation (load a phone photo the right way up)
+
+Nearly every camera JPEG carries an EXIF orientation tag. Read it from
+the header alone — no pixel decode — and apply it in whichever domain
+fits (issue #391):
+
+```rust
+use libjpeg_turbo_rs::{decompress, Decoder, TransformOp};
+
+// Probe without decoding pixels (None when the JPEG carries no EXIF):
+let orientation: Option<u8> = Decoder::new(&jpeg_bytes)?.exif_orientation();
+
+// Pixel domain — decode, then reorient in one call:
+let upright = decompress(&jpeg_bytes)?.apply_orientation();
+
+// DCT domain — rewrite the JPEG losslessly instead (skip the no-op
+// re-encode for upright/untagged images). Strip the markers: transforms
+// copy them by default, and a stale orientation tag on already-rotated
+// pixels would make EXIF-aware viewers rotate twice. Note lossless
+// transforms cannot fully reorient partial edge blocks when dimensions
+// are not iMCU-aligned (see TransformOp::from_exif_orientation docs) —
+// the pixel-domain path above is exact at any size.
+use libjpeg_turbo_rs::{MarkerCopyMode, TransformOptions};
+if let Some(op) = orientation.and_then(TransformOp::from_exif_orientation) {
+    if op != TransformOp::None {
+        let upright_jpeg = libjpeg_turbo_rs::transform_jpeg_with_options(
+            &jpeg_bytes,
+            &TransformOptions { op, copy_markers: MarkerCopyMode::None, ..Default::default() },
+        )?;
+    }
+}
+```
+
+### Scanline-Level I/O
 
 ```rust
 use libjpeg_turbo_rs::ScanlineDecoder;
 
 let mut decoder = ScanlineDecoder::new(&jpeg_bytes)?;
-let width = decoder.header().width as usize;
 let height = decoder.header().height as usize;
-let mut row = vec![0_u8; width * 3];
-
+let width = decoder.header().width as usize;
+let mut buf = vec![0u8; width * 3]; // RGB row buffer
 while decoder.output_scanline() < height {
-    decoder.read_scanline(&mut row)?;
-    // Process this RGB row.
+    decoder.read_scanline(&mut buf)?;
+    // process buf...
 }
-
-let image = decoder.finish()?;
+let img = decoder.finish()?;
 ```
-
-Runnable examples live in [`examples/`](examples). The crate-level examples
-are compile-checked with `cargo test --doc`.
 
 ## Features
 
-### JPEG modes
+### Codec Support
 
-| Capability | Encode | Decode |
-| --- | --- | --- |
-| Baseline DCT with Huffman coding | yes | yes |
+| Feature | Encode | Decode |
+|---------|--------|--------|
+| Baseline DCT (Huffman) | yes | yes |
 | Progressive DCT | yes | yes |
 | Arithmetic coding | yes | yes |
 | Lossless JPEG | yes | yes |
 | 8/12/16-bit precision | yes | yes |
-| Optimized Huffman tables | yes | not applicable |
+| Optimized Huffman tables | yes | - |
 
-The detailed feature inventory, including classic C API gaps, is maintained in
-[`docs/FEATURE_PARITY.md`](docs/FEATURE_PARITY.md).
+### Pixel Formats
 
-### Pixel formats and subsampling
+Grayscale, RGB, BGR, RGBA, BGRA, ARGB, ABGR, RGBX, BGRX, XRGB, XBGR, CMYK, RGB565
 
-Supported packed formats include grayscale, RGB, BGR, RGBA, BGRA, ARGB, ABGR,
-RGBX, BGRX, XRGB, XBGR, CMYK, and RGB565 where the relevant operation supports
-it.
+### Chroma Subsampling
 
-Supported chroma layouts include 4:4:4, 4:2:2, 4:2:0, 4:4:0, 4:1:1, 4:4:1,
-4:1:0, and 2:4, plus grayscale and unusual/custom subsampling detection.
+4:4:4, 4:2:2, 4:2:0, 4:4:0, 4:1:1, 4:4:1, 4:1:0, 2:4
 
-### Additional capabilities
+### SIMD
 
-- all 16 libjpeg scaled inverse DCT factors;
-- coefficient access and lossless spatial transforms;
-- Exchangeable Image File Format (EXIF) orientation inspection and application;
-- International Color Consortium (ICC) profiles, XMP, IPTC, JFIF, Adobe APP14,
-  and comment markers;
-- packed and planar luminance/chrominance (YUV) paths;
-- scanline and `std::io` streaming APIs;
-- caller-owned reusable output buffers;
-- MCU-aligned crop decoding;
-- color quantization and dithering;
-- recovery mode, custom Huffman/quantization tables, restart markers, and
-  progress callbacks;
-- `no_std + alloc` core codec;
-- `image` trait bridge and Wasm/npm wrapper;
-- TurboJPEG 3 and experimental classic libjpeg v8 C ABI shims.
+| Platform | Backend | Decode | Encode |
+|----------|---------|--------|--------|
+| aarch64 | NEON | IDCT, color convert, upsample, dequantize | FDCT, color convert, quantize+zigzag, downsample, Huffman |
+| x86_64 | SSE2 | IDCT, color convert, upsample | Huffman bitmap+sign-correction |
+| x86_64 | AVX2 | IDCT, color convert, upsample, merged upsample+color | FDCT, color convert, quantize+zigzag, downsample (fused H2V1/H2V2) |
 
-## Feature flags and platform support
+aarch64 has comprehensive SIMD across the full pipeline. x86_64 decode and encode are both fully accelerated; encode pairs SSE2 Huffman bitmap construction with AVX2 fused FDCT/quantize/color/downsample.
 
-The root crate defaults to `std` and `simd`.
+All SIMD routines have scalar fallbacks. SIMD is enabled by default via the `simd` feature flag.
 
-| Cargo feature | Default | Effect |
-| --- | --- | --- |
-| `std` | yes | `std::io` streaming, file helpers, runtime CPU-feature detection, standard error interoperability, and standard-library-dependent helpers |
-| `simd` | yes | architecture intrinsics for supported targets |
-| `png` | no | PNG image input/output for the relevant TurboJPEG image-loading helpers; implies `std` |
+### Additional Features
 
-Build the core codec for `no_std + alloc` with:
+- Scaled IDCT (all 16 libjpeg factors: 2/1, 15/8, 7/4, ..., 1/2, 1/4, 1/8)
+- Lossless spatial transforms (rotate, flip, transpose)
+- DCT coefficient access (`read_coefficients` / `write_coefficients`)
+- Metadata: JFIF, EXIF, ICC profile, XMP (read incl. Extended XMP reassembly; write is single-segment), IPTC (APP13 Photoshop IRB), Adobe APP14, comments
+- YUV plane encode/decode (raw component data)
+- Scanline-level streaming API
+- Crop decoding (MCU-aligned)
+- Color quantization with dithering
+- Error recovery mode
+- Custom Huffman/quantization tables
+- Restart markers (DRI)
+- Progress callbacks
 
-```bash
-cargo build --release --no-default-features
-```
+## C ABI replacement tiers
 
-`alloc` is still required because decode, encode, and coefficient operations
-own dynamically sized buffers.
+Beyond the Rust crate, the workspace ships C ABI shims: a TurboJPEG 3
+cdylib (`libturbojpeg.so.0`, ready for TJ3 consumers) and a classic
+libjpeg v8 cdylib (`libjpeg.so.8`, experimental/partial). A pinned OpenCV 4.6
+workload and stock-tool gates prove important default paths, but open classic
+ABI ownership, lifecycle, option, error, and test-integrity gaps mean it is not
+yet a general system-library replacement; GNU ELF symbol versions are also
+tracked as P4-81. The
+legacy-alias matrix, SONAME opt-ins, threading contract, and the v6b/v7
+drop-in non-goal live in
+[`docs/ABI_COMPATIBILITY.md`](docs/ABI_COMPATIBILITY.md); the T1–T4
+replacement-tier framing and its readiness status live in
+[`docs/LAST_MILE.md`](docs/LAST_MILE.md).
 
-| Target | Current acceleration | Status |
-| --- | --- | --- |
-| x86_64 Linux/macOS/Windows | AVX2 and SSE2 with runtime dispatch under `std` | First-class Rust target; Continuous Integration (CI) includes no-AVX2 coverage |
-| aarch64 Linux/macOS | NEON | First-class and CI-tested |
-| `wasm32` browser/WASI | SIMD128 when compiled with `+simd128` | Supported; compiler target feature is explicit outside this repository |
-| `thumbv7em` bare metal | scalar | `no_std + alloc` build is CI-tested |
-| armv7 / AArch32 | scalar by default | Functional CI coverage, but no production AArch32 NEON backend and no hardware performance claim |
-| RISC-V, POWER, s390x | scalar | Functional support; compare on target hardware before adoption |
-
-The root and C ABI crates currently declare Minimum Supported Rust Version
-(MSRV) 1.87. The `image` bridge follows the higher requirement inherited from
-its `image` dependency. MSRV changes are minor-version changes and are recorded
-in [`CHANGELOG.md`](CHANGELOG.md).
-
-## Performance
-
-Performance claims are evidence, not universal properties. The tables below
-are dated measurements from the repository harnesses. **A ratio below 1.00
-means Rust used less time than C.**
-
-### Representative C libjpeg-turbo comparison
-
-| Platform and build | Operation | Workload | Rust / C time |
-| --- | --- | --- | --- |
-| Intel Core i5-10400, portable release decode, C 3.1.2 | decode | 1920x1080 4:2:0 | **0.90x** |
-| Intel Core i5-10400, portable release decode, C 3.1.2 | decode | 3840x2160 4:2:0 | **0.88x** |
-| Intel Core i5-10400, `target-cpu=native` encode, C 3.1.2 | encode | 1920x1080 4:2:0 | **0.98x** |
-| Apple M1 Pro, portable release, C 3.1.0 | decode | 1920x1080 4:2:0 | 1.07x |
-| Apple M1 Pro, portable release, C 3.1.0 | decode | 1920x1080 4:2:2 / 4:4:4 | **0.99x / 0.99x** |
-| Apple M1 Pro, portable release, C 3.1.0 | encode | 1920x1080 4:2:0 / 4:2:2 / 4:4:4 | 1.07x / 1.06x / 1.03x |
-
-Against `zune-jpeg` on the recorded aarch64 matrix, the decoder won 31 of 34
-scored cases with a ±2% threshold; the losses were small fixed-cost or unusual
-multi-scan cases. See
-[`experiments/zune_matrix_aarch64_2026-07-28.md`](experiments/zune_matrix_aarch64_2026-07-28.md).
-
-### Portable versus native x86_64 builds
-
-Do not quote the native encode table as portable performance:
-
-- **Portable:** plain `cargo build --release`. This is the relevant default for
-  distributed binaries. Runtime dispatch still reaches SSE2/AVX2 kernels.
-- **Native:** `RUSTFLAGS="-C target-cpu=native" cargo build --release`. This may
-  enable additional BMI/FMA code generation, but the binary is tied to the
-  build host's CPU capabilities.
-
-Use a native build only for a controlled fleet whose CPUs match the build
-target. Measure both paths with the same corpus before choosing one.
-
-Full methodology and dated evidence live in
-[`docs/ENCODING_PERFORMANCE.md`](docs/ENCODING_PERFORMANCE.md),
-[`docs/CORPUS_TEST_REPORT.md`](docs/CORPUS_TEST_REPORT.md), and
-[`experiments/`](experiments). The Product Requirements Document (PRD) requires
-future benchmark reports to record CPU, operating system, compiler/toolchain,
-C oracle version, build flags, corpus, warmup, sample count, and noise
-threshold.
-
-## Correctness, safety, and validation
-
-The repository uses multiple complementary forms of evidence:
-
-- differential tests against pinned `djpeg`, `cjpeg`, `jpegtran`, TurboJPEG,
-  and classic libjpeg oracles;
-- full feature-cross-product tests where exhaustive or bounded enumeration is
-  practical;
-- real and generated corpus tests;
-- fuzz smoke jobs and longer-running fuzz targets;
-- AddressSanitizer, UB checks, and C-boundary harnesses;
-- cross-architecture and no-SIMD CI legs;
-- WebAssembly and `no_std` builds;
-- downstream OpenCV, libtiff, stock-tool, package, and loader harnesses where
-  documented;
-- code-level unsafe-boundary reviews and checked sizing/layout utilities.
-
-No individual test, fuzzer, sanitizer, or review proves memory safety. The live
-gate records both closed defects and the evidence still required before the
-project offers a stronger guarantee.
-
-Start with:
-
-- [`docs/LAST_MILE.md`](docs/LAST_MILE.md) — canonical readiness and blockers;
-- [`docs/TEST_PARITY.md`](docs/TEST_PARITY.md) — upstream behavior/test mapping;
-- [`docs/CORPUS_TEST_REPORT.md`](docs/CORPUS_TEST_REPORT.md) — corpus results;
-- [`docs/oracle_versions.tsv`](docs/oracle_versions.tsv) — pinned oracle
-  identities.
-
-## C ABI packages and release artifacts
-
-The workspace includes `libjpeg-turbo-rs-capi`, which can produce the
-TurboJPEG 3 library and an experimental classic v8 library. Tagged releases
-publish checksummed native bundles for x86_64/aarch64 Linux and macOS,
-including headers, package configuration files, CMake configuration, and the
-SONAME/install-name chains.
-
-Current distribution gaps:
-
-- no Windows native C ABI bundle;
-- no artifact signature or build attestation;
-- no Software Bill of Materials (SBOM);
-- no first-party deb/rpm package;
-- classic v8 downstream harnesses do not yet prove every open lifecycle and
-  compatibility contract against the exact shipped artifact.
-
-Read [`docs/RELEASE_ARTIFACTS.md`](docs/RELEASE_ARTIFACTS.md) before installing
-a bundle and [`docs/ABI_COMPATIBILITY.md`](docs/ABI_COMPATIBILITY.md) before
-changing a dynamic-library search path.
-
-## Documentation
-
-[`docs/README.md`](docs/README.md) maps documents by audience and records their
-source-of-truth order.
-
-| Document | Purpose |
-| --- | --- |
-| [`PRD.md`](PRD.md) | Adoption strategy, requirements, milestones, priorities, and `1.0` definition of done |
-| [`docs/ADOPTION_GUIDE.md`](docs/ADOPTION_GUIDE.md) | Integration choice, migration, evaluation, rollout, and rollback |
-| [`docs/LAST_MILE.md`](docs/LAST_MILE.md) | Canonical T1-T4 release gate |
-| [`docs/FEATURE_PARITY.md`](docs/FEATURE_PARITY.md) | Implemented feature inventory |
-| [`docs/ABI_COMPATIBILITY.md`](docs/ABI_COMPATIBILITY.md) | C ABI, SONAME, layout, lifecycle, and threading policy |
-| [`docs/C_API_REFERENCE.md`](docs/C_API_REFERENCE.md) | Per-function C API status |
-| [`docs/TEST_PARITY.md`](docs/TEST_PARITY.md) | C reference and behavior validation map |
-| [`docs/RELEASE_ARTIFACTS.md`](docs/RELEASE_ARTIFACTS.md) | Bundle contents, verification, installation, and known gaps |
-| [`CONTRIBUTING.md`](CONTRIBUTING.md) | Development workflow and required evidence |
+Tagged releases attach prebuilt bundles of those shims — libraries, headers,
+`.pc` files and CMake config for x86_64/aarch64 Linux and macOS and for
+x86_64 Windows (MSVC: `jpeg8.dll` + `jpeg.lib`), with a `SHA256SUMS`
+manifest, and each bundle carries Sigstore build provenance and a CycloneDX
+SBOM that `gh attestation verify` checks.
+[`docs/RELEASE_ARTIFACTS.md`](docs/RELEASE_ARTIFACTS.md) covers what ships,
+how to verify and install it, and what is still missing. Downloading a bundle
+does not change the tiers above.
 
 ## Contributing
 
-The highest-priority work is not the largest unchecked feature list. It is the
-work that makes adoption claims safer and easier to verify: release-mode gate
-health, checked layout arithmetic, unsafe-boundary regression detection,
-packaged-artifact validation, portable performance, supply-chain evidence,
-and maintained ecosystem integrations.
-
-Read [`CONTRIBUTING.md`](CONTRIBUTING.md), [`PRD.md`](PRD.md), and the relevant
-live-gate item before starting. Pull requests that change feature, safety,
-performance, API, ABI, platform, or readiness claims must include the evidence
-and documentation update for that claim.
+Development workflow, the pre-commit gate, and the local sanitizer
+recipes live in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
-Licensed under either of:
+Licensed under either of
 
-- Apache License, Version 2.0 ([`LICENSE-APACHE`](LICENSE-APACHE)); or
-- MIT License ([`LICENSE-MIT`](LICENSE-MIT));
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or <http://www.apache.org/licenses/LICENSE-2.0>)
+- MIT License ([LICENSE-MIT](LICENSE-MIT) or <http://opensource.org/licenses/MIT>)
 
 at your option.
 
 ## Acknowledgments
 
 This software is based in part on the work of the Independent JPEG Group.
-Algorithms and implementation techniques are informed by
-[libjpeg-turbo](https://github.com/libjpeg-turbo/libjpeg-turbo) and
-[zune-jpeg](https://github.com/etemesi254/zune-image). Their licenses and
-attribution requirements remain distinct from this project's dual license.
+`libjpeg-turbo-rs` is an independent project; it is not affiliated with or
+endorsed by the libjpeg-turbo project or the IJG.
+
+Algorithms and implementation techniques referenced from [libjpeg-turbo](https://github.com/libjpeg-turbo/libjpeg-turbo) (IJG License / Modified BSD License) and [zune-jpeg](https://github.com/etemesi254/zune-image).

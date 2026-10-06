@@ -15,6 +15,51 @@ pub enum ColorSpace {
 }
 
 impl ColorSpace {
+    /// Classify a JPEG source the way libjpeg's `default_decompress_parms`
+    /// (`jdapimin.c:137`) does when the first SOS is reached.
+    ///
+    /// `saw_jfif_marker` and `adobe_transform` must be the marker state
+    /// *at that point*, not of the whole stream: libjpeg classifies once and
+    /// markers between later scans never change `jpeg_color_space`. For
+    /// three components a JFIF marker wins, then the Adobe transform byte
+    /// (0 = RGB, anything else = YCbCr — libjpeg warns on codes other than
+    /// 0/1 and still assumes YCbCr), then the component IDs (`'R','G','B'`
+    /// = RGB; lossless streams default to RGB, everything else to YCbCr).
+    /// Four components are CMYK unless Adobe says otherwise (0 = CMYK,
+    /// anything else = YCCK, with the same "assume" fallback for unknown
+    /// codes). Any other count is `Unknown`.
+    pub(crate) fn classify_source(
+        num_components: usize,
+        saw_jfif_marker: bool,
+        adobe_transform: Option<u8>,
+        component_ids: &[u8],
+        is_lossless: bool,
+    ) -> ColorSpace {
+        match num_components {
+            1 => ColorSpace::Grayscale,
+            3 => {
+                if saw_jfif_marker {
+                    ColorSpace::YCbCr
+                } else if let Some(transform) = adobe_transform {
+                    if transform == 0 {
+                        ColorSpace::Rgb
+                    } else {
+                        ColorSpace::YCbCr
+                    }
+                } else if component_ids == b"RGB" || is_lossless {
+                    ColorSpace::Rgb
+                } else {
+                    ColorSpace::YCbCr
+                }
+            }
+            4 => match adobe_transform {
+                Some(0) | None => ColorSpace::Cmyk,
+                Some(_) => ColorSpace::Ycck,
+            },
+            _ => ColorSpace::Unknown,
+        }
+    }
+
     pub fn num_components(self) -> usize {
         match self {
             Self::Grayscale => 1,

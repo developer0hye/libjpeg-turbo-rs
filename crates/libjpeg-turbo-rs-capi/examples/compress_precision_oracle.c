@@ -3,7 +3,7 @@
  *
  * The port treated 16-bit as "always lossless" and quietly encoded a lossless
  * stream whatever the caller asked for. Upstream does something different and
- * more useful: `turbojpeg-mp.c:107-115` sets `cinfo->data_precision` to 16 and
+ * more useful: `turbojpeg-mp.c:109-117` sets `cinfo->data_precision` to 16 and
  * only overrides it from `TJPARAM_PRECISION` when `TJPARAM_LOSSLESS` is set;
  * `jpeg_start_compress` then reaches `jcmaster.c:199-208`, where a *lossy*
  * compress accepts precision 8 or 12 and nothing else. A lossy 16-bit call is
@@ -20,7 +20,7 @@
  * The trace also covers *where in the refusal chain* the check sits, which a
  * gate placed naively last gets wrong. Upstream validates the lossless
  * parameters, then installs the destination, then starts the compress
- * (`turbojpeg-mp.c:117-121`), and each stage can refuse — so the three
+ * (`turbojpeg-mp.c:119-123`), and each stage can refuse — so the three
  * `c16_pt_*`, `c16_*_norealloc_*` and `c16_lossy*` groups disagree with each
  * other about which error a caller sees. No single ordering satisfies them all
  * by accident.
@@ -115,7 +115,7 @@ static tjhandle compressor(int lossless, int precision, int point_transform)
  * A non-zero value pre-allocates and sets `TJPARAM_NOREALLOC`, which is what
  * makes the *precedence* between the destination's error and the precision
  * rule observable: upstream installs the destination before
- * `jpeg_start_compress` (`turbojpeg-mp.c:118-120`). `capacity` of `NULL_SLOT`
+ * `jpeg_start_compress` (`turbojpeg-mp.c:120-122`). `capacity` of `NULL_SLOT`
  * sets the flag but leaves the slot empty. */
 #define NULL_SLOT ((size_t)-1)
 
@@ -365,9 +365,9 @@ static void unset_decodeyuvplanes8_case(const char *label)
  * ...Planes8 delegates), so these lines deliberately pass an out-of-range
  * pixelFormat: a port that validates the format first reports the wrong
  * error and a valid-format line cannot tell. `tj3CompressFromYUV8` gates the
- * subsampling in the entry itself (turbojpeg.c:1497-1498), before the
+ * subsampling in the entry itself (turbojpeg.c:1502-1503), before the
  * delegate's quality gate; and a non-power-of-two align is an argument error
- * that beats every gate (turbojpeg.c:1493-1496). */
+ * that beats every gate (turbojpeg.c:1498-1501). */
 static void unset_fromyuv8_case(const char *label, int align)
 {
   tjhandle handle = tj3Init(TJINIT_COMPRESS);
@@ -486,7 +486,7 @@ int main(void)
   compress16_case("c16_lossy", 0, 0, 0, -1);
   /* The configuration 16-bit exists for. */
   compress16_case("c16_lossless", 1, 0, 0, -1);
-  /* Inside the window `turbojpeg-mp.c:111-115` honours (BITS_IN_JSAMPLE-3 .. 16). */
+  /* Inside the window `turbojpeg-mp.c:113-117` honours (BITS_IN_JSAMPLE-3 .. 16). */
   compress16_case("c16_lossless_prec13", 1, 13, 0, -1);
   /* Outside it: silently ignored, so this stays a 16-bit lossless encode
    * rather than becoming an error. */
@@ -497,7 +497,7 @@ int main(void)
 
   /* Precedence against the destination, which upstream installs first. A
    * NOREALLOC slot that cannot be used *at all* — empty, or present with zero
-   * capacity — is refused by `jdatadst-tj.c:184-192` before the compress
+   * capacity — is refused by `jdatadst-tj.c:198-206` before the compress
    * starts, so the buffer error wins over the precision rule. */
   compress16_case("c16_lossy_norealloc_null", 0, 0, NULL_SLOT, -1);
   /* ...but a slot that is merely *too small* does not: its capacity is only
@@ -512,7 +512,7 @@ int main(void)
 
   /* Precedence against the *lossless parameters*, which upstream validates
    * earlier still: `setCompDefaults` calls `jpeg_enable_lossless` before
-   * `jpeg_mem_dest_tj` (`turbojpeg-mp.c:117-120`). With a point transform that
+   * `jpeg_mem_dest_tj` (`turbojpeg-mp.c:119-122`). With a point transform that
    * is not less than the precision, that error wins over the buffer error even
    * though the slot is unusable — so the destination preflight cannot simply be
    * hoisted to the front of the function. */

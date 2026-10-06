@@ -6,7 +6,7 @@
 //! chroma with no upper bound, so `yuv_plane_width(3, ..)` answered with a
 //! chroma-sized plane instead of signalling an invalid argument. C rejects it:
 //! `tj3YUVPlaneWidth` raises `THROWG("Invalid argument", 0)` for
-//! `componentID >= nc` (`references/libjpeg-turbo/src/turbojpeg.c:1123-1125`).
+//! `componentID >= nc` (`references/libjpeg-turbo/src/turbojpeg.c:1126-1128`).
 //!
 //! The only caller that reached index 3 was `decompress_to_yuv_planes`, on
 //! every 4-component frame — and it was getting a *wrong* answer there, not

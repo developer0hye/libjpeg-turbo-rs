@@ -8,6 +8,7 @@ use super::{
 };
 
 /// Per-component block layout for progressive encoding.
+#[derive(Clone, Copy)]
 pub(super) struct CompLayout {
     pub(super) blocks_x: usize,
     pub(super) blocks_y: usize,
@@ -133,6 +134,16 @@ pub fn compress_progressive_custom_with_restart(
     restart_in_rows: u16,
     custom_quant: Option<&[Option<[u16; 64]>; 4]>,
 ) -> Result<Vec<u8>> {
+    // Before anything else: the AC kernels index with `ss..=se` unchecked on
+    // x86_64 (issue #610).
+    // CMYK counts as four so a script valid for a CMYK frame passes here and
+    // the format's own `Unsupported` still comes first, as it did before.
+    let num_components: usize = match pixel_format {
+        PixelFormat::Grayscale => 1,
+        PixelFormat::Cmyk => 4,
+        _ => 3,
+    };
+    crate::encode::progressive::validate_scan_script(script, num_components)?;
     let scans: Vec<ProgressiveScan> = script
         .iter()
         .map(|s| ProgressiveScan {
@@ -240,7 +251,7 @@ fn compress_progressive_with_scans(
     let fdct_quantize_fn: fn(&mut [i16; 64], &QuantDivisors, &mut [i16; 64]) = match dct_method {
         DctMethod::IsLow => enc_simd.fdct_quantize,
         DctMethod::IsFast => crate::simd::scalar::scalar_fdct_ifast_quantize,
-        DctMethod::Float => crate::simd::scalar::scalar_fdct_float_quantize,
+        DctMethod::Float => enc_simd.fdct_float_quantize,
     };
     let use_simd_fdct: bool = dct_method == DctMethod::IsLow;
 
@@ -490,7 +501,7 @@ fn compress_progressive_with_scans(
     }
 
     // Single BitWriter reused across all scans (reset instead of reallocate).
-    let mut bit_writer: BitWriter = BitWriter::new(width * height / 4);
+    let mut bit_writer: BitWriter = BitWriter::for_progressive_scan(width, height);
 
     // Pre-allocate precomp buffers outside the scan loop (clear+reuse per scan).
     let max_blocks: usize = comp_layouts
@@ -553,6 +564,22 @@ fn compress_progressive_with_scans(
         }
         let sos_slice: &[(u8, u8, u8)] = &sos_comps[..sos_len];
 
+        // A single-component scan is non-interleaved (T.81 A.2.2): C walks
+        // that component's own width_in_blocks x height_in_blocks grid in
+        // raster order, one block per MCU, not the frame's MCU grid. The AC
+        // path below already does; DC scans take the same geometry from here
+        // (found by byte comparison with `cjpeg -scans` while fixing #610).
+        let (scan_layouts, scan_mcus_x, scan_mcus_y): (Vec<CompLayout>, usize, usize) =
+            if scan.component_indices.len() == 1 {
+                let ci: usize = scan.component_indices[0];
+                let mut layouts: Vec<CompLayout> = comp_layouts.clone();
+                layouts[ci].h_blocks = 1;
+                layouts[ci].v_blocks = 1;
+                (layouts, comp_wib[ci], comp_hib[ci])
+            } else {
+                (comp_layouts.clone(), mcus_x, mcus_y)
+            };
+
         if is_dc_scan && is_first_scan {
             // DC first scan: gather DC symbol frequencies, generate optimal tables,
             // write DHT markers before SOS.
@@ -565,8 +592,8 @@ fn compress_progressive_with_scans(
             let mut prev_dc: [i16; 4] = [0i16; 4];
             let ri_dc_gather: u32 = restart_interval as u32;
             let mut mcu_idx_gather: u32 = 0;
-            for mcu_y in 0..mcus_y {
-                for mcu_x in 0..mcus_x {
+            for mcu_y in 0..scan_mcus_y {
+                for mcu_x in 0..scan_mcus_x {
                     if ri_dc_gather > 0
                         && mcu_idx_gather > 0
                         && mcu_idx_gather.is_multiple_of(ri_dc_gather)
@@ -578,7 +605,7 @@ fn compress_progressive_with_scans(
                         prev_dc = [0i16; 4];
                     }
                     for (scan_ci, &ci) in scan.component_indices.iter().enumerate() {
-                        let layout = &comp_layouts[ci];
+                        let layout = &scan_layouts[ci];
                         // JCS_RGB puts all three components on table slot 0,
                         // so their DC statistics belong to the same histogram —
                         // splitting them would fit the table to a distribution
@@ -604,14 +631,25 @@ fn compress_progressive_with_scans(
                 }
             }
 
+            // Emit only the table slots this scan's components use, as C's
+            // `jcphuff.c` does (`did[tbl]`): a scan of Cb and Cr alone carries no
+            // luminance table, a scan of Y alone no chrominance one.
+            let uses_luma_slot: bool = scan
+                .component_indices
+                .iter()
+                .any(|&ci| direct_rgb || ci == 0);
             let (dc_luma_bits, dc_luma_values) =
                 crate::encode::huff_opt::gen_optimal_table(&dc_luma_freq);
-            marker_writer::write_dht(&mut output, 0, 0, &dc_luma_bits, &dc_luma_values);
+            if uses_luma_slot {
+                marker_writer::write_dht(&mut output, 0, 0, &dc_luma_bits, &dc_luma_values);
+            }
 
             if !is_grayscale && !direct_rgb {
                 let (dc_chroma_bits, dc_chroma_values) =
                     crate::encode::huff_opt::gen_optimal_table(&dc_chroma_freq);
-                marker_writer::write_dht(&mut output, 0, 1, &dc_chroma_bits, &dc_chroma_values);
+                if scan.component_indices.iter().any(|&ci| ci > 0) {
+                    marker_writer::write_dht(&mut output, 0, 1, &dc_chroma_bits, &dc_chroma_values);
+                }
 
                 if restart_interval != last_ri {
                     if restart_interval > 0 {
@@ -633,10 +671,10 @@ fn compress_progressive_with_scans(
                     build_huff_table(&dc_chroma_bits, &dc_chroma_values);
                 encode_progressive_dc_scan(
                     &coeff_bufs,
-                    &comp_layouts,
+                    &scan_layouts,
                     scan,
-                    mcus_x,
-                    mcus_y,
+                    scan_mcus_x,
+                    scan_mcus_y,
                     &dc_luma_table,
                     &dc_chroma_table,
                     &mut output,
@@ -670,10 +708,10 @@ fn compress_progressive_with_scans(
                 };
                 encode_progressive_dc_scan(
                     &coeff_bufs,
-                    &comp_layouts,
+                    &scan_layouts,
                     scan,
-                    mcus_x,
-                    mcus_y,
+                    scan_mcus_x,
+                    scan_mcus_y,
                     &dc_luma_table,
                     &dc_chroma_table,
                     &mut output,
@@ -705,10 +743,10 @@ fn compress_progressive_with_scans(
             );
             encode_progressive_dc_scan(
                 &coeff_bufs,
-                &comp_layouts,
+                &scan_layouts,
                 scan,
-                mcus_x,
-                mcus_y,
+                scan_mcus_x,
+                scan_mcus_y,
                 &dc_luma_table,
                 &dc_chroma_table,
                 &mut output,
@@ -1175,7 +1213,19 @@ fn prepare_ac_first_coeffs(
     values: &mut [u16; 64],
     diffs: &mut [u16; 64],
 ) {
+    // The SSE2 arm's whole precondition. Validation at the public entry
+    // (`validate_scan_script`) already guarantees it; this keeps the unsafe
+    // call locally justified instead of resting on a check three calls away
+    // (issue #610). One compare per block.
+    // `band_len <= 64 - ss` rather than `ss + band_len <= 64`: the sum can
+    // wrap in release builds, and a wrapped sum would pass.
+    assert!(
+        ss <= 64 && band_len <= 64 - ss,
+        "AC band {ss}+{band_len} exceeds the block"
+    );
     #[cfg(all(target_arch = "x86_64", feature = "simd"))]
+    // SAFETY: `ss + band_len <= 64` (without overflow) was asserted above, which is
+    // `prepare_ac_first_sse2`'s stated precondition; SSE2 is baseline on x86_64.
     unsafe {
         prepare_ac_first_sse2(block, ss, band_len, al, zerobits, values, diffs);
     }
@@ -1206,6 +1256,14 @@ fn prepare_ac_first_coeffs(
 ///
 /// Processes 8 i16 coefficients per iteration: abs via sign-mask,
 /// point-transform shift, bitmap via cmpgt+movemask.
+///
+/// # Safety
+///
+/// `ss + band_len <= 64`. Nothing inside checks it: the loads read
+/// `block[ss..ss + band_len]` and the stores write `values[..band_len]` and
+/// `diffs[..band_len]` through raw pointers and `get_unchecked`, so a larger
+/// band reads past the block and writes past both outputs (issue #610).
+/// `prepare_ac_first_coeffs` asserts it before the call.
 #[cfg(all(target_arch = "x86_64", feature = "simd"))]
 #[inline(always)]
 unsafe fn prepare_ac_first_sse2(
@@ -1217,6 +1275,9 @@ unsafe fn prepare_ac_first_sse2(
     values: &mut [u16; 64],
     diffs: &mut [u16; 64],
 ) {
+    // SAFETY: every pointer offset and unchecked index below stays under
+    // `ss + band_len <= 64` (or `band_len <= 64` for the outputs) — this
+    // function's `# Safety` precondition.
     unsafe {
         use core::arch::x86_64::*;
 
@@ -1284,7 +1345,16 @@ fn prepare_ac_refine_coeffs(
     sign_bits: &mut [u16; 64],
     eob_pos: &mut usize,
 ) {
+    // Same precondition and the same reasoning as `prepare_ac_first_coeffs`.
+    // `band_len <= 64 - ss` rather than `ss + band_len <= 64`: the sum can
+    // wrap in release builds, and a wrapped sum would pass.
+    assert!(
+        ss <= 64 && band_len <= 64 - ss,
+        "AC band {ss}+{band_len} exceeds the block"
+    );
     #[cfg(all(target_arch = "x86_64", feature = "simd"))]
+    // SAFETY: `ss + band_len <= 64` (without overflow) was asserted above, which is
+    // `prepare_ac_refine_sse2`'s stated precondition; SSE2 is baseline on x86_64.
     unsafe {
         prepare_ac_refine_sse2(block, ss, band_len, al, absvals, sign_bits, eob_pos);
     }
@@ -1309,6 +1379,13 @@ fn prepare_ac_refine_coeffs(
 ///
 /// Processes 8 i16 coefficients per iteration: abs via sign-mask,
 /// point-transform shift, sign extraction, eob_pos tracking.
+///
+/// # Safety
+///
+/// `ss + band_len <= 64`, for the same reason as [`prepare_ac_first_sse2`]:
+/// `block`, `absvals` and `sign_bits` are indexed through raw pointers up to
+/// `band_len` from their starts with no bound. `prepare_ac_refine_coeffs`
+/// asserts it before the call.
 #[cfg(all(target_arch = "x86_64", feature = "simd"))]
 #[inline(always)]
 unsafe fn prepare_ac_refine_sse2(
@@ -1320,6 +1397,8 @@ unsafe fn prepare_ac_refine_sse2(
     sign_bits: &mut [u16; 64],
     eob_pos: &mut usize,
 ) {
+    // SAFETY: as in `prepare_ac_first_sse2`, every offset stays under the
+    // `ss + band_len <= 64` precondition.
     unsafe {
         use core::arch::x86_64::*;
 
@@ -1559,5 +1638,75 @@ fn gather_progressive_ac_refine_freq(
     // Flush trailing EOBRUN
     if eobrun > 0 {
         emit_eobrun_freq(eobrun, freq);
+    }
+}
+
+#[cfg(test)]
+mod band_bound_tests {
+    use super::{prepare_ac_first_coeffs, prepare_ac_refine_coeffs};
+
+    /// The wrappers' bound is the unsafe kernels' whole precondition, and
+    /// validation keeps public callers from ever reaching it — so it is pinned
+    /// here directly (issue #610).
+    #[test]
+    #[should_panic(expected = "exceeds the block")]
+    fn ac_first_band_past_the_block_panics() {
+        let (mut zerobits, mut values, mut diffs) = (0u64, [0u16; 64], [0u16; 64]);
+        prepare_ac_first_coeffs(
+            &[1i16; 64],
+            1,
+            64,
+            0,
+            &mut zerobits,
+            &mut values,
+            &mut diffs,
+        );
+    }
+
+    /// `se < ss` makes `se - ss + 1` wrap to `usize::MAX`; `ss + band_len`
+    /// would then wrap back under 64 and pass a naive check.
+    #[test]
+    #[should_panic(expected = "exceeds the block")]
+    fn ac_first_wrapped_band_panics() {
+        let (mut zerobits, mut values, mut diffs) = (0u64, [0u16; 64], [0u16; 64]);
+        prepare_ac_first_coeffs(
+            &[1i16; 64],
+            5,
+            usize::MAX,
+            0,
+            &mut zerobits,
+            &mut values,
+            &mut diffs,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "exceeds the block")]
+    fn ac_refine_wrapped_band_panics() {
+        let (mut absvals, mut sign_bits, mut eob) = ([0u16; 64], [0u16; 64], 0usize);
+        prepare_ac_refine_coeffs(
+            &[1i16; 64],
+            5,
+            usize::MAX,
+            0,
+            &mut absvals,
+            &mut sign_bits,
+            &mut eob,
+        );
+    }
+
+    #[test]
+    fn full_band_is_accepted() {
+        let (mut zerobits, mut values, mut diffs) = (0u64, [0u16; 64], [0u16; 64]);
+        prepare_ac_first_coeffs(
+            &[1i16; 64],
+            1,
+            63,
+            0,
+            &mut zerobits,
+            &mut values,
+            &mut diffs,
+        );
+        assert_eq!(zerobits, (1u64 << 63) - 1);
     }
 }

@@ -65,3 +65,27 @@ pub fn release_cdylib_path_for_target_in(target_dir: &Path, target: &OsStr) -> P
 pub fn cdylib_path() -> PathBuf {
     cargo_built_cdylib_path().unwrap_or_else(|error: String| panic!("{error}"))
 }
+
+/// The staged or bundled library must be *the* library: loadable, and
+/// exporting one entry point from each of the two APIs it is shipped under.
+/// A file that merely has the right name and magic — truncated, or the wrong
+/// DLL copied under this one — passes every shape check and fails here.
+pub fn assert_library_exports(library: &Path, symbols: &[&str]) {
+    let loaded = unsafe { libloading::Library::new(library) }
+        .unwrap_or_else(|e| panic!("the shipped library {library:?} does not load: {e}"));
+    for symbol in symbols {
+        let mut name: Vec<u8> = symbol.as_bytes().to_vec();
+        name.push(0);
+        let resolved: Result<libloading::Symbol<*const ()>, _> =
+            unsafe { loaded.get(name.as_slice()) };
+        assert!(
+            resolved.is_ok(),
+            "{library:?} loads but does not export {symbol}: {:?}",
+            resolved.err()
+        );
+    }
+}
+
+/// The entry points every shipped library must resolve: one from the classic
+/// libjpeg API and one from TurboJPEG 3.
+pub const REQUIRED_EXPORTS: &[&str] = &["jpeg_std_error", "tj3Init"];

@@ -33,6 +33,9 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+permissions:
+  contents: read
+
 jobs:
   fuzz:
     name: Fuzz ${{ matrix.target }}
@@ -60,6 +63,12 @@ jobs:
           - fuzz_decode_diff_c     # P2-7 differential decode vs subprocess djpeg
           - fuzz_encode_diff_c     # P2-7 differential encode-roundtrip vs subprocess djpeg
           - fuzz_transform_diff_c  # P2-7 differential transform vs subprocess jpegtran
+          # P4-141 criterion 3 (#480): ordered handle lifecycles rather than
+          # one buffer per handle. No target above touches `TjHandle` or mixes
+          # operation kinds on one handle, so a defect that only appears when
+          # one operation reads what an earlier one left behind is unreachable
+          # from all of them.
+          - fuzz_api_sequence
     steps:
       - uses: actions/checkout@v7
 
@@ -118,7 +127,7 @@ jobs:
             fuzz-corpus-v1-${{ matrix.target }}-
 
       - name: Regenerate seed corpus
-        run: cargo test --test generate_fuzz_seeds
+        run: cargo test --locked --test generate_fuzz_seeds
 
       - name: Run fuzzer
         # `--target x86_64-unknown-linux-gnu` is mandatory: the prebuilt
@@ -186,7 +195,7 @@ jobs:
             echo "max_total_time: ${EFFECTIVE_TIME:-${MAX_TOTAL_TIME}} (requested ${MAX_TOTAL_TIME})"
             echo
             echo "Rebuild the seed corpus first:"
-            echo "  cargo test --test generate_fuzz_seeds"
+            echo "  cargo test --locked --test generate_fuzz_seeds"
             echo
             echo "Re-run the same smoke budget:"
             echo "  cargo +nightly fuzz run --target x86_64-unknown-linux-gnu ${FUZZ_TARGET} -- -max_total_time=${EFFECTIVE_TIME:-${MAX_TOTAL_TIME}} -fork=4 -timeout=30 -dict=fuzz/jpeg.dict -print_final_stats=1"

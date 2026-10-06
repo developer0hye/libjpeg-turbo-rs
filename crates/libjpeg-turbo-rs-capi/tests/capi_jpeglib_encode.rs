@@ -340,7 +340,7 @@ fn c2_1_calc_jpeg_dimensions_sets_public_compress_fields() {
 }
 
 /// C2-1 mem_dest: a NULL caller buffer is allocated by the library *inside*
-/// `jpeg_mem_dest`, before any compression runs (jdatadst.c:267-273), and the
+/// `jpeg_mem_dest`, before any compression runs (jdatadst.c:281-287), and the
 /// caller's stale `*outsize` is replaced by the real capacity.
 ///
 /// P4-108: this previously asserted the opposite — that `*outbuffer` stays

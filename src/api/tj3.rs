@@ -99,6 +99,208 @@ pub struct FrameInfo {
     pub subsampling: Subsampling,
 }
 
+/// The frame-header facts `tj3SetCroppingRegion` validates a region against.
+///
+/// Upstream's `setDecompParameters` (`turbojpeg.c:514-536`) records them from
+/// the SOF every time a header is read, and `tj3SetCroppingRegion`
+/// (`turbojpeg.c:2068-2115`) reads them back. They are kept apart from the
+/// handle's published `Width`/`Height`, which today carry the decoded *output*
+/// size (P4-200, #621) — validating against those would measure a region
+/// against a previously cropped image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CroppingGeometry {
+    /// `jpegWidth`: the SOF's width, unscaled.
+    width: usize,
+    /// `jpegHeight`: the SOF's height, unscaled.
+    height: usize,
+    /// `subsamp` as a `TJSAMP_*` value; -1 is `TJSAMP_UNKNOWN`.
+    subsampling: i32,
+    /// `precision`: the SOF's sample precision.
+    precision: u8,
+    /// `lossless`: an SOF3/SOF11 frame.
+    lossless: bool,
+}
+
+impl CroppingGeometry {
+    fn of(decoder: &Decoder<'_>) -> Self {
+        let frame = decoder.header();
+        let subsampling: i32 = Self::turbojpeg_subsampling(decoder);
+        Self {
+            width: frame.width as usize,
+            height: frame.height as usize,
+            subsampling,
+            precision: frame.precision,
+            lossless: frame.is_lossless,
+        }
+    }
+
+    /// Upstream's `getSubsamp` (`turbojpeg.c:431-510`), ported as written:
+    /// the iMCU width a crop is checked against comes from this
+    /// classification, so it has to agree with upstream's on every frame,
+    /// including the non-standard sampling layouts it deliberately accepts
+    /// (4:2:2 and 4:4:0 spelled with a 2x2 luma, 4:4:4 with equal non-unit
+    /// factors) and the ones it leaves at TJSAMP_UNKNOWN. `Decoder::
+    /// jpeg_subsampling` compares only luma with the first chroma component,
+    /// so `2x2,1x1,2x2` read as 4:2:0 there where upstream refuses to crop it
+    /// (codex review of P4-197). `numSamp` is TJ_NUMSAMP, as for a 3.2 handle
+    /// (`:611`).
+    fn turbojpeg_subsampling(decoder: &Decoder<'_>) -> i32 {
+        // tjMCUWidth[] / tjMCUHeight[] (turbojpeg.h:247, :277).
+        const MCU_WIDTH: [usize; 9] = [8, 16, 16, 8, 8, 32, 8, 32, 16];
+        const MCU_HEIGHT: [usize; 9] = [8, 8, 16, 8, 16, 8, 32, 16, 32];
+        const TJSAMP_444: usize = 0;
+        const TJSAMP_422: usize = 1;
+        const TJSAMP_GRAY: usize = 3;
+        const TJSAMP_440: usize = 4;
+        // jpeglib.h D_MAX_BLOCKS_IN_MCU.
+        const MAX_BLOCKS_IN_MCU: usize = 10;
+
+        let components = &decoder.header().components;
+        let color_space: ColorSpace = decoder.jpeg_color_space();
+        let num_components: usize = components.len();
+        if num_components == 1 && color_space == ColorSpace::Grayscale {
+            return TJSAMP_GRAY as i32;
+        }
+        let is_cmyk_like: bool = matches!(color_space, ColorSpace::Cmyk | ColorSpace::Ycck);
+        let factors = |k: usize| -> (usize, usize) {
+            (
+                components[k].horizontal_sampling as usize,
+                components[k].vertical_sampling as usize,
+            )
+        };
+        let mut result: i32 = -1;
+        for i in 0..MCU_WIDTH.len() {
+            if i == TJSAMP_GRAY {
+                continue;
+            }
+            if !(num_components == 3 || (is_cmyk_like && num_components == 4)) {
+                continue;
+            }
+            let (h0, v0): (usize, usize) = factors(0);
+            if h0 == MCU_WIDTH[i] / 8 && v0 == MCU_HEIGHT[i] / 8 {
+                let matched: usize = (1..num_components)
+                    .filter(|&k| {
+                        let (href, vref): (usize, usize) = if is_cmyk_like && k == 3 {
+                            (MCU_WIDTH[i] / 8, MCU_HEIGHT[i] / 8)
+                        } else {
+                            (1, 1)
+                        };
+                        factors(k) == (href, vref)
+                    })
+                    .count();
+                if matched == num_components - 1 {
+                    result = i as i32;
+                    break;
+                }
+            }
+            // 4:2:2 and 4:4:0 images whose sampling factors are specified in
+            // non-standard ways.
+            if h0 == 2 && v0 == 2 && (i == TJSAMP_422 || i == TJSAMP_440) {
+                let matched: usize = (1..num_components)
+                    .filter(|&k| {
+                        let (href, vref): (usize, usize) = if is_cmyk_like && k == 3 {
+                            (2, 2)
+                        } else {
+                            (MCU_HEIGHT[i] / 8, MCU_WIDTH[i] / 8)
+                        };
+                        factors(k) == (href, vref)
+                    })
+                    .count();
+                if matched == num_components - 1 {
+                    result = i as i32;
+                    break;
+                }
+            }
+            // 4:4:4 images whose sampling factors are specified in
+            // non-standard ways. Upstream's `break` here leaves only the inner
+            // loop, so the outer one keeps going; `matched` counting to the
+            // end gives the same answer, since the test is "all matched".
+            if h0 * v0 <= MAX_BLOCKS_IN_MCU / 3 && i == TJSAMP_444 {
+                let matched: usize = (1..num_components)
+                    .filter(|&k| factors(k) == (h0, v0))
+                    .count();
+                if matched == num_components - 1 {
+                    result = i as i32;
+                }
+            }
+        }
+        result
+    }
+
+    /// `tj3SetCroppingRegion`'s checks after its sign and header-read guards,
+    /// in upstream's order (`turbojpeg.c:2088-2111`), returning the region
+    /// upstream stores: a zero `width` or `height` means "to the right/bottom
+    /// edge" and is filled in.
+    ///
+    /// The iMCU-divisibility rule is upstream's, not the `Decoder`'s: a left
+    /// boundary that is not a multiple of the scaled iMCU width is refused
+    /// here, where `Decoder::set_crop` aligns it down. TurboJPEG documents the
+    /// refusal and its callers size their buffers from the region they passed,
+    /// so silently widening the output would break them (P4-197, #618).
+    fn resolve(&self, region: CropRegion, scaling: ScalingFactor) -> Result<CropRegion> {
+        let refuse = |reason: alloc::string::String| JpegError::InvalidCropRegion { reason };
+        if (self.precision != 8 && self.precision != 12) || self.lossless {
+            return Err(refuse(alloc::string::String::from(
+                "Cannot partially decompress lossless JPEG images",
+            )));
+        }
+        // tjMCUWidth[] (turbojpeg.h:247), indexed by TJSAMP_*.
+        const MCU_WIDTH: [usize; 9] = [8, 16, 16, 8, 8, 32, 8, 32, 16];
+        let mcu_width: usize = match usize::try_from(self.subsampling)
+            .ok()
+            .and_then(|index| MCU_WIDTH.get(index))
+        {
+            Some(&width) => width,
+            None => {
+                return Err(refuse(alloc::string::String::from(
+                    "Could not determine subsampling level of JPEG image",
+                )))
+            }
+        };
+        let scaled_width: usize = scaling.scale_dim(self.width);
+        let scaled_height: usize = scaling.scale_dim(self.height);
+        let scaled_imcu_width: usize = scaling.scale_dim(mcu_width);
+        if !region.x.is_multiple_of(scaled_imcu_width) {
+            return Err(refuse(format!(
+                "The left boundary of the cropping region ({}) is not\n\
+                 divisible by the scaled iMCU width ({})",
+                region.x, scaled_imcu_width
+            )));
+        }
+        // C computes `scaledWidth - x` in `int`, so a left boundary past the
+        // edge yields a non-positive width and falls into the refusal below;
+        // `checked_sub` reaches the same refusal without wrapping.
+        let width: Option<usize> = if region.width == 0 {
+            scaled_width.checked_sub(region.x)
+        } else {
+            Some(region.width)
+        };
+        let height: Option<usize> = if region.height == 0 {
+            scaled_height.checked_sub(region.y)
+        } else {
+            Some(region.height)
+        };
+        let fits = |origin: usize, extent: Option<usize>, limit: usize| -> Option<usize> {
+            let extent: usize = extent.filter(|&extent| extent > 0)?;
+            (origin.checked_add(extent)? <= limit).then_some(extent)
+        };
+        match (
+            fits(region.x, width, scaled_width),
+            fits(region.y, height, scaled_height),
+        ) {
+            (Some(width), Some(height)) => Ok(CropRegion {
+                x: region.x,
+                y: region.y,
+                width,
+                height,
+            }),
+            _ => Err(refuse(alloc::string::String::from(
+                "The cropping region exceeds the scaled image dimensions",
+            ))),
+        }
+    }
+}
+
 /// TJ3-compatible handle for JPEG compression/decompression.
 ///
 /// Wraps all parameters in a single object with get/set accessors,
@@ -134,6 +336,9 @@ pub struct TjHandle {
     icc_profile: Option<Vec<u8>>,
     scaling_factor: ScalingFactor,
     cropping_region: Option<CropRegion>,
+    /// The last frame header a decompress read, for `resolve_cropping_region`;
+    /// `None` until one has been read, as upstream's `jpegWidth == -1`.
+    cropping_geometry: Option<CroppingGeometry>,
 }
 
 impl TjHandle {
@@ -174,6 +379,7 @@ impl TjHandle {
             icc_profile: None,
             scaling_factor: ScalingFactor::default(),
             cropping_region: None,
+            cropping_geometry: None,
         }
     }
 
@@ -368,9 +574,77 @@ impl TjHandle {
         Ok(())
     }
 
-    /// Set cropping region for decompression.
+    /// Set the cropping region for decompression; `None`, or a region whose
+    /// four fields are all zero (`TJUNCROPPED`), clears it.
+    ///
+    /// The region is stored as given and validated by [`Self::decompress`],
+    /// against the image it decodes and the scaling factor in force then,
+    /// with `tj3SetCroppingRegion`'s rules and messages
+    /// (`turbojpeg.c:2068-2115`); see [`Self::resolve_cropping_region`]. A
+    /// `width` or `height` of 0 means "to the right / bottom edge", as it
+    /// does upstream. A region that does not fit is refused with
+    /// [`JpegError::InvalidCropRegion`], never clamped (P4-197, #618).
+    ///
+    /// Upstream validates at *set* time instead, against the header its
+    /// handle last read, and refuses outright when it has read none. That
+    /// check is [`Self::resolve_cropping_region`], which the C ABI's
+    /// `tj3SetCroppingRegion` calls before storing. It is kept out of this
+    /// setter so a decode's outcome depends only on the handle's
+    /// configuration and its input — not on which image an earlier call
+    /// happened to read.
     pub fn set_cropping_region(&mut self, region: Option<CropRegion>) {
-        self.cropping_region = region;
+        self.cropping_region = region.filter(|region| *region != Self::UNCROPPED);
+    }
+
+    /// `tj3SetCroppingRegion`'s set-time validation (`turbojpeg.c:2086-2111`),
+    /// against the frame header this handle last read — through
+    /// [`Self::decompress_header`] or [`Self::decompress`] — at the current
+    /// scaling factor. Returns the region upstream would store: a `width` or
+    /// `height` of 0 filled in to the edge. It stores nothing.
+    ///
+    /// Refusals, in upstream's order, each an
+    /// [`JpegError::InvalidCropRegion`] carrying upstream's message:
+    ///
+    /// * no header read yet — "JPEG header has not yet been read";
+    /// * a lossless frame, or a precision other than 8 or 12;
+    /// * a subsampling TurboJPEG cannot classify;
+    /// * `x` not a multiple of the scaled iMCU width — refused, where
+    ///   [`Decoder::set_crop`] aligns it down, because TurboJPEG documents the
+    ///   refusal and its callers size their buffers from the region they
+    ///   passed;
+    /// * the region extending past the scaled image.
+    ///
+    /// The all-zero `TJUNCROPPED` region and negative fields are the caller's
+    /// to handle first, as upstream handles them before this point.
+    pub fn resolve_cropping_region(&self, region: CropRegion) -> Result<CropRegion> {
+        let geometry: CroppingGeometry =
+            self.cropping_geometry
+                .ok_or_else(|| JpegError::InvalidCropRegion {
+                    reason: alloc::string::String::from("JPEG header has not yet been read"),
+                })?;
+        geometry.resolve(region, self.scaling_factor)
+    }
+
+    /// `TJUNCROPPED`: the all-zero region that means "no cropping".
+    const UNCROPPED: CropRegion = CropRegion {
+        x: 0,
+        y: 0,
+        width: 0,
+        height: 0,
+    };
+
+    /// The 12- and 16-bit decompress paths take no region yet (P4-219), so a
+    /// stored one is refused rather than ignored: ignoring it returns the
+    /// whole image to a caller — through the C ABI, into a buffer — that
+    /// sized for the region. Upstream crops at 12 bits and refuses a crop on
+    /// the lossless frames 16-bit output requires.
+    fn refuse_unhonoured_crop(region: Option<CropRegion>, path: &str) -> Result<()> {
+        match region {
+            Some(_) => Err(JpegError::Unsupported(format!(
+                "cropping is not implemented for {path} decompression (P4-219)"
+            ))),
+            None => Ok(()),
+        }
     }
 
     /// Get available scaling factors.
@@ -735,20 +1009,27 @@ impl TjHandle {
     /// - Ignores `scaling_factor` (`JPEGWIDTH`/`JPEGHEIGHT` must reflect the
     ///   ORIGINAL JPEG dimensions per the libjpeg-turbo spec, not the
     ///   scaled output).
+    /// - Ignores the cropping region, as `tj3DecompressHeader` does.
     /// - Populates `width`, `height`, `precision`, `color_space`,
     ///   `subsampling`, density, and ICC exactly as `decompress()` would,
     ///   but without producing pixel data.
     ///
-    /// Implementation: temporarily reset the scaling factor to 1:1, call
-    /// `decompress()`, then restore. The scaled output from a subsequent
-    /// `decompress()` call is still governed by the original scaling
-    /// factor — this method does NOT clobber user-visible state beyond the
-    /// read-only header params.
+    /// Implementation: temporarily reset the scaling factor to 1:1 and clear
+    /// the cropping region, call `decompress()`, then restore both. The
+    /// output from a subsequent `decompress()` call is still governed by the
+    /// original scaling factor and region — this method does NOT clobber
+    /// user-visible state beyond the read-only header params.
     pub fn decompress_header(&mut self, data: &[u8]) -> Result<()> {
-        let saved: ScalingFactor = self.scaling_factor;
+        // The cropping region is suspended for the same reason, and for one
+        // more: upstream's tj3DecompressHeader never consults it, so a region
+        // set for an earlier, larger image must not make reading a smaller
+        // image's header fail (P4-197, #618).
+        let saved_scaling: ScalingFactor = self.scaling_factor;
+        let saved_region: Option<CropRegion> = self.cropping_region.take();
         self.scaling_factor = ScalingFactor::default();
         let result: Result<Image> = self.decompress(data);
-        self.scaling_factor = saved;
+        self.scaling_factor = saved_scaling;
+        self.cropping_region = saved_region;
         result.map(|_| ())
     }
 
@@ -790,7 +1071,7 @@ impl TjHandle {
     /// the decode that may never happen.
     ///
     /// This exists so C-ABI entry points can apply upstream's header-time
-    /// validation order (`turbojpeg.c:2214-2230`) instead of decoding first and
+    /// validation order (`turbojpeg.c:2223-2239`) instead of decoding first and
     /// rejecting after. The free functions `decompress_to_yuv_planes` and
     /// friends take no handle, so they cannot see these limits at all (P4-127).
     pub fn inspect_header(&self, data: &[u8]) -> Result<FrameInfo> {
@@ -798,7 +1079,7 @@ impl TjHandle {
         let frame = decoder.header();
         let (width, height): (usize, usize) = (frame.width(), frame.height());
         // Upstream applies its maxPixels test right after reading the header
-        // and before anything else (turbojpeg.c:2219-2222).
+        // and before anything else (turbojpeg.c:2228-2231).
         decoder.limits().check_frame(width, height)?;
         Ok(FrameInfo {
             width,
@@ -831,10 +1112,52 @@ impl TjHandle {
             decoder.set_fast_dct(true);
         }
 
-        // Apply crop region
-        if let Some(crop) = self.cropping_region {
-            decoder.set_crop_region(crop.x, crop.y, crop.width, crop.height);
-        }
+        // What upstream's setDecompParameters records once the header is
+        // read (`turbojpeg.c:514-536`, called at `turbojpeg-mp.c:190`), so a
+        // later resolve_cropping_region validates against this frame.
+        let geometry: CroppingGeometry = CroppingGeometry::of(&decoder);
+        self.cropping_geometry = Some(geometry);
+
+        // Apply the crop region, resolved against *this* image with
+        // tj3SetCroppingRegion's rules: refused with upstream's message
+        // rather than handed to the decoder to clamp (P4-197, #618). For a
+        // region the C ABI already resolved at set time this is a no-op
+        // unless the image or the scaling factor changed since.
+        let applied_crop: Option<CropRegion> = match self.cropping_region {
+            Some(region) => {
+                let crop: CropRegion = geometry.resolve(region, self.scaling_factor)?;
+                // `resolve` checks `x` against `tjMCUWidth[subsamp]`, as
+                // upstream does, but the decoder aligns to its own iMCU —
+                // `max_h_samp` scaled blocks — and the two differ for sampling
+                // factors TurboJPEG classifies loosely (all three components
+                // 2x1 is TJSAMP_444, an 8-pixel iMCU, decoded in 16-pixel
+                // columns). Upstream catches the difference after
+                // `jpeg_crop_scanline` moves `x` (`turbojpeg-mp.c:217-221`);
+                // so must we, or the decode is wider than the buffer a caller
+                // sized from the region.
+                let max_h_samp: usize = decoder
+                    .header()
+                    .components
+                    .iter()
+                    .map(|component| component.horizontal_sampling as usize)
+                    .max()
+                    .unwrap_or(1);
+                let decoder_imcu_width: usize = max_h_samp * decoder.output_block_size();
+                let aligned_x: usize = (crop.x / decoder_imcu_width) * decoder_imcu_width;
+                if aligned_x != crop.x {
+                    return Err(JpegError::InvalidCropRegion {
+                        reason: format!(
+                            "Unexplained mismatch between specified ({}) and\n\
+                             actual ({}) cropping region left boundary",
+                            crop.x, aligned_x
+                        ),
+                    });
+                }
+                decoder.set_crop_region(crop.x, crop.y, crop.width, crop.height);
+                Some(crop)
+            }
+            None => None,
+        };
 
         // Wire SaveMarkers: configure which markers to preserve
         // Matches C TJSM_NONE(0), TJSM_COM(1), TJSM_ALL(2), TJSM_NOICC(3), TJSM_ICC(4)
@@ -851,6 +1174,33 @@ impl TjHandle {
         let jpeg_subsampling: Subsampling = decoder.jpeg_subsampling();
 
         let mut img: Image = decoder.decode_image()?;
+
+        // The decode must have produced exactly the region, as upstream's
+        // `turbojpeg-mp.c:222-225` and `:265-276` require. A decode path that
+        // does not honour the horizontal crop — the 12-bit one today
+        // (P4-219) — would otherwise hand the C ABI an image wider than the
+        // caller's buffer.
+        if let Some(crop) = applied_crop {
+            if img.width != crop.width {
+                return Err(JpegError::InvalidCropRegion {
+                    reason: format!(
+                        "Unexplained mismatch between specified ({}) and\n\
+                         actual ({}) cropping region width",
+                        crop.width, img.width
+                    ),
+                });
+            }
+            if img.height != crop.height {
+                return Err(JpegError::InvalidCropRegion {
+                    reason: format!(
+                        "Unexplained mismatch between specified ({}) and\n\
+                         actual ({}) cropping region lower boundary",
+                        crop.y + crop.height,
+                        crop.y + img.height
+                    ),
+                });
+            }
+        }
 
         // Update read-only params from decoded image
         self.width = img.width as i32;
@@ -918,6 +1268,7 @@ impl TjHandle {
     /// Returns 12-bit sample data (0-4095). Updates handle `Width`, `Height`,
     /// and `Precision` from the decoded image.
     pub fn decompress_12bit(&mut self, data: &[u8]) -> Result<crate::api::precision::Image12> {
+        Self::refuse_unhonoured_crop(self.cropping_region, "12-bit")?;
         let img = crate::api::precision::decompress_12bit(data)?;
         self.width = img.width as i32;
         self.height = img.height as i32;
@@ -930,6 +1281,7 @@ impl TjHandle {
     /// Returns 16-bit sample data. Updates handle `Width`, `Height`,
     /// and `Precision` from the decoded image.
     pub fn decompress_16bit(&mut self, data: &[u8]) -> Result<crate::api::precision::Image16> {
+        Self::refuse_unhonoured_crop(self.cropping_region, "16-bit")?;
         let img = crate::api::precision::decompress_16bit(data)?;
         self.width = img.width as i32;
         self.height = img.height as i32;

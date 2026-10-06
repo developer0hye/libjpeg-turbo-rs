@@ -5,10 +5,10 @@
  * eight YUV entry points are documented against that number. Upstream keeps
  * the two consistent in one place: the packed wrappers set
  * `planes[1] = planes[2] = NULL; strides[1] = strides[2] = 0` for GRAY
- * (`turbojpeg.c:1504-1507`, `:1756-1759`, `:2416-2419`, `:2732-2735`) and the
+ * (`turbojpeg.c:1509-1512`, `:1765-1768`, `:2427-2430`, `:2747-2750`) and the
  * `…Planes8` workers then loop over `cinfo->num_components`, which
  * `setCompDefaults` / `setDecodeDefaults` have already made 1
- * (`:2502-2504`). A GRAY call therefore reads and writes plane 0 and nothing
+ * (`:2513-2515`). A GRAY call therefore reads and writes plane 0 and nothing
  * else.
  *
  * This is worth an oracle rather than a transcription because the divergence
@@ -359,7 +359,7 @@ static void case_encode_yuv_planes8(const geometry *geo, size_t chroma_capacity)
    * which walks all three planes writes here instead of running off the end
    * of a one-element array. Upstream accepts either for GRAY: its NULL check
    * is `subsamp != TJSAMP_GRAY && (!dstPlanes[1] || !dstPlanes[2])`
-   * (turbojpeg.c:1589-1590). */
+   * (turbojpeg.c:1594-1595). */
   unsigned char *chroma[2];
   unsigned char *planes[3];
   int rc, i;

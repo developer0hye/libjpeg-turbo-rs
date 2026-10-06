@@ -24,7 +24,7 @@
 //! virtual arrays in memory.
 //!
 //! That is **not** a divergence from the library we replace, contrary to what
-//! this comment used to say: `references/libjpeg-turbo/CMakeLists.txt:678`
+//! this comment used to say: `references/libjpeg-turbo/CMakeLists.txt:687`
 //! compiles `src/jmemnobs.c` unconditionally — the no-backing-store variant.
 //! Stock libjpeg-turbo has no spill path either, so "rebuild against stock to
 //! get disk spill" was advice that could not work. When the budget cannot
@@ -759,7 +759,7 @@ unsafe extern "C" fn realize_virt_arrays_impl(cinfo: *mut c_void) {
     // P4-14: enforce `max_memory_to_use` here, which is the only place
     // upstream consults it. We have no backing store to spill to — and neither
     // does upstream's shipped build, which compiles `jmemnobs.c`
-    // unconditionally (`CMakeLists.txt:678`). So a budget that cannot cover the
+    // unconditionally (`CMakeLists.txt:687`). So a budget that cannot cover the
     // arrays is `JERR_NO_BACKING_STORE`, exactly as it is there.
     //
     // Deliberate simplification, recorded rather than hidden: upstream first

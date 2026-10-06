@@ -7,7 +7,7 @@
  * during `jpeg_start_decompress` master selection. Whole-image coefficient
  * arrays exist only for multi-scan streams — progressive *or*
  * non-interleaved sequential, `has_multiple_scans` per `jdinput.c:153-156`
- * — and for any stream in buffered-image mode (`jdmaster.c:709`). With no
+ * — and for any stream in buffered-image mode (`jdmaster.c:720`). With no
  * backing store, a budget those arrays cannot fit raises
  * `JERR_NO_BACKING_STORE` (51) at `jpeg_start_decompress`; everything else
  * is unbounded, so a tiny budget passes a baseline single-scan decode

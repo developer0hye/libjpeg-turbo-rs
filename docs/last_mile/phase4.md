@@ -229,7 +229,7 @@ Original acceptance criteria preserved below:
 
 **Verification:**
 
-- `grep -n "is_x86_feature_detected" src/encode/huffman_encode.rs` shows the BMI1+LZCNT dispatch in the two AC-encode call sites and the `#[target_feature(enable = "bmi1,lzcnt")]` variant.
+- `grep -n "is_x86_feature_detected" src/encode/huffman_encode.rs` shows the BMI1+LZCNT dispatch in the two AC-encode call sites and the `#[target_feature(enable = "bmi1,lzcnt")]` variant. *(As of 2026-09-08 the probes live in `AcTier::detect()` behind `cpu_has!` and the two dispatch sites are the `match ac_tier` in `encode_block` / `encode_block_hoisted`, so the equivalent command is `grep -n "AcTier::detect\|match ac_tier\|target_feature(enable = \"bmi1" src/encode/huffman_encode.rs` — see P4-133.)*
 - A stock `cargo build --release` (no env) followed by `RUSTFLAGS="-C target-cpu=native" cargo build --release` and per-bench comparison against C libjpeg-turbo at 1080p shows < 2 pp delta on a Haswell-class CPU (operator should pin the measurement in `experiments/encode.tsv` when running on a new CPU class).
 
 **Follow-up (deferred to P2 backlog):** BMI2 PEXT/PDEP coverage for any encode hot path that benefits + FMA-dispatched FDCT scalar fallback. The static-analysis review correctly notes these remain `target-cpu=native`-gated today.
@@ -266,6 +266,8 @@ tracked as P4-81.
 The companion C-boundary sanitizer harness is implemented as part of this closure: `examples/sanitizer_c_harness/harness.c` is a tiny un-instrumented C driver that `dlopen`s the cdylib and exercises the TJ3 surface (`tj3Init` / `tj3DecompressHeader` / `tj3Get` / `tj3Decompress8` / `tj3Destroy`) against a fixture corpus. `.github/workflows/sanitizers.yml` gains a `c_boundary_asan` job that builds the cdylib with `-Z sanitizer=address`, compiles the harness with `-fsanitize=address,undefined`, and runs it against `references/libjpeg-turbo/testimages/{testorig,testimgint,testimgari}.jpg` with `ASAN_OPTIONS=detect_leaks=0:abort_on_error=1:halt_on_error=1` so any sanitizer hit fails the job.
 
 The single remaining follow-up is the actual upstream PR to `google/oss-fuzz`, which is a maintainer action requiring a `google/oss-fuzz` fork + write access (not an in-repo engineering change). Tracked under **P2-H** in `/Users/yhkwon/.claude/plans/dreamy-moseying-swing.md`.
+
+**Re-checked 2026-10-07 ([P4-217](#p4-217-no-written-release-semver-msrv-or-security-policy-no-private-reporting-route-and-no-api-check-before-publish--partial-policy-api-gate-and-affected-version-record-landed-private-reporting-route-not-enabled-oss-fuzz-not-submitted)):** "ready" did not hold. OSS-Fuzz supports only `address` for Rust, so `undefined`/`memory` were removed, and the `cargo install … || true` step was dropped; the files have never been built with `helper.py`. Submission is tracked under P4-217.
 
 ## P4-12. Encoder / Decoder Hard-Case Parity Corpus — **CLOSED 2026-05-17**
 
@@ -322,7 +324,7 @@ exceeded. The budget is consulted by `jpeg_mem_available`
 
 And the constraint this item records — that we have no backing store, so true
 enforcement means reimplementing the spill path — **does not apply**:
-`references/libjpeg-turbo/CMakeLists.txt:678` compiles `src/jmemnobs.c`
+`references/libjpeg-turbo/CMakeLists.txt:687` compiles `src/jmemnobs.c`
 unconditionally. The library we are replacing has no backing store either. Our
 "all data in RAM, never spills" is not a divergence; it is the same design, and
 matching upstream is a ~60-line change in `realize_virt_arrays_impl` rather than
@@ -373,7 +375,7 @@ at `jpeg_start_decompress`.** `classic_budget_refuses_start`
 (`jpeglib.rs`) mirrors upstream's single enforcement point: the budget
 applies exactly when whole-image coefficient arrays would exist —
 `has_multiple_scans` (progressive *or* non-interleaved sequential,
-`jdinput.c:153-156`) or buffered-image mode (`jdmaster.c:709`) — and the
+`jdinput.c:153-156`) or buffered-image mode (`jdmaster.c:720`) — and the
 quantity weighed is **only** the coefficient-array bytes (summed from
 `coef_array_geometries`, upstream's `realize_virt_arrays` accounting),
 raising `JERR_NO_BACKING_STORE` (51) at start. The check sits before the
@@ -482,7 +484,7 @@ the `msg_parm` payload of `JERR_OUT_OF_MEMORY` was unproven) was closed
 > arrays to a backing store. Neither holds. The budget is consulted by
 > `jpeg_mem_available` and a shortfall raises **`JERR_NO_BACKING_STORE` (51)**;
 > upstream's shipped build has no backing store either
-> (`CMakeLists.txt:678` compiles `src/jmemnobs.c`). The live contract is the
+> (`CMakeLists.txt:687` compiles `src/jmemnobs.c`). The live contract is the
 > Status sections above (2026-08-11 vtable, 2026-08-13 decode sequence). Do
 > not implement to the text below.
 
@@ -506,7 +508,7 @@ No further action. `jpeg12_*_raw_data` parity remains satisfied by P3-2 (closed 
 
 ## P4-16. Per-`cinfo` Private State Lives in Thread-Local Side Tables — **CLOSED 2026-05-19**
 
-**Status (2026-05-19): closed via Option B (document the per-thread ownership contract).** A new "Threading contract" section in `docs/ABI_COMPATIBILITY.md` (inside the "Our policy" tree, between the safe-SONAME matrix and the `libjpeg.so.62` opt-in path) now states the contract authoritatively: a `jpeg_decompress_struct` / `jpeg_compress_struct` allocated through our cdylib must be used (and freed) on the thread that created it. The "Why this contract" paragraph cites the v8 byte-for-byte ABI mirror at `jpeglib.rs:3900-3970` as the reason private state lives in TLS rather than appended to the public struct, and links the implementation pointers (`DECOMPRESS_PRIVATE_STATE` at `jpeglib.rs:368-372` + compress equivalent at `:3492-3505`). The "Divergence from upstream" paragraph names the upstream contract verbatim ("single-threaded per `cinfo`, but ownership transfer between threads is OK") and points at P4-16 Option A as the migration path if a named consumer ever needs cross-thread transfer (FFmpeg's frame-thread JPEG path is flagged as the canonical example).
+**Superseded 2026-09-08 by [P4-132](#p4-132-classic-c-abi-per-cinfo-state-is-thread-affine-p4-16-option-a--closed-2026-09-08)** — the per-thread ownership contract this closure documented no longer exists; the state moved onto the object. **Status (2026-05-19): closed via Option B (document the per-thread ownership contract).** A new "Threading contract" section in `docs/ABI_COMPATIBILITY.md` (inside the "Our policy" tree, between the safe-SONAME matrix and the `libjpeg.so.62` opt-in path) now states the contract authoritatively: a `jpeg_decompress_struct` / `jpeg_compress_struct` allocated through our cdylib must be used (and freed) on the thread that created it. The "Why this contract" paragraph cites the v8 byte-for-byte ABI mirror at `jpeglib.rs:3900-3970` as the reason private state lives in TLS rather than appended to the public struct, and links the implementation pointers (`DECOMPRESS_PRIVATE_STATE` at `jpeglib.rs:368-372` + compress equivalent at `:3492-3505`). The "Divergence from upstream" paragraph names the upstream contract verbatim ("single-threaded per `cinfo`, but ownership transfer between threads is OK") and points at P4-16 Option A as the migration path if a named consumer ever needs cross-thread transfer (FFmpeg's frame-thread JPEG path is flagged as the canonical example).
 
 Option A (migrate to `OnceLock<RwLock<HashMap<usize, …>>>` + multi-thread ownership-transfer test) remains tracked here for the day a downstream consumer surfaces the need, but is **not** required for T3 readiness — Option B closes the documentation gap that was the actual divergence ("neither `ABI_COMPATIBILITY.md` nor `README.md` document the divergence") flagged by the cold review.
 
@@ -1278,7 +1280,7 @@ The one non-obvious piece was the **scan script**. `jpeg_simple_progression` tak
 
 **Acceptance criteria.** Peak RSS for a streaming baseline decode of the 8K fixture bounded by intermediates + a fixed input window (measured); slice-path throughput unchanged on the full matrix (recorded in `experiments/`); design reviewed against P4-26 before implementation.
 
-**Status (2026-07-28): closed.** `decompress_from_reader_incremental` (src/api/incremental.rs) decodes interleaved single-scan Huffman baseline streams from a sliding window: per-MCU-row checkpoints on a window-aware `BitReader` (additive `is_final`/`starved` fields; the slice path constructs with `is_final=true` where starvation cannot fire), retry-on-starvation, front-compaction of committed bytes, and plane injection into `decode_baseline_planes` so the whole existing output pipeline is reused. Peak input storage measured at 195,985 bytes of allocation capacity (entropy window + header prefix + the fixed 64 KiB read-staging buffer; the instrumented metric counts capacities, not live bytes) on the 1.25 MB 1080p fixture fed in ≥ 64 KiB reads — 129,203 at the 8 KiB feed the test drives — asserted ≤ 256 KiB in `tests/regression_issue_357_incremental_reader.rs`, and size-independent in the strongest sense: the full-chunk-feed peak is exactly 195,985 bytes on the 1.25 MB 1080p, 5.0 MB 4K, and 8K corpus fixtures alike (all three asserted, closing the criterion's 8K clause as written). Slice-path throughput unchanged on the full decode matrix (`experiments/pipeline.tsv`: 27 benchmarks compared branch-vs-main sequentially on a quiet host — zero criterion regression verdicts, every change midpoint within [-1.13%, +0.30%]; spot figures 416.20 µs branch vs 416.99 µs main on decode_640x480). P4-26 co-design: the P4-13 marker-boundary scanner was lifted to `src/decode/boundary.rs` and the capi shim re-imports it — one scanner drives both mechanisms. Scope note (corrects the original filing's baseline/progressive split): the windowable set is *interleaved* baseline only. Multi-component non-interleaved baseline and progressive walk the full entropy stream during header parse (`marker.rs` `skip_entropy_data`, reached only when the scan carries fewer components than the frame) and take the documented buffering fallback. Single-component/grayscale streams stop at the first SOS like interleaved baseline, but decode through P4-27's one-block raster (`pipeline_impl/baseline.rs:55-56` routes `scan.components.len() == 1` to `decode_non_interleaved_baseline_planes`), which the row loop does not model — so they fall back as well, as do arithmetic/lossless/12-bit.
+**Status (2026-07-28): closed.** `decompress_from_reader_incremental` (src/api/incremental.rs) decodes interleaved single-scan Huffman baseline streams from a sliding window: per-MCU-row checkpoints on a window-aware `BitReader` (additive `is_final`/`starved` fields; the slice path constructs with `is_final=true` where starvation cannot fire), retry-on-starvation, front-compaction of committed bytes, and plane injection into `decode_baseline_planes` so the whole existing output pipeline is reused. Peak input storage measured at 195,985 bytes of allocation capacity (entropy window + header prefix + the fixed 64 KiB read-staging buffer; the instrumented metric counts capacities, not live bytes) on the 1.25 MB 1080p fixture fed in ≥ 64 KiB reads — 129,203 at the 8 KiB feed the test drives — asserted ≤ 256 KiB in `tests/regression_issue_357_incremental_reader.rs`, and size-independent in the strongest sense: the full-chunk-feed peak is exactly 195,985 bytes on the 1.25 MB 1080p, 5.0 MB 4K, and 8K corpus fixtures alike (all three asserted, closing the criterion's 8K clause as written). Slice-path throughput unchanged on the full decode matrix (`experiments/pipeline.tsv`: 27 benchmarks compared branch-vs-main sequentially on a quiet host — zero criterion regression verdicts, every change midpoint within [-1.13%, +0.30%]; spot figures 416.20 µs branch vs 416.99 µs main on decode_640x480). P4-26 co-design: the P4-13 marker-boundary scanner was lifted to `src/decode/boundary.rs` and the capi shim re-imports it — one scanner drives both mechanisms. Scope note (corrects the original filing's baseline/progressive split): the windowable set is *interleaved* baseline only. Multi-component non-interleaved baseline and progressive walk the full entropy stream during header parse (`marker.rs` `skip_entropy_data`, reached only when the scan carries fewer components than the frame) and take the documented buffering fallback. Single-component/grayscale streams stop at the first SOS like interleaved baseline, but decode through P4-27's one-block raster (`pipeline_impl/baseline.rs:56-57` routes `scan.components.len() == 1` to `decode_non_interleaved_baseline_planes`), which the row loop does not model — so they fall back as well, as do arithmetic/lossless/12-bit.
 
 ## P4-60. Scalar Kernels Are ~2.5x Slower Than C's Scalar Kernels — **OPEN**
 
@@ -1289,6 +1291,8 @@ The one non-obvious piece was the **scan script**. `jpeg_simple_progression` tak
 **Acceptance criteria.** Profile the scalar IDCT / fancy upsample / YCbCr→RGB against `jidctint.c` / `jdsample.c` / `jdcolor.c` and close the gap to ≤ 1.2x C on the RISC-V harness; byte-exactness vs `djpeg` preserved (the scalar path is the reference every SIMD kernel is checked against, so it must not drift); experiment recorded per `experiments/README.md`.
 
 **Progress (2026-07-28): step 1 landed, item stays OPEN.** Table-driven YCbCr→RGB (`src/decode/color.rs`, exact const-evaluated precomputation of the multiply form — bit-identical, proven by an exhaustive chroma equivalence test and 49 simd-off djpeg cross-checks): kernel 1.63× faster on riscv64 (same-binary A/B), decode totals 12–14% lower than the 07-27 env though no same-env baseline was re-measured, same-run ours/C now ~1.12× at 640×480 and ~1.72× at 1080p (`experiments/riscv64_scalar_2026-07-27.md`, 07-28 section). The ≤1.2× criterion is not yet met at 1080p. The criteria's profiling step is now DONE (07-28 profile section): at 1080p volume the three kernels sum to 36.4% (IDCT 13.5%, fancy upsample 9.2%, colour 13.7%) and the ~63.6% residual is Huffman entropy decode + `BitReader` — the measured next target (`jdhuff.c` two-level lookahead tables vs `decode/huffman.rs`). No per-stage profile has been run yet, so the acceptance criteria's "profile the scalar IDCT / fancy upsample / YCbCr→RGB" step is still outstanding.
+
+**Premise change (2026-09-08, via [P4-134](#p4-134-no-risc-v-rvv-simd-backend--upstream-32-ships-one--partial-measured-under-emulation-only-hardware-measurement-outstanding)).** The riscv64 numbers in this entry (07-27 and 07-28 sections of `experiments/riscv64_scalar_2026-07-27.md`) were taken against libjpeg-turbo 2.1.x distro builds, when *neither* side vectorised on RISC-V. libjpeg-turbo **3.2.0 ships RVV kernels** for colour conversion, up/downsampling, quantisation and the integer DCT/IDCT, so on RVV hardware C is no longer scalar there. **These measurements remain valid as scalar-kernel data — the quantity this entry's acceptance criteria are about — and stop being a statement about our position versus current upstream on riscv64.** The scalar-vs-scalar pair was re-measured against 3.2.0 with `JSIMD_FORCENONE=1` on 2026-09-08 (`experiments/riscv64_rvv_2026-09-08.md`: decode ~1.1–1.5×, encode ~1.7–1.9× behind C's scalar under `qemu-riscv64`, spread under 10 %), and the same run showed that emulator cannot measure the RVV side at all; the current-upstream question lives in P4-134.
 
 ## P4-59. Extended XMP Writing Not Implemented — **OPEN**
 
@@ -1306,7 +1310,7 @@ The one non-obvious piece was the **scan script**. `jpeg_simple_progression` tak
 
 **Acceptance criteria.** Both `C Interop` legs report a non-zero test count; the job is validated by mechanism (a deliberately broken encoder byte-comparison must fail it) rather than by "it passed"; any aarch64 divergence the newly-live tests surface is filed before the filter fix merges.
 
-**Status (2026-07-28): closed.** The fix sketch above was itself falsified before merging: the corrected multi-filter form (`cargo test --tests -- cross_encode cross_check`) selects only **8 tests** on this workspace, because libtest filters match test *names*, and the tests inside `cross_check_*`/`cross_encode_*` files have names like `c_xval_decode_bgr_444` that contain neither substring. The job now runs the full unfiltered `cargo test --tests` on **macos-latest only** (timeout 15→30 min) — aarch64 + Homebrew jpeg-turbo 3.x, the one C-tool environment no other job covers. The former ubuntu leg is **removed**, not fixed: with apt's 2.1.x tools the unfiltered suite cannot run (codex review caught that e.g. `lossless_point_transform_matches_c_djpeg_exactly` feeds SOF3 to `djpeg` with no capability probe), and installing the official 3.1.4.1 deb would make the leg an exact environment+command duplicate of `Integration Tests` — the redundancy this entry's Impact paragraph already established. The "both legs non-zero" acceptance criterion is therefore satisfied in its intent (every remaining leg runs the full suite; no leg silently runs zero) rather than its letter. A comment in `ci.yml` pins the substring-vs-regex trap so a filter cannot quietly come back. **Mechanism-validated**, not validated-by-passing: with a deliberate encoder break (`FIX_0_299` 19595→20100 in `src/encode/color.rs`), `cargo test --test cross_check_encoder_binary` fails 3 of 4 byte-exact comparisons against `cjpeg`; reverted, green again. aarch64 + Homebrew first run: the full `--tests` suite was executed on a macOS aarch64 host with Homebrew jpeg-turbo before merging — no divergence surfaced, so nothing needed filing; the PR's own `C Interop (macos-latest)` leg is the first CI proof and must show a non-zero test count. **Amended 2026-08-18 by [P4-130](#p4-130-c-parity-oracle-is-pinned-to-3141-upstream-stable-is-320--partial-every-oracle-provisioning-job-is-now-pinned-checked-and-measured-the-legs-still-on-one-release-the-submodule-bump-and-the-four-filed-gaps-remain):** the environment is still aarch64 macOS, but the oracle is no longer `brew install jpeg-turbo` — the leg builds 3.1.4.1 from source at `/tmp/ljt3141/prefix`, asserts it, and selects it with `LIBJPEG_TURBO_PREFIX`.
+**Status (2026-07-28): closed.** The fix sketch above was itself falsified before merging: the corrected multi-filter form (`cargo test --tests -- cross_encode cross_check`) selects only **8 tests** on this workspace, because libtest filters match test *names*, and the tests inside `cross_check_*`/`cross_encode_*` files have names like `c_xval_decode_bgr_444` that contain neither substring. The job now runs the full unfiltered `cargo test --tests` on **macos-latest only** (timeout 15→30 min) — aarch64 + Homebrew jpeg-turbo 3.x, the one C-tool environment no other job covers. The former ubuntu leg is **removed**, not fixed: with apt's 2.1.x tools the unfiltered suite cannot run (codex review caught that e.g. `lossless_point_transform_matches_c_djpeg_exactly` feeds SOF3 to `djpeg` with no capability probe), and installing the official 3.1.4.1 deb would make the leg an exact environment+command duplicate of `Integration Tests` — the redundancy this entry's Impact paragraph already established. The "both legs non-zero" acceptance criterion is therefore satisfied in its intent (every remaining leg runs the full suite; no leg silently runs zero) rather than its letter. A comment in `ci.yml` pins the substring-vs-regex trap so a filter cannot quietly come back. **Mechanism-validated**, not validated-by-passing: with a deliberate encoder break (`FIX_0_299` 19595→20100 in `src/encode/color.rs`), `cargo test --test cross_check_encoder_binary` fails 3 of 4 byte-exact comparisons against `cjpeg`; reverted, green again. aarch64 + Homebrew first run: the full `--tests` suite was executed on a macOS aarch64 host with Homebrew jpeg-turbo before merging — no divergence surfaced, so nothing needed filing; the PR's own `C Interop (macos-latest)` leg is the first CI proof and must show a non-zero test count. **Amended 2026-08-18 by [P4-130](#p4-130-c-parity-oracle-is-pinned-to-3141-upstream-stable-is-320--partial-every-oracle-provisioning-job-is-pinned-checked-and-measured-and-the-submodule-is-at-320-two-jobs-still-on-one-release-and-the-four-filed-gaps-remain):** the environment is still aarch64 macOS, but the oracle is no longer `brew install jpeg-turbo` — the leg builds 3.1.4.1 from source at `/tmp/ljt3141/prefix`, asserts it, and selects it with `LIBJPEG_TURBO_PREFIX`.
 
 ## P4-62. `cargo test --workspace` Does Not Build on windows-msvc — **CLOSED 2026-07-28**
 
@@ -1381,7 +1385,7 @@ C expands instead of ignoring: `djpeg -rgb` on a `cjpeg -precision 12` grayscale
 | Source | Result |
 |---|---|
 | 8-bit baseline YCbCr (4:2:0) | panic, now `pipeline_impl/color.rs:517` (`grayscale/cmyk handled separately`) |
-| 8-bit baseline grayscale | panic, now `pipeline_impl/output.rs:993` (grayscale expansion match) |
+| 8-bit baseline grayscale | panic, now `pipeline_impl/output.rs:1012` (grayscale expansion match) |
 | 8-bit lossless grayscale (SOF3) | panic, now `pipeline_impl/lossless.rs:376` (`lossless_output_grayscale` match) |
 | 12-bit grayscale | `Unsupported("cannot convert 12-bit JPEG to Cmyk")` — the #394 fix |
 
@@ -1398,7 +1402,7 @@ C expands instead of ignoring: `djpeg -rgb` on a `cjpeg -precision 12` grayscale
 **Remaining work.**
 1. **Module-level feature enforcement**: gate the backend modules (or their exported fns) on `feature = "simd"` so a simd-off build cannot even name an intrinsic wrapper; decide the interplay with `cpu_has!` and the scalar reference paths.
 2. **simd/ `unsafe_op_in_unsafe_fn` sweep**: lift the carve by wrapping the ~780 sites with per-op blocks + SAFETY notes (mechanical but must not be rushed — wrong SAFETY prose is worse than none).
-3. **Non-SIMD unsafe audit to zero**: the sites that survive phase 1 outside `simd/` (the `BitWriter` built over `mem::forget` in `huffman_encode.rs`, `Vec::set_len`-on-uninit patterns carrying `#[allow(clippy::uninit_vec)]`, raw-pointer `.add()` arithmetic, cold-path `get_unchecked`s in `decode/progressive.rs`) — each migrated to safe code (perf-gated per `experiments/`) or kept with a written `// SAFETY:` invariant.
+3. **Non-SIMD unsafe audit to zero**: the sites that survive phase 1 outside `simd/` (the `BitWriter` built over `mem::forget` in `huffman_encode.rs`, `Vec::set_len`-on-uninit patterns carrying `#[allow(clippy::uninit_vec)]`, raw-pointer `.add()` arithmetic, cold-path `get_unchecked`s in `decode/progressive.rs` — done 2026-09-08 under P4-141 criterion 5, and now gated) — each migrated to safe code (perf-gated per `experiments/`) or kept with a written `// SAFETY:` invariant.
 4. **Goal state (#389's last criterion)**: `#![cfg_attr(not(feature = "simd"), forbid(unsafe_code))]` compiles, README-advertised and CI-checked — requires (3) to reach zero.
 
 **Acceptance criteria.** Each numbered item lands with tests/benches per the project rules; #389 closes only when all four do. The phase-1 Miri job (non-SIMD `--lib` subset, 191 tests) must stay green throughout.
@@ -1487,7 +1491,7 @@ Proof the refactor is behaviour-preserving: a temporary differential harness com
 
 **The asymmetry.** On 32-bit ARM we dispatch **100% scalar**: `src/simd/mod.rs` compiles backend modules for `aarch64` / `x86_64` / `wasm32` only, so `detect()` and `detect_encoder()` fall through to `scalar::routines()` on `target_arch = "arm"`. C libjpeg-turbo does **not** — `simd/CMakeLists.txt:352-356` compiles the same 13 shared `simd/arm/*-neon.c` intrinsics kernels for `CPU_TYPE=arm` as for `arm64` (IDCT islow/ifast/reduced, FDCT int/fast, both colour directions, merged upsample, upsample, downsample, quantize, progressive Huffman) plus an AArch32-specific `arm/aarch32/jchuff-neon.c`, with `-mfpu=neon` forced at line 358. NEON is then detected at run time on AArch32 Linux/Android by parsing `/proc/cpuinfo` (`simd/arm/aarch32/jsimdcpu.c:72-125`), so a distro build serves NEON and non-NEON ARMv7 cores from one binary.
 
-This makes 32-bit ARM different in kind from the other scalar targets. On RISC-V / POWER / s390x **neither** side vectorises, so P4-60's scalar-kernel gap is the whole story. On ARMv7-A it is our scalar code against C's full SIMD pipeline, and the two deficits multiply. Note the hardware caveat: NEON is optional in ARMv7-A (present on most Cortex-A parts, e.g. A7/A15; optional on A5/A9) and absent from ARMv7-M/R — on a NEON-less ARMv7 core C is scalar too, and P4-60 alone describes the gap.
+This makes 32-bit ARM different in kind from the other scalar targets. On POWER / s390x **neither** side vectorises, so P4-60's scalar-kernel gap is the whole story — and that held for RISC-V too until libjpeg-turbo 3.2.0 shipped RVV ([P4-134](#p4-134-no-risc-v-rvv-simd-backend--upstream-32-ships-one--partial-measured-under-emulation-only-hardware-measurement-outstanding)). On ARMv7-A it is our scalar code against C's full SIMD pipeline, and the two deficits multiply. Note the hardware caveat: NEON is optional in ARMv7-A (present on most Cortex-A parts, e.g. A7/A15; optional on A5/A9) and absent from ARMv7-M/R — on a NEON-less ARMv7 core C is scalar too, and P4-60 alone describes the gap.
 
 **Estimated magnitude — inference, not measurement.** No ARMv7 hardware measurement exists yet; the honest bound composes two known factors: our scalar decode measured **1.12× at 640×480 and 1.72× at 1080p** vs C's scalar decode (`experiments/riscv64_scalar_2026-07-27.md`, 07-28 section, post-P4-60-step-1), times C's own NEON speedup — upstream claims **2-6×** for SIMD-capable CPUs generally (`references/libjpeg-turbo/README.md:6`). That puts us in the region of **2-5× slower than C libjpeg-turbo on a NEON-capable ARMv7-A core**, decode. Encode is not better: C's AArch32 NEON covers FDCT, colour convert, downsample, quantize and Huffman encode. **Do not quote a hardware figure until one is measured** — see the recipe below.
 
@@ -2425,7 +2429,15 @@ subsampling/scaling/grayscale, invalid null/zero/out-of-bounds/after-read calls,
 returned x/width/output_width, component geometry, and subsequent row bytes.
 The 12-bit initialization/order portion remains in P4-98.
 
-**Extended 2026-08-17 by the [P4-130](#p4-130-c-parity-oracle-is-pinned-to-3141-upstream-stable-is-320--partial-every-oracle-provisioning-job-is-now-pinned-checked-and-measured-the-legs-still-on-one-release-the-submodule-bump-and-the-four-filed-gaps-remain)
+**Noted 2026-10-07 by P4-197 (#618), which left this entry point alone.** The
+out-of-bounds half is concrete: for `xoffset + width > output_width` (and for
+`xoffset >= output_width`) the shim clamps — `x = output_width, width = 0`, or
+`width = output_width - x` — and returns, where `jdapistd.c:213-216` raises
+`JERR_WIDTH_OVERFLOW` (as it does for a zero width); a NULL pointer returns silently where `:210-211` raises
+`JERR_BAD_CROP_SPEC`. `jpeg12_crop_scanline` has the same clamp. The Rust
+`Decoder` and TurboJPEG paths now refuse such regions; this one does not.
+
+**Extended 2026-08-17 by the [P4-130](#p4-130-c-parity-oracle-is-pinned-to-3141-upstream-stable-is-320--partial-every-oracle-provisioning-job-is-pinned-checked-and-measured-and-the-submodule-is-at-320-two-jobs-still-on-one-release-and-the-four-filed-gaps-remain)
 3.2 delta triage.** 3.2.0 note 3 hardened this entry point, and the delta is
 exactly one condition: 3.2.0 `src/jdapistd.c:203` reads
 `if (cinfo->master->lossless || cinfo->raw_data_out)` where 3.1.90 reads
@@ -2916,7 +2928,7 @@ tests use `/dev/full` plus a portable failing stream and require
 * `MemDestState` / `StdioDestState` mirror `my_mem_destination_mgr` /
   `my_destination_mgr`, so the two managers have **separate** callback sets.
   That separation is what makes upstream's identity check
-  (`init_destination != init_mem_destination`, jdatadst.c:204-212 / 252-257)
+  (`init_destination != init_mem_destination`, jdatadst.c:218-226 / 266-271)
   expressible; installing a memory destination over a foreign manager now
   raises `JERR_BUFFER_SIZE` instead of reinterpreting someone else's private
   area.
@@ -2926,9 +2938,9 @@ tests use `/dev/full` plus a portable failing stream and require
   this library allocated. A caller buffer is never passed to `free`.
 * `*outbuffer == NULL || *outsize == 0` allocates `OUTPUT_BUF_SIZE` inside
   `jpeg_mem_dest` and publishes it immediately, as upstream does
-  (jdatadst.c:267-273). The prior behaviour — leaving `*outbuffer` NULL until
+  (jdatadst.c:281-287). The prior behaviour — leaving `*outbuffer` NULL until
   the first flush — was pinned by a test that has been corrected.
-* `jpeg_mem_dest(cinfo, NULL, …)` raises `JERR_BUFFER_SIZE` (jdatadst.c:242-243)
+* `jpeg_mem_dest(cinfo, NULL, …)` raises `JERR_BUFFER_SIZE` (jdatadst.c:256-257)
   instead of silently installing no destination at all, which is what the shim
   previously did — a caller that passed a NULL out-parameter got a successful
   compress that wrote nowhere.
@@ -2975,7 +2987,7 @@ allocation — undefined behaviour that LLVM's `noalias` would be entitled to
 exploit by folding away the very `pending_error` read this fix depends on. The
 manager's private state now lives *inside* the manager (`OwnedDestMgr`,
 reachable only through `cinfo->dest`), which is both sound and what upstream
-does (`my_mem_destination_mgr`, jdatadst.c:43-53). The same re-derivation
+does (`my_mem_destination_mgr`, jdatadst.c:46-56). The same re-derivation
 pattern exists elsewhere in the shim and is not addressed here.
 
 ## P4-109. Classic Source-Manager Setup and Stdio Semantics Diverge — **CLOSED 2026-08-14**
@@ -3265,7 +3277,7 @@ transcription. The P4-145 oracle's `compress16_*` lines then no longer need
 `TJPARAM_LOSSLESS` to agree, which is the observable proof.
 
 **Root cause.** TurboJPEG imposes no precision rule of its own. It sets
-`cinfo->data_precision = 16` (`turbojpeg-mp.c:107`) and lets
+`cinfo->data_precision = 16` (`turbojpeg-mp.c:111`) and lets
 `jpeg_start_compress` decide, where `jcmaster.c:199-208` admits 2..=16 for a
 lossless compress and only 8 or 12 for a lossy one. Reading `turbojpeg-mp.c`
 alone — which is what the original port did — correctly concludes that
@@ -3279,7 +3291,7 @@ which is why the fix is pinned by an oracle rather than by assertions.
 `Unsupported JPEG data precision 16`, with no `function():` prefix, because an
 error raised inside libjpeg reaches `errStr` through `CATCH_LIBJPEG` verbatim.
 The gate is the lossless flag, not `TJPARAM_PRECISION`: that parameter is read
-only when the flag is set (`turbojpeg-mp.c:111-115`), so requesting 12 bits does
+only when the flag is set (`turbojpeg-mp.c:113-117`), so requesting 12 bits does
 not make a lossy 16-bit call legal — traced as `c16_lossy_prec12`.
 
 Verified by `crates/libjpeg-turbo-rs-capi/tests/capi_compress_precision.rs`
@@ -3291,9 +3303,9 @@ fix exactly two lines diverged (`c16_lossy`, `c16_lossy_prec12`), both
 
 **Where the refusal sits in the chain.** Review found that a gate placed
 naively last gets the *precedence* wrong. Upstream installs the destination
-before `jpeg_start_compress` (`turbojpeg-mp.c:118-120`), so a
+before `jpeg_start_compress` (`turbojpeg-mp.c:123-125`), so a
 `TJPARAM_NOREALLOC` slot that cannot be used at all — empty, or present with
-zero capacity — is refused by `jdatadst-tj.c:184-192` first, and the buffer
+zero capacity — is refused by `jdatadst-tj.c:198-206` first, and the buffer
 error wins. The rule is narrower than "destination before precision", though: a
 slot that is merely *too small* still reports the precision error, because its
 capacity is only tested when output overflows it, which never happens once the
@@ -3303,7 +3315,7 @@ ordering check removed exactly the first line flips, so a fix that checked the
 destination unconditionally would have been caught too.
 
 Review then found a *third* stage above both. `setCompDefaults` calls
-`jpeg_enable_lossless` before `jpeg_mem_dest_tj` (`turbojpeg-mp.c:117-120`), so
+`jpeg_enable_lossless` before `jpeg_mem_dest_tj` (`turbojpeg-mp.c:121-123`), so
 an out-of-range point transform beats the buffer error too: with
 `PRECISION=13`, `LOSSLESSPT=13`, `NOREALLOC` and an empty slot, TurboJPEG 3
 reports the lossless-parameter error. The port's Pt check had to move above the
@@ -3360,7 +3372,7 @@ at it were rejected in review. Legacy `dstSizes[i]` are **outputs**: a caller th
 its destinations with `tjTransformBufSize()` may leave them at zero. TJ3 reads
 the same slot as an input capacity, so under `TJFLAG_NOREALLOC` such a call now
 fails as "buffer too small". Upstream bridges it by filling a temporary array
-with each transformed image's worst case (`turbojpeg.c:3118-3132`).
+with each transformed image's worst case (`turbojpeg.c:3133-3147`).
 
 `tjCompress2`'s equivalent bridge *did* land with P4-145: there the geometry is
 in the parameters, so `tj3JPEGBufSize(width, height, subsamp)` is a direct
@@ -3399,7 +3411,7 @@ this description.
 **Status (2026-08-12): closed.** A legacy `tjTransform` with `TJFLAG_NOREALLOC`
 and `dstSizes[i] = 0` now transforms, filling a temporary capacity array from
 the transformed geometry and copying the produced sizes back, as upstream does
-(`turbojpeg.c:3118-3132`).
+(`turbojpeg.c:3133-3147`).
 
 Both rejected attempts were the acceptance criteria in disguise, and both
 constraints are met by construction rather than by care:
@@ -4412,9 +4424,10 @@ against a reference v8 build — `JERR_BUFFER_SIZE` and `JERR_FILE_WRITE` by
 `tests/capi_classic_lifecycle_pathological.rs`. `JERR_OUT_OF_MEMORY = 56` is
 asserted only by a source comment. A wrong constant would mis-report
 out-of-memory to every consumer with no test able to notice, and the same blind
-spot covers the `msg_parm` payload: upstream uses `ERREXIT1(…, 10)`, so the
-rendered message is `"Insufficient memory (case 10)"`, and only a test that
-formats the message can prove we match.
+spot covers the `msg_parm` payload: upstream used `ERREXIT1(…, 10)` on both
+paths at 3.1.90 — 3.2.0 renumbered the growth failure to 12 (P4-130) — so the
+rendered message is `"Insufficient memory (case 10)"` or `(case 12)`, and only
+a test that formats the message can prove we match.
 
 **Root cause.** The shim's allocation failures all funnel through
 `crate::alloc::libc_malloc`, which calls libc `malloc` directly. There is no
@@ -4446,8 +4459,9 @@ failure countdown armed only by `fail_nth_allocation_for_tests` (not
 `extern "C"`, not exported from the cdylib; one thread-local read on the
 production path). `capi_alloc_failure_injection.rs` forces both
 previously-unreachable `jpeg_mem_dest` OOM paths — the empty-slot initial
-allocation (`jdatadst.c:271`) and the doubling growth (`:132`) — and asserts
-code 56 **with** `msg_parm.i[0] == 10`, the `ERREXIT1` payload this item
+allocation (`jdatadst.c:285`) and the doubling growth (`:146`) — and asserts
+code 56 **with** `msg_parm.i[0] == 10` for the initial allocation and `== 12`
+for the growth since the 3.2.0 bump, the `ERREXIT1` payload this item
 called unproven; the growth path's `pending_error` was widened to carry the
 parm through the deferred flush. A disarmed-hook control test pins that the
 injection, not the sequence, causes the failures. No C oracle exists for
@@ -4470,7 +4484,7 @@ tall**. A 27-row image therefore contains zero whole iMCU rows, and
 transform outright.
 
 Upstream has no such error path. `trim_right_edge` and `trim_bottom_edge`
-(transupp.c:1570-1592) each open with `if (MCU_cols > 0 && …)` /
+(transupp.c:1576-1598) each open with `if (MCU_cols > 0 && …)` /
 `if (MCU_rows > 0 && …)`: an axis holding less than one whole iMCU is simply
 left untrimmed. Measured against stock `jpegtran -trim` on exactly this input:
 
@@ -4478,7 +4492,7 @@ left untrimmed. Measured against stock `jpegtran -trim` on exactly this input:
 | --- | --- | --- |
 | hflip | 32x27 | width 35 → 32; height not trimmed by this op |
 | vflip | **35x27** | height 27 holds no whole iMCU — guard fires |
-| transpose | 27x35 | transpose never trims (transupp.c:1873) |
+| transpose | 27x35 | transpose never trims (transupp.c:1879) |
 | rot90 | **27x35** | output width comes from source height — guard fires |
 | rot180 | 32x27 | width trims; height guarded |
 | rot270 | 27x32 | output height comes from source width → 32 |
@@ -4708,14 +4722,14 @@ wrote a whole extra plane past the caller's allocation:
 
 **Root cause.** A missing upstream guard, not a novel defect. Upstream
 libjpeg-turbo rejects these frames in `tj3DecompressToYUVPlanes8`
-(`references/libjpeg-turbo/src/turbojpeg.c:2229-2230`):
+(`references/libjpeg-turbo/src/turbojpeg.c:2238-2239`):
 
 ```c
   if (dinfo->num_components > 3)
     THROW("JPEG image must have 3 or fewer components");
 ```
 
-Upstream's `tj3DecompressToYUV8` (`turbojpeg.c:2383`) builds a 3-entry
+Upstream's `tj3DecompressToYUV8` (`turbojpeg.c:2394`) builds a 3-entry
 `dstPlanes[3]`/`strides[3]` and inherits that guard by *delegating* to
 `tj3DecompressToYUVPlanes8`, so upstream needs only one guard site. **This port
 does not delegate** — both entry points call `decompress_to_yuv_planes`
@@ -4843,9 +4857,9 @@ mis-sized one. Criteria 2 and 5 are done.
 **Motivation.** Filed 2026-08-08 while closing P4-125, which ported the
 first-layer defence but left upstream's second layer unported in the root-crate
 plane-size helpers. Upstream defends the YUV plane model twice: `tj3YUVBufSize`
-(`references/libjpeg-turbo/src/turbojpeg.c:1029`, line 1038) fixes
+(`references/libjpeg-turbo/src/turbojpeg.c:1031`, line 1040) fixes
 `nc = (subsamp == TJSAMP_GRAY ? 1 : 3)`, and `tj3YUVPlaneWidth` /
-`tj3YUVPlaneHeight` (`turbojpeg.c:1115`, lines 1124-1125) additionally reject an
+`tj3YUVPlaneHeight` (`turbojpeg.c:1118`, lines 1127-1128) additionally reject an
 out-of-range component with `THROWG("Invalid argument", 0)`:
 
 ```c
@@ -4910,10 +4924,10 @@ reviewable.
 before `decompress_to_yuv_planes`, which resolves all three consequences:
 
 1. `TJPARAM_MAXPIXELS` bounds them, enforced at header time as upstream does
-   (`turbojpeg.c:2219-2222`) rather than left to a decode that may never run.
-2. `align` is validated at function entry (`turbojpeg.c:2395-2397`), so it
+   (`turbojpeg.c:2228-2231`) rather than left to a decode that may never run.
+2. `align` is validated at function entry (`turbojpeg.c:2406-2408`), so it
    outranks the component guard again, matching C's precedence.
-3. `dstPlanes[0..n]` are NULL-checked up front (`turbojpeg.c:2226-2227`), so a
+3. `dstPlanes[0..n]` are NULL-checked up front (`turbojpeg.c:2235-2236`), so a
    rejected call leaves every caller buffer untouched instead of writing planes
    0 and 1 before noticing a NULL plane 2.
 
@@ -4936,7 +4950,7 @@ upstream's `num_components > 3` rejection correctly, but placed it at the only
 point the current structure allows: *after* `decompress_to_yuv_planes` has
 already decoded the whole frame and allocated every plane. Upstream validates
 the same frame from the header, before any decompression
-(`references/libjpeg-turbo/src/turbojpeg.c:2214-2230`):
+(`references/libjpeg-turbo/src/turbojpeg.c:2223-2239`):
 
 ```c
     jpeg_read_header(dinfo, TRUE);          /* header only */
@@ -4960,7 +4974,7 @@ here. Any check that upstream performs between "header parsed" and "decode
 begins" therefore has nowhere to live in this port.
 
 1. **`TJPARAM_MAXPIXELS` is not enforced on these two entry points.** Upstream
-   checks it at `turbojpeg.c:2219-2222`, *before* the component guard. The
+   checks it at `turbojpeg.c:2228-2231`, *before* the component guard. The
    handle stores the value (`src/api/tj3.rs:697-699` maps it into `Limits`, and
    `src/common/types.rs:441` enforces it "before any plane allocation"), but
    that plumbing is bypassed: `Decoder::new` uses `Limits::default`. A caller
@@ -4968,14 +4982,14 @@ begins" therefore has nowhere to live in this port.
    unbounded — the 2,147,483,647-pixel default still applies — but not the
    caller's bound either.
 2. **Error precedence diverges for `align`.** Upstream rejects a bad `align` at
-   function entry (`turbojpeg.c:2395-2397`, `"Invalid argument"`). Ours only
+   function entry (`turbojpeg.c:2406-2408`, `"Invalid argument"`). Ours only
    discovers it inside `pack_yuv_planes` (`yuv.rs:627`), which the P4-125 guard
    now precedes, so `tj3DecompressToYUV8(h, cmyk, .., align = 0)` reports
    `"must have 3 or fewer components"` where C reports `"Invalid argument"`.
    Both return -1, which is why `yuv_four_component_c_parity` cannot see it: it
    compares accept-vs-reject, not message or precedence.
 3. **Partial writes on a NULL plane pointer.** Upstream checks `dstPlanes[1]`
-   and `dstPlanes[2]` up front (`turbojpeg.c:2226-2227`) and writes nothing on
+   and `dstPlanes[2]` up front (`turbojpeg.c:2235-2236`) and writes nothing on
    failure. Ours checks each pointer inside the copy loop (`yuv.rs:677`), so a
    NULL `dstPlanes[2]` returns -1 only after planes 0 and 1 have been written
    into caller memory.
@@ -5020,7 +5034,7 @@ The new matrix uses 100 deliberately.
 **The defect.** `crates/libjpeg-turbo-rs-capi/src/bufsize.rs` padded with
 `pad_up(width, mcuw)` — the MCU width in *pixels* (8/16/32) — where C pads with
 `PAD(width, tjMCUWidth[subsamp] / 8)` — the horizontal subsampling ratio
-(1/2/2/4) (`references/libjpeg-turbo/src/turbojpeg.c:1127`, and :1150 for
+(1/2/2/4) (`references/libjpeg-turbo/src/turbojpeg.c:1130`, and :1164 for
 height). That is 8x too coarse, so every plane whose dimension was not already
 MCU-aligned came back over-sized: `tj3YUVPlaneWidth(0, 100, TJSAMP_411)`
 returned 128 where C returns 100, and `TJSAMP_444` returned 104 where C returns
@@ -5118,7 +5132,7 @@ prevent, and it undermines any claim that the shipped surface is audited.
 
 **Status (2026-08-09): closed.** Landed in #486; `crates/libjpeg-turbo-rs-capi/build.rs` now routes the 16 `jpeg_capi_test_*` accessors to a `LIBJPEGTURBORS_PRIVATE_1.0` node via an exact-name list, and `tests/soname.rs` asserts no `jpeg_capi_test_*` symbol carries `LIBJPEG_8.0`.
 
-## P4-130. C-Parity Oracle Is Pinned to 3.1.4.1; Upstream Stable Is 3.2.0 — **PARTIAL: every oracle-provisioning job is now pinned, checked and measured; the legs still on one release, the submodule bump and the four filed gaps remain**
+## P4-130. C-Parity Oracle Is Pinned to 3.1.4.1; Upstream Stable Is 3.2.0 — **PARTIAL: every oracle-provisioning job is pinned, checked and measured and the submodule is at 3.2.0; two jobs still on one release and the four filed gaps remain**
 
 **GitHub:** [#461](https://github.com/developer0hye/libjpeg-turbo-rs/issues/461) — under the [#470](https://github.com/developer0hye/libjpeg-turbo-rs/issues/470) umbrella.
 
@@ -5140,12 +5154,13 @@ release notes):
 
 - **Per-instance SIMD dispatch replaces thread-local storage** (beta1 note 2):
   upstream explicitly "eliminat[ed] the need for thread-local storage in the
-  libjpeg API library." Our shim's private state is still TLS-keyed — see
-  **[P4-132](#p4-132-classic-c-abi-per-cinfo-state-is-thread-affine-p4-16-option-a--open)**.
+  libjpeg API library." Our shim's private state was TLS-keyed until
+  2026-09-08 — see
+  **[P4-132](#p4-132-classic-c-abi-per-cinfo-state-is-thread-affine-p4-16-option-a--closed-2026-09-08)**.
   Upstream moving off TLS weakens the "upstream is single-threaded too" framing.
 - **RISC-V Vector (RVV) SIMD** (beta1 note 6): +149-246% compress, +48-180%
   decompress vs 3.1.x on RVV hardware. See
-  **[P4-134](#p4-134-no-risc-v-rvv-simd-backend--upstream-32-ships-one--open)**;
+  **[P4-134](#p4-134-no-risc-v-rvv-simd-backend--upstream-32-ships-one--partial-measured-under-emulation-only-hardware-measurement-outstanding)**;
   it also moves the goalposts for **[P4-60](#p4-60-scalar-kernels-are-25x-slower-than-cs-scalar-kernels--open)**,
   whose riscv64 measurement assumed *neither* side had SIMD. That assumption
   expires with 3.2.
@@ -5203,9 +5218,9 @@ measured was whatever homebrew shipped that week.
 
 So the rule moved off the list of workflow files and onto the **job**.
 `tests/oracle_version_pins.rs` enumerates every job in `.github/workflows`
-(45 today, in nine files; the enumeration is checked against a real YAML
+(46 today, in nine files; the enumeration is checked against a real YAML
 parser, name for name, whenever a job is added — 42 when this rule landed, 45
-once the cross-arch pairs below joined) and holds each one that provisions a C
+once the cross-arch pairs below joined, 46 with the corpus twin) and holds each one that provisions a C
 libjpeg-turbo to three things:
 
 - **pinned** — the install names the release it installs. Upstream's
@@ -5259,9 +5274,10 @@ wrote it. Second, the two v8 source builds — `/tmp/ljt8/prefix` from the
 submodule and `/tmp/ljt320v8/prefix` from the 3.2.0 clone — now assert their
 own releases, which is also what makes a submodule bump come through a workflow
 line rather than re-baselining the classic-ABI trace oracles silently. Verified
-by removing each check in turn: dropping the 3.1.90 assertion turns the four
-steps that select that prefix red, dropping `test-cross-encode`'s job-level
-prefix turns its `cargo test` step red as a macOS lookup-order step, and
+by removing each check in turn: dropping the submodule-release assertion
+(3.1.90 at the time) turns the four steps that select that prefix red,
+dropping `test-cross-encode`'s job-level prefix turns its `cargo test` step
+red as a macOS lookup-order step, and
 pointing one `test-integration` step at `/opt/homebrew` turns exactly that step
 red. The step parser had the same bug in miniature and is pinned against it: it
 read the step indent off the first `- ` line in the job, which in a matrix job
@@ -5546,10 +5562,10 @@ it.
 
 *The oracle the write-up missed.* Writing the manifest surfaced that this
 repository was **already running two upstream versions, undocumented**:
-`references/libjpeg-turbo` is pinned at **3.1.90 (3.2 beta1)**, not 3.1.4.1, so
+`references/libjpeg-turbo` was pinned at **3.1.90 (3.2 beta1)**, not 3.1.4.1, so
 the classic-ABI trace oracles built from it (`/tmp/ljt8/prefix`, `WITH_JPEG8=1`)
-and every `j*.c:NNN` citation in this repository already quote the 3.2 line
-while the tool oracles quote 3.1.4.1. `docs/oracle_versions.tsv` records the
+and every `j*.c:NNN` citation in this repository already quoted the 3.2 line
+while the tool oracles quoted 3.1.4.1. `docs/oracle_versions.tsv` records the
 split and `tests/oracle_version_pins.rs` cross-checks that row against the
 submodule's own `CMakeLists.txt`, so it cannot drift again.
 
@@ -5578,8 +5594,8 @@ was filed with:
 
 | # | 3.2 change | Disposition |
 | --- | --- | --- |
-| beta1-2 | Per-instance SIMD dispatch replaces thread-local storage | **Tracked — [P4-132](#p4-132-classic-c-abi-per-cinfo-state-is-thread-affine-p4-16-option-a--open).** Upstream removing TLS from its libjpeg API is that item's central evidence. |
-| beta1-6 | RISC-V Vector (RVV) SIMD | **Tracked — [P4-134](#p4-134-no-risc-v-rvv-simd-backend--upstream-32-ships-one--open)**, and it expires [P4-60](#p4-60-scalar-kernels-are-25x-slower-than-cs-scalar-kernels--open)'s premise that riscv64 was scalar-vs-scalar. |
+| beta1-2 | Per-instance SIMD dispatch replaces thread-local storage | **Closed 2026-09-08 — [P4-132](#p4-132-classic-c-abi-per-cinfo-state-is-thread-affine-p4-16-option-a--closed-2026-09-08).** Upstream removing TLS from its libjpeg API is that item's central evidence. |
+| beta1-6 | RISC-V Vector (RVV) SIMD | **Tracked — [P4-134](#p4-134-no-risc-v-rvv-simd-backend--upstream-32-ships-one--partial-measured-under-emulation-only-hardware-measurement-outstanding)**, and it expires [P4-60](#p4-60-scalar-kernels-are-25x-slower-than-cs-scalar-kernels--open)'s premise that riscv64 was scalar-vs-scalar. |
 | beta1-8 | 8-bit lossy JPEG decompressed to 12-bit output | **New — [P4-171](#p4-171-8-bit-lossy-jpeg-cannot-be-decompressed-to-12-bit-output-32-beta1-note-8--open).** Measured: `src/api/precision.rs:865` refuses any stream whose precision is not 12, so we reject where 3.2 decodes. |
 | beta1-10 | TurboJPEG: `TJCS_DEFAULT`, repeated `tj3GetICCProfile`, ICC from a compression instance, 4:1:0 and 2:4 subsampling | **Split.** 4:1:0 and 2:4 are implemented (`TJSAMP_410`/`TJSAMP_24`) and covered by the subsampling matrices; the ICC and `TJCS_DEFAULT` additions are **new — [P4-172](#p4-172-turbojpeg-32-icc-and-tjcs_default-additions-are-unimplemented-32-beta1-note-10--open)**. |
 | beta1-4, beta1-12, 3.2.0-4 | jpegtran `-crop` expansion honouring `-trim`/`-perfect`; new `-roll`; the `-crop`/`-trim` overflow fix and its flatten/reflect error | **New — [P4-173](#p4-173-jpegtran-32-crop-expansion--roll-and-the-flattenreflect-refusal-are-unported--open).** These are `transupp.c` semantics our transform API mirrors, so "it is app code" does not exempt us. |
@@ -5590,6 +5606,11 @@ was filed with:
 | beta1-7 | TurboJPEG Java API moved to its own repository | **Non-goal.** No Java binding is in scope here. |
 | beta1-11 | `-nooverwrite` in cjpeg/djpeg/jpegtran | **Non-goal.** Pure CLI file handling in upstream's application code; we ship a library and link *stock* tools against it, so the option is upstream's to implement and ours to inherit. |
 | 3.2.0-1 | Arm64EC Windows build regression fixed | **Non-goal.** An upstream build-system fix with no behavioural surface. |
+| unlisted — `abf0f592`, `25b62127` | TurboJPEG rejects `pitch < width × pixel size` on every pitch-taking entry point and `stride < plane width` on every planar one | **New — [P4-184](#p4-184-turbojpeg-320-rejects-a-pitch-narrower-than-a-row-and-a-stride-narrower-than-a-plane-the-1216-bit-and-planar-entry-points-here-do-not--open).** Not in the release notes; found in the commit log between the tags during the submodule bump (2026-09-07). The 8-bit packed paths already reject a narrow pitch, in their own words; the 12/16-bit paths check only `pitch < 0` and no planar stride is checked at all. |
+| unlisted — `94d5ff43`, `8ed15736`, `94201557`, `ab4c3a8f` | `tj3JPEGBufSize` / `TJBUFSIZE` / `tj3YUVBufSize` / `tj3*YUV8` integer overflow with large dimensions | **Met.** The shim computes these with checked arithmetic (`crates/libjpeg-turbo-rs-capi/src/bufsize.rs`), and 3.2.0's `tjunittest.c` `overflowTest` — the submodule's copy since the bump, compiled against the shim by `tjunittest_link` — passes with its new 65536×65536 and 1 Gi cases. |
+| unlisted — `4453e227` | `jdmaster.c` rejects an output data precision that differs from the JPEG's, except 8-bit lossy decoded to 12-bit | **Tracked — [P4-171](#p4-171-8-bit-lossy-jpeg-cannot-be-decompressed-to-12-bit-output-32-beta1-note-8--open).** The guard is the other half of beta1 note 8: it names the one mismatch upstream allows, which is the one P4-171 records the shim refusing. |
+| unlisted — `df05c3ca`, `6defa8c3` | `jdatadst.c` and `jdatadst-tj.c` `JERR_OUT_OF_MEMORY` case 10 → 12 for the growth failure; new case 13 for a doubling that would overflow `size_t` | **Closed with the bump for the classic destination** — see the sixth milestone: `jpeg_mem_dest`'s growth arm mirrors both numbers, case 12 test first and case 13 unreachable to any injection. The `jdatadst-tj.c` half is **not** mirrored: the TurboJPEG compress entry points report an allocation failure as `"tj3Compress8: out-of-memory"` and never carried a case number, before or after the bump — a pre-existing message divergence filed as [P4-185](#p4-185-turbojpeg-memory-destination-allocation-failure-reports-a-bespoke-string-instead-of-libjpegs-jerr_out_of_memory-message--open). |
+| unlisted — `96c5446c`, `ed00e0f4`, `d49b16ad`, `01d607bd` | CMake `CPU_TYPE` from the generator platform; libspng drops libm; `indexedcolortest.in`'s md5cmp path; Windows CI | **Non-goal.** Build-system and test-script changes inside the submodule. `c_indexedcolortest.rs` reads the `.in` file's cases, not its md5cmp path, and passes on the new copy. |
 
 *Criterion 1, the cross-arch backends — and pairing as a property of the job
 (2026-08-18).* The three legs in `cross-arch.yml` are now paired:
@@ -5619,7 +5640,7 @@ records once: a workflow that grows a new oracle leg is covered by nothing
 until someone remembers to add it to a constant, and "someone remembers" is
 what let thirteen pins sit at a superseded release for two months.
 `every_oracle_installing_job_is_paired_or_on_the_recorded_remainder` reads all
-45 jobs in the nine workflows and requires each one that installs a C
+47 jobs in the nine workflows and requires each one that installs a C
 libjpeg-turbo to be a baseline with a `-current-oracle` twin, that twin, or a
 row in `UNPAIRED_ORACLE_JOBS`. Written first and red on the unmodified tree,
 naming exactly the three cross-arch jobs.
@@ -5775,10 +5796,209 @@ which that item was holding open: comparing two legs' commands is impossible
 while a folded `>` block reads as one command per physical line, because every
 argument past the first drops out of the comparison.
 
+*Criterion 1, the corpus leg (2026-09-07).* `test-corpus` is the widest
+**real-world** differential surface here — 9,216 files generated by C `cjpeg`
+across a 384-variant option matrix over 24 sources, plus 336 strict-parity fuzz
+seeds and 188 committed fixtures, 9,740 in all, every one of them decoded,
+re-encoded and transformed against `djpeg`/`cjpeg`/`jpegtran` — and it answered
+at 3.1.4.1 alone.
+`test-corpus-current-oracle` ("Corpus Test (C parity, oracle 3.2.0)") runs the
+same two commands on the same runner against the official 3.2.0 deb. It is
+*cheaper* than its baseline rather than dearer, which is why this pair landed
+before the other two on the remainder: the baseline builds its oracle from
+source at `/usr/local`, so pairing it costs a package install rather than a
+second build. (apt's own libjpeg-turbo serves neither leg: it ships 2.1.x,
+which is neither of the two releases the pair names.)
+
+**Pairing it was not a workflow edit, because the comparison could not see what
+this leg measures.** `test-corpus` runs no `cargo test`: it measures with
+`cargo run --release --example generate_corpus` and
+`cargo run --release --example corpus_test`. The pairing gate read `cargo test`
+invocations only, so the pair would have fallen into the whole-command branch
+with an **empty** baseline set — which that branch refuses ("its twin is being
+compared against nothing") rather than passes. That is the "an echo is not a
+run" finding one subcommand over: what the scanner cannot see, the gate never
+asks about. `measurement_commands_in` now keeps every invocation whose
+subcommand can reach an oracle, sharing the deny list with the `measured` rule
+so the two cannot disagree about what a step does, and
+`runs_the_root_integration_matrix` requires the `test` subcommand explicitly —
+a bare `cargo run` carries no argument that would otherwise give it away, and
+crediting one would vouch for every root oracle suite over a pair that runs no
+test at all.
+
+**The harness had the #569 lookup bug, in both examples.** `corpus_test.rs` and
+`generate_corpus.rs` each carried a private `c_tool_path` that read
+`/opt/homebrew/bin` and then PATH and never looked at `LIBJPEG_TURBO_PREFIX` —
+the residual private lookup the P4-116 sweep left behind in
+`capi_classic_lifecycle_pathological`, where the review of #569 caught a step
+named "oracle 3.2.0" comparing against homebrew's 3.1.4.1. A twin selecting its
+oracle by prefix would have been ignored by the harness it labels. Both now
+include `tests/helpers/oracle_prefix.rs`, the single implementation the
+differential suites resolve through, whose two branches `helpers_smoke.rs`
+already asserts; `helpers::c_tool_path` is a re-export of it rather than a
+second copy. The twin therefore puts **nothing on PATH** and names its oracle
+with the prefix alone: a harness that stopped reading the variable would find no
+`djpeg` at all, every row would be a skip, and `corpus_test` exits non-zero on a
+single skip. The check is a mechanism, not a comment.
+
+Measured 2026-08-25 on macOS aarch64 against a locally built 3.2.0 prefix,
+running the two commands the leg runs: the corpus regenerates at **9,740 files** (9,216
+generated across the 384-variant matrix with **0 cjpeg failures**, 336
+strict-parity fuzz seeds, 188 fixtures) and the comparison is
+**84,972 rows, 0 fail, 0 crash, 0 skip** in 31 minutes — decode 9,737 pass /
+2 expected-reject / 1 known-mismatch, encode 9,403 / 1 / 0, transform 65,758 /
+56 / 14. The same two commands with the variable unset
+(homebrew 3.1.4.1, the release the baseline leg measures) regenerate the
+corpus — again 9,216 of 9,216 — and produce **tallies identical to the
+3.2.0 leg's, line for line, exclusions included**. So the corpus is already
+at parity with 3.2.0 and this leg is what keeps that true; the pair adds
+coverage rather than replacing it.
+
+*The generator could shrink the corpus silently, and a review found it.*
+`generate_corpus` printed its `failed` counter and carried on; the only check on
+the result was a bucket **floor** of 9,000 against a matrix of 384 x 24 = 9,216,
+so up to 216 variants could fail with the corpus still accepted. Harmless while
+one release generated it — and a hole the day a second one does, because a
+variant *this release's* `cjpeg` refuses is precisely the 3.2 delta the leg
+exists to surface, and dropping it shrinks what the comparison runs on while the
+leg stays green. `assert_every_variant_generated` makes any failure fatal.
+Validated end to end rather than by its unit test alone, which matters here
+because that test is in an example's `#[cfg(test)]` module and **no workflow
+runs those** (filed as
+[P4-183](#p4-183-example-target-unit-tests-never-run-in-ci-because-no-workflow-selects-that-target-kind--open)):
+a stand-in `cjpeg` under `LIBJPEG_TURBO_PREFIX` refusing one variant label lost
+46 of 8,832 in a scratch run — well inside the slack the floor leaves — and the
+run exits 1 naming the count.
+
+The gates were validated by mutation rather than by passing, in ten
+directions: echoing the twin's corpus run, moving it to another runner, pointing
+it at 3.1.4.1, deleting its version assertion, deleting its oracle prefix,
+deleting its corpus-generation step, leaving the now-paired row in
+`UNPAIRED_ORACLE_JOBS`, giving `corpus_test.rs` a private lookup back, writing
+the twin's corpus run as `… || true`, and putting `continue-on-error: true` on
+that step. Each turns exactly the intended gate red, and the unmutated tree is
+56 green (52 when first measured; P4-175's closure added two the day this
+landed, and the review round below two more).
+
+*The review found a twin that cannot fail satisfied the pair.* `cmd || true`
+normalised to `cmd`, because the argument scan stops where the shell takes the
+line back and `||` is where it does — so a twin written that way compared
+equal to a baseline that fails on the same command while never being able to
+go red itself. The step scanner already recorded `if:` and
+`continue-on-error:` for the complete-inventory gate, and the pairing
+comparison never read the flag. Pre-existing in kind for every `cargo test`
+pair, and newly load-bearing here: this is the first pair whose whole
+measurement is two `cargo run` steps. `failure_is_swallowed` now drops an
+invocation whose command list reaches a `||` before a `;` or a closing
+keyword (`&&` and `|` do not close the swallow: `a && b || c` runs `c` when
+`a` fails), and `test_runs_in` credits no step carrying an execution
+override. Both pinned in both directions — `if !` and a next-line `||` are
+still the measurement. The `if`-conditional shape without `exit 1` stays with
+P4-177's criterion 5. The same round gave the **baseline** leg
+`LIBJPEG_TURBO_PREFIX: /usr/local`: it had resolved by lookup order while its
+twin resolved exclusively, so a runner image shipping its own `djpeg` ahead of
+`/usr/local/bin` would have made the pair differ in PATH and blamed the
+difference on a release. Also corrected on the way: the corpus is generated
+with none of the lossless or 12-bit options the workflow comment claimed, so
+apt's 2.1.x is excluded for being neither release the pair names, not for
+lacking them; and `run_cjpeg` now requires a non-empty output file, since the
+every-output gate counts what it returns and an exit status alone does not say
+a file was written.
+
+*Criterion 1, the C Interop leg (2026-09-07).* `ci.yml`'s `test-cross-encode`
+is the one job that runs the whole root `cargo test --tests` matrix on macOS
+aarch64 for every pull request — a suite that had otherwise been measured
+against 3.2.0 only weekly, through the four selected matrices of
+`full-c-parity.yml`'s aarch64 legs (the Linux NEON backend has had its own
+paired `cross-arch.yml` leg since 2026-08-18; macOS is a different toolchain
+and libc on the same instruction set). It stayed on the unpaired inventory for cost:
+upstream ships no macOS package, so its twin is a second source build on every
+pull request. `test-cross-encode-current-oracle`
+(`C Interop (macos-latest, oracle 3.2.0)`) now builds 3.2.0 from source at
+`/tmp/ljt320/prefix`, asserts the release at that prefix, selects it through
+`LIBJPEG_TURBO_PREFIX` alone — on macOS a PATH entry selects nothing, the
+#569 rule — and runs the identical unfiltered command on the identical runner.
+The cost is accepted rather than argued away: the build is a NEON-intrinsics
+tree with no NASM step: 56 s of build ahead of 4 min 26 s of suite on the
+last green `main` run (34094560659). Its
+row leaves `UNPAIRED_ORACLE_JOBS`, which the gate reads both ways — written red
+first by deleting the row, green by adding the job. Measured on macOS aarch64
+against a local 3.2.0 source build, the twin's exact command:
+**223 suite sections, 2409 passed, 0 failed, 4 ignored** (`cargo test --tests
+--no-fail-fast`, tallied per section). The baseline's command against a local 3.1.4.1 source build,
+for the pair: **223 sections, 2409 passed, 0 failed, 4 ignored** — identical
+tallies, so the NEON backend's root matrix was already at parity with 3.2.0
+and the twin is what keeps that true.
+
+The pairing's first mutation found a hole in the pair comparison itself. Both
+legs say `runs-on: ${{ matrix.os }}`, and `runs_on_in` read that verbatim — so
+a twin whose matrix said `ubuntu-latest` passed the same-machine assertion,
+the one whose message says a divergence between two runners is not evidence
+about the oracle release. This is the first pair declared through a matrix;
+the seven before it name literal runners, which is why the verbatim read had
+held. `runs_on_in` now resolves a `matrix.<key>` expression through the job's
+own `strategy:` block — `include:` entries, flow lists and block lists, with
+`exclude:` entries skipped — to the set of runners the leg fans out over, and
+reads an expression the block never resolves as unreadable, which the pair
+test rejects rather than comparing equal to another unreadable leg. Pinned by
+`a_matrix_declared_runner_is_compared_through_the_matrix`, red first; the
+runner mutation now fails the gate. The review round widened the read to the
+spellings that would have fallen back to the verbatim comparison — a quoted
+expression, a trailing comment on either form, quoted flow items, a block
+sequence at its key's own indent, and the object form (`group:` / `labels:`),
+which reads as unreadable rather than as an empty runner — and moved the
+same-machine check into `shared_runner_of`, so the refusal of an unreadable
+baseline is exercised by `an_unreadable_runner_is_refused_rather_than_matched`
+rather than asserted around a path no workflow reaches. `exclude:` entries are
+over-approximated on purpose (they name combinations, not runners) and the
+test says so with a fixture that would distinguish subtraction. A flow list
+wrapped across lines is the one spelling left unmodelled, filed under P4-177.
+`oracle_version_pins` stands at **58**.
+
+**Sixth milestone (2026-09-07) — the submodule bump.** `references/libjpeg-turbo`
+moved from 3.1.90 (3.2 beta1) to the 3.2.0 tag: 23 upstream commits over 17
+files, of which the cited sources are `jdapistd.c`, `jdatadst.c`,
+`jdatadst-tj.c`, `jdmaster.c`, `transupp.c`, `turbojpeg.c`, `turbojpeg-mp.c`,
+`tjunittest.c` and `CMakeLists.txt`. Every `file:NNN` / `file:NNN-MMM` citation in the
+repository was remapped from the tag's `-U0` diff — 207 citations in 38 files:
+186 `file:NNN` tokens, every one re-checked by a script carrying the two tags'
+hunk map, and 21 shorthand `` `:NNN` `` tokens the script cannot attribute to a
+file, each remapped by hand and read against the 3.2.0 tree — with the anchors
+that were already off at 3.1.90 moved to the line they meant rather than
+shifted. The manifest's `submodule`
+row now says 3.2.0; `the_submodule_row_matches_the_checked_out_submodule` was
+red the moment the submodule moved and green once the row followed, which is
+the whole point of that cross-check. `ci.yml`'s `/tmp/ljt8` build asserts the
+new release, and its `-current-oracle` twin keeps building the tagged clone
+beside it: the trace pair names one release today and two again the week
+upstream ships, and the two rows stay separate because they move for different
+reasons (`docs/oracle_versions.tsv` says which).
+
+The bump surfaced one behaviour delta the 3.2.0 tool legs could not see,
+because no C oracle can be made to fail `malloc` on cue: 3.2.0 renumbered
+`empty_mem_output_buffer`'s allocation failure from `JERR_OUT_OF_MEMORY` case
+10 to case 12 (`jdatadst.c:146`) and added case 13 for a doubling that would
+overflow `size_t` (`jdatadst.c:140-141`). The shim mirrored beta1's case 10 on
+both arms. `capi_alloc_failure_injection` was moved to 12 first (red), then the
+shim (green); the overflow arm now carries 13, untested because no injection
+can stage a buffer already past `SIZE_MAX / 2`. `jdapistd.c:203`'s
+`raw_data_out` condition — the one delta the triage had already tied to P4-103
+— is now in the cited tree, so that entry's acceptance line cites the checkout
+rather than a release ahead of it. Measured on macOS aarch64 with the
+submodule built `WITH_JPEG8=1` at `/tmp/ljt8/prefix` (asserting `version 3.2.0`
+and `JPEG_LIB_VERSION 80`), the C-ABI leg's exact command — `cargo test -p
+libjpeg-turbo-rs-capi --tests --features png --no-fail-fast` — is **77
+sections, 335 passed, 0 failed, 0 ignored, 0 SKIP**, including the suites that
+compile the submodule's own sources against the shim (`tjunittest_link`,
+`abi_offsets`, `capi_stock_tool_link`); the root matrix at the 3.2.0 tool
+oracle, `cargo test --tests --no-fail-fast`, is **223 sections, 2410 passed,
+0 failed, 4 ignored**, the same four `--include-ignored` timing assertions as
+before. `oracle_version_pins` stands at **58**.
+
 **What remains.**
 
 1. The four filed gaps (P4-171..P4-174) are triaged, not fixed.
-2. **Four jobs still measure one release**, and the inventory now lives in
+2. **Two jobs still measure one release**, and the inventory now lives in
    `UNPAIRED_ORACLE_JOBS` in `tests/oracle_version_pins.rs`, where a gate reads
    it, with the reason on each row:
    - `fuzz-smoke.yml`'s `fuzz` — the three differential fuzz targets
@@ -5786,11 +6006,6 @@ argument past the first drops out of the comparison.
      matrix entries taking the 3.1.4.1 deb, and the reproduction instructions
      the failure path prints name that release too, so pairing has to reach
      those as well;
-   - `ci.yml`'s `test-corpus` — a 3.1.4.1 source build at `/usr/local`;
-   - `ci.yml`'s `test-cross-encode` — a 3.1.4.1 source build at
-     `/tmp/ljt3141/prefix`, on the only macOS leg that runs the whole root
-     suite; upstream ships no macOS package, so its twin is a *second* source
-     build on every pull request;
    - `ci.yml`'s `mutants-in-diff` — a mutation run rather than a parity
      measurement, and `continue-on-error` besides. Recorded as a decision, not
      a backlog entry: pairing it would double a job's cost to answer the same
@@ -5799,18 +6014,77 @@ argument past the first drops out of the comparison.
    Every one of them is **pinned, checked and measured** — the release each
    installs is named in `docs/oracle_versions.tsv`, asserted at the path it was
    installed to, and selected for the tests that read it. What none has is a
-   *second* leg, so a 3.2.0 divergence in the differential fuzz targets or in
-   the corpus comparison is still unmeasured. Pairing the remaining three is a
+   *second* leg, so a 3.2.0 divergence in the differential fuzz targets is still
+   unmeasured. Pairing the fuzz leg is a
    question of runner cost rather than of mechanism.
-3. `references/libjpeg-turbo` stays at 3.1.90. Bumping it to 3.2.0 moves every
-   `j*.c:NNN` citation in this repository and re-baselines the classic-ABI
-   trace oracles at the same time, which is its own change with its own
-   drift audit — not a line in this one.
-4. Retiring the 3.1.4.1 leg is deliberately **not** scheduled: it is the
+3. Retiring the 3.1.4.1 leg is deliberately **not** scheduled: it is the
    behaviour-regression half of the pair, and it retires only when its
    expectations are known to hold on the newer leg.
 
-## P4-131. No Native Binary Distribution — Releases Ship crates.io and npm Only — **PARTIAL: Unix bundles ship and are gated; Windows, signing/SBOM and the deb/rpm decision remain**
+## P4-180. The Differential Fuzz Targets Resolve Their C Oracle by a Fixed Path List, and Skip the Comparison When It Misses — **OPEN**
+
+**GitHub:** [#579](https://github.com/developer0hye/libjpeg-turbo-rs/issues/579) — prerequisite for
+[P4-130](#p4-130-c-parity-oracle-is-pinned-to-3141-upstream-stable-is-320--partial-every-oracle-provisioning-job-is-pinned-checked-and-measured-and-the-submodule-is-at-320-two-jobs-still-on-one-release-and-the-four-filed-gaps-remain)'s
+remaining pairing of `fuzz-smoke.yml`.
+
+**Motivation.** Filed 2026-08-25 while pairing `ci.yml`'s `test-corpus` with a
+3.2.0 leg. All three differential fuzz targets resolve their oracle from a
+hard-coded list — `/opt/homebrew/bin`, `/usr/local/bin`,
+`/opt/libjpeg-turbo/bin`, `/usr/bin` — and never read
+`LIBJPEG_TURBO_PREFIX`: `fuzz/fuzz_targets/fuzz_decode_diff_c.rs:63`,
+`fuzz_encode_diff_c.rs:93,98`, `fuzz_transform_diff_c.rs:75,80`. The encode
+target alone reads a differently named `LIBJPEG_TURBO_BIN` first
+(`fuzz_encode_diff_c.rs:73`) and *falls back* to the list when the tool is not
+under it, so it is selectable but not exclusively — criterion 1 there is a
+rename plus exclusivity rather than a mechanism from scratch. It is the same
+four directories as the private `find_c_tool` the review of #569 found in
+`capi_classic_lifecycle_pathological` — a survivor of the P4-116 sweep, which
+read `/usr/bin` before `/opt/libjpeg-turbo/bin` rather than after — and the same
+prefix-blind shape both corpus examples carried, in their shorter
+`/opt/homebrew/bin`-then-PATH form, until this pairing moved them onto
+`tests/helpers/oracle_prefix.rs`.
+
+Two consequences. **The oracle cannot be selected**, so the leg cannot be
+paired: the 3.2.0 deb installs at `/opt/libjpeg-turbo`, which this list reads
+*after* `/usr/local/bin`, and a second matrix dimension would be a leg labelled
+3.2.0 comparing against whatever install sorts first. **And a missing oracle
+skips the comparison silently** — every target does
+`let Some(djpeg) = djpeg_path() else { return; };`, so with no C tool
+discoverable a differential target degrades to fuzzing our decoder alone and
+reports success. `corpus_test` exits non-zero on a single skip row and the capi
+oracle suites panic rather than fall back; this one returns.
+
+`examples/diag_4pixel_chroma_diff.rs` and
+`examples/diag_4pixel_chroma_transform_diff.rs` carry the same shape. They are
+developer diagnostics rather than gates, recorded here so the sweep is complete
+rather than as part of the failure.
+
+**Acceptance criteria.**
+
+1. All three differential fuzz targets resolve `djpeg`/`cjpeg`/`jpegtran` by the
+   rule in `tests/helpers/oracle_prefix.rs`: an explicit `LIBJPEG_TURBO_PREFIX`
+   is **exclusive**, and lookup order applies only when it is unset. The fuzz
+   crate is a separate cargo package, so the *mechanism* may have to differ from
+   the corpus examples' `#[path]` include; the rule may not.
+2. A missing oracle is an error rather than a silent `return`, at least under
+   `CI`, matching `helpers::require_c_tool!`.
+3. `the_corpus_harness_resolves_its_oracle_through_the_shared_rule` in
+   `tests/oracle_version_pins.rs` enumerates every oracle-consuming harness
+   rather than naming two files by hand, so a fourth copy of the lookup fails
+   the gate that exists to catch the third.
+4. `fuzz-smoke.yml` names the prefix for the three differential targets, and the
+   reproduction instructions its failure path prints name the release the target
+   ran against.
+
+**Why deferred.** It is not what the corpus pairing changes, and it is a
+prerequisite for a *different* leg's pairing rather than a defect in this one:
+mixing a fuzz-harness change into a corpus leg would have put two unrelated
+mechanisms behind one review. Nothing regresses today — `fuzz-smoke.yml`
+installs the 3.1.4.1 deb at `/opt/libjpeg-turbo` and the runner carries no other
+libjpeg-turbo, so the list resolves to the intended install by absence rather
+than by choice.
+
+## P4-131. No Native Binary Distribution — Releases Ship crates.io and npm Only — **PARTIAL: Unix and Windows bundles ship, gated and attested; the deb/rpm decision remains**
 
 **GitHub:** [#462](https://github.com/developer0hye/libjpeg-turbo-rs/issues/462) — under the [#470](https://github.com/developer0hye/libjpeg-turbo-rs/issues/470) umbrella.
 
@@ -5857,6 +6131,13 @@ binary of a library that is not yet a general drop-in increases the blast
 radius of the gaps rather than reducing it. Sequenced in Stage C, after the
 export surface (P4-129) and the shipped-artifact test path (P4-124) are settled,
 since both change what a release artifact should contain.
+
+**Status (2026-09-07): PARTIAL** — criteria 1, 2, 3 and 4 are met, criterion 5
+remains. The 2026-09-07 (Windows) and 2026-09-07 (attestation) milestones are
+recorded after the 2026-08-18 one below.
+
+**Status (2026-09-07, superseded above): PARTIAL** — criteria 2, 3 and 4 are
+met, criterion 1 is met for Unix and open for Windows, criterion 5 remains.
 
 **Status (2026-08-18): PARTIAL** — criteria 2 and 3 are met, criterion 1 is met
 for Unix and open for Windows, criteria 4 and 5 remain.
@@ -5906,30 +6187,27 @@ its own, so every install gets them and not only the archive.
 
 *Where it runs.* `capi-abi-checks` in `ci.yml` gained a step naming
 `--test install_layout --test release_bundle`, so the gate runs on
-`ubuntu-latest` and `macos-latest` (and skips with a reason on
-`windows-latest`) for every pull request. That step is also the first CI
-coverage `install_layout` has ever had: it has existed since P2-8 and no
-workflow named it, so the layout gate that closed P2-8 ran on no pull request —
-the same "a suite nothing names never runs" shape P4-81 and P4-61 each hit
-before. The Linux release legs additionally install `patchelf` and fail if the
-packaging log lacks `P4-81: relinked`, so neither of `install_capi.sh`'s two
-warn-and-continue degradations can ship silently in a published bundle.
+`ubuntu-latest` and `macos-latest` (and, until the 2026-09-07 Windows
+milestone below, skipped with a reason on `windows-latest`) for every pull
+request. That step is also the first CI coverage `install_layout` has ever
+had: it has existed since P2-8 and no workflow named it, so the layout gate
+that closed P2-8 ran on no pull request — the same "a suite nothing names
+never runs" shape P4-81 and P4-61 each hit before. The Linux release legs
+additionally install `patchelf` and fail if the packaging log lacks
+`P4-81: relinked`, so neither of `install_capi.sh`'s two warn-and-continue
+degradations can ship silently in a published bundle.
 
-*What remains.*
+*What remained after 2026-08-18* (item 2 closed on 2026-09-07, below; the
+rest stand).
 
-1. **Windows (criterion 1).** No DLL or import library. `install_capi.sh` is
-   Linux/macOS-only and the packaging script refuses to run elsewhere rather
-   than emit an unverified shape. Windows needs its own layout decision — no
-   SONAME chain, an import library, a toolchain-dependent `.pc` convention —
-   so it is separate work, not another matrix row.
-2. **Signing and SBOM (criterion 4).** Still a recorded gap, but the recorded
-   *reason* changed: "nothing to sign yet" is spent. A checksum published
-   beside the file it covers proves integrity, not origin. Closing it means
-   Sigstore provenance (`actions/attest-build-provenance`) or detached
-   signatures, and neither is observable from a pull request — it needs a
-   dispatch run and then a real tag to verify, which is why it was not wired
-   into the release path blind. `docs/RELEASE_ARTIFACTS.md` states the residual
-   risk to a downloader.
+1. **Windows (criterion 1).** *Closed 2026-09-07 — see the second milestone
+   below.* As recorded on 2026-08-18: no DLL or import library, the scripts
+   were Linux/macOS-only, and Windows needed its own layout decision — no
+   SONAME chain, an import library, a toolchain-dependent `.pc` convention.
+2. **Signing and SBOM (criterion 4).** *Closed 2026-09-07 — see the milestone
+   below.* As recorded on 2026-08-18: "nothing to sign yet" was spent, a
+   checksum beside the file proves integrity not origin, and the fix was not
+   observable from a pull request — it needed a dispatch run.
 3. **deb/rpm (criterion 5).** Unchanged and deliberately so: `ABI_COMPATIBILITY.md`
    already records it as a maintainer decision rather than a technical one, and
    an unattended session is not the place to make it. The tarballs do remove
@@ -5952,7 +6230,271 @@ warn-and-continue degradations can ship silently in a published bundle.
    not. Fixing it means putting the release tag in the name, which changes the
    name a packager scripts against, so it belongs with (4).
 
-## P4-132. Classic C-ABI Per-`cinfo` State Is Thread-Affine (P4-16 Option A) — **OPEN**
+**Milestone (2026-09-07): criterion 4 met — every bundle is attested for
+provenance and SBOM, and the release path was rehearsed end to end.**
+
+*What landed.* `native-artifacts` signs what it built, in the job that built
+it: `actions/attest-build-provenance` records SLSA v1 provenance for the
+archive, and `actions/attest` records a CycloneDX SBOM of the capi crate for
+the bundle's *target* — written by `scripts/package_capi_release.sh --sbom`
+with `cargo-cyclonedx`, checksummed, and attached beside the archive. Both are
+signed through Sigstore with the job's OIDC identity and stored under this
+repository; `gh attestation verify <bundle> --repo developer0hye/libjpeg-turbo-rs`
+checks origin. The two Sigstore bundles are attached as
+`<bundle>.tar.gz.{provenance,sbom}.sigstore.json` so a host that cannot ask
+GitHub can still verify from the files. `SHA256SUMS` covers the SBOMs too,
+because criterion 2 says *every* attached artifact. The job's permissions are
+now explicit — `contents: read`, `id-token: write`, `attestations: write` —
+and the attest steps carry no `if:`, so a `workflow_dispatch` exercises them.
+
+*Why in that job and not in `github-release`.* Provenance generated where the
+bytes are downloaded rather than built would attest a download. The signing
+also had to be unconditional: gated on `push`, every rehearsal would pass and
+the tag would be the first run.
+
+*What holds it.* `release_bundle.rs` gained four tests: the packaging script's
+SBOM is a CycloneDX document whose subject is the capi crate at the archive's
+version and which lists the root crate it compiles against (not merely a file
+that parses — an SBOM naming some other crate would attest and verify just as
+cleanly); the bundle job grants the two permissions and attests both
+predicates against `dist/*.tar.gz` without an `if:`; `github-release` attaches
+the SBOMs and Sigstore bundles on both its create and its upload path and
+folds the SBOM checksums into `SHA256SUMS`; and `cargo-cyclonedx` is pinned to
+one version in both workflows. `capi-abi-checks` installs the generator so the
+SBOM test runs on every Linux and macOS pull request rather than skipping (and
+on the Windows leg too since the milestone below).
+
+*Proof.* The attestation half cannot run on a pull request; it was proved by
+dispatching `release.yml` on the branch before merge — run
+[34115284733](https://github.com/developer0hye/libjpeg-turbo-rs/actions/runs/34115284733)
+— which built all four bundles, attested each, and published nothing (every
+publish job and `github-release` reported `skipped`). Verified on 2026-09-07
+from the run's artifacts, on every target, with `gh` 2.92.0:
+
+```
+# each of the four bundles, from its download directory
+shasum -a 256 -c *.sha256                                   # archive OK, SBOM OK
+gh attestation verify <bundle>.tar.gz -R developer0hye/libjpeg-turbo-rs \
+    --signer-workflow developer0hye/libjpeg-turbo-rs/.github/workflows/release.yml \
+    --source-ref refs/heads/feat/p4-131-release-provenance   # exit 0
+gh attestation verify <bundle>.tar.gz -R developer0hye/libjpeg-turbo-rs \
+    --source-ref refs/tags/v0.8.0                            # rejected: "expected
+                                                             # SourceRepositoryRef to be
+                                                             # refs/tags/v0.8.0, got refs/heads/…"
+gh attestation verify <bundle>.tar.gz -R developer0hye/libjpeg-turbo-rs \
+    --predicate-type https://cyclonedx.org/bom --format json  # CycloneDX 1.5,
+                                                             # subject libjpeg-turbo-rs-capi@0.1.2,
+                                                             # 7 components; predicate == attached .cdx.json
+gh attestation verify <bundle>.tar.gz -R developer0hye/libjpeg-turbo-rs \
+    --bundle <bundle>.tar.gz.provenance.sigstore.json \
+    --custom-trusted-root trusted_root.jsonl                 # exit 0 (offline)
+gh attestation verify <bundle>.tar.gz -R developer0hye/libjpeg-turbo-rs \
+    --bundle <bundle>.tar.gz.sbom.sigstore.json \
+    --predicate-type https://cyclonedx.org/bom \
+    --custom-trusted-root trusted_root.jsonl                 # exit 0 (offline)
+```
+
+The provenance statement names `.github/workflows/release.yml`, the branch
+ref, commit `f80ac7a` and the run above as its invocation; the negative case
+is what shows `--source-ref` is checked rather than merely accepted.
+
+*What is deliberately not claimed.* A dispatch proves the bundle job, not
+`github-release`, which still only runs on a `v*` tag: the attach globs there
+are pinned by test but have not executed. Keyless Sigstore bound to a workflow
+identity is not a maintainer-held GPG key, which is what upstream uses; a
+downloader whose root of trust must be a person rather than GitHub's OIDC
+issuer is not served. Rehearsal attestations from a branch are stored like a
+tag's, so verification instructions pin `--source-ref` to the tag.
+
+**Milestone (2026-09-07): criterion 1 met for Windows — the MSVC bundle
+ships, staged by the same path and held by the same suites.**
+
+*The layout decision.* The bundle mirrors what upstream libjpeg-turbo's own
+Visual C++ build installs (`sharedlib/CMakeLists.txt`, `RUNTIME_OUTPUT_NAME
+jpeg${SO_MAJOR_VERSION}`; `BUILDING.md` "Visual C++"): `bin/jpeg8.dll` with
+the import library `lib/jpeg.lib`, and `bin/turbojpeg.dll` with
+`lib/turbojpeg.lib`, plus the same `include/`, `lib/pkgconfig/`,
+`lib/cmake/JPEG/` and `share/doc/` entries as the Unix bundles. The name is
+not a free choice: a Windows consumer's import table records the DLL's file
+name, so an executable built against upstream's v8 build asks the loader for
+`jpeg8.dll` and nothing else will do — the name *is* the SONAME. The default
+prefix is `C:/libjpeg-turbo-rs64`, beside upstream's `c:/libjpeg-turbo64`.
+The `.pc` files keep `-ljpeg`, which is `jpeg.lib` under MSVC pkg-config
+(`--msvc-syntax`) and `libjpeg.dll.a` under MinGW; that toolchain dependence
+is resolved by shipping **MSVC only** — the scripts accept an
+`x86_64-*-windows-msvc` triple and nothing else on Windows, so a MinGW layout
+(`libjpeg-8.dll`) is never staged under this bundle's name. The DLL links the dynamic Visual C++
+runtime, as upstream's DLL does (`MultiThreadedDLL` in the same CMake file);
+a host needs the VC++ redistributable it already needs for upstream.
+
+*What landed.* `install_capi.sh` gained a `windows` platform, run from Git
+for Windows' bash: it copies cargo's `libjpeg_turbo_rs_capi.dll` under both
+shipped names and **regenerates** each import library from the DLL's export
+table — `dumpbin -EXPORTS` lists the exports, a `.def` names them under
+`LIBRARY jpeg8.dll`, `lib -DEF` binds them. Copying cargo's own
+`libjpeg_turbo_rs_capi.dll.lib` would have shipped an import library that
+links every consumer to a file the bundle does not contain; the regeneration
+is the Windows counterpart of `patchelf --set-soname`. The two tools are found
+on PATH (a developer shell) or through `vswhere`, the way rustc finds
+`link.exe`, since any host that built the DLL has them. `--soname jpeg62.dll`
+is the v6b opt-in there, with the same documented risk. `package_capi_release.sh`
+accepts the platform, picks the archive owner flags by the `tar` on PATH
+rather than by OS (Git for Windows carries GNU tar), and lists `bin/` entries
+in `BUNDLE.txt`. Both scripts normalise the `C:\…` paths a Windows caller
+hands them with `cygpath`, and `install_capi.sh` hands cargo a `C:/…`
+`CARGO_TARGET_DIR`, since a native program reads `/c/…` as a path on the
+current drive. A
+`.gitattributes` pins `*.sh` to LF: the Windows runner checks out with
+`core.autocrlf=true`, and bash reads the `\r` as part of every command name.
+`release.yml`'s `native-artifacts` gained the `x86_64-pc-windows-msvc` /
+`windows-latest` row and `defaults.run.shell: bash` — its steps use
+`pipefail`, `shopt` and `[ ]`, and the runner's default shell is PowerShell.
+
+*What holds it.* `install_layout` and `release_bundle` no longer skip on
+Windows: `tests/support/shell.rs` resolves Git for Windows' bash by install
+location (a bare `bash` can be the WSL launcher in `System32`) and the
+bsdtar Windows ships, and the suites assert the Windows shape — a PE image
+under each shipped name, an import library that contains `jpeg8.dll\0` and
+not `libjpeg_turbo_rs_capi.dll`, `JPEG_LIBRARY` naming `lib/jpeg.lib` — and,
+on every platform now, that the staged library *loads* and resolves
+`jpeg_std_error` and `tj3Init`. The bundle-equals-staging comparison treats
+an import library by what it binds (its sorted NUL-terminated strings)
+because `lib.exe` stamps a build time into each archive member; `-Brepro` is
+passed but not relied on. Both suites also stage once with *no* `--prefix`,
+since that is how the release runs them, so the platform default and the
+drive-stripping DESTDIR arithmetic are exercised on pull requests rather
+than first on a tag. Two workflow-shape tests pin the matrix row with its
+bash default and keep `capi-abi-checks`' `cargo-cyclonedx` install
+unconditional, so the SBOM test runs on the Windows leg too. The Linux leg
+of `capi-abi-checks` now installs `patchelf`, as the release leg does: the
+libturbojpeg copy's `DT_SONAME` comes only from it, and the suite now asserts
+that identity rather than the chain's mere existence.
+
+*Proof.* The release path was rehearsed by dispatching `release.yml` on the
+branch: run
+[34126576196](https://github.com/developer0hye/libjpeg-turbo-rs/actions/runs/34126576196)
+(commit `afd1e74`, the scripts as merged) built all five bundles — the
+Windows leg under Git for Windows' bash, finding `dumpbin`/`lib.exe` through
+`vswhere` — attested each, and published nothing (every publish job and
+`github-release` reported `skipped`). The first dispatch, run 34125407045,
+failed in exactly the place the tests could not reach from a Mac: with the
+`.pdb` beside the DLL, `dumpbin` prints `name = symbol` rows, and the
+four-field parser read zero exports and refused. Verified on 2026-09-07 from
+the run's `native-x86_64-pc-windows-msvc` artifact, with `gh` 2.92.0:
+
+```
+shasum -a 256 -c *.sha256                        # archive OK, SBOM OK
+tar -xzf libjpeg-turbo-rs-capi-0.1.2-x86_64-pc-windows-msvc.tar.gz
+# bin/jpeg8.dll bin/turbojpeg.dll lib/jpeg.lib lib/turbojpeg.lib, plus the
+# same include/, lib/pkgconfig/, lib/cmake/JPEG/, share/doc/ and BUNDLE.txt
+# (prefix: C:/libjpeg-turbo-rs64, soname: jpeg8.dll) as the Unix bundles
+strings lib/jpeg.lib | grep '\.dll$' | sort -u   # jpeg8.dll — and nothing else
+strings lib/turbojpeg.lib | grep '\.dll$' | sort -u   # turbojpeg.dll
+gh attestation verify <bundle>.tar.gz -R developer0hye/libjpeg-turbo-rs \
+    --signer-workflow developer0hye/libjpeg-turbo-rs/.github/workflows/release.yml \
+    --source-ref refs/heads/feat/p4-131-windows-bundle    # exit 0
+gh attestation verify <bundle>.tar.gz -R developer0hye/libjpeg-turbo-rs \
+    --source-ref refs/tags/v0.8.0                         # exit 1 (rejected)
+gh attestation verify <bundle>.tar.gz -R developer0hye/libjpeg-turbo-rs \
+    --predicate-type https://cyclonedx.org/bom --format json  # predicate ==
+                                                          # attached .cdx.json,
+                                                          # 7 components
+gh attestation verify <bundle>.tar.gz -R developer0hye/libjpeg-turbo-rs \
+    --bundle <bundle>.tar.gz.provenance.sigstore.json     # exit 0 (offline)
+```
+
+The pull-request half is the Windows leg of `capi-abi-checks` on
+[#595](https://github.com/developer0hye/libjpeg-turbo-rs/pull/595):
+`install_layout` and `release_bundle` run there for real — the staged and
+bundled `jpeg8.dll` loads and resolves both APIs, the regenerated import
+libraries bind to the shipped names and carry the exports — and the leg is
+green at merge, together with the Linux and macOS legs that now also assert
+the libturbojpeg identity.
+
+*What is deliberately not claimed.* No C program is compiled against
+`jpeg.lib` in CI: the import library's binding is asserted by its strings and
+the DLL by loading it, not by a downstream link — that is P4-124's programme,
+which on Windows now has an artifact to point at. No MinGW bundle, no
+installer, no `.pdb`. The DLL's export directory still records
+`libjpeg_turbo_rs_capi.dll` as its original name; the loader never reads it,
+but a dependency viewer will show it.
+
+*What remains under this item:* the deb/rpm decision (3) and the two
+`capi-v*` / naming policy questions (4, 5) above.
+
+## P4-132. Classic C-ABI Per-`cinfo` State Is Thread-Affine (P4-16 Option A) — **CLOSED 2026-09-08**
+
+**Status (2026-09-08): closed.** Both `thread_local!` tables are gone from
+`crates/libjpeg-turbo-rs-capi/src/jpeglib.rs`; a `cinfo` created on one
+thread is driven and destroyed on another with its state intact and released.
+Proof: `cargo test -p libjpeg-turbo-rs-capi --test capi_thread_affinity`
+(5 tests — decompress and compress ownership transfer with the live-state
+count back to baseline after the cross-thread destroy, destroy-then-recreate
+at the same address, eight independent `cinfo`s on eight threads — the moved
+decode cross-validated byte for byte against `djpeg` where installed, and the
+moved and eight-thread runs compared to the same-thread reference
+unconditionally — and the moved decode sequence
+under Miri on a 1×1 fixture, which `.github/workflows/ci.yml`'s Miri leg
+now runs: the first draft of this fix read the private-state slot through
+the raw `cinfo` while the entry point held a `&mut` to the same struct, a
+Stacked Borrows violation nothing else in CI could see), plus
+`cargo test -p libjpeg-turbo-rs-capi --no-fail-fast` (79 sections, 345
+passed, 0 failed on macOS aarch64) and the benchmark in
+`experiments/capi_thread_affinity_2026-09-08.md`.
+
+**How it closed against the criteria as written.** The criteria assumed the
+fix would be a process-global map behind a lock and listed what such a map
+needs to be correct. The shipped design has no map. `DecompressPrivate` is
+boxed behind `jpeg_decompress_struct::master` — the opaque slot upstream's
+own `jdmaster.c` uses for per-instance state and no consumer dereferences —
+exactly as `CompressPrivate` has always sat behind
+`jpeg_compress_struct::master`; the 12/16-bit scanline slot that keyed the
+second table on the box address moved inside the box. Against the numbered
+criteria:
+
+1. Both tables migrated off `thread_local!`. No lock was needed because
+   there is no shared structure left to guard; a field on the object moves
+   with the object.
+2. Benchmark (min µs/iteration over three alternating runs, baseline →
+   fix): `tj3Decompress8` 640×480 1148.97 → 1145.09 (−0.34 %), 64×64
+   28.71 → 28.66 (−0.17 %); `tj3Compress8` 640×480 863.43 → 865.19
+   (+0.20 %), 64×64 13.46 → 13.37 (−0.67 %). All inside the 1 % bar; the
+   TurboJPEG paths share no code with the change. The classic
+   create-to-destroy decode loop, which does, went from 36.52 → 35.92 µs at
+   64×64 (−1.64 %) and 1167.40 → 1163.92 µs at 640×480 (−0.30 %).
+3. Pointer reuse: with no key there is nothing to collide.
+   `jpeg_destroy_decompress` is the single release point — it drops the box
+   and nulls `master` before any later create can fill it — and
+   `decompress_private_raw` also gates on `mem`, the one field a rejected
+   create leaves null (P4-110), so an object that was never created is not
+   trusted for its `master` bit pattern. The generation counter and magic
+   value the criterion specified would have disambiguated map entries; with
+   no map they would be dead fields and were not added. The test the
+   criterion demands exists and passes:
+   `reallocated_cinfo_at_the_same_address_does_not_inherit_the_old_state`
+   (a `jpeg_save_markers` request from lifecycle 1, destroyed on another
+   thread, is provably absent from lifecycle 2 in the same allocation).
+4. `capi_thread_affinity.rs` as above. Leak-freedom is measured, not
+   inferred: `live_decompress_private_count_for_tests` /
+   `live_compress_private_count_for_tests` are non-exported test hooks
+   counted at construction and in `Drop`. Concurrent use of one `cinfo`
+   from two threads is documented as undefined, matching upstream's
+   `libjpeg.txt` (3.2.0, lines 2222-2225); it is a data race on both
+   libraries and has no observable contract to assert.
+5. The `tjhandle` half that P4-137's criterion 6 deferred here is decided the
+   same way: one handle, one thread at a time, concurrent use undefined as
+   upstream's TurboJPEG documents it, no error returned for it because
+   upstream returns none. `docs/ABI_COMPATIBILITY.md`'s "Threading contract" section is rewritten
+   to the new contract (supported / supported / undefined, how it works,
+   history); the "Divergence from upstream" paragraph is gone because there
+   is no divergence left to state.
+
+The tests call the same `extern "C"` functions the cdylib exports, in
+process, rather than through a compiled C harness; the property is in those
+functions, not in the linker.
+
+Original (OPEN) entry preserved below for institutional memory.
+
 
 **GitHub:** [#463](https://github.com/developer0hye/libjpeg-turbo-rs/issues/463) — under the [#470](https://github.com/developer0hye/libjpeg-turbo-rs/issues/470) umbrella.
 
@@ -6014,16 +6556,16 @@ current test or downstream harness in this repository transfers a `cinfo` across
 threads, so nothing is broken today for what we actually measure. It is a
 correctness-of-contract gap that blocks the T3 claim, not a live defect.
 
-## P4-133. BMI2/FMA Paths Are Reachable Only via `target-cpu=native`, So Portable Builds Leave Them Off — **OPEN**
+## P4-133. BMI2/FMA Paths Are Reachable Only via `target-cpu=native`, So Portable Builds Leave Them Off — **CLOSED 2026-09-08**
 
 **GitHub:** [#464](https://github.com/developer0hye/libjpeg-turbo-rs/issues/464) — under the [#470](https://github.com/developer0hye/libjpeg-turbo-rs/issues/470) umbrella.
 
 **Motivation.** Filed 2026-08-09 by the external drop-in readiness review.
 **[P4-8](#p4-8-runtime-bmi1lzcnt-dispatch-for-x86_64-encode-already-live-readme-updated--closed-2026-05-17)** closed 2026-05-17 after establishing that the BMI1/LZCNT AC
 encoding loop already dispatches at runtime
-(`src/encode/huffman_encode.rs:524,598`), so a stock `cargo build --release` is
+(`src/encode/huffman_encode.rs:613,708`), so a stock `cargo build --release` is
 within ~2 pp of C. That closure recorded an explicit follow-up
-(`phase4.md:233`): *"BMI2 PEXT/PDEP coverage for any encode hot path that
+(`phase4.md:235`): *"BMI2 PEXT/PDEP coverage for any encode hot path that
 benefits + FMA-dispatched FDCT scalar fallback. The static-analysis review
 correctly notes these remain `target-cpu=native`-gated today."*
 
@@ -6033,16 +6575,17 @@ downstream lab. By this repository's own rule — if it is not in LAST_MILE, it
 does not exist for the next session — the deferral was a silent drop. This entry
 restores it.
 
-**Why it matters for T3 specifically.** `README.md:94,113` still recommends
-`RUSTFLAGS="-C target-cpu=native"` for the last few percent. That is sound advice
-for an application built on the target machine, and unusable for a *system
-library*: a distribution package is built once and runs on every CPU of that
-architecture, so it must be compiled to the baseline and light up wider
-instruction sets at runtime. Every percent that only `target-cpu=native` unlocks
-is a percent a packaged `libjpeg.so.8` cannot have. C libjpeg-turbo has no such
-constraint — its hot loops are hand-written NASM with the instructions embedded,
-dispatched at runtime, which `docs/last_mile/phase1.md:217` already identifies as
-the root of the original gap.
+**Why it matters for T3 specifically.** README's performance and build-flag
+sections recommended, at filing, `RUSTFLAGS="-C target-cpu=native"` for the
+last few percent. That is sound advice for an application built on the target
+machine, and unusable for a *system library*: a distribution package is built
+once and runs on every CPU of that architecture, so it must be compiled to the
+baseline and light up wider instruction sets at runtime. Every percent that
+only `target-cpu=native` unlocks is a percent a packaged `libjpeg.so.8` cannot
+have. C libjpeg-turbo has no such constraint — its hot loops are hand-written
+NASM with the instructions embedded, dispatched at runtime, which
+`docs/last_mile/phase1.md:217` already identifies as the root of the original
+gap.
 
 **Acceptance criteria.**
 
@@ -6070,7 +6613,178 @@ the root of the original gap.
 filed now because the deferral was previously untracked, not because it
 outranks the Stage A items.
 
-## P4-134. No RISC-V RVV SIMD Backend — Upstream 3.2 Ships One — **OPEN**
+**Progress (2026-09-08) — criteria 1, 4 and 5 met; 2 and 3 remain.**
+PR #599 added `.github/workflows/perf-portable-vs-native.yml` (manual, or on
+a pull request that changes the harness): one x86_64 runner builds
+`examples/bench_encode_matrix` seven ways — portable, `+bmi1,+lzcnt`, `+bmi2`,
+`+fma`, README's `+bmi1,+lzcnt,+bmi2,+fma`, `+avx2`, `target-cpu=native` —
+and times each for the integer and the float DCT against upstream's official
+3.2.0 package, portable and C each timed first and last so the run's own
+drift brackets the variants (`scripts/perf_ab_summary.py --noise-pair`). Two
+samples, on AMD EPYC 7763 (Zen 3) and EPYC 9V74 (Zen 4), recorded in
+`experiments/portable_vs_native_x86_64_2026-09-08.md` and
+`experiments/encode.tsv`:
+
+- **Integer DCT (every default encode):** native is worth 0.7–3.5 % at
+  1080p; `+bmi2` alone 1.3–2.9 %, outside the 0–1.2 % noise bracket in every
+  1080p case of both samples — the compiler's `SHLX`-family shifts in the Huffman bit packer,
+  which the `#[target_feature(enable = "bmi1,lzcnt")]` variant does not
+  enable. `+fma` is noise (≤ 1.7 %); `+avx2` ≤ 1.6 %; compile-time `+bmi1,+lzcnt` a
+  further 0.6–1.5 % over the runtime dispatch (P4-8 priced that). Nothing in
+  the port uses PEXT/PDEP; that half of the P4-8 follow-up had nothing to
+  measure. **Portable vs C 3.2.0: 1.00–1.14× from 320×240 up, 1.05–1.10×
+  at 1080p**; even native does not beat C on either CPU (the 2026-05 i5-10400
+  native table did, against 3.1.2).
+- **Float DCT (`-dct float`):** compile-time FMA is worth 18–23 % of the
+  whole encode — `f32::mul_add` in `fdct_float_workspace` is a libm `fmaf`
+  call on a baseline build. Even with it the port trails C by 1.37–1.53×
+  because upstream's float FDCT/quantiser is SIMD and ours is scalar on every
+  backend: filed as **P4-187**.
+- README's performance section now quotes the portable build from the run and
+  marks the i5-10400 native table supplementary; the `+bmi1,+lzcnt,+bmi2,+fma`
+  line is no longer described as a portable baseline (it faults without
+  BMI2/FMA).
+
+**Remaining after the first milestone (criteria 2 and 3):** (a) add `bmi2`
+to the elevated Huffman variant's feature set behind `cpu_has!("bmi2")`; (b)
+a `#[target_feature(enable = "fma")]` twin of `scalar_fdct_float_quantize`
+selected where `DctMethod::Float` already picks the kernel at plan build —
+both resolved once per plan, per P4-123 workstream 2, and each proved by
+dispatching the workflow on its branch and by the existing `cjpeg -dct float`
+byte-parity suites for (b).
+
+**Progress (2026-09-08, second milestone) — criterion 2 met for both wins;
+criterion 3 met for FMA, not yet for the Huffman tier.**
+
+- **FMA float FDCT, once per plan.** `src/simd/x86_64/fma_fdct.rs` is the
+  scalar float FDCT + quantise body re-emitted under
+  `#[target_feature(enable = "fma")]`; the scalar kernel and
+  `fdct_float_workspace` were split into `#[inline(always)]` bodies so the
+  twin is the *same* code under a different feature context, and its safe
+  wrapper checks `cpu_has!("fma")` itself (the P4-135 rule). It is installed
+  in the encoder's existing per-operation kernel set —
+  `EncoderSimdRoutines` gained an `fdct_float_quantize` field, filled by all
+  four `encoder_routines()` constructors, x86_64 choosing the twin when the
+  CPU reports FMA independently of AVX2 — and the six `DctMethod::Float`
+  sites in `src/encode/pipeline_impl/` now take the kernel from the plan
+  instead of naming the scalar function. That is the mechanism P4-123
+  workstream 2 asks for, not a parallel one. The islow-shortcut guard
+  (`dispatch::may_use_islow_simd_kernel`) compares function pointers, so the
+  twin had to be added to the float list or `-dct float` on an FMA CPU would
+  have re-created #330; `mcu::can_use_fused_islow`, a second copy of the same
+  pointer comparison, is deleted and its call sites now ask the one guard.
+  Cross-compiled x86_64 release assembly: the twin contains four `vfmadd`
+  and no `fmaf` call, the scalar kernel four `call fmaf`. The coefficients
+  are bit-identical by construction (`mul_add` is single-rounding either
+  way), asserted by
+  `fma_float_fdct_twin_is_bit_identical_to_the_scalar_kernel` over Annex K
+  tables at five qualities, and the `cjpeg -dct float` suites
+  (`tests/dct_method.rs`, `tests/regression_dct_method_parity.rs`) exercise
+  the twin on every x86_64 CI runner.
+- **BMI2 Huffman tier.** `encode_ac_x86_64_bmi1_lzcnt_bmi2` is the third
+  compilation of the AC body, under `bmi1,lzcnt,bmi2`. The tier is an
+  `AcTier` enum resolved from CPUID once per process and cached in an
+  `AtomicU8` (review finding: the three per-block `cpu_has!` probes the
+  first cut used were of the same order as the win), so the two dispatch
+  points (`encode_block`, `encode_block_hoisted`) pay one relaxed load and a
+  direct call per block; a CPU with BMI1+LZCNT but no BMI2
+  (Piledriver/Steamroller) keeps the middle tier. The assembly check shows
+  four `shlx` in the BMI2 tier and none in the BMI1 tier.
+  `x86_64_ac_kernel_tiers_emit_identical_bytes` asserts all three tiers
+  emit the same bytes across EOB-only, ZRL-run, trailing-63, dense, sparse
+  and category-10 blocks, and `x86_64_ac_tier_is_resolved_once_and_matches_detection`
+  pins the cache to the uncached answer (that test is
+  `x86_64_bit_writer_resolves_ac_tier_at_construction_and_matches_detection`
+  since the third milestone below removed the cache).
+- **Measured on the branch** (`gh workflow run perf-portable-vs-native.yml
+  --ref perf/p4-133-runtime-dispatch`, run 34157974332, AMD EPYC 9V74 /
+  Zen 4, C 3.2.0, noise 0.2–0.6 % at 1080p; tables in
+  `experiments/portable_vs_native_x86_64_2026-09-08.md`). **Float DCT:** the
+  portable build is 1.39–1.41× C at 1080p (1.41–1.51× across the matrix),
+  where the previous Zen 4 run's portable build was 1.72–1.94× and its
+  `+fma` build 1.41–1.53×; compile-time `+fma` over the dispatched portable
+  build is now 1.0–1.8 % everywhere, against 18–21 % before — the twin is
+  reached, and `native` / the README set are 4–9 % *slower* than portable on
+  that path. **Integer DCT:** portable/C 1.10–1.12× at 1080p; `+bmi2` over
+  portable 0.4–2.2 % (noise 0.4–0.6 %), `native` 2.0–2.9 %. Against the
+  previous Zen 4 run (`+bmi2` 1.3–1.9 %, portable/C 1.09–1.10×) that is
+  inside cross-run variance — a different host on a different hour — so this
+  run cannot say whether the BMI2 tier pays; the harness now builds a
+  same-run `main-portable` variant to settle it.
+- **Same-run `main` vs branch** (run 34159737624, the harness re-run on
+  the PR, Intel Xeon 6973P-C with AVX-512 — a noisy box, bracket 0.3–11.7 %).
+  **Float DCT: settled.** `main-portable / stock` is 1.12–1.27 on all eleven
+  cases — `main` 12–27 % slower than the branch, above that run's noise in
+  every row but the two widest brackets — and compile-time `+fma` over the
+  branch is noise (0.91–1.04). **Integer DCT: still open.** `main-portable /
+  stock` at 1080p is 1.03 / 1.07 / 1.09, but the compile-time `+bmi2` binary
+  timed between them swung the other way by as much (1.09 at 1080p 4:2:2
+  against a 0.5 % bracket), so the box drifted more than the bracket shows
+  and no 1–3 % claim survives it. The same-run column is what a quiet Zen
+  runner needs to answer it; until then the BMI2 tier is kept on the
+  assembly evidence and byte-identity, not on a measured percentage. A third
+  dispatch (run 34161016801) drew the same Xeon model and repeated the
+  picture — float `main / branch` 1.16–1.36 on every row, integer inside a
+  1–12 % bracket — so measurement stopped there; the column stays in the
+  harness for the next quiet host.
+- Rosetta on the aarch64 host reports neither FMA nor BMI2, so locally every
+  new test ran its fallback branch and still had to pass; the elevated
+  branches are exercised by CI's x86_64 runners and by the A/B above.
+
+**Progress (2026-09-08, third milestone) — criterion 3 met for the Huffman
+tier; the process-wide static is gone.** After the second milestone the
+AC-tier choice was resolved once — but per process, in an `AtomicU8`, not on
+the encode operation. The object every entropy-emitting site already holds
+is the operation's `BitWriter`: each encode, transcode and 12-bit writer
+constructs exactly one where it builds its plan (baseline and raw right
+after `detect_encoder()`, the planar/coefficient/precision writers where
+they build their tables), every `encode_block` takes it, and every
+`encode_block_hoisted` site sits inside that writer's
+`begin_block`/`end_block` bracket. So the writer now owns the tier:
+`BitWriter::new` resolves `AcTier::detect()` once, `encode_block` reads the
+writer's tier next to the hoisted `pb`/`fb`/`buf`, and the five hoisted MCU
+paths — the four `mcu.rs` `encode_mcu_*` loops per MCU, `baseline.rs`'s
+4:2:0 fast path per MCU row — read `writer.ac_tier()` once beside
+`begin_block` and pass it to `encode_block_hoisted` as one more piece of
+hoisted writer state — no new parameter threads through the MCU-loop
+signatures, and no second dispatch mechanism exists beside the kernel set.
+`AC_TIER_CACHE`, `AcTier::current()` and `resolve_and_cache()` are deleted.
+A test-only `BitWriter::with_ac_tier` refuses a tier above the detected one
+(running a `target_feature` body without the feature is UB) and lets the
+dispatch be exercised at every tier the CPU has. Per-block cost is one field
+load and a match instead of one relaxed atomic load and a match; the
+assembly still shows four `shlx` in the BMI2 tier and none in the BMI1 tier.
+When P4-123 workstream 2's `EncodePlan` lands it owns the writer, and with
+it the tier, without further change.
+
+**Status (2026-09-08): closed.** Criteria 1, 4, 5 by PR #599, criterion 2
+by PR #602, criterion 3 by PR #602 (FMA, `EncoderSimdRoutines`) and this
+milestone (Huffman tier on the operation's `BitWriter`). Proof:
+`cargo test --lib --target x86_64-apple-darwin huffman_encode` —
+`x86_64_bit_writer_resolves_ac_tier_at_construction_and_matches_detection`
+(the writer's tier is the CPU's, fixed per writer, a tier above the CPU is
+refused), `x86_64_encode_block_dispatches_on_the_writer_tier` and
+`x86_64_encode_block_hoisted_takes_the_writer_tier_it_is_handed` (reference
+bytes through a writer pinned to each available tier, on both dispatchers) and
+`x86_64_ac_kernel_tiers_emit_identical_bytes`; `grep -rn "AC_TIER_CACHE\|AcTier::current" src` is empty; the
+`cjpeg` byte-parity suites (`tests/dct_method.rs`,
+`tests/regression_dct_method_parity.rs`, the encode matrices) cover every
+x86_64 CI runner. Each dispatch test skips a tier this CPU cannot run, so on
+the Rosetta host — no BMI2, as the second milestone recorded — the elevated
+arms are proven on CI's x86_64 runners, not locally. Same-run A/B on the branch
+(`perf-portable-vs-native.yml`, runs 6–7 in
+`experiments/portable_vs_native_x86_64_2026-09-08.md` and the `67f672d` row
+of `experiments/encode.tsv`; `main-portable` is `origin/main` with #602 in,
+so the column isolates this change): run 34166439144 (Intel Xeon 6973P-C)
+could not resolve it — `main-portable / stock` 0.96–1.01 inside that host's
+0.2–6.3 % drift; run 34167658277 (AMD EPYC 7763 / Zen 3, brackets ≤ 0.6 %)
+puts `main` 3.2–3.9 % slower than the branch on every 4:2:0 case and within
+0.5 % on 4:2:2/4:4:4, and compile-time `+bmi2` over the dispatched build at
+0.991–1.011 (noise) on the CPU model where it was worth 1.3–2.9 % before the
+tier existed. The tier is reached, and moving it onto the writer cost
+nothing and gained a measured 3–4 % on the row-hoisted 4:2:0 paths.
+
+## P4-134. No RISC-V RVV SIMD Backend — Upstream 3.2 Ships One — **PARTIAL: measured under emulation only; hardware measurement outstanding**
 
 **GitHub:** [#465](https://github.com/developer0hye/libjpeg-turbo-rs/issues/465) — under the [#470](https://github.com/developer0hye/libjpeg-turbo-rs/issues/470) umbrella.
 
@@ -6115,6 +6829,66 @@ a statement about our position versus current upstream on that architecture.
 installed base of the architectures we target, and unlike P4-78 (where ARMv7
 hardware is everywhere and the gap is inferred from a real user question) there
 is no downstream request. It is filed so the P4-60 premise change is on record.
+
+**Status (2026-09-08): PARTIAL — criteria 2, 3 and 4 delivered; criterion 1
+measured under emulation only, and the emulator turned out unable to answer
+it.** Full record: `experiments/riscv64_rvv_2026-09-08.md`; harness
+`examples/bench_p4134_riscv64.rs` (the two `tjbench` operations upstream's RVV
+kernels accelerate, so the hardware run reuses it).
+
+*Criterion 1 — what was measured, and why it is not the number the criterion
+asks for.* libjpeg-turbo 3.2.0 (`references/libjpeg-turbo` @ `c85e6b9`) was
+cross-built for riscv64 with `HAVE_RVV` (gcc 14.2, 324 `vsetvli` in each
+tool), ours with rustc 1.98.0, and both run under `qemu-riscv64` 10.0.11,
+`-cpu rv64,v=true`. Verified by mechanism, not by passing: QEMU's translated-
+block log shows 57 vector blocks for a `djpeg` decode with V on, **0** under
+`JSIMD_FORCENONE=1` and **0** under `v=false`, with byte-identical output.
+Then the finding that gates the rest: **under QEMU C's RVV build is 3–4×
+slower than C's own scalar path** (640×480: 8.4 vs 40.0 Mpix/s decompress,
+7.6 vs 29.0 compress; 1080p: 6.9 vs 21.8, 6.5 vs 21.1), because TCG runs each
+vector instruction through a helper loop — the emulation asymmetry P4-78
+predicted for NEON, now measured for RVV. Upstream reports the same kernels
+at +48–180 % decode / +149–246 % encode on a Ky X1. **So no emulator ratio
+against the RVV build has the right sign, and the hardware gap remains
+inferred:** composing the re-measured scalar-vs-scalar pair against 3.2.0
+(`JSIMD_FORCENONE=1`, same emulator: decode ~1.1–1.5×, encode ~1.7–1.9×
+behind C's scalar, spread under 10 %) with upstream's reported RVV win
+(decode 1.1–1.5 × 1.48–2.80 = 1.6–4.2×; encode 1.7–1.9 × 2.49–3.46 = 4.2–6.6×)
+puts us at roughly **1.5–4× slower decode and 4–7× slower encode on RVV
+hardware. That is inference, not measurement — do not quote it as one.** Criterion 1 stays
+open until an RVV 1.0 board runs `bench_p4134_riscv64` against `tjbench`.
+
+*Criterion 2 — done.* P4-60 carries the premise-change note (below, in its
+own entry), so its riscv64 numbers read as scalar-kernel data only.
+
+*Criterion 3 — scope decision, measured on rustc 1.98.0 stable.*
+`#[target_feature(enable = "v")]` is **unstable** (`E0658`); `core::arch::riscv64`
+has **no vector intrinsics at all** (not merely gated — stdarch ships none);
+`is_riscv_feature_detected!` is **unstable** (`stdarch_riscv_feature_detection`,
+rust-lang/rust#111192); `asm!` is stable. `-C target-feature=+v` is accepted
+with a warning and honoured, and `-C target-cpu=sifive-x280`/`spacemit-x60`
+enable V silently — but auto-vectorisation (P4-78's option D) lands its
+7,930 vector instructions in pipeline plumbing and **none in the kernels**
+(`idct_8x8` 9, `fancy_h2v2_row` 0, `ycbcr_to_rgb_row` 0, `rgb_to_ycbcr_row` 0;
+contrast ARMv7 `+neon`: 270 / 232 / 140). So the options are: **(A)** wait for
+`riscv_target_feature` + intrinsics to stabilise; **(B)** hand-written `asm!`
+kernels behind our own `AT_HWCAP`/`riscv_hwprobe` probe (C's shape,
+`simd/riscv64/jsimdcpu.c:44-86`); **(C)** nightly-only feature; **(D)** is
+ruled out on riscv64 by the count above, independent of the SIGILL objection.
+**Decision: defer.** (B) is the only stable route and it is an investment
+that cannot be measured without hardware; building it against an emulator
+that penalises every vector instruction would optimise for the wrong machine.
+
+*Criterion 4 — reopen trigger, in P4-78's shape.* Reopen when **any** of:
+(1) an RVV 1.0 board (SpacemiT K1/Ky X1, SiFive P670-class, or a cloud
+riscv64 instance with `V` in `AT_HWCAP`) is available to run
+`examples/bench_p4134_riscv64` against 3.2.0 `tjbench`, which converts the
+inference above into criterion 1's number; (2) `riscv_target_feature` `v`
+and RVV intrinsics stabilise, which removes the `asm!`-only constraint on
+(B); (3) a downstream riscv64 performance request arrives, which supplies
+the missing motivation the way #424 did for P4-78. Whichever fires, the
+first step is the hardware measurement, split into its two factors
+(scalar-vs-scalar, C's RVV win) exactly as P4-78's recipe does.
 
 ## P4-135. Public Safe SIMD Wrappers Let Safe Rust Reach `target_feature` Kernels With Unvalidated Slices — **CLOSED 2026-08-13**
 
@@ -6749,7 +7523,7 @@ and for the decision to be recorded either way. **Declined**, for three reasons:
    belief that the rest is checked too.
 2. **It costs a process-global lock on every entry point.** A registry lookup
    per call serialises otherwise-independent instances — the exact property
-   [P4-132](#p4-132-classic-c-abi-per-cinfo-state-is-thread-affine-p4-16-option-a--open)
+   [P4-132](#p4-132-classic-c-abi-per-cinfo-state-is-thread-affine-p4-16-option-a--closed-2026-09-08)
    exists to *improve*. Upstream 3.2 moved the other way, removing TLS from its
    libjpeg API. (The criterion says "weigh against P4-131's threading work";
    P4-131 is native binary distribution — the threading item is P4-132.)
@@ -6759,8 +7533,11 @@ and for the decision to be recorded either way. **Declined**, for three reasons:
 
 The *concurrency* half has merit and is not dropped: "a concurrent same-handle
 call returns an error rather than aliasing `&mut`" is a real hazard, and it is
-P4-132's subject, where the per-`cinfo` threading contract is being decided as a
-whole. It is recorded there rather than solved twice.
+P4-132's subject, where the per-`cinfo` threading contract was decided as a
+whole (closed 2026-09-08). It is recorded there rather than solved twice — and
+decided the same way for a `tjhandle`: one handle, one thread at a time, with
+concurrent use undefined as upstream's TurboJPEG documents it, and no error
+returned for it because upstream returns none.
 
 **A note on the tripwire that fired.** The previous status predicted that when
 criterion 1 landed, the NULL-handle call sites in `handle_borrow_scope.rs` would
@@ -7116,14 +7893,15 @@ an infallible constructor and so needs an API decision (panic, or a fallible
 
 * **Criterion 3 — done, and it is the load-bearing one.** The rule is enforced
   by `tests/sizing_arithmetic_gate.rs` against
-  `docs/sizing_arithmetic_inventory.tsv`, which classifies all 86 remaining
-  `saturating_*` occurrences (73 distinct lines) in library sources. A new one fails the build until
+  `docs/sizing_arithmetic_inventory.tsv`, which classifies all 83 remaining
+  `saturating_*` occurrences (70 distinct lines; 86 across 73 until P4-197
+  deleted three crop clamps on 2026-10-07) in library sources. A new one fails the build until
   a human classifies it; a stale row fails until it is removed. **Naming the
   mechanism was part of the criterion, so: it is a test, not a grep or a review
   checklist** — a test runs on every CI leg and cannot be skipped by a reviewer
   in a hurry.
 
-  Scope covers `saturating_mul`/`add`/`sub` — 86 occurrences across 73 lines.
+  Scope covers `saturating_mul`/`add`/`sub` — 83 occurrences across 70 lines.
   **`wrapping_*` is deliberately excluded, which narrows the criterion's literal
   wording** ("no `saturating_*` or `wrapping_*`"), so it is recorded here rather
   than left implicit. It is the IDCT's C-parity idiom at 244 sites where
@@ -7208,9 +7986,9 @@ an infallible constructor and so needs an API decision (panic, or a fallible
   Adoption was not behaviour-neutral, and the three caller-visible changes are
   pinned by `crates/libjpeg-turbo-rs-capi/tests/capi_layout_adoption.rs`:
   `tj3SaveImage8` now refuses a negative `pitch` instead of reading it as
-  "dense" (`turbojpeg-mp.c:511-513`), `tj3LoadImage8` requires `align` to be a
+  "dense" (`turbojpeg-mp.c:515-517`), `tj3LoadImage8` requires `align` to be a
   positive power of two instead of clamping with `align.max(1)`
-  (`turbojpeg-mp.c:317-321`), and `tj3Compress12`/`tj3Compress16` bound their
+  (`turbojpeg-mp.c:321-325`), and `tj3Compress12`/`tj3Compress16` bound their
   source span in *bytes*, putting the ×2 element size inside the checked chain
   where `from_raw_parts`' precondition needs it.
 * **Criterion 4 — `ScalingFactor`. Decision recorded: do it, in 0.9.0, as
@@ -7298,12 +8076,12 @@ an infallible constructor and so needs an API decision (panic, or a fallible
   Its assertions (rows match a dense decode, inter-row padding untouched) pass
   either way; only Miri or ASAN sees the out-of-bounds slice.
   `sanitizers.yml` excludes integration tests and the capi Miri step names
-  `capi_create_abi_guards` alone. Adding a leg is not a one-liner — the test
+  `capi_create_abi_guards` and `capi_thread_affinity` only. Adding a leg is not a one-liner — the test
   performs a real encode and decode, so Miri stops at the first SIMD intrinsic
   the dispatcher picks (measured locally: `llvm.aarch64.neon.ushl.v8i16`),
   which is why the library's own Miri run passes `--skip simd::`. A
   scalar-only capi build under Miri belongs to
-  [P4-141](#p4-141-soundness-verification-program-mirisanitizerfuzz-coverage-gaps-and-an-unsafe-inventory-gate--open),
+  [P4-141](#p4-141-soundness-verification-program-mirisanitizerfuzz-coverage-gaps-and-an-unsafe-inventory-gate--partial-criteria-3-4-and-5-landed-and-gated-except-criterion-3s-callback-reentry-scenario-criterion-1-landed-except-the-pre-existing-integration-suites-criteria-2-6-and-7-open),
   not here.
 
 **Also recorded: resource-limit defaults.** `DecodeLimits` currently defaults to
@@ -7379,7 +8157,7 @@ immediately, ahead of the code work.
 
 **Status (2026-08-09): closed.** Landed in #485; `crates/libjpeg-turbo-rs-capi/src/lib.rs` no longer offers the crate as a `libjpeg.so.62` replacement, and `README.md` states the safety scope rather than a guarantee.
 
-## P4-141. Soundness Verification Program: Miri/Sanitizer/Fuzz Coverage Gaps and an `unsafe` Inventory Gate — **OPEN**
+## P4-141. Soundness Verification Program: Miri/Sanitizer/Fuzz Coverage Gaps and an `unsafe` Inventory Gate — **PARTIAL: criteria 3, 4 and 5 landed and gated except criterion 3's callback-reentry scenario; criterion 1 landed except the pre-existing integration suites; criteria 2, 6 and 7 open**
 
 **GitHub:** [#480](https://github.com/developer0hye/libjpeg-turbo-rs/issues/480) — under the [#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481) umbrella.
 
@@ -7399,6 +8177,19 @@ misuse of a public SIMD entry point; none injects allocation failure; none runs
 1. **Miri** additionally covers non-SIMD integration tests, doctests, progressive
    output (P4-136), `BitWriter` (P4-138), post-allocation-failure state, and
    concurrent one-time initialisation.
+   **Delivered 2026-09-09 except the pre-existing integration suites**: three
+   purpose-built integration suites (`tests/miri_public_api.rs`,
+   `tests/miri_alloc_failure.rs`, `tests/miri_once_init.rs`) and the doctests are
+   in the Miri job, `tests/miri_coverage_gate.rs` fails when a step stops naming
+   one of them, and the allocation-failure injection produced
+   [P4-209](#p4-209-the-mainline-decode-destination-is-allocated-infallibly-so-an-allocator-refusal-aborts-the-process--closed-2026-10-07)
+   (#632, closed 2026-10-07) on its first run. What remains is the *existing* 224 integration
+   suites: most spawn `djpeg`/`cjpeg`, which Miri cannot support — measured, not
+   assumed (`cargo miri test --test decode_limits` interprets its first few tests
+   and then stops with "can't call foreign function `posix_spawnattr_init`"; how
+   many it reaches depends on libtest's scheduling), so adopting
+   them means `#[cfg_attr(miri, ignore)]` on every C-oracle test in each suite,
+   one suite at a time. See *Progress* below.
 2. **Sanitizers** run with SIMD on *and* off; on an AVX2 machine and a
    non-AVX2 one; on 32-bit `i686`; and on AArch64 NEON. Add guard pages either
    side of C destination buffers, short-stride and canary buffers, and repeated
@@ -7408,7 +8199,21 @@ misuse of a public SIMD entry point; none injects allocation failure; none runs
    under a masked CPUID; it now carries `--lib`, and the scalar-fallback arms
    P4-135 added to `avx2_idct_islow` / `avx2_fdct_quantize` execute there.
    That is the x86 non-AVX2 half for *tests*; the sanitizer legs, `i686` and
-   AArch64 NEON remain. Also outstanding from the same closure: the wasm
+   AArch64 NEON remain. Two further gaps the criterion-4 C-ABI inventory
+   measured on 2026-09-08 — the C-boundary ASan harness resolved five symbols
+   (`tj3Init`, `tj3DecompressHeader`, `tj3Get`, `tj3Decompress8`,
+   `tj3Destroy`) over three baseline/progressive/arithmetic fixtures, so no
+   12-bit and no compress path crossed the boundary under a sanitizer, and it
+   allocated with its own `malloc`/`free`, so `tj3Alloc`/`tj3Free`'s
+   shared-allocator contract was never exercised across the ABI — **closed
+   2026-09-09** by the criterion-3 misuse harness: `sanitizers.yml`'s
+   `c_boundary_asan` job now also runs `precision12` (a 12-bit compress and
+   decompress across the ABI) and `alloc_ownership` (library-allocated
+   destination released through `tj3Free`, and a compress output allocated by
+   the library), each in its own process. Both `harness.c`'s header comment and
+   `sanitizers.yml`'s step comment claimed more than the corpus harness does —
+   six symbols and four fixtures including a 12-bit one — until the 2026-09-08
+   landing corrected them. Also outstanding from the same closure: the wasm
    wrappers' `fits == false` fallback arms have no executing coverage
    anywhere (wasip1 parity uses exact-fit slices, and the panic arm cannot
    be asserted under `panic = "abort"`) — the "pinned by the checks' code,
@@ -7418,6 +8223,20 @@ misuse of a public SIMD entry point; none injects allocation failure; none runs
    orderings — plus a process-isolated C-ABI harness covering
    `init→destroy→destroy`, undersized output buffers, pitch boundaries, maximum
    dimensions, same-handle concurrent calls, and callback reentry.
+   **Delivered 2026-09-09 except callback reentry, with same-handle concurrency
+   substituted rather than driven**: the API-sequence fuzzer
+   exists, is seeded and is in the `Fuzz Smoke` matrix, and its oracle also runs
+   deterministically on every pull request; the process-isolated C-ABI harness
+   exists and drives four of the six named scenarios differentially against a
+   stock `libturbojpeg`, substituting one handle per thread for **same-handle
+   concurrent calls** — upstream mutates `tjinstance` unsynchronised from every
+   entry point, so a shared handle is a data race in both implementations with
+   no observable contract to compare — see *Progress* below. **Callback reentry
+   remains**, and its blocker is now named rather than deferred: the TurboJPEG surface's
+   only user callback is `tjtransform.customFilter`, which our `tj3Transform`
+   refuses outright ([P4-204](#p4-204-the-c-abis-tjtransformcustomfilter-is-rejected-while-feature_paritymd-and-c_api_referencemd-record-it-as-delivered--open)),
+   so reentry there has nothing to reenter and the scenario falls to the classic
+   `jpeg_*` error, source and destination managers.
 4. **An `unsafe` inventory is committed and gated.** Per site: location,
    why safe Rust cannot express it, the invariant (bounds/lifetime/aliasing/CPU
    feature), whether a safe caller can reach it, the regression test that would
@@ -7425,13 +8244,16 @@ misuse of a public SIMD entry point; none injects allocation failure; none runs
    inventory and requires review for additions. **A raw count is not the
    deliverable** — "780 unsafe operations" says nothing about risk; one
    precondition-free safe wrapper (P4-135) outweighs hundreds of intrinsic calls.
+   **Landed and gated 2026-09-09**: the root crate and the whole C-ABI crate,
+   `jpeglib.rs` included — see *Progress* below. This criterion is closed.
 5. **Parser and control-plane `unsafe` goes to zero.** Malformed-input handling —
    progressive scan state, restart markers, EOB runs, spectral ranges,
    coefficient indexing, marker length parsing, custom scan scripts — is the
    largest attack surface and should be entirely safe Rust. `decode/huffman.rs`'s
    `get_unchecked`/`get_unchecked_mut` on `ZIGZAG_ORDER` and coefficients is the
    known instance: replace with safe indexing and show the generated code is
-   unchanged, or justify with a benchmark.
+   unchanged, or justify with a benchmark. **Landed and gated 2026-09-08** —
+   see *Progress* below.
 6. **`#![cfg_attr(not(feature = "simd"), forbid(unsafe_code))]` compiles.** This
    is P4-69's goal; it becomes reachable once (5) and P4-138 land. `OnceBox` in
    `HuffmanTable` is the remaining blocker — the standard Annex K tables are
@@ -7445,6 +8267,666 @@ misuse of a public SIMD entry point; none injects allocation failure; none runs
 **Why P2.** It is the evidence layer. Sequenced after the P0 fixes because
 several criteria here exist specifically to prove those fixes hold, and writing
 the harness first would only pin current behaviour.
+
+**Progress.**
+
+- **Criterion 5 — 2026-08-10 (#500):** `decode/huffman.rs`'s two
+  `get_unchecked`/`get_unchecked_mut` sites on `ZIGZAG_ORDER` and the
+  coefficient block became safe indexing; both bounds were already
+  established at the call site, and the 8K progressive decode measured
+  41.29 / 41.16 ms unchecked vs 41.33 / 41.32 ms safe (`experiments/huffman.tsv`).
+- **Criterion 5 — 2026-09-08:** `decode/progressive.rs` — the ten remaining
+  `unsafe` blocks (twelve `get_unchecked`/`get_unchecked_mut` calls) in the
+  AC-first and AC-refine scans (progressive scan state, EOB runs, spectral
+  ranges, coefficient indexing — the surfaces the criterion names) — became
+  safe indexing. `k < 64` is established by the
+  scan-bounds guard (`1 <= ss <= se <= 63`) and the soft-landing `k >= 64`
+  branch directly above each write, and every `ZIGZAG_ORDER` entry is < 64
+  by construction. Same harness (`examples/p4141_huff_bench.rs`, 8K
+  progressive, best-of-9, two runs each), interleaved in one machine state:
+  `origin/main` 43.56 / 43.20 ms, safe 42.76 / 42.59 ms — no regression,
+  within noise (`experiments/progressive.tsv`; an earlier separate-state
+  pair read 46.74 / 47.44 vs 46.31 / 45.24 ms, same verdict). Byte parity
+  with `djpeg` is pinned by `tests/progressive_ac_soft_landing.rs`, which
+  exercises the AC-refine `k` overflow edge; the AC-first edge has no pinned
+  fixture of its own — that file describes one but does not commit it, filed
+  as [P4-190](#p4-190-the-ac-first-progressive-soft-landing-has-no-pinned-regression-fixture--open).
+  **The mechanism is `tests/parser_unsafe_gate.rs`:** twenty-six parser /
+  control-plane sources (marker parsing, bit reader, Huffman, arithmetic,
+  progressive, lossless, resync, scan layout and drivers, output plumbing,
+  zigzag tables, scan-script types, marker writer, encode-side progressive
+  and arithmetic) plus the five scalar decode kernels that are already clean
+  must contain no `unsafe` token outside comments, and a new one fails the
+  build until it is removed — the first *gate* under this item, in the
+  P4-139 criterion-3 shape. It does not fail open either: every `.rs` under
+  `src/decode/` must be classified into one of its three lists (parser,
+  unsafe-free kernel, inventory-owned), so a new module cannot slip past it.
+  With it, "parser and control-plane `unsafe`" is zero for every listed
+  file. Not in the list:
+  `common/huffman_table.rs`, whose `OnceBox` lazy-init `unsafe` is criterion
+  6's named blocker — it joins the gate when that lands. The
+  `pipeline_impl/{baseline,progressive,arithmetic,streaming}.rs` scan drivers
+  still hold `unsafe`, but all ten sites are `idct_scaled_strided`
+  destination pointers — strided IDCT dispatch, not parsing; they belong to
+  the criterion-4 inventory.
+- **Criterion 4 — 2026-09-08, root crate:** `docs/UNSAFE_INVENTORY.md`
+  lists every code `unsafe` token under `src/` — 301 sites in 45 files,
+  224 rows keyed by (file, enclosing item) — with the seven cells the
+  criterion names: why safe Rust cannot express it, the invariant and where
+  it is established, whether a safe caller can reach it, the regression
+  test that would catch the invariant breaking, the CI legs that execute it
+  (and those that do not), and the last reviewer. **The mechanism is
+  `tests/unsafe_inventory_gate.rs`:** it lexes the tree with the scanner
+  the criterion-5 gate uses (`tests/helpers/unsafe_scan.rs`, now shared),
+  attributes each token to its enclosing `fn` or `unsafe impl` header, and
+  fails unless the inventory holds exactly those items at exactly those
+  counts with no empty or placeholder cell — so an added, removed or
+  *moved* `unsafe` is a CI failure until the row changes, and the failure
+  message prints the paste-ready rows. `.github/CODEOWNERS` routes the
+  inventory and both gates to the maintainer, which becomes a hard review
+  requirement once branch protection asks for code-owner review (it does
+  not today — a repository setting, not a code change). Sites in
+  `#[cfg(test)]` code are inventoried and marked test-only rather than
+  exempted. Rows whose honest *Regression test* cell is `**none**` are the
+  gaps this inventory surfaced — thirty-two of the 224 when this chunk landed,
+  thirty since the criterion-1 landing gave the two `OnceBox` rows a test — and they are the
+  criterion's product rather than a defect in it: a raw count could not
+  have named one of them. They are filed together as
+  [P4-191](#p4-191-sixty-nine-inventoried-unsafe-items-have-no-regression-test--open)
+  (#609), which includes three uncalled functions holding `unsafe`. Writing
+  one of those cells also produced the criterion's first *defect*:
+  [P4-192](#p4-192-a-custom-scan-script-with-se--63-writes-past-two-stack-arrays-from-safe-rust-on-x86_64--closed-2026-10-07)
+  (#610), a stack overflow reachable from safe Rust — the answer to the
+  premise of this whole item, which is that no gate had ever found one.
+  The workspace's other two crates (`libjpeg-turbo-rs-image`,
+  `libjpeg-turbo-rs-wasm`) hold no `unsafe` at all, so `src/` plus the C-ABI
+  crate is the whole of it.
+- **Criterion 4 — 2026-09-08, C-ABI crate except `jpeglib.rs`:**
+  `docs/UNSAFE_INVENTORY_CAPI.md` lists every code `unsafe` token under
+  `crates/libjpeg-turbo-rs-capi/src/` outside that one file — 285 sites in
+  14 files, 91 rows — with the same seven cells. The gate now carries a
+  `SCOPES` table of (tree, document) pairs rather than one `SCAN_ROOT`, so
+  the two inventories are diffed by one mechanism, and two new tests hold
+  the edges: `the_scanned_roots_are_the_whole_workspace` fails if
+  `libjpeg-turbo-rs-image` or `libjpeg-turbo-rs-wasm` grows an `unsafe` no
+  document covers, and `deferrals_are_live_and_named` requires every
+  `DEFERRED` entry to exist, to sit inside a scanned root and to *still hold
+  `unsafe`* — so the deferral has to be deleted the moment the file is
+  inventoried, and the list cannot become a place for stale exemptions.
+  Both directions were mutation-checked before the rows were written:
+  removing `jpeglib.rs` from `DEFERRED` fails with "holds 501 `unsafe`
+  site(s) and is not in docs/UNSAFE_INVENTORY_CAPI.md", and adding one
+  `unsafe` to `bufsize.rs` fails naming the new item.
+  **Deferred:** `jpeglib.rs` — 501 sites in 12.9k lines, 64 % of the crate's
+  total, the classic `jpeg_*` surface. It is named in code, not in prose.
+  What the C-ABI rows produced, beyond the inventory itself: twenty-five
+  answer `**none**`, four of them entry points no leg executes at all
+  (`tj3LoadImage12/16`, `tj3SaveImage12/16`), added to
+  [P4-191](#p4-191-sixty-nine-inventoried-unsafe-items-have-no-regression-test--open)
+  (#609) as criteria 6 and 7 rather than filed as a sibling; and one
+  two defects: [P4-193](#p4-193-the-c-abi-destination-spans-do-not-use-imagelayoutstrided-so-a-decode-forms-a-slice-over-one-rows-padding--open),
+  where a destination span is wider than the extent upstream touches, and
+  [P4-194](#p4-194-the-memory-managers-alloc_sarray--alloc_barray-multiply-jdimensions-unchecked-where-upstream-guards-and-chunks--open),
+  unchecked `JDIMENSION` products in the memory manager where upstream
+  guards and chunks — the second surfaced only because `codex review`
+  refused the row's first draft, which had named `Layout::from_size_align`
+  as the bound it is not. The
+  document also records what *no* leg reaches: no TurboJPEG entry point runs
+  under Miri, `sanitizers.yml` is `--lib` so it sees only this crate's own
+  unit tests, and none of the thirteen fuzz targets crosses the C ABI at all —
+  which is criterion 3, restated as evidence instead of as a plan.
+- **Criterion 4 — 2026-09-09, the C-ABI crate's last file, and the
+  criterion's close:** `docs/UNSAFE_INVENTORY_CAPI.md` gains
+  `crates/libjpeg-turbo-rs-capi/src/jpeglib.rs` — 501 sites in 12.9k lines,
+  144 rows, the classic `jpeg_*` surface and 64 % of the crate's `unsafe`.
+  With it the gate's `DEFERRED` list is **empty**: every `.rs` under `src/`
+  and under the C-ABI crate's `src/` is inventoried, and
+  `the_scanned_roots_are_the_whole_workspace` proves the other two members
+  hold no `unsafe` at all. Mutation-checked both ways before the rows were
+  written — adding one `unsafe` to `write_c_file` fails with "holds 2 site(s)
+  but the inventory says 1", and putting `jpeglib.rs` back in `DEFERRED` now
+  fails with "has an inventory section now", so the deferral mechanism
+  self-destructs rather than rotting.
+  What the rows produced, in three kinds. **Fourteen answer `**none**`** —
+  three exports no leg calls (`jpeg_new_colormap`, `jpeg_alloc_huff_table`,
+  `jpeg_set_linear_quality`), four source-manager callbacks that are
+  installed into the caller-visible slots and never invoked
+  (`noop_init_source`, `stdio_init_source`, `noop_skip_input_data`,
+  `default_resync_to_restart`), five named sub-cases, and the 32-bit
+  dispatch below. All of them went to
+  [P4-191](#p4-191-sixty-nine-inventoried-unsafe-items-have-no-regression-test--open)
+  (#609), which is renamed from fifty-seven to seventy-one (and to
+  sixty-nine on 2026-09-09).
+  **Two defects**, both found by writing an *Invariant* cell and neither
+  tracked anywhere before:
+  [P4-195](#p4-195-jpeg_read_raw_data-copies-mcu-aligned-plane-widths-into-caller-buffers-libjpegtxt-sizes-to-dct-blocks--open)
+  (#615), where `jpeg_read_raw_data` copies an MCU-aligned plane width into
+  a buffer `libjpeg.txt` sizes to DCT blocks — eight bytes past every row of
+  the manual's own 101x101 4:2:0 example, sixteen in the 12-bit twin — and
+  [P4-196](#p4-196-jpeg_abort--jpeg_destroy-and-the-memory-managers-precision-probe-hardcode-is_decompressor-at-byte-32-which-is-an-lp64-only-offset--open)
+  (#616), a literal `.add(32)` for `is_decompressor` that is the LP64 offset
+  only, with the `const _` pinning it gated to 64-bit so it compiles out
+  exactly where it is wrong. And a coverage
+  fact the document now records per site: **no sanitizer executes a single
+  site in `jpeglib.rs`** — `sanitizers.yml` is `--workspace --lib`, this
+  file's four `#[cfg(test)]` modules parse headers and marker bytes without
+  calling an entry point, and the C-boundary harnesses resolve fifteen `tj3*`
+  symbols between them and no `jpeg_*` symbol. Miri is the only instrumented tool that
+  reaches it, through `capi_create_abi_guards` and `capi_thread_affinity`.
+  That is criterion 2 and criterion 3 restated as measurement.
+  **The review round is part of the finding.** The chunk's first draft
+  answered "which CI legs execute this site" by reading call graphs, and got
+  six rows wrong in both directions — crediting ARMv7 and the stock-tool link
+  with paths they do not take, and calling two live functions dead. The
+  `docs-drift-auditor` pass re-derived the column with `cargo llvm-cov`
+  instead, and the `rust-code-reviewer` pass produced both defects above. An
+  inventory's coverage column is only as good as its measurement; asserting
+  it from the source is the same mistake #320 named.
+- **Criterion 3 — 2026-09-09, the API-sequence half:**
+  `fuzz/fuzz_targets/fuzz_api_sequence.rs` drives ordered `TjHandle`
+  lifecycles — `new → configure → probe → decode → reset → decode →
+  transform → destroy` — where no existing target touches `TjHandle` or
+  mixes operation kinds on one handle. The engine, the wire format and the
+  oracle live in `tests/helpers/api_sequence.rs`, included by path by the
+  target *and* by `tests/api_sequence_state.rs`, so what CI proves on every
+  pull request and what libFuzzer searches on the 6-hourly schedule are the
+  same code rather than two drifting copies of it. The seeds are assembled by
+  `encode_program`, the exact inverse of the target's decoder and pinned by
+  `program_round_trips_through_its_wire_format`, so the seed generator does
+  not carry a second copy of the wire format; and `program_from_bytes`
+  re-anchors the image on SOI, so a libFuzzer insertion before it cannot turn
+  a good corpus entry into a garbage body.
+  **The oracle is four properties**, each stated against the documented
+  contract rather than against current behaviour. *P1, decode purity* — every
+  decode-family result on a used handle must equal the same call on a handle
+  built fresh from the configuration alone, which is sound because
+  `TjHandle::decompress` reads only writable parameters (scaling, cropping,
+  `STOPONWARNING`, `FASTUPSAMPLE`, `FASTDCT`, `SAVEMARKERS`, `BOTTOMUP` and
+  the limits) and none of the eight it publishes. *P2* — a compress must
+  equal the same call on a fresh handle replaying the configuration **plus
+  the last publishing operation that succeeded**, on the image it read; a
+  compress legitimately reads `SUBSAMP`, the densities and `COLORSPACE` from
+  the handle (`setCompDefaults`, `turbojpeg.c:376-378` and `:418-427`), so
+  the reference has to include that one call — and only that one. *P3* —
+  determinism of `transform_jpeg_with_options`, which takes no handle at all,
+  so a difference there is global state; it is deliberately not a statement
+  about handle state. *P4, both directions* — after a successful decode every
+  parameter the call documents writing must agree with the fresh handle's,
+  **and** every parameter it does not document writing must be unchanged from
+  before the call, which is what holds `inspect_header` and `compress` (both
+  `&self`) to writing nothing at all.
+  **Two drafts of this oracle compared nothing, and both were caught by
+  asking what would have to change for the comparison to fail.** The first
+  passed one JPEG per program, so P4 compared a number against itself — the
+  value an earlier call left behind is the value this call would write
+  anyway. `Op::SelectInput` fixed that. The second skipped P2 once anything
+  had been published, which removed every sequence in which a compress could
+  have differed; replaying the last publishing operation fixed that. A third
+  survived review: all the committed fixtures report `PRECISION = 8` and the
+  JFIF default density `0 / 1 / 1`, which are also `TjHandle::new()`'s initial
+  values, so four of P4's eight comparisons were dead — deleting the whole
+  density write-back left every test green. `BUILTIN_INPUTS` now carries a
+  `cjpeg -sample 2x1` image whose JFIF density was set to `1 / 72 x 71` and a
+  `cjpeg -precision 16 -lossless 1` image, and
+  `the_builtin_inputs_can_move_every_published_parameter` fails if any
+  published parameter stops taking two values across them.
+  **Each property but P3 has a committed proof that it can fail** — P3,
+  determinism of the handle-free `transform_jpeg_with_options`, has none,
+  because the only defects it can see are ones the language mostly prevents.
+  `ReferencePolicy::NoConfig` (a reference replaying nothing) and
+  `NoWriteBackReplay` (one replaying the configuration but not the last
+  published header) are both required to be *detected*. Verified by source
+  mutation before the tests were believed: deleting the density write-back
+  fails the premise gate, publishing it only on the first decode fails P4 in
+  three tests naming `XDensity` and the operation index, writing an
+  undocumented `Optimize` fails P4's second half, and leaving `bottom_up` set
+  at the end of `decompress` fails P1.
+  189 committed seeds, one program of nine against each of six encoder
+  configurations and fifteen structural edge cases.
+  **The fuzzer's first real finding was a defect in the oracle, which is the
+  right order for it to happen in.** Ninety seconds in, P2 failed on
+  `[Set(Quality), Decompress, Set(Quality), Set(Subsampling), Compress]`: the
+  reference replayed the configuration and *then* the last publishing decode,
+  which reorders `set(SUBSAMP) → decode` into `decode → set(SUBSAMP)` — and a
+  decode publishes `SUBSAMP`, so the two orders leave different values behind.
+  The prefix is replayed in its original order now, and that program is pinned
+  as `the_reference_replays_configuration_and_the_decode_in_their_original_order`.
+  After the fix, 346,032 runs over five minutes found nothing.
+  `codex review` then found two more, both of the same shape — a safeguard
+  that was not where it claimed to be. The pixel ceiling lived only in a
+  pre-parse that reads the header with `Decoder::new`, which refuses a stream
+  whose *scan count* exceeds its own default of 8192 while a fresh `TjHandle`
+  leaves `TJPARAM_SCANLIMIT` unset: a header the pre-parse could not read was
+  one the handle decoded anyway, past the ceiling. Two things changed, because
+  neither alone is enough. `TJPARAM_MAXPIXELS` is set on the live handle and on
+  every reference now — a parameter no program can write, so every comparison
+  stays exact — and the pre-parse *blanks* an input whose header it refuses
+  **for a limit** rather than forwarding it, because `decompress_12bit` /
+  `decompress_16bit` read nothing from the handle at all
+  ([P4-199](#p4-199-setdecompparameters-publishes-thirteen-handle-parameters-our-8-bit-decode-publishes-eight-and-the-1216-bit-ones-publish-three-and-ignore-the-handles-limits--open),
+  #620), so `TJPARAM_MAXPIXELS` never reaches them; every *other* parse failure
+  is still forwarded on purpose, since those error paths are most of what a
+  program of decode operations exercises.
+  `a_header_the_prefilter_cannot_read_because_of_a_limit_is_kept_out` pins the
+  first of those. The second needed a switch to be testable at all: with the
+  pre-parse on, no input can distinguish it from the handle ceiling, so
+  `Limits::prefilter_headers` exists to turn it off and let
+  `a_handle_built_by_reset_carries_the_same_ceiling_as_the_references` drive a
+  path where forgetting the cap is observable — without it that assertion would
+  be asserting around an unreachable branch, which is exactly what the first
+  version of the ceiling test did. And the
+  target handed the engine two of the three built-in images while the seeds
+  addressed three, so the `precision_transition` seed's `Decompress16` calls
+  landed on an 8-bit image; the input layout is one function
+  (`fuzz_inputs`) with named indices now, checked by decoding each one.
+  A second `codex review` round found two more of the same kind at the
+  lifecycle edges the first fix created: `Op::Reset` built an *uncapped*
+  handle while every reference kept the ceiling, so `[Reset, InspectHeader]`
+  failed P1 on the harness rather than on the library; and blanking an
+  oversize input by *removing* it renumbered every input behind it, folding
+  `FUZZ_INPUT_LOSSLESS16` (3) to `3 % 3` and deleting the corpus's only
+  16-bit decode whenever the fuzzed body happened to be large. An oversize
+  input keeps its slot as an empty slice now. Both are pinned, and both
+  regressions fail when the fix is reverted — which is the check that
+  distinguishes a test of the fix from a test of its ingredients, and which
+  the first version of the ceiling test did not pass.
+  A third round found the same class one level in: the decode outcome
+  summarised ICC, EXIF, XMP, IPTC and the comment as *lengths*, so two images
+  whose metadata differed but happened to be the same size compared equal —
+  a decode returning the previous image's XMP would have been invisible to P1,
+  and to P4 too, since none of them is a `TjParam`. The outcome carries every
+  metadata byte now, length-prefixed, and the regression compares two streams
+  that differ only in metadata content with `TJPARAM_SAVEMARKERS` off, because
+  under the default level the raw APP segments would distinguish them even if
+  the parsed fields did not.
+  It produced one defect on its first run:
+  [P4-197](#p4-197-a-cropping-region-whose-left-boundary-exceeds-the-scaled-width-decodes-to-zero-columns-and-trips-a-false-debug_assert--closed-2026-10-07)
+  (#618), a crop whose left boundary is past the scaled width decoding to
+  zero columns, tripping a `debug_assert!` whose comment calls that state
+  unreachable and, in release, silently dropping the requested crop height.
+  Upstream refuses the region (`turbojpeg.c:2106-2109`). The generator pinned
+  crop `x` to 0 until that closed; P4-197 closed 2026-10-07 and removed the
+  pin, so the generator draws `x` from 0..16 again.
+  Writing the oracle down produced two more, both from the same question the
+  criterion-4 inventory asked of every `unsafe` site — *what is this call
+  allowed to read, and what is it allowed to write?*
+  [P4-198](#p4-198-tjhandle-merges-upstreams-two-icc-buffers-so-a-decode-changes-the-profile-a-later-compress-embeds--open)
+  (#619) came from asking whether `icc_profile` is a compress parameter or a
+  decompress one — upstream's answer is "both, separately", and `TjHandle`
+  merges them, so a decode changes the profile a later compress embeds.
+  [P4-199](#p4-199-setdecompparameters-publishes-thirteen-handle-parameters-our-8-bit-decode-publishes-eight-and-the-1216-bit-ones-publish-three-and-ignore-the-handles-limits--open)
+  (#620) came from having to enumerate what a decode publishes in order to
+  compare it: `setDecompParameters` writes thirteen parameters on the shared
+  path all three precisions take, ours writes eight at 8-bit and three at
+  12/16-bit, and the 12/16-bit entry points read no handle limits at all.
+  Neither is fixed here — each changes what downstream callers read back and
+  needs its own C cross-validation pass — so `WRITE_BACK_8BIT`,
+  `WRITE_BACK_PRECISION`, `Op::publishes_for_compress` and
+  `Limits::prefilter_headers` encode the *port's* write sets and carry a
+  pointer to #620, and P1's comparison on `Decompress12` / `Decompress16` is a
+  forward guard rather than a live check until it closes.
+  A fourth `rust-code-reviewer` round produced the third, and named the
+  harness's own limit. **`Op::Decompress12` could not succeed on any input the
+  engine could reach**: `decompress_12bit` refuses an 8-bit source (P4-171)
+  and a 16-bit one, and P4's first half is gated on the live call succeeding,
+  so that opcode's write-back comparison was dead in every deterministic test
+  and in all 189 seeds — the "assert around an unrunnable path" shape this
+  file goes to some lengths elsewhere to avoid. `BUILTIN_INPUTS` gains
+  `real_world/libjpeg_testorig12_227x149_12bit.jpg` as
+  `FUZZ_INPUT_LOSSY12`, the `mixed_precision` and `precision_transition` seed
+  programs now aim their `Decompress12` calls at it, and
+  `the_twelve_bit_write_back_comparison_runs_on_some_input` fails when the
+  fixture is removed. Two more of the round's findings were taken as written:
+  the per-input pixel ceiling drops from 1 MP to 256 x 256, because the
+  byte targets decode once per input while a program of sixteen operations can
+  ask for more than thirty full decodes and 1 MP against libFuzzer's
+  `-timeout=30` is a hang report the harness caused; and P2's freedom from a
+  merged-ICC false positive turns out to rest on P4-142 being *open* —
+  `decompress_header` is literally `self.decompress(data)`, so both publishers
+  write `icc_profile` identically, and a header-only rewrite that drops the
+  ICC write would make `SetIcc(v), Decompress, DecompressHeader, Compress`
+  report a harness bug as a library crash.
+  `the_two_publishing_operations_agree_on_the_icc_profile` turns that into a
+  named failure; injecting `self.icc_profile = None` into `decompress_header`
+  fails it.
+  **And the blind spot is now stated rather than left to be found.** Every
+  property here is a *mirror* comparison — the live handle against a second
+  handle carrying the same configuration — so it can see a value that differs
+  between two paths and not one that is wrong on both.
+  [P4-200](#p4-200-jpegwidth--jpegheight-publish-the-scaled-and-cropped-output-dimensions-where-upstream-publishes-the-sofs--open)
+  (#621) is exactly that: `JPEGWIDTH` / `JPEGHEIGHT` are published from the
+  decoded output, so a scaled or cropped decode reports the output size where
+  `setDecompParameters` reports the SOF's, and
+  `criterion_named_sequence_leaves_no_state_behind` drives the triggering
+  configuration across eleven fixtures and passes. The module doc says so, and
+  criterion 5 of P4-200 is the fifth property that closes it.
+  A fifth came from CI rather than from review:
+  [P4-201](#p4-201-the-c-parity-corpus-adopts-every-file-under-testsfixtures-and-compares-it-through-the-8-bit-decompress-so-a-precision-specific-fixture-is-reported-as-a-crash--open)
+  (#623). The branch's first push turned both `Corpus Test (C parity)` legs red
+  with `1 crash` and nothing else — `examples/generate_corpus.rs` copies the
+  whole of `tests/fixtures/` into the corpus and `examples/corpus_test.rs`
+  compares every file through the **8-bit** `decompress()`, so the new 16-bit
+  lossless built-in was read by an entry point that cannot read it, and the two
+  offending rows landed nine thousand lines above the `tail -200` the workflow
+  prints. The stream lives in `tests/inputs/` now, outside the tree the corpus
+  copies, and `the_sixteen_bit_builtin_stays_out_of_the_c_parity_corpus`
+  asserts both the reason and the consequence, comparing bytes so a rename does
+  not evade it.
+  That is five defects from criterion 3, against five from criterion 4.
+- **Criterion 3 — 2026-09-09, the process-isolated C-ABI half:**
+  `crates/libjpeg-turbo-rs-capi/examples/cabi_misuse_harness.c` is a C driver
+  that `dlopen`s one shared library, runs **one named case**, and exits;
+  `crates/libjpeg-turbo-rs-capi/tests/cabi_misuse_harness.rs` spawns it once per
+  case against our cdylib and once against a stock `libturbojpeg`, and requires
+  the two stdout transcripts to be byte-identical. Because the library is a
+  command-line argument, the *same binary* drives both implementations, so the
+  comparison is between two transcripts rather than between our behaviour and a
+  comment — which is the failure mode this whole item exists to retire.
+  **A child per case is the mechanism, not a convenience.** The scenarios the
+  criterion names are the ones that may fault, and in one process the first that
+  misbehaves takes every later case with it. Ten cases cover four of the six
+  named scenarios and substitute a defensible shape for a fifth: `lifecycle`
+  (`init → destroy → destroy`, in the part that has
+  a contract — a second destroy of the same live pointer is a double free
+  upstream too, and the harness says so rather than driving it), `null_handle`,
+  `pitch_boundaries`, `undersized_output`, `max_dimensions`,
+  `concurrent_handles` (one handle per thread, *not* the criterion's same-handle
+  concurrency: upstream mutates `tjinstance` unsynchronised from every entry
+  point, so a shared handle races in both implementations and has no contract to
+  compare — and its eight threads are parked on a condition variable and
+  released together, so the process's *first* library call is made by eight
+  threads at once and the serial reference is decoded afterwards; the first
+  version probed and decoded on the main thread first, warming every lazily
+  built table, so no worker could have raced the initialisation the case names.
+  `codex review` found that), `alloc_ownership`, `precision12`,
+  `handle_defaults`, which compares the whole 26-parameter vector of a handle
+  that has read nothing, and `parameter_applicability`, which writes every one
+  of those 26 on each of the three instance types.
+  **Every destination a case sizes for a real decode or compress crosses the ABI
+  inside a guard-page buffer**: an `mmap`ed
+  region whose payload ends flush against a `PROT_NONE` page, with the slack
+  before it canary-filled. The one exception is deliberate —
+  `alloc_ownership`'s destination has to come from `tj3Alloc` for the case to
+  mean anything; even `null_handle`'s three bytes are guarded, because a
+  library that skipped the NULL check would write the fixture's 101 KB into
+  them. A one-byte overrun is a signal, a short-stride write
+  is a canary mismatch, and neither needs a sanitizer — so the cases keep their
+  meaning in the ordinary `cargo test` run. `selftest_guard_page` and
+  `selftest_canary` are committed proof that both are armed; disarming the
+  `mprotect` calls fails the first and stubbing `canary_intact` to 1 fails the
+  second, both checked before the cases were believed.
+  **The C driver's exit status carries its own invariant checks**, which is not
+  redundancy: the sanitizer leg runs the cases *without* the Rust runner and
+  reads only the exit status, so a case that merely printed `canary=corrupt` and
+  returned 0 left that leg green on real corruption. `codex review` demonstrated
+  it five times over four rounds, and each mutation is now caught: a
+  short-stride write into the argument-rejection destination; a valid 12-bit
+  decode made to report failure; an underrun of the one buffer no case happened
+  to check — which moved the canary test into `guarded_free` itself, so a case
+  that forgets to ask is still covered; a rejected decode writing byte *one* of
+  its destination, where only byte zero was inspected — now the whole payload is
+  checked against its poison; and a compress output zeroed after the SOI, which
+  a length and a marker cannot distinguish from a valid JPEG — now the
+  compressed bytes are digested and compared, which both libraries produce
+  identically (810 and 1097 bytes, byte for byte), so it is an encode
+  cross-validation rather than a snapshot of our own output. That last one is
+  this paragraph's one exception, stated rather than glossed: a digest cannot
+  be `require()`d without pinning our own bytes, so it is the *transcript
+  comparison* that catches it and not the exit status — verified by corrupting
+  the compress output for our library alone, which fails
+  `transcripts_match_stock_turbojpeg`; corrupting it in the driver for both
+  passes, because the same binary drives both. The sanitizer leg prints that
+  line and checks nothing. `require()` covers only what holds on *both*
+  implementations; every known divergence is left to the transcript comparison,
+  since failing on one would turn the oracle run red. `every_harness_case_is_driven`
+  reads the C driver's dispatch chain and fails if a case exists that no Rust
+  test runs, and `sanitizers.yml`'s `c_boundary_asan` job runs the same ten
+  cases plus `selftest_guard_page` against an ASan/UBSan-instrumented cdylib
+  with an equivalent count check. That job is also where **criterion 2's two recorded C-boundary gaps
+  close**: `precision12` is the first 12-bit path to cross the boundary under a
+  sanitizer, and `alloc_ownership` the first exercise of the `tj3Alloc` /
+  `tj3Free` shared-allocator contract across it, in both directions.
+  **Six divergences**, each a filed item and a live entry in
+  `KNOWN_DIVERGENCES` — a list every entry of which must *still* diverge, so a
+  fix deletes its entry rather than leaving an exemption that would quietly
+  cover the next regression on the same line:
+  [P4-202](#p4-202-tj3compress8-accepts-a-width-or-height-above-jpeg_max_dimension-and-emits-a-frame-stock-djpeg-refuses--open),
+  where `tj3Compress8` accepts a 65,501-pixel axis and emits an SOF stock
+  `djpeg` refuses to read;
+  [P4-203](#p4-203-tjparam_precision-reports-the-decode-paths-output-precision-not-the-frames-data_precision--open),
+  where `TJPARAM_PRECISION` reports 8 for a 12-bit frame both libraries agree
+  is 12-bit; the initial-value half of
+  [P4-200](#p4-200-jpegwidth--jpegheight-publish-the-scaled-and-cropped-output-dimensions-where-upstream-publishes-the-sofs--open),
+  where a fresh handle's `JPEGWIDTH` / `JPEGHEIGHT` are 0 against upstream's -1
+  sentinel;
+  [P4-205](#p4-205-tj3alloc0-returns-null-where-upstream-returns-a-freeable-pointer-and-the-code-comment-claims-the-opposite--open),
+  `tj3Alloc(0)`;
+  [P4-206](#p4-206-tjparam_norealloc-accepts-a-buffer-exactly-the-size-of-the-output-where-upstream-needs-one-byte-more--open),
+  a `TJPARAM_NOREALLOC` buffer exactly the size of the output; and
+  [P4-207](#p4-207-tj3set-accepts-sixteen-parameterinstance-type-pairs-upstream-refuses-as-not-applicable--open),
+  sixteen `tj3Set` parameter/instance-type pairs upstream refuses as not
+  applicable.
+  **The last three came from the review round, not the first run, and each came
+  from the same question**: what would have to change for this comparison to
+  fail? `rust-code-reviewer` asked it of `alloc_4096_readback` — which read back
+  a byte the harness itself had just written, and could not fail — and probing
+  the `tj3Alloc` contract properly produced P4-205. It asked it of a hard-coded
+  "obviously too small" NOREALLOC capacity; measuring the boundary instead
+  produced P4-206. And it asked it of `reinit_matches_fresh`, which compared two
+  handles neither of which had ever been written to; dirtying the first one
+  before the destroy produced a `dirtied` count that disagreed across the two
+  libraries, and chasing *that* produced P4-207 and the
+  `parameter_applicability` case. Three of the six divergences this harness
+  found were found by making an assertion capable of failing.
+  **A second `rust-code-reviewer` round asked the same question of the
+  instrumentation itself, and found the one place it was answered wrong.**
+  `guarded_alloc` rounded the payload *up* to a page multiple, so a length that
+  is already a multiple got **zero** canary slack — and `canary_intact` then
+  loops zero times and returns 1 without comparing anything. It was not
+  hypothetical: `tj3JPEGBufSize(96, 64, TJSAMP_420)` is 20480, exactly five
+  4 KiB pages, so on Linux — every leg that runs this harness, the sanitizer
+  job included — the two buffers a *successful* compress writes into were the
+  two with no underrun detector at all, while the 16 KiB pages of an Apple
+  Silicon machine hid it locally. `len / page + 1` always leaves 1..page bytes,
+  and `require(g->slack > 0)` now fails inside `guarded_alloc` rather than
+  leaving a later edit to re-open it. Two more of that round's findings were
+  taken as written: `require(parked == WORKERS)` could not fail, because
+  `open_gate` blocks until the count reaches eight — the comments said the
+  number was measured, which was true of the earlier broadcast-on-create design
+  and not of this one, so the assertion is gone and both comments now claim
+  what the gate provides; and `undersized_output`'s rule was stated against
+  the output but keyed off `tj3JPEGBufSize`, with no capacity between the two,
+  so an implementation that refused every buffer below the worst case satisfied
+  every check in the case. A sixth slot at `actual + 1` closes it — both
+  libraries accept 1098 bytes and emit the same 1097, which puts both sides of
+  the P4-206 boundary in one transcript. The same round added `alarm(60)`: a
+  deadlock is what `concurrent_handles` exists to find, and an unbounded one
+  would have surfaced as an unattributed job timeout rather than as one case's
+  exit status, which is this harness's whole premise.
+  **The oracle has to be at least the pinned `tool-current` release**, and the
+  harness enforces it by resolving `tj3InitVersion`, which TurboJPEG added in
+  3.2. That is not fastidiousness: 3.1.4.1 *accepts* a pitch below
+  `width * pixelSize` and writes rows at that stride, which `pitch_boundaries`
+  catches with a guard page. Comparing against it would report an upstream
+  defect fixed in the pinned release as this port's.
+  **What remains in this criterion** is callback reentry, and its blocker is
+  named rather than deferred: the TurboJPEG surface's only user callback is
+  `tjtransform.customFilter`, which our `tj3Transform` refuses
+  ([P4-204](#p4-204-the-c-abis-tjtransformcustomfilter-is-rejected-while-feature_paritymd-and-c_api_referencemd-record-it-as-delivered--open)) —
+  a gap `docs/FEATURE_PARITY.md` and `docs/C_API_REFERENCE.md` recorded as
+  delivered until this landing corrected them. Reentry therefore falls to the
+  classic `jpeg_*` error, source and destination managers, which need the
+  installed `jpeglib.h` and are their own milestone.
+- **Criterion 1 — 2026-09-09, the public API, the doctests, allocation refusal
+  and the initialisation race:** the Miri job ran `cargo miri test --lib` plus
+  two C-ABI suites, so everything it interpreted in the root crate was reached
+  from inside — a `#[cfg(test)]` module calling a function with arguments it
+  chose. Four of the six surfaces the criterion names — integration suites,
+  doctests, post-allocation-failure state and *concurrent* one-time
+  initialisation — had no interpreted coverage at all. The other two did, and
+  the delta is narrower than "uncovered" and worth stating precisely, because
+  the first draft of this entry got it wrong and `docs-drift-auditor` measured
+  it: `progressive_output::tests::progressive_output_path_is_miri_covered` walks
+  a `ProgressiveDecoder` under `--lib` but asserts `image.data.len()`; the
+  `BitWriter` lib tests drive the writer with sizes they choose, never through
+  an encode. Three integration suites and one step close all of it:
+  - `tests/miri_public_api.rs` (5 tests, 73 s under Miri on an idle macOS
+    aarch64 host, 150 s with the native suite running alongside — the figures
+    here are wall-clock on one machine, not a budget)
+    walks each intermediate `ProgressiveDecoder::output()` — P4-136's surface —
+    and drives the `BitWriter` arena (P4-138) across a reallocation and through
+    its `0xFF`-stuffing slow path. **What the interpreter checks there, and
+    what it does not, are worth separating**, because the first draft of this
+    entry claimed the stronger one and `rust-code-reviewer` read the allocator
+    (2026-09-09). *Live:* reconstructing a scan runs `decode_progressive_planes`,
+    which writes every block through
+    `component_planes[c].as_mut_ptr().add(dst_offset)` into
+    `idct_scaled_strided` — a raw destination pointer plus a stride, not
+    feature-gated, one of the sites `docs/UNSAFE_INVENTORY.md` owns — and Miri
+    checks each of those writes for bounds and provenance; the baseline decodes
+    reach the three equivalents in `pipeline_impl/baseline.rs`. *A tripwire:*
+    reading every byte of the reconstruction does **not** test initialisation
+    today, because both destinations are initialised by construction
+    (`try_filled_vec` on the colour path, reserve-and-`extend_from_slice` on the
+    grayscale one), so Miri's uninit tracking cannot fire. It guards against a
+    return to the `set_len`-over-spare-capacity shape P4-136 removed, whose
+    bytes a length assertion would pass over. The content assertions are
+    separate and stronger than the read: every row of every intermediate must
+    carry a written byte, and the final reconstruction must equal the one-shot
+    `decompress`.
+    Both `BitWriter` facts are *asserted*, not hoped for: the writer reserves
+    `2 * capacity` and is `reset` rather than reallocated between progressive
+    scans, so the test measures the **longest scan payload** against that
+    reservation. The first draft compared `jpeg.len()` and passed on a
+    progressive fixture whose longest scan was 849 bytes against a 1024-byte
+    reservation — no growth at all. 48×48 (1911 against 1152) is what makes it
+    real, and the baseline case is 4218 against 2048 with 21 stuffed pairs. The
+    suite re-derives that reservation from two figures it does not own, so both
+    are pinned on the library side in `huffman_encode::tests`: the multiplier by
+    `new_reserves_double_the_request_floored_at_1024`, and the capacity each
+    encoder starts from by
+    `frame_and_progressive_reservations_are_what_the_miri_suite_models`, over
+    the named `BitWriter::for_frame` / `for_progressive_scan` constructors the
+    pipelines now call — without which raising a call site's argument would
+    leave the integration test comparing against a stale, smaller number and
+    passing (`rust-code-reviewer`, 2026-09-09). Byte parity with
+    `djpeg` for all four fixtures this suite builds is a separate test in the
+    same file, `#[cfg_attr(miri, ignore)]` because Miri cannot spawn a process.
+    This is also the one suite of the four without a wasm guard, so
+    `wasm.yml`'s `cargo test --target wasm32-wasip1` runs its four
+    interpreter-independent tests under `wasmtime` as well (verified).
+  - `tests/miri_alloc_failure.rs` (4 tests and 35 s under Miri when landed; 7
+    tests since P4-209, not re-timed) injects the refusal from a
+    `#[global_allocator]` that fails an allocation of an **exact size**, armed
+    on the calling thread, so one test cannot reach another's, the harness's own
+    allocations are never refused, and a `>=` rule cannot catch an *infallible*
+    allocation and turn the case into a `SIGABRT`.
+    `selftest_the_injector_refuses_exactly_what_it_is_armed_for` is the
+    committed proof the mechanism is armed — the shape the criterion-3 harness
+    needed after its guard pages turned out inert. Two cases pass: a refused
+    progressive destination and a refused ICC reassembly each report
+    `AllocationFailed` **naming the buffer and its size** (a bare `matches!` on
+    the variant would have accepted a refusal from any other call site), and
+    the *same decoder* then produces bytes identical to an unrefused decode.
+    The fourth, the mainline contract, was `#[ignore]`d until P4-209
+    (2026-10-07), which un-ignored it and added three more converted decode
+    sites in the same shape.
+  - `tests/miri_once_init.rs` (2 tests, one of them runnable under Miri, ~11 s
+    per seed) races `std_huffman_tables`'s `AtomicPtr` once-cell in a process that
+    has not touched it — which is why it is its own binary:
+    `tests/concurrency.rs` decodes on ten threads but computes its reference
+    decode first, so all ten take the already-published fast path. Six threads
+    behind one barrier, four calling the cell directly and two reaching it
+    through `fill_default_huffman_tables`; the four direct callers must observe
+    the **same four `Arc` pointers**, and the two decoders must agree byte for
+    byte with a decode performed after the join. A `get_or_init` that leaked one
+    box per caller fails exactly that assertion and nothing else — mutation
+    checked locally rather than by a committed artifact: publishing every
+    caller's own box fails with "thread 1 saw a different set of tables … more
+    than one initialiser published" and nothing else changes. The fixture carries **no DHT segments**, which is what
+    makes the second route real: `fill_default_huffman_tables` writes only unset
+    slots, so a decode of an ordinary `compress` output calls the cell and clones
+    nothing — `codex review` found that, and the assertion that pins the fix is
+    that the stripped stream still decodes to bytes identical to the unstripped
+    one, which holds only because the omitted tables are the Annex K tables the
+    cell publishes (`djpeg` agrees on the same stream, diff = 0).
+    `-Zmiri-many-seeds` is the search: instrumenting the `compare_exchange`
+    loser branch and counting on macOS aarch64, the default seed takes it 5
+    times and the eight seeds the step passes take it 40. The figures are
+    scheduler-dependent; that the branch is reached at all is the claim.
+  - `cargo miri test --doc` interprets all seven of the crate's doctests, which
+    `--lib` does not build.
+  **The mechanism is `tests/miri_coverage_gate.rs`** (7 tests, every pull
+  request): the suites are selected by name in one `run:` line each, and a
+  suite dropped from that line keeps compiling, keeps passing on the native legs
+  and stops being interpreted, with no failure anywhere — #320's shape. The gate
+  reads the job out of `ci.yml` and requires each surface's selection, the
+  pre-existing `--lib`/`--skip simd::` and C-ABI selections, `--doc`,
+  `-Zmiri-many-seeds` on the concurrency step,
+  `-Zmiri-disable-isolation` on the steps whose suites read files (requiring it
+  of every step would report a *stronger* configuration as a problem), that no
+  interpreting step is non-executing (`--no-run`, `--list`, or an `if:` on the
+  step or on the **job**, each of which withdraws coverage without touching a
+  command), that every named test exists, is a `#[test]` and leaves at least one
+  runnable per surface, that any `#[ignore]` **anywhere in those suites** cites
+  an issue outside one listed exemption, and that **every** `tests/miri_*.rs` in
+  the tree is selected by some step.
+  Three further withdrawals were found by `rust-code-reviewer` on the way in,
+  each one line and each satisfying every rule above, and each now has its own:
+  `continue-on-error:` on a step or on the job (it runs, it fails, the job is
+  green), a libtest filter on a `miri_*` step — after `--`, or as the bare
+  positional word cargo forwards to libtest, which `codex review` added by
+  showing that `--test miri_once_init nonexistent` runs zero tests and exits 0 —
+  and, the shortest of them, a `cfg` on `miri`. `#![cfg(not(miri))]` at the top of a suite leaves every named
+  test defined, keeps the native legs green and makes the interpreting step run
+  **zero** tests and exit 0; only the per-test `cfg_attr(miri, ignore = …)` is
+  allowed, and the ignore rule holds that to citing an issue. The same round
+  moved the attribute rules onto a bracket-balanced join, so a `rustfmt`-split
+  `#[cfg_attr(\n miri,\n ignore = "flaky"\n)]` is one attribute rather than
+  three fragments no rule recognises, and anchored the one listed exemption to
+  the whole reason string. Every attribute comparison is
+  whitespace-insensitive, because the join's own spacing had made the rule
+  reject a *permitted* split `cfg_attr(miri, ignore = …)` — the rule that
+  exists to allow it (`codex review`).
+  `.github/CODEOWNERS` routes the four suites
+  and `ci.yml` to the maintainer for the question no gate can ask — whether a
+  selected suite still asserts anything.
+  Mutation-checked against the real workflow by
+  `dropping_a_selection_from_the_real_workflow_is_reported` — drop
+  `--test miri_once_init` from `ci.yml`, put `if: false` or
+  `continue-on-error: true` on the job, or narrow a step with `-- --skip` or a
+  bare test name, and the gate reports each of the five — while
+  `the_rules_reject_each_way_the_job_can_go_stale`
+  drives twelve negative fixtures and four positive controls over a synthetic
+  job — `continue-on-error: false` and the `--lib` step's own `--skip simd::`
+  among them, so a stricter reading cannot start reporting a healthy job — and
+  so the rules cannot rot
+  into always-true.
+  **What the injection produced:**
+  [P4-209](#p4-209-the-mainline-decode-destination-is-allocated-infallibly-so-an-allocator-refusal-aborts-the-process--closed-2026-10-07)
+  (#632, closed 2026-10-07) — `decompress` allocated its destination with `vec![0u8; size]`
+  (`decode/pipeline_impl/output.rs`, `take_out_buf`) where `size` comes from the
+  SOF, so a refused allocation **aborts the process** instead of returning
+  `AllocationFailed`. This is the class P4-136 criterion 4 and P4-144 closed
+  everywhere else; the primary entry point was never in it, and no job could see
+  that because none had ever refused an allocation a decode actually makes (the
+  two pre-existing probes ask `try_alloc` for an unservable `isize::MAX` and are
+  Miri-ignored — see P4-209). Verified by patching that one
+  site to `try_filled_vec`, after which the contract test passes unchanged; it was
+  committed `#[ignore]`d citing the issue, and P4-209 closed 2026-10-07 by
+  deleting the attribute, converting the other geometry-sized allocations
+  under `src/decode/`, and gating the rest with `tests/decode_alloc_gate.rs`.
+  **What remains in this criterion** is the pre-existing integration suites.
+  They are not one edit away: `cargo miri test --test decode_limits` interprets
+  the first handful of its tests and then stops with "can't call foreign
+  function `posix_spawnattr_init`" (how many depends on libtest's scheduling,
+  which is why the count is not quoted), because most suites here
+  cross-validate against a spawned `djpeg`. Adopting one means marking every C-oracle test in it
+  `#[cfg_attr(miri, ignore)]` — worth doing suite by suite, not in the landing
+  that built the harness.
+- **Criterion 2 — partial since 2026-08-13** (see the criterion text), less the
+  two C-boundary-harness gaps closed above.
+- **Criteria 6, 7 — untouched.**
 
 ## P4-142. `tj3DecompressHeader` Decodes the Entire Image to Read the Header — **OPEN**
 
@@ -7538,7 +9020,7 @@ into a hard error. Review caught it; no automated gate did.
    matrix covers, so the next person narrowing a `cfg` does not repeat this.
 4. Audit whether the same masking applies elsewhere: `aarch64` NEON is mandatory
    so it has no equivalent, but the x86_64 `target-cpu=native` question in
-   [P4-133](#p4-133-bmi2fma-paths-are-reachable-only-via-target-cpunative-so-portable-builds-leave-them-off--open)
+   [P4-133](#p4-133-bmi2fma-paths-are-reachable-only-via-target-cpunative-so-portable-builds-leave-them-off--closed-2026-09-08)
    is the same class of "CI tests a configuration consumers do not get".
 
 **Why it matters beyond P4-135.** It is a *coverage* defect, not a code defect:
@@ -7570,7 +9052,7 @@ criterion 5:
    equivalent gap); the x86_64 `target-cpu=native` case is the same
    "CI tests a configuration consumers do not get" class and is already
    tracked as its own item —
-   [P4-133](#p4-133-bmi2fma-paths-are-reachable-only-via-target-cpunative-so-portable-builds-leave-them-off--open)
+   [P4-133](#p4-133-bmi2fma-paths-are-reachable-only-via-target-cpunative-so-portable-builds-leave-them-off--closed-2026-09-08)
    — so it stays there rather than being duplicated. `.cargo/config.toml`
    sets no rustflags beyond the two wasm targets, so nothing else is masked
    repo-wide; the per-job `RUSTFLAGS` in `cross-arch.yml`/`armv7.yml`/
@@ -7763,7 +9245,7 @@ pointee unconditionally, even when the caller's buffer was large enough.
 *does* read the flag, but its in-place path ignored `*jpeg_size` — the input
 capacity — and `copy_nonoverlapping`'d the encoded output on the assumption the
 buffer was at least `tj3JPEGBufSize(...)`. Upstream instead raises
-`JERR_BUFFER_SIZE` (`jdatadst-tj.c:92`), so a caller doing exactly what upstream
+`JERR_BUFFER_SIZE` (`jdatadst-tj.c:95`), so a caller doing exactly what upstream
 permits — a smaller buffer, its size declared — got a heap overflow.
 Fixed 2026-08-11 under P4-137: the capacity is now compared before the copy.
 `norealloc_buffer_capacity.rs` pins both directions, and removing the check
@@ -7820,7 +9302,7 @@ only when the flag is unset.
 
 **Review found the first version got a case wrong that no self-consistent test
 could have caught.** With the flag set and the output slot **NULL**, it
-allocated. Upstream refuses: `jdatadst-tj.c:184-192` takes the
+allocated. Upstream refuses: `jdatadst-tj.c:198-206` takes the
 `*outbuffer == NULL` branch and, with `alloc` false, raises `JERR_BUFFER_SIZE`.
 The flag is a request *not to allocate*, so honouring it half-way — refusing to
 grow a buffer but conjuring one when none was given — is the one behaviour no
@@ -7860,8 +9342,8 @@ Two further paths, also from review:
   has no reason to write `*jpegSize`, so forwarding it to TJ3 — where the same
   field *is* an input capacity — turned a valid call into "buffer too small".
   Upstream substitutes the worst case instead: `tj3JPEGBufSize(...)` in
-  `tjCompress2` (`turbojpeg.c:1282-1284`) and a per-image temporary array in
-  `tjTransform` (`turbojpeg.c:3118-3132`). **Only the `tjCompress2` adapter is
+  `tjCompress2` (`turbojpeg.c:1285-1287`) and a per-image temporary array in
+  `tjTransform` (`turbojpeg.c:3133-3147`). **Only the `tjCompress2` adapter is
   ported** — see the next point for why the transform one is not. The
   distinguishing input is `size = 0`, which the first legacy test could not
   catch because it passed a real capacity.
@@ -7879,14 +9361,14 @@ Two further paths, also from review:
   call through a local `size_t` hid a NULL `jpegSize` from `tj3Compress8`,
   turning a call upstream rejects into a success that allocated a buffer whose
   size the caller could never learn. Both now validate first
-  (`turbojpeg.c:1274-1280`).
+  (`turbojpeg.c:1277-1283`).
 
 Four review rounds produced five defects *in the fix*, every one on the legacy
 wrappers rather than the TJ3 entry points the item named. The pattern is worth
 keeping: adapting an API whose field *semantics* differ — output slot versus
 input capacity — is where the errors were, not in the ownership rule itself.
 - **`TJXOPT_NOOUTPUT` needs no destination.** Upstream skips destination setup
-  entirely for it (`turbojpeg.c:3007`), so a NULL slot succeeds and a non-NULL
+  entirely for it (`turbojpeg.c:3022`), so a NULL slot succeeds and a non-NULL
   slot is left alone. Delivery now returns early for that option instead of
   demanding a buffer for output that was never produced.
 
@@ -8141,7 +9623,7 @@ Upstream's full order for a compress entry point is
 2. `TJPARAM_QUALITY must be specified` (lossy only)
 3. `TJPARAM_SUBSAMP must be specified` (lossy only)
 4. destination setup — `Buffer passed to JPEG library is too small` under
-   `TJPARAM_NOREALLOC` with a NULL or zero-capacity slot (`jdatadst-tj.c:184-192`)
+   `TJPARAM_NOREALLOC` with a NULL or zero-capacity slot (`jdatadst-tj.c:198-206`)
 5. `jpeg_start_compress` — e.g. `Unsupported JPEG data precision 16`
    (`jcmaster.c:199-208`)
 
@@ -8174,9 +9656,9 @@ gates are ported at both layers: the TJ3 entry points refuse with upstream's
 message shape after argument validation — the lossy compress entries skip
 them under `TJPARAM_LOSSLESS` (`turbojpeg-mp.c:95-98`), the YUV compress
 entries gate quality unconditionally — `tj3CompressFromYUVPlanes8`
-quality-then-subsampling (`turbojpeg.c:1347-1350`), while the packed
+quality-then-subsampling (`turbojpeg.c:1350-1353`), while the packed
 `tj3CompressFromYUV8` gates the subsampling itself first, because it needs it
-to size the planes (`:1497-1498`), and reaches the quality gate only through
+to size the planes (`:1502-1503`), and reaches the quality gate only through
 the delegate — and the YUV encode/decode entries need only the
 subsampling, with *unset* distinguished from *out-of-range* — and the native
 `TjHandle` compress methods carry the same refusal as a backstop for Rust
@@ -8197,10 +9679,10 @@ The #539 review round (adversarial, standing in for the quota-blocked codex
 pass) reordered three gates the first version got wrong, each measured
 against stock TurboJPEG 3.1.4.1 before and after: packed `tj3CompressFromYUV8`
 gates the subsampling in the entry itself — it needs it to size the planes
-(`turbojpeg.c:1497-1498`) — and reaches the quality gate only through the
+(`turbojpeg.c:1502-1503`) — and reaches the quality gate only through the
 `…Planes8` delegate; and the packed `tj3EncodeYUV8` / `tj3DecodeYUV8`
 wrappers gate the subsampling *before* the pixel-format range check, which
-upstream performs in the delegates (`:1745-1750`, `:2721-2726`). The packed
+upstream performs in the delegates (`:1754-1759`, `:2736-2741`). The packed
 entries also now validate `align` (power of two) in argument validation,
 where it beats every gate. The discriminating oracle lines use an
 out-of-range pixel format on purpose — a valid-format line passes with the
@@ -8232,10 +9714,10 @@ path we should not have produced 5619.
 
 **Root cause in upstream, which parity must mimic.** Upstream's marker copying
 is gated by `jcopy_markers_setup(dinfo, saveMarkers)` — registration that must
-run *before* the header is parsed (`turbojpeg.c:2976-2979`, default
+run *before* the header is parsed (`turbojpeg.c:2991-2994`, default
 `saveMarkers = 2` = `JCOPYOPT_ALL`). The legacy NOREALLOC wrapper, uniquely,
 pre-reads the header to derive per-transform capacities
-(`turbojpeg.c:3112-3134`) — so when `tj3Transform` later calls
+(`turbojpeg.c:3127-3149`) — so when `tj3Transform` later calls
 `jcopy_markers_setup` and finds `global_state > DSTATE_INHEADER`, the guarded
 re-read is skipped, nothing was registered, and `jcopy_markers_execute` copies
 *no* markers at all (not just ICC: COM and every APPn die too). On the other
@@ -8546,7 +10028,7 @@ suites — today `tests/yuv.rs` has none.
 
 **Status (2026-08-14): closed.** The plane count now travels separately
 from the geometry. `plane_count_from_tj` in `yuv.rs` is upstream's
-`nc = (subsamp == TJSAMP_GRAY ? 1 : 3)` (`turbojpeg.c:1038`) built on the
+`nc = (subsamp == TJSAMP_GRAY ? 1 : 3)` (`turbojpeg.c:1040`) built on the
 *same* `bufsize::is_gray` predicate `tj3YUVBufSize` sizes by, so the two
 cannot drift; `packed_yuv_len` and `split_packed_yuv` take it as a
 parameter, `pack_yuv_planes` packs exactly the planes it is handed, and
@@ -8667,8 +10149,8 @@ control against the pre-P4-165 call path, which fails identically):
    `api::raw_data::compress_raw` rejects them for being larger than the
    image. Upstream handles the same mismatch by copying rows into
    MCU-sized scratch and replicating the last sample
-   (`turbojpeg.c:1372-1423`, the `usetmpbuf` path — detected at `:1376`,
-   copied and replicated at `:1412-1423`). Only 4:4:4 and
+   (`turbojpeg.c:1375-1428`, the `usetmpbuf` path — detected at `:1381`,
+   copied and replicated at `:1417-1428`). Only 4:4:4 and
    already-aligned geometries work today; a caller doing
    `tj3DecompressToYUV8` → `tj3CompressFromYUV8` on any odd-sized 4:2:0
    image gets a hard failure where stock round-trips.
@@ -8895,7 +10377,7 @@ change with its own oracle traces.
 
 ## P4-171. 8-Bit Lossy JPEG Cannot Be Decompressed to 12-Bit Output (3.2 beta1 note 8) — **OPEN**
 
-**GitHub:** [#561](https://github.com/developer0hye/libjpeg-turbo-rs/issues/561) — filed 2026-08-17 by the [P4-130](#p4-130-c-parity-oracle-is-pinned-to-3141-upstream-stable-is-320--partial-every-oracle-provisioning-job-is-now-pinned-checked-and-measured-the-legs-still-on-one-release-the-submodule-bump-and-the-four-filed-gaps-remain) 3.2 delta triage.
+**GitHub:** [#561](https://github.com/developer0hye/libjpeg-turbo-rs/issues/561) — filed 2026-08-17 by the [P4-130](#p4-130-c-parity-oracle-is-pinned-to-3141-upstream-stable-is-320--partial-every-oracle-provisioning-job-is-pinned-checked-and-measured-and-the-submodule-is-at-320-two-jobs-still-on-one-release-and-the-four-filed-gaps-remain) 3.2 delta triage.
 
 **Motivation.** 3.2 beta1 note 8 added a capability, not a fix: an 8-bit-per-sample
 *lossy* JPEG can now be decompressed to a 12-bit-per-sample output image, to
@@ -8964,8 +10446,8 @@ and run in the subsampling matrices — and two are not:
   repository, so a caller passing it hits our unknown-value path.
 
 `TJPARAM_SAVEMARKERS` itself is **not** part of this gap, and an earlier draft
-of this entry wrongly said it was: `src/api/tj3.rs:303` accepts levels 0-4 and
-`:841` wires 2 to all markers and 4 to ICC-only extraction from the JPEG. What
+of this entry wrongly said it was: `src/api/tj3.rs:509` accepts levels 0-4 and
+`:1164` wires 2 to all markers and 4 to ICC-only extraction from the JPEG. What
 note 9 adds on top is the *PNG* side of that transfer, which is tracked with
 the PNG work in P4-174 — a marker level with no PNG to transfer to or from has
 no observable behaviour to compare.
@@ -9064,7 +10546,7 @@ supports PNG or does not, and a consumer cannot see a cargo feature.
 load-bearing for the replacement gate — PNG interchange is a convenience
 surface around the codec, not the codec.
 
-## P4-175. `capi_classic_decode_budget` Is Never Named by a Workflow, So It Has Never Run in CI — **OPEN**
+## P4-175. `capi_classic_decode_budget` Is Never Named by a Workflow, So It Has Never Run in CI — **CLOSED 2026-09-07**
 
 **GitHub:** [#565](https://github.com/developer0hye/libjpeg-turbo-rs/issues/565) — found 2026-08-17 while auditing which oracle each gate uses for P4-130.
 
@@ -9104,18 +10586,21 @@ warn about it in prose. Prose has now failed to prevent it twice.
 
 **Acceptance criteria.**
 
-1. `capi_classic_decode_budget` and `capi_yuv_gray` are named in a CI step,
+1. `capi_classic_decode_budget` and `capi_yuv_gray` execute in a CI step,
    each with the `LIBJPEG_TURBO_PREFIX` its oracle needs so it fails rather
    than soft-skips.
 2. Each passes there, or the failure it surfaces is filed.
-3. A mechanism, not another comment: an enumeration test comparing
-   `crates/libjpeg-turbo-rs-capi/tests/*.rs` against the suites named in
-   `.github/workflows/*.yml`, with an explicit opt-out list for suites that are
-   deliberately local-only. Criterion 3 is the valuable half.
+3. A mechanism, not another comment: require coverage for every target under
+   `crates/libjpeg-turbo-rs-capi/tests/`. Either compare the inventory against
+   workflow selections with explicit local-only opt-outs, or require an
+   unfiltered complete-package run that lets Cargo enumerate every target.
+   Criterion 3 is the valuable half; a hand-maintained list alone is insufficient.
 
 **Why deferred.** Unrelated to the oracle-currency work that found it, and
 criterion 3 is a gate of its own — it needs the opt-out list triaged across
 every capi suite, not just this one.
+
+**Status (2026-09-07): closed.** Both integration oracle jobs (`test-integration` on the 3.1.4.1 baseline SDK, `test-integration-current-oracle` on 3.2.0) now run `cargo test -p libjpeg-turbo-rs-capi --tests --features png --no-fail-fast` as the step `Complete C-ABI integration inventory (P4-175)`, with `LIBJPEG_TURBO_PREFIX` and `LIBJPEG_TURBO_REFERENCE_DIR` both naming the leg's SDK so an oracle suite fails rather than soft-skips. Cargo enumerates the inventory, so a new test file is executed from its first pull request without anyone naming it — which is why no opt-out list exists: no C-ABI integration target is excluded. Proof is the pull request's own CI ([run 34044740931](https://github.com/developer0hye/libjpeg-turbo-rs/actions/runs/34044740931)): on the baseline leg the step executed **77 test binaries, 335 passed, 0 failed, 0 ignored**, `capi_classic_decode_budget` and `capi_yuv_gray` among them, in 2m21s; the 3.2.0 leg ran the same inventory green in 3m51s. Criterion 3 is `tests/oracle_version_pins.rs::every_capi_test_target_runs_on_both_oracle_legs`, which requires that unfiltered command with both prefixes on each leg, plus `complete_capi_coverage_rejects_compilation_filters_and_wrong_oracles`, whose negative controls reject an `echo`, `--no-run`, a positional filter, `--list`/`--ignored`, `|| true`, `--lib`, the wrong package, a missing or wrong prefix, and `if:` / `continue-on-error:` / `working-directory:` / `shell:` / `defaults:` overrides at step or job level. The inventory assertion failed against the previous workflow before the steps were added. The focused named steps stay as earlier failure signals; the two legs cost 6→7 and 4→9 minutes for the whole inventory. Older external-consumer harnesses keep their own prerequisite skips, so this closes *execution* of every target, not availability of every downstream consumer (P2-G).
 
 ## P4-176. Every C Oracle Is Fetched by a Moveable Name, With Nothing Verifying What Arrived — **OPEN**
 
@@ -9124,20 +10609,21 @@ every capi suite, not just this one.
 **Motivation.** Every C libjpeg-turbo oracle here is fetched by a name upstream
 can repoint, and nothing checks what arrived:
 
-- **eleven** deb downloads —
+- **twelve** deb downloads —
   `curl -fL .../releases/download/${VERSION}/libjpeg-turbo-official_${VERSION}_${ARCH}.deb`,
-  installed with no digest: `ci.yml:64,330,639`,
+  installed with no digest: `ci.yml:64,330,655,1134`,
   `cross-arch.yml:48,88,131,169,214,256`, `fuzz-smoke.yml:95`,
   `full-c-parity.yml:99`. (`fuzz-smoke.yml:206` prints the same command as
   reproduction instructions and does not fetch.) Three of the `cross-arch.yml`
   sites arrived on 2026-08-18 with P4-130's `-current-oracle` twins, which is
   the point: every leg this repository pairs adds a fetch, so the inventory
   grows with the coverage rather than with this gap.
-- **six** source clones — `full-c-parity.yml:58,152` and `ci.yml:925,972` at
-  `--branch 3.1.4.1`, and `full-c-parity.yml:191` and `ci.yml:725` at
+- **seven** source clones — `full-c-parity.yml:58,152` and `ci.yml:954,1070`
+  at `--branch 3.1.4.1`, and `full-c-parity.yml:191` and `ci.yml:1026,743` at
   `--branch 3.2.0`, the last of them for the `trace-current` v8-ABI oracle.
-  `ci.yml:925` is `test-cross-encode`, which became a source clone on
-  2026-08-18 when P4-130 replaced its `brew install jpeg-turbo`;
+  `ci.yml:954` is `test-cross-encode`, which became a source clone on
+  2026-08-18 when P4-130 replaced its `brew install jpeg-turbo`, and
+  `ci.yml:1026` is its `-current-oracle` twin, added 2026-09-07;
 - `references/libjpeg-turbo` is the exception. A submodule is pinned by commit,
   which is why it is not part of this gap.
 
@@ -9180,7 +10666,7 @@ change.
 ## P4-177. The Workflow Scanner Does Not Model Heredocs, Folded Scalars or Quoted Substitution Syntax — **PARTIAL: folded scalars are modelled; heredocs and quote/escape state remain**
 
 **GitHub:** [#572](https://github.com/developer0hye/libjpeg-turbo-rs/issues/572) — filed 2026-08-18 from the sixth codex round on the
-[P4-130](#p4-130-c-parity-oracle-is-pinned-to-3141-upstream-stable-is-320--partial-every-oracle-provisioning-job-is-now-pinned-checked-and-measured-the-legs-still-on-one-release-the-submodule-bump-and-the-four-filed-gaps-remain)
+[P4-130](#p4-130-c-parity-oracle-is-pinned-to-3141-upstream-stable-is-320--partial-every-oracle-provisioning-job-is-pinned-checked-and-measured-and-the-submodule-is-at-320-two-jobs-still-on-one-release-and-the-four-filed-gaps-remain)
 per-job pin-and-name gates.
 
 **Motivation.** `tests/oracle_version_pins.rs` decides which workflow steps
@@ -9236,6 +10722,15 @@ blocks a legitimate change.
    twin build to cover the whole merged selection, which rejects a pair whose
    coverage is genuinely equal — a false failure, the polarity that costs a
    valid change rather than hiding a gap. Added 2026-08-18 from the same round.
+7. A matrix flow list **wrapped across lines** (`os: [ubuntu-latest,` /
+   `macos-latest]`) resolves to the runners it names. `matrix_values_in` reads
+   a flow list from one physical line, so the wrapped form reads as a single
+   unresolvable item and `runs_on_in` returns `None` — a *false failure* of the
+   pair gate's same-machine check, the polarity that rejects a valid workflow.
+   Added 2026-09-07 from the review of the C Interop pairing, which taught the
+   pair gate to resolve `runs-on: ${{ matrix.os }}` through the matrix; the
+   single-line, quoted, commented and block-sequence spellings are modelled,
+   this one is not. Not in `.github/workflows` today.
 
 **Why deferred.** None of these shapes is in the workflows, and the same file's
 history is the argument for not fixing them inline: each of the five rounds
@@ -9337,3 +10832,2208 @@ appears in four workflows, so fixing it there would have mixed a
 CI-robustness change into a coverage one — and the fix wants its own
 measurement of what a healthy run costs per step and runner class before it
 picks a bound.
+
+## P4-181. Differential HFlip Fuzzing Emits a JPEG That Stock djpeg Rejects — **CLOSED 2026-09-07**
+
+**GitHub:** [#581](https://github.com/developer0hye/libjpeg-turbo-rs/issues/581) — filed 2026-09-06 from scheduled Fuzz Smoke [run 34042331788](https://github.com/developer0hye/libjpeg-turbo-rs/actions/runs/34042331788) (`main` at `118a9f9`; recorded oracle Linux x86_64, libjpeg-turbo 3.1.4.1, Rust nightly 2026-09-05).
+
+**Evidence.** Artifact `crash-3732c8eae6ee71b7e90ba334fcb94b2e6d8de878` (876 bytes: one op-selector byte, then an 875-byte JPEG) trips the acceptance-agreement panic in `fuzz_transform_diff_c.rs`: `transform-diff HFlip: djpeg rejected our transformed JPEG (input=16x16, rust_len=925, c_len=1053)`. Re-running `djpeg` on the 925-byte output gives the actual verdict, which the panic did not carry: `Unknown Adobe color transform code 255`, exit 2 — djpeg *decoded* the file, but with a warning, and the harness (correctly) counts any non-zero exit as a rejection because jpegtran's 1053-byte output decodes with exit 0.
+
+**Root cause.** The source is a 16x16 4:2:0 progressive JPEG whose only scan is DC-first, followed by a stray DHT, six APP0 segments (none carrying a `JFIF\0` identifier), two Exif APP1 segments and nine APP14 segments — five of them identified as `Adobe`, the last of those carrying transform byte 255. Two things about it matter to libjpeg: the leading APP0's identifier is `JFIF\x02`, not `JFIF\0`, so `examine_app0` (`jdmarker.c:606`) never sets `saw_JFIF_marker`; and every Adobe marker sits *after* the first SOS, so at `jpeg_read_header` time `default_decompress_parms` (`jdapimin.c:137`) sees no marker at all and classifies the stream as YCbCr from component IDs 1/2/3. `jpegtran` then re-encodes through `jpeg_copy_critical_parameters` (`jctrans.c:71`) → `jpeg_set_colorspace(JCS_YCbCr)` (`jcparam.c:333`) → `write_file_header` (`jcmarker.c:475`): a JFIF APP0, no Adobe marker, and — under `-copy all` — every saved APP segment copied verbatim, including the non-JFIF APP0s and all nine APP14 segments.
+
+`write_coefficient_colorspace_marker` in `src/api/coefficient.rs` did something else: it re-emitted `JpegCoefficients::adobe_transform` *verbatim* as a synthesized Adobe APP14 whenever the source had one, and wrote JFIF only when the source had a `JFIF\0` marker or had neither an Adobe marker nor `R`/`G`/`B` component IDs. So the transcode carried `Adobe … transform=255` and no JFIF, and every libjpeg consumer that opens it warns. The verbatim rule (introduced by `abcfb1a`/`0b83648` to keep RGB-vs-YCbCr classification stable across a transcode) had three further consequences the fuzz target never reached: a JFIF+Adobe source transcoded under `-copy all` came out with **two** Adobe segments (one synthesized, one copied); `MarkerCopyMode::All` dropped **every** APP0 from the copied set where `jcopy_markers_execute` (`transupp.c:2493`) drops only a `JFIF\0` duplicate of the header the encoder wrote; and the capi's `jpeg_write_coefficients` prepended a second Adobe segment to 4-component outputs on top of the one the core writer had started emitting.
+
+**Fix.** The marker reader now snapshots the JFIF/Adobe state at the first SOS (`JpegMetadata::saw_jfif_marker_at_first_sos` / `adobe_transform_at_first_sos`), because libjpeg classifies exactly once — `jpeg_consume_input` calls `default_decompress_parms` at `JPEG_REACHED_SOS` — while `examine_app0`/`examine_app14` keep updating `saw_*` between scans without ever re-classifying; both the decoder's `detect_color_space` and `read_coefficients` read the snapshot (a whole-stream reading would have turned this seed's post-SOS Adobe marker into an RGB header had its byte been 0, and decoded it without the YCbCr conversion djpeg applies — caught in review). `classify_coefficient_colorspace` ports `default_decompress_parms` (JFIF outranks Adobe; Adobe 0 = RGB/CMYK, 2 = YCCK, anything else = YCbCr/YCCK with libjpeg's "assume" fallback; `R`/`G`/`B` IDs = RGB), and `coefficient_header_markers` ports `jpeg_set_colorspace` + `write_file_header` (JFIF for grayscale/YCbCr, Adobe 0 for RGB/CMYK, Adobe 2 for YCCK, transform byte derived from the output colorspace per `jcmarker.c:423-429`). `transform_jpeg_with_options` keeps every saved APP/COM segment and applies `jcopy_markers_execute`'s two duplicate rules against the header the *final* coefficient set produces (a `grayscale` request changes it); `inject_saved_markers` places copied markers after the writer's own JFIF/Adobe header, where `jpegtran` puts them. The capi shim drops its `swap_jfif_for_adobe_app14` / `inject_adobe_app14_after_jfif` post-processing and instead feeds the core writer `write_JFIF_header` / `write_Adobe_marker` / `jpeg_color_space` for foreign coefficient arrays. The fuzz target's panic now carries djpeg's exit status and stderr.
+
+**Status (2026-09-07): closed.** `tests/regression_transform_fuzz_progressive.rs::progressive_source_with_bogus_adobe_transform_after_sos_matches_jpegtran` inlines the 875-byte source and holds HFlip, VFlip and Rot180 **byte-exact** against `jpegtran -copy all` (all three were 925 → 1053 bytes, identical to C), then decodes both through `djpeg` with exit 0 asserted; its sibling `adobe_transform_after_first_sos_does_not_change_classification` flips the seed's last Adobe transform byte to 0 and holds the HFlip transcode byte-exact with `jpegtran` and the block-smoothed decode pixel-exact with `djpeg`. `tests/transform.rs::coefficient_transform_header_markers_match_jpegtran_for_adobe_sources` crafts JFIF+Adobe(1), JFIF+Adobe(255), Adobe(0), Adobe(1) and Adobe(255) sources and holds `-copy all` and `-copy none` byte-exact (the RGB-classified Adobe(0) case to header segments + pixels, see P4-182). `crates/libjpeg-turbo-rs-capi/tests/capi_jpeglib_write_coefficients.rs::write_coefficients_preserves_source_adobe_app14` now asserts exactly one Adobe segment. The seed is committed under `fuzz/corpus/fuzz_transform_diff_c/` and replayed by `tests/fuzz_crashes.rs::fuzz_transform_diff_c_crashes_are_panic_safe`. Verified red-before-green: with every `src/` change stashed, the seed test fails at its byte-exact assertion against the old 925-byte output (the stream djpeg exits 2 on), and the post-SOS test fails at its byte-exact assertion on the Adobe-0 header.
+
+## P4-182. Transcode Huffman-Slot Assignment Keys on Component IDs Instead of the Colorspace Classification — **OPEN**
+
+**GitHub:** [#584](https://github.com/developer0hye/libjpeg-turbo-rs/issues/584) — found 2026-09-07 while holding P4-181's crafted sources byte-exact against `jpegtran`.
+
+**Motivation.** `jpeg_copy_critical_parameters` explicitly does **not** copy the source's Huffman table assignments (`jctrans.c:143-144`: *"instead we rely on jpeg_set_colorspace to have made a suitable choice"*). `jpeg_set_colorspace` (`jcparam.c:333`) puts every component of an RGB, CMYK, grayscale or unknown-colorspace stream on DC/AC slot 0; YCbCr uses 0/1/1; YCCK uses 0/1/1/0. `jpeg_simple_progression` likewise reserves the 10-scan luma/chroma script for 3-component YCbCr and uses the all-purpose `2 + 4·n` script for everything else. Our `coding_table_for_component` / `uses_single_rgb_coding_table` put component 0 on slot 0 and every other component on slot 1, except when the IDs are literally `R`/`G`/`B` *and* every component uses quant table 0 — a partial port keyed on the wrong input, now that `classify_coefficient_colorspace` (P4-181) exists.
+
+**Measured** against `jpegtran -copy all -flip horizontal` (libjpeg-turbo 3.1.4.1), pixels identical in every case:
+
+| source | C slots | ours | bytes C / ours |
+| --- | --- | --- | --- |
+| `tests/fixtures/cmyk_scanner/scanner_64x64.jpg` (CMYK, Adobe 0) | 0/0/0/0, two DHTs | 0/1/1/1, four DHTs | 970 / 1132 |
+| `tests/fixtures/real_world/pil_cmyk.jpg` (YCCK, Adobe 2) | 0/1/1/0 | 0/1/1/1 | 31158 / 31167 |
+| 32x24 4:2:0 source, Adobe transform 0, IDs 1/2/3 (RGB by classification) | 0/0/0 | 0/1/1 | differ |
+
+**Acceptance criteria.**
+
+1. Slot assignment (and the progressive scan-script choice) derive from `classify_coefficient_colorspace` per the table above, across every writer variant (`write_coefficients`, `_optimized`, `_progressive`, `_arithmetic`, `_progressive_arithmetic`) — the same two helpers feed all of them, so the change is one site.
+2. The `adobe0` case in `tests/transform.rs::coefficient_transform_header_markers_match_jpegtran_for_adobe_sources` is promoted to byte-exact, and CMYK/YCCK `-copy all` byte-exact cases against `jpegtran` are added for both baseline and `-progressive`.
+3. `examples/stock_djpeg_cjpeg/run.sh` and the corpus transform gate stay green.
+4. **JFIF minor version.** `write_app0_jfif_with_density` always writes 1.01; `jpeg_copy_critical_parameters` (`jctrans.c:155-158`) copies the source's minor version when the major is 1 and `emit_jfif_app0` writes it, so a JFIF 1.02 source transcodes byte-inexactly. `MarkerReader` already parses both bytes; `JpegCoefficients` needs to carry the minor version (an additive field — note the struct is constructed literally by tests) and the writers must emit it. Add a 1.02 source to the byte-exact matrix.
+5. **capi header override.** `materialize_foreign_coef_arrays` folds the destination cinfo's `write_JFIF_header` / `write_Adobe_marker` / `jpeg_color_space` into the classifier's two inputs, which round-trips only the four states `jpeg_set_colorspace` produces. An application that clears both flags (`JCS_UNKNOWN`, or `write_JFIF_header = FALSE` by hand) gets a JFIF or Adobe 0 header where `write_file_header` writes none, and `write_Adobe_marker` on a YCbCr destination gets JFIF alone where C writes JFIF + Adobe 1. Give the core writers an explicit header override (an internal `write_coefficients_with_header(coeffs, CoefficientHeaderMarkers)`) so the shim passes the decision through instead of reconstructing it, and pin both hand-set states against C `jpeg_write_coefficients`. Pre-existing — the old shim had its own divergences here — surfaced by the P4-181 review.
+
+**Why deferred.** P4-181 is a correctness fix for a warning-free drop-in; this is a byte-level fidelity gap on streams that already decode identically, and it touches the scan-script selection for 4-component progressive output, which deserves its own oracle run.
+
+## P4-183. Example-Target Unit Tests Never Run in CI Because No Workflow Selects That Target Kind — **OPEN**
+
+**GitHub:** [#586](https://github.com/developer0hye/libjpeg-turbo-rs/issues/586) — found 2026-08-25 while pairing `ci.yml`'s `test-corpus` with a 3.2.0 oracle for
+[P4-130](#p4-130-c-parity-oracle-is-pinned-to-3141-upstream-stable-is-320--partial-every-oracle-provisioning-job-is-pinned-checked-and-measured-and-the-submodule-is-at-320-two-jobs-still-on-one-release-and-the-four-filed-gaps-remain).
+
+**Motivation.** `examples/corpus_test.rs` and `examples/generate_corpus.rs` each
+carry a `#[cfg(test)] mod tests` — the corpus harness's own discovery, copy,
+bucket-minimum and coverage-gate tests, plus the `assert_every_variant_generated`
+test the corpus pairing added. Cargo does not run an example target's tests
+unless it is asked for that target kind (`cargo test --examples` or
+`--all-targets`), and no workflow passes either to `cargo test`. `ci.yml` runs
+`cargo check --examples` and `cargo clippy --workspace --all-targets`, which
+compile and lint those modules but never execute them. So every unit test inside
+an example has compiled on every pull request and executed on none.
+
+It is the
+[P4-175](#p4-175-capi_classic_decode_budget-is-never-named-by-a-workflow-so-it-has-never-run-in-ci--closed-2026-09-07)
+defect class with a different mechanism: not "no workflow names this binary" but
+"no workflow selects this *target kind*". P4-175 closed by letting Cargo
+enumerate the C-ABI crate's integration targets; that enumeration is over
+`--tests`, so it cannot see this — which is why an enumeration of what runs has
+to be over target kinds as well as over `tests/`.
+
+**Acceptance criteria.**
+
+1. A CI step executes the example targets' unit tests on at least one leg
+   (`cargo test --examples`, or `--all-targets` on a job that already builds
+   them), with each test either passing there or its failure filed.
+2. A mechanism rather than a comment: a gate that enumerates the example targets
+   carrying `#[cfg(test)]` and fails when a workflow selection leaves one
+   unexecuted — the same shape as P4-175's criterion 3, over target kinds rather
+   than over `tests/`.
+3. `assert_every_variant_generated`'s unit test is among the tests the step
+   runs.
+
+**Why deferred.** Not what the corpus pairing changes (P4-130 criterion 1);
+mixing a target-kind coverage gate into an oracle-pairing pull request would put
+two unrelated mechanisms behind one review. Nothing regresses today — the corpus
+harness is validated end to end by the paired `test-corpus` legs, whose `cjpeg`
+failure path was exercised with a stand-in tool — but the unit tests that pin
+the harness's own helpers have never run under CI.
+
+## P4-184. TurboJPEG 3.2.0 Rejects a Pitch Narrower Than a Row and a Stride Narrower Than a Plane; the 12/16-bit and Planar Entry Points Here Do Not — **OPEN**
+
+**GitHub:** [#590](https://github.com/developer0hye/libjpeg-turbo-rs/issues/590) — from the
+[P4-130](#p4-130-c-parity-oracle-is-pinned-to-3141-upstream-stable-is-320--partial-every-oracle-provisioning-job-is-pinned-checked-and-measured-and-the-submodule-is-at-320-two-jobs-still-on-one-release-and-the-four-filed-gaps-remain) submodule bump.
+
+**Motivation.** Filed 2026-09-07 while moving `references/libjpeg-turbo` from
+3.1.90 to 3.2.0. Two upstream commits between the tags — `abf0f592` ("TJ:
+Don't allow pitch < (width * pixel size)") and `25b62127` ("TJ: Don't allow
+stride < plane width") — appear in no release note, so the P4-130 triage, which
+read the notes, could not have seen them; they turned up in the commit log the
+bump had to read. At 3.2.0 every TurboJPEG entry point that takes a `pitch`
+throws `"Invalid argument"` when a non-zero pitch is narrower than one row, and
+every planar entry point does the same for a non-zero stride narrower than its
+plane: `turbojpeg-mp.c:101` (`tj3Compress*`), `:230` (`tj3Decompress*`), `:592`
+(`tj3SaveImage*`); `turbojpeg.c:1603` and `:1676` (`tj3EncodeYUVPlanes8`,
+pitch then strides), `:1377` (`tj3CompressFromYUVPlanes8`), `:2254`
+(`tj3DecompressToYUVPlanes8`), `:2595` and `:2654` (`tj3DecodeYUVPlanes8`).
+Before 3.2.0 these read past the end of the caller's rows.
+
+The shim is partway there and says so differently. `tj3Compress8`
+(`compress.rs:128`), `tj3Decompress8` (`decompress.rs:137`) and the packed
+`tj3EncodeYUV*` / `tj3DecodeYUV*` paths (`yuv.rs:201`, `:1192`, `:1321`) return
+-1 for a narrow pitch, but each with its own message
+(`"pitch N smaller than width*bpp (M)"` on the two packed-pixel entries,
+`"bad pitch"` and `"pitch too small"` on the YUV ones), so `tj3GetErrorStr`
+diverges on the one path both sides reject. `tj3Compress12/16` and
+`tj3Decompress12/16` (`precision.rs:183`, `:390`, `:520`, `:770`) check only
+`pitch < 0` and read a narrow positive pitch as if the rows were tight. No
+planar stride is validated against its plane width (`yuv.rs:511` leaves it to
+the caller). `tj3SaveImage*` is unmeasured. None of the 3.2.0 legs sees any of
+this: the differential suites pass valid pitches and strides, so a leg labelled
+3.2.0 is green either way.
+
+**Acceptance criteria.**
+
+1. Each entry point named above returns -1 with `tj3GetErrorStr` reading
+   exactly `"Invalid argument"` for a non-zero pitch narrower than a row and,
+   on the planar paths, for a non-zero stride narrower than the plane — while
+   still accepting 0 and any value at or above the row or plane width.
+2. Measured by a differential test per entry point against `libturbojpeg` at
+   `LIBJPEG_TURBO_PREFIX`. The 3.2.0 oracle is where the contract *must*
+   hold; on the 3.1.4.1 leg the same test records the older behaviour rather
+   than asserting ours.
+3. The shim's existing narrow-pitch rejections adopt upstream's wording, so the
+   message matches on both legs.
+
+**Why deferred.** The bump is a citation and oracle move and was kept to that;
+a validation change across nine entry points wants its own review and its own
+differential tests, and nothing regresses meanwhile — the paths that accepted a
+narrow pitch before the bump accept one after it, and the 3.2.0 legs never
+sent one.
+
+
+**Also noted (2026-10-07, P4-197):** every decompress error here carries the
+prefix `tj3Decompress8: …` where upstream writes `tj3Decompress8(): …`
+(`turbojpeg.c` `THROW` uses the function name with `()`); recorded in
+`crop_region_sampling_c_parity.rs`, which compares messages after that
+prefix. Same family as this item's `tj3GetErrorStr` divergence.
+## P4-185. TurboJPEG Memory-Destination Allocation Failure Reports a Bespoke String Instead of libjpeg's `JERR_OUT_OF_MEMORY` Message — **OPEN**
+
+**GitHub:** [#592](https://github.com/developer0hye/libjpeg-turbo-rs/issues/592) — found 2026-09-07 by the
+[P4-130](#p4-130-c-parity-oracle-is-pinned-to-3141-upstream-stable-is-320--partial-every-oracle-provisioning-job-is-pinned-checked-and-measured-and-the-submodule-is-at-320-two-jobs-still-on-one-release-and-the-four-filed-gaps-remain)
+submodule bump's drift audit.
+
+**Motivation.** Upstream's TurboJPEG memory destination (`jdatadst-tj.c`)
+raises `JERR_OUT_OF_MEMORY` with an `ERREXIT1` case number when the output
+buffer cannot grow — since 3.2.0, case 12 for a failed doubling
+(`jdatadst-tj.c:113`) and case 13 for a doubling that would overflow `size_t`
+(`:108`); case 10 for both before. A libjpeg error reaches `tj3GetErrorStr`
+verbatim through `CATCH_LIBJPEG`, so a caller sees
+`Insufficient memory (case 12)`. The shim's `tj3Compress8/12/16` encode into a
+Rust buffer and report an allocation failure as `"tj3Compress8: out-of-memory"`
+(`crates/libjpeg-turbo-rs-capi/src/compress.rs:299`, `precision.rs:352`,
+`:732`) through `OutputDelivery::OutOfMemory` (`alloc.rs`). The classic
+`jpeg_mem_dest` path was renumbered with the bump; this path never carried a
+case number at all, so nothing regressed — but the 3.2 delta table's
+`jdatadst*.c` row is true of the classic destination only, and says so.
+
+**Acceptance criteria.**
+
+1. The TurboJPEG compress and transform entry points report an output-buffer
+   allocation failure with libjpeg's `JERR_OUT_OF_MEMORY` text and 3.2.0's
+   case number (12 growth, 13 overflow), matching what `tj3GetErrorStr`
+   returns upstream.
+2. Pinned by an allocation-failure injection test in the P4-120 style: the C
+   side cannot be made to fail `malloc` on cue, so the contract is read from
+   `jdatadst-tj.c` and pinned rather than measured differentially.
+
+**Why deferred.** Reachable only under allocator failure, visible to no
+differential leg, and the divergence pre-dates the bump.
+
+## P4-186. Miri Covers Only the Classic Decode Sequence; the Transcode and Resync Paths' Raw `cinfo` Reads Are Verified by Reading, Not by the Gate — **OPEN**
+
+**GitHub:** [#598](https://github.com/developer0hye/libjpeg-turbo-rs/issues/598) — follow-up from the P4-132 review (PR #597).
+
+**Motivation.** P4-132's first draft read `mem`/`master` through the raw
+`cinfo` while every decompress entry point held a `&mut` to the same struct —
+a Stacked Borrows violation that native tests, clippy and ASan all passed and
+only Miri saw. The fix added
+`capi_thread_affinity::moved_decode_sequence_is_sound_under_miri` to the CI
+Miri leg, proven discriminating by swapping one site back to the raw read.
+That test drives `jpeg_save_markers` → `jpeg_mem_src` → `jpeg_read_header` →
+`jpeg_start_decompress` → `jpeg_read_scanlines` → `jpeg_finish_decompress` →
+`jpeg_destroy_decompress` and nothing else. The remaining raw reads of the
+public struct — `decompress_private_raw` in `decompress_private_remove`,
+`with_decompress_private` (from `store_resync_discarded` /
+`jpeg_resync_to_restart`), the stdio callbacks `stdio_init_source` /
+`stdio_fill_input_buffer`, `jpeg_has_multiple_scans` — and the
+`jpeg_read_coefficients` / `jpeg_abort_decompress` /
+`jpeg_copy_critical_parameters` entry points were verified sound *by
+reading* (before any reference is formed, or a child access of the outer
+frame's reference), and that reasoning is recorded only in the PR #597 review.
+
+**Acceptance criteria.**
+
+1. A second Miri-run test drives a transcode-shaped sequence on a fixture
+   that stays off the SIMD kernels: `jpeg_read_header` →
+   `jpeg_read_coefficients` → `jpeg_copy_critical_parameters` →
+   `jpeg_abort_decompress` → reuse → `jpeg_destroy_decompress`.
+2. A third reaches `stdio_fill_input_buffer` through `jpeg_stdio_src` over a
+   `FILE *` (Miri supports it with `-Zmiri-disable-isolation`) and a
+   `jpeg_resync_to_restart` path — or records why Miri cannot reach one of
+   them.
+3. Each new test is shown discriminating the way the existing one was:
+   reintroduce a parent-tag read at one site it covers, confirm Miri rejects
+   it, restore.
+
+**Why deferred.** Not blocking P4-132: every remaining site was checked by
+hand with the reason recorded, and the defect class the gate exists for is
+already caught on the primary decode path. This makes the remaining checks
+mechanical rather than reviewed.
+
+## P4-187. Float-DCT Encode Runs Scalar on Every Backend While C Uses SIMD, So `-dct float` Trails C by Well Over a Third — **OPEN**
+
+**GitHub:** [#600](https://github.com/developer0hye/libjpeg-turbo-rs/issues/600) — surfaced by the P4-133 measurement (PR #599).
+
+**Motivation.** The P4-133 A/B (`experiments/portable_vs_native_x86_64_2026-09-08.md`)
+timed `BENCH_DCT_METHOD=float` against `cjpeg`-equivalent C at `JDCT_FLOAT`
+on AMD EPYC 7763 and 9V74 runners, from 320×240 up: the portable build is **1.72–1.94×
+slower than C 3.2.0**, and a build with FMA enabled — which removes the libm
+`fmaf` calls P4-133's FMA twin now dispatches around (2026-09-08) — is still
+**1.37–1.53× slower**. A one-sample smoke of the same benches on an Apple
+M-series host (recorded in that report's appendix: homebrew jpeg-turbo,
+unpinned clocks) showed 1.35–1.55× on 4:2:0/4:2:2 and 1.03× on 4:4:4. Every
+`DctMethod::Float =>` selection site in `src/encode/pipeline_impl/` takes
+`EncoderSimdRoutines::fdct_float_quantize`, which is
+`crate::simd::scalar::scalar_fdct_float_quantize` on every architecture — on
+x86_64 with FMA, that same scalar body re-emitted under `target_feature`
+(P4-133), still not a SIMD kernel; upstream runs `jsimd_convsamp_float` +
+`jsimd_fdct_float` + `jsimd_quantize_float`
+(`simd/x86_64/jfdctflt-sse.asm`, `jquantf-sse2.asm`; `simd/i386/*`) wherever
+SSE is present. The integer default is unaffected — it has AVX2/NEON
+FDCT+quantise kernels — so this is a non-default-path gap, but `-dct float` is
+a documented `cjpeg` option and a TurboJPEG flag, and a drop-in that is 1.4×
+slower on it is a regression a benchmark will find.
+
+**Acceptance criteria.**
+
+1. An x86_64 SSE2 (and, if it pays, AVX2) float FDCT + float quantise kernel
+   pair, dispatched with `cpu_has!` the same way `fdct_quantize` is, selected
+   once at plan build; a NEON pair on aarch64 (upstream has none there, so
+   parity with C on aarch64 is the bar, not upstream's mechanism).
+2. Byte-identical output to `cjpeg -dct float` on the existing float parity
+   suites (`tests/regression_dct_method_parity.rs`, `tests/dct_method.rs`,
+   `tests/cross_check_encoder_options.rs`) — upstream's SSE float FDCT is the
+   same AA&N arithmetic in single precision, so exactness is the contract.
+3. The P4-133 workflow's float table at ≤ 1.10× C 3.2.0 on the 1080p cases,
+   recorded in `experiments/encode.tsv`.
+
+**Why deferred.** Performance on a non-default DCT method; gate item 7 puts
+it after correctness, and P4-133's FMA dispatch landed first (2026-09-08) so
+the remaining gap is measured without the libm calls in it.
+
+## P4-188. `DctMethod::Float` Documents f64 Arithmetic While the Encoder's Float Path Is f32 — **OPEN**
+
+**GitHub:** [#601](https://github.com/developer0hye/libjpeg-turbo-rs/issues/601) — surfaced by the P4-133 review (PR #599).
+
+**Motivation.** `src/common/types.rs` documents the variant as "Floating-point
+DCT. Uses f64 arithmetic and the AA&N algorithm." The encode path selected for
+it is the plan's `fdct_float_quantize` kernel — `scalar_fdct_float_quantize`,
+or its FMA twin on x86_64 — over the shared `fdct_float_workspace_body`
+(`src/encode/fdct.rs`), which is single-precision on purpose — its doc comment
+says so, and byte-parity with `cjpeg -dct float` (`FAST_FLOAT = float`) depends
+on it. `fdct_float` at `src/encode/fdct.rs:389`, the routine the comment seems
+to describe, is not what the pipeline uses. A reader choosing `Float` for
+"more precision" is being told the opposite of what they get; a reader
+reasoning about the P4-133 FMA dispatch from the public doc would conclude
+that `f32::mul_add` cannot be on the hot path.
+
+**Acceptance criteria.**
+
+1. The variant's doc states the precision the *selected* path actually uses,
+   for the encoder and, if it differs, the decoder's float IDCT, with the
+   parity reason.
+2. If `fdct_float` (the `[i32; 64]`-output routine) is dead on every path,
+   say so at its definition or remove it; if it is live, name where.
+
+**Why deferred.** Documentation only, no runtime effect; filed rather than
+fixed inside #599 because that PR is scoped to the P4-133 measurement.
+
+## P4-189. The islow-Shortcut Guard Infers the DCT Method From Function-Pointer Identity, Which the Language Does Not Guarantee — **OPEN**
+
+**GitHub:** [#603](https://github.com/developer0hye/libjpeg-turbo-rs/issues/603) — filed 2026-09-08 by the P4-133 second milestone (PR #602); coordinates with [P4-123](#p4-123-architecture-umbrella-codec-plans-c-abi-state-public-boundaries-simd-dispatch--open) workstream 2.
+
+**Motivation.** `encode::pipeline_impl::dispatch::may_use_islow_simd_kernel`
+— the #330 fix, consulted at seventeen sites in `mcu.rs` / `baseline.rs` /
+`optimized.rs` — decides whether the fused islow SIMD kernels may replace the
+requested transform by `core::ptr::eq`-comparing the plan's `fdct_quantize_fn`
+against `scalar_fdct_ifast_quantize`, `scalar_fdct_float_quantize` and, since
+#602, the FMA float twin. Rust does not guarantee function-pointer identity:
+the same function may have different addresses and different functions may
+share one (cross-crate instantiation, identical-code folding). Miri models
+exactly that, and #602's `float_and_ifast_kernels_never_unlock_the_islow_simd_shortcut`
+failed under the Miri job on its first `ptr::eq` of a scalar kernel against
+itself. On every shipping target the guard works today — each kernel is a
+distinct non-generic function in one crate, and the `cjpeg -dct fast` /
+`-dct float` byte-parity suites prove it on every CI leg — but the design
+*infers* the method from an address instead of carrying it, so an LLVM merge
+or a cross-crate instantiation would re-create #330 silently. #602 excludes
+that one test under Miri (`#[cfg_attr(miri, ignore = …)]`); it stays live on
+every non-Miri leg.
+
+**Acceptance criteria.**
+
+1. The plan carries the DCT method (or the resolved kernel *kind*) explicitly
+   — an enum beside the `fdct_quantize_fn` pointer, or P4-123 workstream 2's
+   `EncodePlan` — and every former `may_use_islow_simd_kernel` site reads
+   that, not a pointer comparison.
+2. No `ptr::eq` against an FDCT kernel remains in `src/encode/pipeline_impl/`.
+3. `float_and_ifast_kernels_never_unlock_the_islow_simd_shortcut` loses its
+   Miri exclusion and passes under
+   `cargo miri test --no-default-features --features std --lib`.
+4. `tests/regression_dct_method_parity.rs` and `tests/dct_method.rs` stay
+   byte-exact against `cjpeg`.
+
+**Why deferred.** Correct on every shipping target and covered by C parity;
+the fix belongs to the plan model P4-123 workstream 2 is building, and a
+one-off parameter now would be the parallel mechanism that programme warns
+against. (P4-133's third milestone set a precedent worth weighing: it put
+the Huffman tier on the `BitWriter` the operation already holds rather than
+waiting for `EncodePlan`, which criterion 1's "an enum beside the
+`fdct_quantize_fn` pointer" option would mirror for the DCT method.)
+
+## P4-190. The AC-First Progressive Soft-Landing Has No Pinned Regression Fixture — **OPEN**
+
+**GitHub:** [#607](https://github.com/developer0hye/libjpeg-turbo-rs/issues/607) — filed 2026-09-08 by the P4-141 criterion-5 landing (#480), found by its docs-drift audit.
+
+**Motivation.** `decode_ac_first_tracked` in `src/decode/progressive.rs`
+mirrors libjpeg-turbo's `jpeg_natural_order[DCTSIZE2 + 16]` padding: when a
+run-length advance pushes `k` past 63, the coefficient is written to
+`coeffs[63]` and the block ends instead of erroring, because `djpeg` accepts
+such inputs. `tests/progressive_ac_soft_landing.rs` describes **two**
+fixtures that surfaced this class — a 70 KB 640×480 progressive RGB file for
+the AC-*first* path and a 544-byte 16×16 file for the AC-*refine* path — but
+commits only the second; its module doc claimed "both fixtures are pinned
+here" until the P4-141 PR corrected it. The AC-first branch is covered by
+code reading and by whatever the 6-hourly fuzzers happen to hit, not by a
+regression test — the "pinned by the checks' code, not by a gate" shape
+P4-141 exists to retire. It matters more now that the path uses safe
+indexing: a future "tighten the bounds check" edit would fail with a
+`CorruptData` error rather than UB, but it would still diverge from `djpeg`
+with nothing to catch it.
+
+**Acceptance criteria.**
+
+1. A committed fixture — small and synthesised is fine (a progressive stream
+   whose AC-first scan carries a symbol with run ≥ 1 from `k ≥ 49` so
+   `k + run > 63` with `Se = 63`, plus the same pattern via the fast
+   combined-table path if reachable) — whose decode is asserted byte-exact
+   against `djpeg` in `tests/progressive_ac_soft_landing.rs`, citing #607.
+2. The test fails when the `k >= 64` branch in `decode_ac_first_tracked` is
+   replaced by an error return (proven discriminating).
+3. `tests/progressive_ac_soft_landing.rs`'s module doc lists what it
+   actually pins.
+
+**Why deferred.** Filed rather than fixed inside the P4-141 PR because that
+PR is a behaviour-preserving refactor plus a gate, and a new C-oracle fixture
+is its own TDD cycle; the fixture must be built and proven discriminating,
+not just committed.
+
+## P4-191. Sixty-Nine Inventoried `unsafe` Items Have No Regression Test — **OPEN**
+
+**GitHub:** [#609](https://github.com/developer0hye/libjpeg-turbo-rs/issues/609) — filed 2026-09-08 by the P4-141 criterion-4 landing.
+
+**What produced it.** The P4-141 criterion-4 inventories ask every row for
+the test that would fail if the invariant broke. Thirty of
+`docs/UNSAFE_INVENTORY.md`'s 224 rows answer `**none**`, and — since the
+C-ABI chunks landed 2026-09-08 and 2026-09-09 — thirty-nine of
+`docs/UNSAFE_INVENTORY_CAPI.md`'s 235 do, for the whole site or for a named
+sub-invariant. Sixty-nine in all — thirty-two and seventy-one before this
+landing, less the two `OnceBox` sub-invariants the P4-141 criterion-1 landing
+closed on 2026-09-09 (`tests/miri_once_init.rs` races the first initialisation
+and reaches the losing `compare_exchange` arm). That answer is the criterion's product,
+not a defect in it — a raw count could not have named one of them.
+
+**Progress (2026-10-07).** The P4-192 fix (#610) rewrote the four rows of
+criterion 3 — `prepare_ac_first_coeffs`, `prepare_ac_first_sse2`,
+`prepare_ac_refine_coeffs`, `prepare_ac_refine_sse2` — to name tests: the
+bound is now asserted in both safe wrappers, pinned by `band_bound_tests`
+(`src/encode/pipeline_impl/progressive.rs`) and driven through the public API
+by `tests/scan_script_validation.rs`. `docs/UNSAFE_INVENTORY.md` now has
+twenty-six `**none**` rows, sixty-five in all. Criterion 3 is not met as
+written: no test compares the SSE2 and scalar arms at the smallest and largest
+legal `(Ss, Se)`.
+
+Eight clusters are actionable; the rest are qualified `**none**`s (a named
+sub-invariant or a CI leg, not an untested site) and are context.
+
+**Acceptance criteria.**
+
+1. **Three uncalled functions holding `unsafe` (7 sites between them)** are
+   deleted, or given a caller *and* a test:
+   `encode_ac_sparse_lsb` (`src/encode/huffman_encode.rs:957`, 2 sites,
+   `#[allow(dead_code)]`), `encode_mcu_420_half_chroma`
+   (`src/encode/pipeline_impl/mcu.rs:1351`, 4 sites, `pub(super)`, never
+   called) and `transpose_8x8_i16` (`src/simd/x86_64/avx2_idct.rs:481`, 1
+   site, `#[allow(dead_code)]`, carrying `#[target_feature(enable = "avx2")]`
+   over SSE2-only intrinsics). Verified by `grep -rn <name> src/ crates/
+   tests/ benches/ examples/`, which finds only the definition. Unreachable
+   `unsafe` can be audited only by reading, never by exercise. If
+   `encode_mcu_420_half_chroma` goes, `tests/regression_dct_method_parity.rs`'s
+   module doc — which names it as if it were live — is corrected with it.
+2. **The three wasm32 fused FDCT kernels** (`wasm_extract_fdct_quantize`,
+   `wasm_downsample_h2v2_fdct_quantize`, `wasm_downsample_h2v1_fdct_quantize`
+   in `src/simd/wasm32/mod.rs`) gain a `src/simd/simd_parity_tests.rs` entry
+   each, against the scalar `fdct_quantize` on a padded plane including the
+   stride-boundary window. Their AArch64 and x86_64 twins already have one;
+   the two progressive ones have nothing that pins bytes today.
+3. **The SSE2 progressive coefficient preparation's bound** is driven by a
+   test: `prepare_ac_first_coeffs` / `prepare_ac_first_sse2` /
+   `prepare_ac_refine_coeffs` / `prepare_ac_refine_sse2`
+   (`src/encode/pipeline_impl/progressive.rs`, 6 sites) at the smallest and
+   largest legal `(Ss, Se)`, asserted equal to the scalar path. In-range
+   output is already byte-exact against `cjpeg`; the bound is not exercised.
+4. **The strided IDCT destination writes** gain direct tests that write into
+   a canary-padded buffer and assert both the pixels and the untouched
+   margins: `sse2_idct_islow_strided` (`src/simd/x86_64/idct.rs`, reached
+   only by the emulated Nehalem leg today) and `idct_1x1_strided`
+   (`src/decode/idct_scaled.rs`, 2 sites, no unit-level test —
+   `idct_1x1_dc_only` covers the safe inner function, not the wrapper).
+5. **`avx2_merged_h2v2_ycbcr_to_rgb` / `avx2_merged_h2v2_inner`**
+   (`src/simd/x86_64/avx2_merged.rs`, 2 sites) are exercised with an
+   under-sized second luma row — the odd-height case their SAFETY contract
+   permits and `parity_merged_upsample_h2v2`, which feeds equal-length rows
+   only, never produces.
+6. **Four C-ABI entry points have no test at all** and are executed by no
+   leg: `tj3LoadImage12`, `tj3LoadImage16`, `tj3SaveImage12` and
+   `tj3SaveImage16` (`crates/libjpeg-turbo-rs-capi/src/imageio.rs`). Each
+   body is a refusal — "not routed through the Rust shim yet" — so the test
+   is small: call it, assert -1 or NULL, and assert the message reaches
+   `tj3GetErrorStr`. The nine `mozjpeg_compat.rs` stubs are the same shape
+   and are deliberately *not* included here: they exist for dyld resolution,
+   `capi_libvips_compat.rs` proves that, and a test that calls them would
+   assert only that a no-op is a no-op.
+7. **Eleven C-ABI rows name an untested sub-case**, each worth one small
+   test: a non-NULL `numScalingFactors` for `tj3GetScalingFactors`; a
+   destination allocated at exactly `pitch * (h - 1) + row_bytes` for
+   `tj3Decompress8` (see [P4-193](#p4-193-the-c-abi-destination-spans-do-not-use-imagelayoutstrided-so-a-decode-forms-a-slice-over-one-rows-padding--open));
+   a non-UTF-8 filename for `cstr_to_path`; a partially-NULL out-slot set for
+   `tjDecompressHeader3`; a cross-thread move for `MemPool`'s
+   `unsafe impl Send for Block`; an out-of-range window for
+   `access_virt_sarray_impl` and `access_virt_barray_impl`; a padded pitch
+   for `tj3Decompress16`; a double `tj3Destroy` (which cannot be asserted
+   without a registry — P4-137's open decision — so this one is a note, not
+   a test); a C-ABI-crate-side test for `tj3GetICCProfile`, today covered
+   only from the root crate; and the profile-clearing branch of
+   `tj3SetICCProfile`. A twelfth is a *non-discriminating* test rather than a
+   missing one: `tj_encode_yuv3_does_not_over_read_padded_input_buffer`
+   (`crates/libjpeg-turbo-rs-capi/tests/legacy_aliases.rs`) allocates an
+   ordinary `Vec` of exactly `(h - 1) * pitch + row_bytes` and asserts a
+   return code, so the over-read it guards `densify_pitched_bytes` against
+   would not fault in a release build — and no sanitizer or Miri leg runs it.
+   Either the fixture becomes a guard page or the suite reaches a leg that
+   would observe the read.
+8. **Three classic-ABI exports are executed by no leg at all**, added
+   2026-09-09 by the `jpeglib.rs` inventory: `jpeg_new_colormap` (an exported
+   no-op — two-pass colour quantisation is unimplemented — that
+   `symbol_inventory` resolves and nothing calls), `jpeg_alloc_huff_table`
+   (no in-workspace caller, and no stock-tool path either: upstream's callers
+   of that symbol are all *library* sources this shim replaces) and
+   `jpeg_set_linear_quality` (a thin wrapper over `jpeg_add_quant_table`
+   whose delegate is covered). Each test is a few lines.
+9. **Four installed source-manager callbacks are never invoked**, also
+   2026-09-09: `noop_init_source`, `stdio_init_source`,
+   `noop_skip_input_data` and `default_resync_to_restart`. They are written
+   into the caller-visible `jpeg_source_mgr` slots and left there — the shim
+   drains a mem source from its own buffer and a stdio source through
+   `stdio_drain_to_eoi`, so no shim path steps the FSM, and no test calls
+   `cinfo->src->…` directly. `classic_source_mgr_matches_stock_libjpeg` pins
+   that they are *installed*, which is a different claim. A C consumer may
+   call any of them, so each wants a direct call plus an assertion on the
+   published window; `default_resync_to_restart` additionally wants the
+   P4-97 identity check driven through the *installed* slot rather than only
+   through the exported `jpeg_resync_to_restart`.
+10. **Five classic-ABI rows name an untested sub-case**, also 2026-09-09:
+   `default_reset_error_mgr` (installed by `jpeg_std_error` and never
+   invoked — call `err->reset_error_mgr` and assert `msg_code` and
+   `num_warnings` return to zero); the clamp arms of `jpeg12_crop_scanline`,
+   which has no counterpart to the 8-bit
+   `crop_scanline_narrows_emitted_window`; the zero-fill in
+   `alloc_through_memmgr_or_heap`, i.e. that a table from
+   `jpeg_alloc_quant_table` arrives with `sent_table == 0`;
+   `jpeg_default_qtables`, whose executed call is the guard case so the
+   live-compressor path is unexercised; and `jpeg_set_marker_processor`,
+   which runs but whose *retention* — the thing the row claims, since this
+   shim deliberately never dispatches the callback — is asserted nowhere.
+11. Each `**none**` cell that a landed test replaces is rewritten in
+   `docs/UNSAFE_INVENTORY.md` or `docs/UNSAFE_INVENTORY_CAPI.md` in the same
+   pull request.
+
+**Why deferred.** Filed rather than fixed inside the P4-141 criterion-4 pull
+requests, which commit the inventories and their gate: several test programs
+across four backends and the C ABI is its own work, and deleting dead
+`unsafe` changes the compiled surface, which a documentation-and-gate change
+should not.
+
+## P4-192. A Custom Scan Script With `Se > 63` Writes Past Two Stack Arrays From Safe Rust on x86_64 — **CLOSED 2026-10-07**
+
+**GitHub:** [#610](https://github.com/developer0hye/libjpeg-turbo-rs/issues/610) — found 2026-09-08 by the P4-141 criterion-4 inventory; under the [#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481) umbrella.
+
+**The defect.** `Encoder::scan_script` (`src/api/encoder.rs:176`) stores a
+`Vec<ScanScript>` verbatim and nothing validates `se`.
+`compress_progressive_custom_with_restart` copies the fields across,
+`band_len = se - ss + 1` (`src/encode/pipeline_impl/progressive.rs:730`) is
+handed to `prepare_ac_first_coeffs`, and on x86_64 with the default `simd`
+feature that forwards it to `prepare_ac_first_sse2`, which indexes `block`,
+`values` and `diffs` through raw pointers with no bound. **100 % safe Rust
+therefore writes past two `[u16; 64]` stack arrays and the call returns
+`Ok`.** Measured on `--target x86_64-apple-darwin`:
+
+| Build | `se = 64` | `se = 200` |
+|---|---|---|
+| x86_64 release | `Ok(273)` | **`Ok(639)`** — 200 `u16` into `[u16; 64]` |
+| x86_64 debug | `Ok(278)` | panic at `progressive.rs:1249`, after the stores |
+| aarch64 (scalar arm) | panic, index out of bounds | same panic |
+
+The non-x86_64 arm of `prepare_ac_first_coeffs` is safe indexing, which is
+why the defect is architecture-specific and why no aarch64 leg can see it.
+The AC-*refine* twin panics at `progressive.rs:975` in both profiles; only
+the AC-first band corrupts.
+
+**How it was found.** By writing the *Invariant* cell for
+`prepare_ac_first_sse2` in `docs/UNSAFE_INVENTORY.md`: the row had to say
+"nothing inside checks it", and the caller turned out not to check it
+either. This is the first defect any P4-141 mechanism has produced — the
+program's whole premise was that P4-135 and P4-143 came from reading code
+and review, never from a gate.
+
+**What C does.** `validate_script` (`references/libjpeg-turbo/src/jcmaster.c:359`)
+rejects `Ss < 0 || Ss >= DCTSIZE2 || Se < Ss || Se >= DCTSIZE2` and the
+`Ah`/`Al` range with `JERR_BAD_PROG_SCRIPT`, then enforces DC/AC
+exclusivity, one component per AC scan, AC-after-DC, and the successive
+approximation chain. This port has no equivalent.
+
+**Acceptance criteria.**
+
+1. A `validate_script` equivalent runs before any encoding work and returns
+   an `Err` — not a panic — for every condition `jcmaster.c:359-381` rejects.
+2. A regression test citing #610 drives the reproducer and asserts `Err`,
+   proven discriminating by failing before the fix, and running on x86_64.
+3. `prepare_ac_first_sse2` and `prepare_ac_refine_sse2` gain a `# Safety`
+   section stating `ss + band_len <= 64`, and their `docs/UNSAFE_INVENTORY.md`
+   rows are rewritten.
+4. The scalar and SSE2 arms reject the same scripts, so the behaviour is not
+   architecture-dependent.
+
+**Why deferred.** Filed rather than fixed inside the P4-141 criterion-4 pull
+request, which changes no file under `src/`; the fix is a behaviour change
+with its own C-parity contract and its own TDD cycle.
+
+**Status (2026-10-07): closed.** Per criterion:
+
+1. `validate_scan_script` (`src/encode/progressive.rs`) ports
+   `validate_script`'s progressive arm — the `JERR_COMPONENT_COUNT`,
+   `JERR_BAD_SCAN_SCRIPT` and `JERR_BAD_PROG_SCRIPT` checks, the
+   `last_bitpos` successive-approximation chain and the final
+   `JERR_MISSING_DATA` DC check, with the 8-bit `Ah`/`Al` ceiling of 10 — and
+   `compress_progressive_custom_with_restart` calls it before any other work.
+   Refusal is the new `JpegError::InvalidScanScript { entry, reason }`, with
+   `entry` 1-based like C's `scanno` (0 for the whole script). The builder's
+   script always selects progressive coding, so a first entry shaped like C's
+   sequential (`Ss = 0, Se = 63`) or lossless (`Ss != 0, Se = 0`) selector is
+   refused by the same rules rather than reinterpreted; that is pinned by
+   `sequential_and_lossless_shaped_scripts_are_refused`.
+2. `tests/scan_script_validation.rs::issue_610_se_past_63_is_refused_not_written`
+   drives the reproducer. Discriminating on x86_64, measured on
+   `--target x86_64-apple-darwin --release`: with the validation call and the
+   wrapper asserts removed it fails with `se = 200: expected
+   InvalidScanScript, got Ok with 1241 bytes`; with them it passes. The CI
+   x86_64 legs run it. `refusals_match_cjpeg_entry_for_entry` runs nineteen
+   refused scripts through `cjpeg -scans` and requires C to refuse each with
+   its own message naming the same entry; `accepted_scripts_match_cjpeg`
+   requires both sides to accept seven valid ones and to write the same bytes
+   (which found P4-211).
+3. Both SSE2 kernels have a `# Safety` section; both safe wrappers assert
+   `ss <= 64 && band_len <= 64 - ss` before the call (both arms) — not
+   `ss + band_len <= 64`, which a wrapped `se - ss + 1` passes in release
+   (rust-code-reviewer) — with a SAFETY comment citing it, pinned by
+   `band_bound_tests` including the wrapped length; the four
+   `docs/UNSAFE_INVENTORY.md` rows are rewritten.
+4. Validation runs before the architecture split, so the scalar and SSE2 arms
+   see only scripts that passed it; `tests/scan_script_validation.rs` has no
+   `cfg(target_arch)` and runs on every leg.
+
+## P4-193. The C-ABI Destination Spans Do Not Use `ImageLayout::strided`, So a Decode Forms a Slice Over One Row's Padding — **OPEN**
+
+**GitHub:** [#612](https://github.com/developer0hye/libjpeg-turbo-rs/issues/612) — found 2026-09-08 while writing the P4-141 criterion-4 inventory for the C-ABI crate.
+
+**Motivation.** `tj3Decompress8` sizes the caller's destination as
+`effective_pitch * height` and hands that to `slice::from_raw_parts_mut`
+(`crates/libjpeg-turbo-rs-capi/src/decompress.rs`). Its *source* sibling
+`tj3Compress8` does not: it uses `ImageLayout::strided`, whose rule is
+`pitch * (h - 1) + row_bytes` — every row but the last is a full pitch, and
+the last needs only its own pixels, because a caller is not required to
+allocate padding past the final row. Upstream touches exactly that tighter
+extent too: `turbojpeg-mp.c:244-246` builds `row_pointer[i] = &dstBuf[i *
+pitch]` and libjpeg writes `output_width * output_components` bytes through
+each one, so the final row's padding is never addressed.
+
+Writing the *Invariant* cell for the row is what surfaced it: the cell had to
+say the slice is wider than what the writes use, and the asymmetry with the
+compress side is visible only when the two rows sit next to each other.
+
+**Severity, stated plainly.** This is not a live overrun and not a
+documentation divergence: `turbojpeg.h:2077-2079` — `tj3Decompress8`'s own
+`@param dstBuf` — tells the caller the buffer "should normally be `pitch *
+destinationHeight` samples in size", so a caller following upstream's own
+documentation allocates enough and the reference is valid. The
+defect is that the shim *requires* what upstream only *recommends*. A caller
+that sized from what upstream actually touches — legal against the C library,
+and the exact shape `tj_encode_yuv3_does_not_over_read_padded_input_buffer`
+guards against on the encode side — gets a `&mut [u8]` formed over memory it
+never allocated, which is undefined behaviour before a single byte is
+written. The same question applies to `tj3Decompress12` / `tj3Decompress16`,
+whose `SampleGrid` is built on `ImageLayout` and therefore may already be
+correct, and to `tj3DecodeYUV8` / `tj3DecodeYUVPlanes8`, which write row by
+row through raw pointers and form no over-wide slice at all — so the audit is
+narrow.
+
+**Acceptance criteria.**
+
+1. `tj3Decompress8`'s destination span comes from `ImageLayout::strided`, so
+   the slice covers `pitch * (h - 1) + width * bpp` bytes and not one byte
+   more.
+2. A regression test allocates a destination at exactly that size with
+   `pitch > width * bpp`, decodes into it, and asserts the pixels — failing
+   before the change under Miri or ASan, passing after. It belongs in
+   `crates/libjpeg-turbo-rs-capi/tests/capi_layout_adoption.rs`, beside
+   `tj3_decompress12_writes_only_the_pitched_extent`, which is the same test
+   for the 12-bit path.
+3. The other pitched *destinations* in the C-ABI crate are audited against
+   the same rule and either fixed or recorded as already tight, in the row's
+   *Invariant* cell in `docs/UNSAFE_INVENTORY_CAPI.md`.
+4. The `tj3Decompress8` row's `**none**` in that document is replaced by the
+   test from criterion 2, and P4-191's criterion 7 entry for it is struck.
+
+**Why deferred.** Filed rather than fixed inside the P4-141 criterion-4 pull
+request, which is a documentation-and-gate change: this one edits a decode
+entry point and wants its own differential test against the C oracle.
+## P4-194. The Memory Manager's `alloc_sarray` / `alloc_barray` Multiply `JDIMENSION`s Unchecked, Where Upstream Guards and Chunks — **OPEN**
+
+**GitHub:** [#613](https://github.com/developer0hye/libjpeg-turbo-rs/issues/613) — found 2026-09-08 while writing the P4-141 criterion-4 inventory row for `alloc_sarray_impl`, and confirmed by the `codex review` of that landing, which corrected the row's first draft.
+
+**Motivation.** `crates/libjpeg-turbo-rs-capi/src/memmgr.rs`'s
+`alloc_sarray_impl` and `alloc_barray_impl` size their allocations with plain
+`*` over `JDIMENSION` (`u32`) arguments:
+`row_bytes = align_up(samplesperrow as usize * sample_size, 64)`,
+`ptr_array_bytes = rows * size_of::<JSampRow>()`, and
+`push_block(pool_id, row_bytes * rows)`. The last of these reaches
+`2^33 * 2^32` and **overflows a 64-bit `usize`**; on the 32-bit ARMv7 leg the
+smaller products wrap as well — 65500 samples times 4 components rounded up
+is about 2^18, times 65500 rows is about 2^34.
+
+`push_block`'s `Layout::from_size_align` is not the guard the row first
+claimed it was: it receives the already-wrapped product and accepts it. A
+wrapped product under-allocates, and the loop immediately after writes
+`*ptr_array.add(r) = data_raw.add(r * row_bytes)` for every row, handing C
+row pointers past the end of the block.
+
+Upstream does two things here that this port does neither of
+(`jmemmgr.c:435`): it refuses `samplesperrow > MAX_ALLOC_CHUNK` with
+`out_of_memory(cinfo, 9)` — its own comment says this "prevents
+overflow/wrap-around" — and it chunks the rows so no single `alloc_large`
+exceeds `MAX_ALLOC_CHUNK`, raising `JERR_WIDTH_OVERFLOW` when even one row
+cannot fit. Our `JpegMemoryMgr` advertises the same `max_alloc_chunk =
+1_000_000_000` in the vtable and enforces it nowhere.
+
+**Reachability.** Not from the Rust API, which bounds its geometry before any
+allocation. `alloc_sarray` and `alloc_barray` are *vtable slots*: any C
+consumer holding a `cinfo` from this shim can call them with any
+`JDIMENSION` pair, and stock libjpeg modules linked against the shim call
+them with values derived from the frame. `realize_virt_arrays_impl` in the
+same file already does the checked version of this arithmetic
+(`virt_array_maximum_space`, `checked_mul`/`checked_add`, mirroring
+upstream's `maximum_space` guard), so the pattern to follow is local.
+
+**Why it was untracked.** `tests/sizing_arithmetic_gate.rs` (P4-139
+criterion 3) scans for `saturating_mul` / `saturating_add` /
+`saturating_sub` only. These are plain `*`, so the gate never looks at them,
+and `docs/sizing_arithmetic_inventory.tsv`'s four `memmgr.rs` rows are the
+saturating counters and bound checks, not these.
+
+**Acceptance criteria.**
+
+1. `alloc_sarray_impl` and `alloc_barray_impl` compute every size with
+   checked arithmetic and report the failure the way upstream reports it —
+   through `error_exit`, not by returning NULL. Both receive `cinfo`, and
+   `realize_virt_arrays_impl` in the same file already shows the call
+   (`crate::jpeglib::invoke_error_exit_parm(cinfo, JERR_OUT_OF_MEMORY,
+   case)`); it is only the lower-level `MemPool::push_block` that has no
+   `j_common_ptr` and must keep signalling with NULL. A stock C consumer
+   does not check these two slots for NULL — `jmemmgr.c` never returns it —
+   so a NULL here is dereferenced by the caller, which is the whole reason
+   upstream raises instead. `JERR_WIDTH_OVERFLOW` is upstream's code for a
+   row that cannot fit and `out_of_memory(cinfo, 9)` for
+   `samplesperrow > MAX_ALLOC_CHUNK`; match both.
+2. `samplesperrow > MAX_ALLOC_CHUNK` is refused as upstream refuses it, and a
+   request whose total exceeds `max_alloc_chunk` either chunks as upstream
+   does or is refused; whichever is chosen, the vtable field stops
+   advertising a limit nothing enforces.
+3. A regression test calls the two vtable slots directly with a `JDIMENSION`
+   pair whose product overflows `usize` and asserts that the caller's
+   `error_exit` ran with the expected code — not that NULL came back and not
+   that a wrapped allocation succeeded — on a 64-bit host and on the 32-bit
+   ARMv7 leg (`capi_layout_adoption` and `capi_span_overflow_guards` are the
+   two suites ARMv7 already runs, so it belongs in one of them).
+   `capi_alloc_failure_injection.rs` is the shape to copy for observing an
+   `error_exit` from a test.
+4. The `alloc_sarray_impl` / `alloc_barray_impl` rows in
+   `docs/UNSAFE_INVENTORY_CAPI.md` cite that test instead of recording the
+   obligation as unmet.
+
+**Why deferred.** Filed rather than fixed inside the P4-141 criterion-4 pull
+request, which is a documentation-and-gate change: this edits the memory
+manager two stock tools allocate through, and wants its own differential run
+against the stock-tool link gate.
+
+
+## P4-195. `jpeg_read_raw_data` Copies MCU-Aligned Plane Widths Into Caller Buffers `libjpeg.txt` Sizes to DCT Blocks — **OPEN**
+
+**GitHub:** [#615](https://github.com/developer0hye/libjpeg-turbo-rs/issues/615) — found 2026-09-09 by the P4-141 criterion-4 `jpeglib.rs` inventory; under the [#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481) umbrella.
+
+**What it is.** `jpeg_read_raw_data` and `jpeg12_read_raw_data`
+(`crates/libjpeg-turbo-rs-capi/src/jpeglib.rs`) copy `plane_width` samples
+into each caller row pointer. `plane_width` is **MCU-aligned** —
+`mcus_x * h_samp * block_size`, `src/decode/pipeline_impl/raw.rs:101` — but
+the contract the caller sized its buffer against is **DCT-block-aligned**.
+`references/libjpeg-turbo/doc/libjpeg.txt:2977-2981`:
+
+> The buffer you pass must be large enough to hold the actual data plus
+> padding to DCT-block boundaries. As with compression, any entirely dummy
+> DCT blocks are not processed so you need not allocate space for them, but
+> the total scanline count includes them.
+
+Upstream enforces exactly that: `jdcoefct.c:349-350` bounds its column loop
+by `master->last_MCU_col[ci]`, derived from `width_in_blocks`
+(`jdinput.c:129`), and `:336-341` bounds rows by `height_in_blocks`.
+
+**The worked case is the manual's own.** For a 101x101 4:2:0 image
+`libjpeg.txt:2942-2946` computes `width_in_blocks = 13` for Y and tells the
+caller to pad to `13 * 8 = 104` columns. Our `mcus_x` is
+`ceil(101 / 16) = 7`, so `plane_width = 7 * 2 * 8 = 112` and the copy writes
+**eight bytes past every Y row the caller allocated**. `jpeg12_read_raw_data`
+overruns by sixteen, the count being in `i16` items. The condition is
+ordinary rather than exotic: any 4:2:0 width whose `ceil(w / 8)` is odd.
+Rows are affected the same way — the loop breaks on `src_row >=
+plane_height`, and `plane_height` is MCU-aligned too.
+
+**Why no test sees it.** `capi_jpeg_read_raw_data.rs:257` allocates
+`output_width + 16` per row, which absorbs the overrun, and TurboJPEG's own
+consumer pads to 32 (`turbojpeg.c:2639`). No sanitizer runs this file at all
+(see P4-141 criterion 4's `jpeglib.rs` chunk), so nothing else would notice.
+
+**Acceptance criteria.**
+
+1. The copy width becomes the block-aligned extent —
+   `ceil(downsampled_width / block_size) * block_size` per component — and
+   the row loop stops at the real `height_in_blocks` rather than at the
+   MCU-padded plane height, matching `jdcoefct.c`.
+2. A regression test allocates each row at **exactly** the documented size
+   (`width_in_blocks * DCTSIZE`) for the manual's 101x101 4:2:0 case, in both
+   the 8-bit and 12-bit entry points, and asserts the bytes past that extent
+   are untouched — a canary, since the current tests over-allocate by 16 and
+   would pass either way.
+3. The samples inside the block-aligned extent stay byte-identical to
+   `djpeg`'s raw output, so the fix narrows the write without changing pixels.
+4. `docs/UNSAFE_INVENTORY_CAPI.md`'s two raw-data rows drop the P4-195 note
+   and state the corrected bound.
+
+**Why deferred.** Filed rather than fixed inside the P4-141 criterion-4 pull
+request, which is a documentation-and-gate change: this narrows a write in
+the decode path and needs its own C cross-validation run.
+
+## P4-196. `jpeg_abort` / `jpeg_destroy` and the Memory Manager's Precision Probe Hardcode `is_decompressor` at Byte 32, Which Is an LP64-Only Offset — **OPEN**
+
+**GitHub:** [#616](https://github.com/developer0hye/libjpeg-turbo-rs/issues/616) — found 2026-09-09 by the P4-141 criterion-4 `jpeglib.rs` inventory; under the [#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481) umbrella.
+
+**What it is.** Three sites read the `is_decompressor` flag at a **literal**
+byte offset to decide which of the two `#[repr(C)]` mirrors a
+`j_common_ptr` really is:
+
+```rust
+let is_decompressor: CBoolean = unsafe { *(cinfo as *const u8).add(32).cast::<CBoolean>() };
+```
+
+`crates/libjpeg-turbo-rs-capi/src/jpeglib.rs` in `jpeg_abort` and
+`jpeg_destroy`, and `crates/libjpeg-turbo-rs-capi/src/memmgr.rs` in the
+precision probe. The `jpeg_common_fields` prefix is four pointers
+(`err`, `mem`, `progress`, `client_data`) then `is_decompressor`, so the
+offset is 32 on LP64 and **16** on ILP32, where `.add(32)` lands on
+`image_height` in both mirrors. The consequence is not a wrong branch but
+type confusion: a compress object torn down through `jpeg_abort_decompress`
+is then reinterpreted through `JpegDecompressPublic`.
+
+**Why nothing catches it.** The `const _` blocks that pin
+`offset_of!(…, is_decompressor) == 32` are
+`#[cfg(all(target_pointer_width = "64", not(windows)))]`, so they compile out
+on exactly the targets where the literal is wrong — a gate that is silent
+where it is needed. The ungated block asserts only `> 0`.
+`tests/abi_offsets.rs` skips on non-64-bit by design. `armv7.yml` runs
+`-p libjpeg-turbo-rs-capi --lib` plus `capi_layout_adoption` and
+`capi_span_overflow_guards`, and the last calls `jpeg_destroy_compress`
+directly rather than the dispatching `jpeg_destroy`, so the 32-bit leg never
+executes the dispatch.
+
+Note what this is *not*: `phase4.md`'s existing `is_decompressor` discussion
+(P4-149, P4-110) is about the flag being **indeterminate** after a rejected
+create, which `common_mem_is_null` fixed. This is a different bug in the same
+line — the offset, not the value.
+
+**Acceptance criteria.**
+
+1. All three sites use `std::mem::offset_of!(JpegDecompressPublic,
+   is_decompressor)` — the constant `common_mem_is_null` already uses two
+   lines above one of them, which is what makes the literal look deliberate.
+2. A `const _` assertion that the two mirrors agree on that offset, **ungated
+   by pointer width**, alongside the existing `common_mem_offset_is_shared`
+   unit test in `jpeglib.rs` — which asserts the `mem` offset and not this
+   one, and which `docs/UNSAFE_INVENTORY_CAPI.md`'s `jpeg_abort` row wrongly
+   credited until 2026-09-09.
+3. `armv7.yml`'s C-ABI step gains a case that creates a compressor and tears
+   it down through `jpeg_destroy` (not `jpeg_destroy_compress`), and one that
+   does the same for a decompressor through `jpeg_abort`, so the dispatch is
+   executed at 32-bit pointer width.
+4. `docs/UNSAFE_INVENTORY_CAPI.md`'s `jpeg_abort` and `jpeg_destroy` rows drop
+   the P4-196 note and state the corrected derivation.
+
+**Why deferred.** Filed rather than fixed inside the P4-141 criterion-4 pull
+request, which is a documentation-and-gate change: the fix touches three call
+sites plus a CI leg, and criterion 3 of it is a workflow edit whose value is
+that it *runs*, which a documentation PR cannot demonstrate.
+
+## P4-197. A Cropping Region Whose Left Boundary Exceeds the Scaled Width Decodes to Zero Columns and Trips a False `debug_assert!` — **CLOSED 2026-10-07**
+
+**GitHub:** [#618](https://github.com/developer0hye/libjpeg-turbo-rs/issues/618) — found 2026-09-09 by the P4-141 criterion-3 API-sequence harness on its first run; under the [#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481) umbrella.
+
+**What it is.** A cropping region whose `x` is at or past the *scaled* output
+width is accepted, and the decode that follows produces an image with no
+columns. Minimal reproduction, entirely in safe Rust, on the committed 8x8
+grayscale fixture:
+
+```rust
+let mut decoder = Decoder::new(include_bytes!("fixtures/gray_8x8.jpg"))?;
+decoder.set_crop_region(10, 1, 16, 2);
+let image = decoder.decode_image()?;
+```
+
+* **debug** — panics in `src/decode/pipeline_impl/output.rs` at the
+  `debug_assert!(!image.data.is_empty(), "vertical crop cannot apply to a
+  sink-claimed decode")`;
+* **release** — returns `Ok`, with `width = 0`, `height = 8` and no data. The
+  requested crop *height* of 2 is silently dropped, because the vertical-crop
+  step is skipped by the `if !image.data.is_empty()` guard below the assert.
+
+The same region reaches the same place through `TjHandle::set_cropping_region`
++ `decompress`, and through the C ABI's `tj3SetCroppingRegion` — which
+validates only that `x` and `y` are non-negative, that `w` and `h` are
+positive, and that all-zero means "clear the region"
+(`crates/libjpeg-turbo-rs-capi/src/header.rs`); it never compares the region
+against the image, because at that point it has no image.
+
+**Root cause.** `pipeline_impl/output.rs` aligns the crop's left boundary down
+to the scaled iMCU boundary and clamps the width against what is left of the
+row:
+
+```rust
+let aligned_x: usize = (cx / scaled_imcu_w) * scaled_imcu_w;
+let expanded_w: usize = cw + (cx - aligned_x);
+let clamped_w: usize = expanded_w.min(out_width.saturating_sub(aligned_x));
+```
+
+With `cx = 10` on an 8-pixel-wide output, `aligned_x` is 8 and
+`out_width.saturating_sub(8)` is 0, so the decode emits zero columns and
+`image.data` is empty. The assert's comment — "A sink-claimed decode returns
+empty data; vertical crop is excluded from sink mode in `decode_image_into`,
+so this is unreachable" — names a second, unrelated route to empty data and
+concludes it is the only one. It is the comment that is wrong, not just the
+assertion: an ordinary owned decode reaches it.
+
+**What upstream does.** It refuses the region rather than degenerating.
+`tj3SetCroppingRegion` (`references/libjpeg-turbo/src/turbojpeg.c:2106-2109`)
+throws "The cropping region exceeds the scaled image dimensions" when
+`x + w > scaledWidth` or `y + h > scaledHeight`, and rejects an `x` that is not
+divisible by the scaled iMCU width ten lines above (`:2096-2101`);
+`jpeg_crop_scanline` refuses the same shape at the libjpeg level:
+`references/libjpeg-turbo/src/jdapistd.c:213-216` raises `JERR_WIDTH_OVERFLOW`
+when `xoffset + width > output_width` (the `JERR_BAD_CROP_SPEC` two lines
+above is the null-pointer guard, not this case). Upstream can validate at *set*
+time because its handle has already read the header; ours cannot — `TjHandle`
+and `Decoder::set_crop_region` both accept the region before any frame is
+known — so the equivalent check has to run where the scaled dimensions exist,
+which is the decode.
+
+**Acceptance criteria.**
+
+1. A crop region exceeding the scaled output dimensions returns a typed `Err`
+   from `Decoder::decode_image` and from `TjHandle::decompress`, with the
+   message upstream uses, instead of a zero-column image.
+2. `tj3SetCroppingRegion` reports it the way upstream does for the cases it can
+   see, and the C-ABI decode reports the rest; cross-validated against
+   `tj3SetCroppingRegion` in a C harness rather than against our own previous
+   output.
+3. The iMCU-divisibility rule (`turbojpeg.c:2096-2101`) is decided one way or
+   the other and written down — today the Rust side aligns down silently where
+   upstream refuses, which is a second, separable divergence this item
+   surfaced.
+4. The false invariant in `pipeline_impl/output.rs` is deleted rather than
+   softened, and a regression test pins the 8x8 reproduction above.
+5. `tests/helpers/api_sequence.rs` drops the `x: 0` pin in `op_from_record`
+   and lets the API-sequence fuzzer generate the full offset range again.
+
+**Why deferred.** Filed rather than fixed inside the pull request that found
+it, which lands the P4-141 criterion-3 harness. The fix is a behaviour change
+on an accepted input — today's clamping is exercised by the crop and
+crop-plus-scale cross-check suites — so it needs its own C cross-validation
+pass, and folding it into a harness PR would put a decode-pipeline change
+behind a test-infrastructure review.
+
+**Status (2026-10-07): closed.** Per criterion:
+
+1. `Decoder::check_crop_region` (`src/decode/pipeline_impl/output.rs`)
+   refuses `x + width > output_width()` or `y + height > output_height()` —
+   `djpeg -crop`'s bound (`djpeg.c:854-858`) — with the new
+   `JpegError::InvalidCropRegion { reason }`, whose `reason` is upstream's
+   "The cropping region exceeds the scaled image dimensions". It runs in
+   `decode_image_inner` (so `decode_image` and `decode_image_into`) after the
+   `JERR_CONVERSION_NOTIMPL` refusal and before any decoding, and in
+   `output_buffer_size`, so size → allocate → decode cannot size a region the
+   decode refuses. A zero width is refused too, as `jpeg_crop_scanline`
+   refuses it (`jdapistd.c:213-216`) — aligned down, it used to widen into
+   columns nobody asked for (`set_crop(5, 0)` decoded five); a zero height
+   stays accepted, since `StreamingDecoder::skip_scanlines` skips to the
+   bottom with `y = output_height, height = 0` (cross-checked against
+   `djpeg -skip 0,7`). `TjHandle::decompress` resolves the stored region
+   against the image it decodes with `tj3SetCroppingRegion`'s full rule set
+   and message text (below), then holds the decoder to it as upstream's
+   `turbojpeg-mp.c:217-225` does: an `x` the decoder's own iMCU would move is
+   refused with "Unexplained mismatch … left boundary" (a `cjpeg -sample
+   2x1,2x1,2x1` frame is TJSAMP_444 to TurboJPEG but decodes in 16-pixel
+   columns; stock 3.2.0 refuses `x = 8` with the same text, measured with a C
+   probe; `crates/libjpeg-turbo-rs-capi/tests/crop_region_sampling_c_parity.rs`
+   drives stock 3.2.0 and our cdylib, one library per child process, through
+   header → set → decode on four committed `cjpeg -sample` layouts
+   (`tests/fixtures/crop_sampling_*.jpg`) and three regions each, and requires
+   identical return codes, messages and pixels — 12 of 12 match; `tests/
+   tj3_handle.rs::handle_cropping_region_follows_turbojpeg_on_nonstandard_sampling`
+   pins the Rust API to the same outcomes), and a decode whose
+   size differs from the region is refused rather
+   than returned — before this, both reached the C ABI as an image wider than
+   the caller's buffer. `decompress_12bit` / `decompress_16bit` take no region
+   yet, so they refuse a stored one ([P4-219](#p4-219-12-bit-decodes-ignore-the-horizontal-crop-and-tjhandles-1216-bit-decompress-ignores-the-cropping-region-entirely--open),
+   filed here). `tests/crop_region_bounds.rs::
+   crop_bounds_agree_with_djpeg` drives nine regions around the scaled edges
+   of a grayscale, a 4:4:4 and a 4:2:0 frame at 1/1 and 1/2 and requires
+   accept/refuse to match `djpeg -crop` on all 54 (18 accepted, 36 refused),
+   with djpeg's dimensions on every accepted one and djpeg's pixels where the
+   cropped decode is pixel-exact (grayscale, 4:4:4). Other entry points:
+   `decompress_cropped` clamps by documented contract, so the check it reaches
+   through `decode_image` never fires; `ScanlineDecoder::set_crop_x` already
+   refused (`Unsupported`); `StreamingDecoder::crop_scanline` hands the
+   decoder an in-bounds region, zero-width for a zero `width` at an
+   iMCU-aligned origin or an origin at an iMCU-aligned width, which `decode()`
+   then refuses;
+   the classic `jpeg_crop_scanline` / `jpeg12_crop_scanline` still clamp where
+   upstream raises `JERR_WIDTH_OVERFLOW` — recorded under
+   [P4-103](#p4-103-jpeg_crop_scanline-does-not-implement-imcu-aligned-c-semantics--open),
+   which owns that entry point.
+2. Upstream validates at set time because its handle has read a header; ours
+   now records the same facts. `TjHandle::decompress` stores a private
+   `CroppingGeometry` (SOF width/height, `TJSAMP_*`, precision, lossless —
+   what `setDecompParameters` records, `turbojpeg.c:514-536`; the `TJSAMP_*`
+   comes from a line-for-line port of `getSubsamp`, `:431-510`, because
+   `Decoder::jpeg_subsampling` compares luma with the first chroma component
+   only and read `2x2,1x1,2x2` as 4:2:0 where upstream refuses to crop it —
+   codex review) and the new
+   `TjHandle::resolve_cropping_region` applies `tj3SetCroppingRegion`'s checks
+   in upstream's order (`:2086-2111`). The C ABI's `tj3SetCroppingRegion`
+   keeps the all-zero and negative checks and calls it, so it refuses before
+   any header ("JPEG header has not yet been read"), for a lossless frame, off
+   the iMCU grid and past the scaled image, fills a zero width/height to the
+   edge (it used to refuse it), keeps the previous region on a refusal, and
+   reports `"tj3SetCroppingRegion(): <upstream message>"`. `TjHandle::
+   set_cropping_region` itself stays infallible and validation-free: making
+   it fail on "no header" would make a decode's outcome depend on which image
+   an earlier call read, which the P4-141 API-sequence oracle's P1 ("a
+   decode depends only on configuration and input") correctly flags.
+   `decompress_header` now suspends the region, as `tj3DecompressHeader`
+   ignores it — which also moved one row of
+   [P4-200](#p4-200-jpegwidth--jpegheight-publish-the-scaled-and-cropped-output-dimensions-where-upstream-publishes-the-sofs--open)'s
+   table. Cross-validation: the new `cropping_region` case of
+   `crates/libjpeg-turbo-rs-capi/examples/cabi_misuse_harness.c` (in `CASES`
+   and in `sanitizers.yml`'s ASan loop) walks before-header, `x` past the
+   width, `x + w` past the width, `y + h` past the height, zero-fill past the
+   edge, unaligned `x`, negative `w`, accepted regions and a lossless frame,
+   at 1/1 and 1/2, decoding each accepted region into a guard-page buffer of
+   exactly the cropped size. Against stock libjpeg-turbo 3.2.0 the 51-line
+   transcript is byte-identical — return codes, every `tj3GetErrorStr` and
+   the pixel hashes of the five cropped decodes, 4:2:0 included.
+3. **The iMCU rule, decided per API.** TurboJPEG (`TjHandle`, `tj3*`) refuses
+   an `x` not divisible by the scaled iMCU width, with upstream's message
+   (`turbojpeg.c:2096-2101`): its callers size their destination from the
+   region they passed, so aligning down would hand back a wider image than
+   they allocated for. `Decoder::set_crop` / `set_crop_region` keep aligning
+   down and widening by the same amount — the libjpeg contract
+   `jpeg_crop_scanline` implements and `djpeg -crop` exposes, already
+   documented as "auto-aligned" and pinned by `tests/crop_c_compat.rs`,
+   `crop_skip.rs`, `cross_check_crop_scale.rs` and `c_croptest.rs`. The
+   alignment never changes the bounds check: the right edge stays
+   `x + width`. Recorded in both APIs' docs.
+4. The `debug_assert!` and the `if !image.data.is_empty()` guard it
+   protected are deleted; the vertical-crop slice now relies on
+   `check_crop_region` and says why the data is full-length (a vertical crop
+   keeps `decode_image_into` off the sink path). `tests/crop_region_bounds.rs::
+   issue_618_left_boundary_past_scaled_width_is_refused` pins the reproducer
+   on `tests/fixtures/gray_8x8.jpg` — `decode_image`, `decode_image_into` and
+   `output_buffer_size` each return `InvalidCropRegion`, and `djpeg -crop
+   16x2+10+1` refuses too — and passes in debug and `--release`; before the fix
+   it panicked at the assertion.
+5. `op_from_record` draws crop `x` from `b % 16` again, `encode_op` packs it
+   into the same byte (`width * 16 + x`), and
+   `program_round_trips_through_its_wire_format` round-trips a non-zero `x`.
+   `tests/api_sequence_state.rs` passes unchanged in its properties.
+
+Verification (2026-10-07, aarch64-darwin): `cargo test --locked
+--no-fail-fast` for the root crate, 2487 passed / 0 failed / 5 ignored across
+233 binaries; `cargo test --locked -p libjpeg-turbo-rs-capi --tests` with
+`LIBJPEG_TURBO_PREFIX` on a stock 3.2.0 install, 363 passed / 0 failed,
+`transcripts_match_stock_turbojpeg` included; the #618 regression and the
+`TjHandle` suite also in `--release`; workspace and `--lib` clippy clean. The
+first full run failed four tests that had asserted the old clamping —
+`cross_product_decompress`'s two crop matrices (a 64x64 port of
+tjdecomptest.in, whose regions upstream runs on the 227x149 `testorig`, where
+they fit at 1/2; they now require the refusal from both us and `djpeg`),
+`decompress_into`'s vertical-crop config (now a region that fits) and
+`sizing_arithmetic_gate`'s inventory (three deleted clamps).
+
+## P4-198. `TjHandle` Merges Upstream's Two ICC Buffers, So a Decode Changes the Profile a Later Compress Embeds — **OPEN**
+
+**GitHub:** [#619](https://github.com/developer0hye/libjpeg-turbo-rs/issues/619) — found 2026-09-09 while designing the P4-141 criterion-3 API-sequence oracle; under the [#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481) umbrella.
+
+**What it is.** `tjinstance` carries **two** ICC buffers
+(`references/libjpeg-turbo/src/turbojpeg.c:111-112`):
+
+```c
+unsigned char *iccBuf, *decompICCBuf;
+size_t iccSize, decompICCSize;
+```
+
+`iccBuf` is written only by `tj3SetICCProfile` (`:1239-1246`) and read by the
+compress and transform paths — `tj3Compress*` (`turbojpeg-mp.c:126`),
+`tj3CompressFromYUVPlanes8` (`turbojpeg.c:1367`) and `tj3Transform`
+(`:3045`). `decompICCBuf` is written only by the decompressor, in
+`tj3DecompressHeader` (`:1909-1913` — `turbojpeg-mp.c` never writes the
+field; its one mention there is a read, in `tj3SaveImage*`'s PNG branch at
+`turbojpeg-mp.c:562-570`), and read only by `tj3GetICCProfile` when the instance was initialised for decompression
+(`:1993-2011`). In C a decode therefore cannot change the profile a later
+compress embeds.
+
+`TjHandle` has one field (`src/api/tj3.rs:336`, `icc_profile: Option<Vec<u8>>`).
+`set_icc_profile` writes it (`:554`), `configure_encoder` reads it (`:798`) and
+`decompress` **overwrites** it from the decoded image on every
+`TJPARAM_SAVEMARKERS` arm (`:1234-1248`). So
+
+```
+set_icc_profile(P) → decompress(imageA) → compress(...)
+```
+
+embeds **A's** profile where upstream embeds `P`, and embeds nothing at all
+where `A` carried none. The C ABI inherits it: `tj3GetICCProfile` in
+`crates/libjpeg-turbo-rs-capi/src/tj3.rs` delegates to
+`inst.inner.icc_profile()`, so it answers with whatever the last decode left.
+
+`docs/FEATURE_PARITY.md` records the merged behaviour as intended
+("decompress populates handle ICC"), which is what kept it from being noticed.
+
+**Acceptance criteria.**
+
+1. `TjHandle` carries a compress-side profile and a decompress-side profile
+   separately; `set_icc_profile` writes only the first, `decompress` only the
+   second.
+2. `tj3GetICCProfile` returns the decompress-side buffer for a handle
+   initialised for decompression and the compress-side one otherwise, matching
+   `turbojpeg.c:1993-2011`.
+3. A regression drives `set → decompress → compress` and asserts the embedded
+   profile is the one that was *set*, cross-validated against real
+   `tj3SetICCProfile` / `tj3Compress8` rather than against our own previous
+   output.
+4. `docs/FEATURE_PARITY.md`'s "decompress populates handle ICC" line is
+   corrected.
+5. `tests/helpers/api_sequence.rs` gains the property this item is the
+   exception to — "the profile a compress embeds is the one `set_icc_profile`
+   last supplied" — which the P4-141 criterion-3 oracle deliberately does not
+   assert while this is open. P2 cannot see it today because P2's reference
+   replays the same decode, so both handles carry whatever profile it left.
+
+**Why deferred.** Filed rather than fixed inside the pull request that landed
+the P4-141 criterion-3 harness. Splitting the field changes the public
+`TjHandle::icc_profile()` accessor's meaning and the `tj3GetICCProfile` C entry
+point, so it needs its own C cross-validation pass rather than riding behind a
+test-infrastructure review.
+
+## P4-199. `setDecompParameters` Publishes Thirteen Handle Parameters; Our 8-Bit Decode Publishes Eight and the 12/16-Bit Ones Publish Three and Ignore the Handle's Limits — **OPEN**
+
+**GitHub:** [#620](https://github.com/developer0hye/libjpeg-turbo-rs/issues/620) — found 2026-09-09 by the `rust-code-reviewer` pass on the P4-141 criterion-3 harness, which had to write down what a decode publishes in order to compare it; under the [#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481) umbrella.
+
+**What it is.** `setDecompParameters`
+(`references/libjpeg-turbo/src/turbojpeg.c:514-536`) writes **thirteen**
+parameters: `subsamp`, `jpegWidth`, `jpegHeight`, `precision`, `colorspace`,
+`progressive`, `arithmetic`, `lossless`, `losslessPSV`, `losslessPt`,
+`xDensity`, `yDensity` and `densityUnits`. It is called from the *shared* body of
+`tj3Decompress{8,12,16}` (`turbojpeg-mp.c:153`, whose `setDecompParameters`
+call is at `:190`), which `turbojpeg.c:1255-1263` compiles once per precision,
+so all three publish the same thirteen — and the same shared function applies `TJPARAM_MAXPIXELS` five lines
+later (`turbojpeg-mp.c:195-198`), so the ceiling holds at every precision too.
+
+Ours diverges twice:
+
+* `TjHandle::decompress` (`src/api/tj3.rs:1206-1228`) publishes **eight**:
+  `Width`, `Height`, `Precision`, `ColorSpace`, `Subsampling`, `XDensity`,
+  `YDensity`, `DensityUnits`. `TJPARAM_PROGRESSIVE`, `TJPARAM_ARITHMETIC`,
+  `TJPARAM_LOSSLESS`, `TJPARAM_LOSSLESSPSV` and `TJPARAM_LOSSLESSPT` keep
+  whatever the caller last set, so a caller cannot ask a decoded stream whether
+  it was progressive, arithmetic or lossless — and a compress that follows
+  inherits the caller's old values where upstream would have replaced them with
+  the frame's.
+* `TjHandle::decompress_12bit` / `decompress_16bit` (`:1270-1290`) publish
+  **three** (`Width`, `Height`, `Precision`) and read *nothing* from the
+  handle: they delegate to `crate::api::precision::decompress_12bit` /
+  `_16bit`, which build their own decoder with `DecodeLimits::default()`.
+  `TJPARAM_MAXPIXELS`, `TJPARAM_MAXMEMORY` and `TJPARAM_SCANLIMIT` therefore do
+  not apply to the 12/16-bit entry points at all.
+
+The resource half is reachable rather than theoretical: `Decoder::new` refuses
+a stream whose scan count exceeds its own default of 8192, so a header a
+caller's pre-parse cannot read is one `decompress_16bit` will still decode —
+and a lossless 16-bit SOF at 65500 x 32000 is a 4.19 GB `vec![0u16; …]` from a
+stream any sane `MAXPIXELS` was meant to exclude.
+
+**Acceptance criteria.**
+
+1. `TjHandle::decompress` publishes all thirteen parameters
+   `setDecompParameters` writes, cross-validated against `tj3Get` after
+   `tj3Decompress8` on progressive, arithmetic and lossless fixtures.
+2. `decompress_12bit` / `decompress_16bit` publish the same thirteen, since
+   upstream reaches them through the same function.
+3. `decompress_12bit` / `decompress_16bit` apply the handle's
+   `TJPARAM_MAXPIXELS`, `TJPARAM_MAXMEMORY` and `TJPARAM_SCANLIMIT`; a
+   regression drives `Decompress16` on an over-ceiling frame and asserts
+   refusal.
+4. `tests/helpers/api_sequence.rs`'s `WRITE_BACK_8BIT`, `WRITE_BACK_PRECISION`
+   and `Op::publishes_for_compress` are re-derived from `setDecompParameters`
+   rather than from our behaviour, and `Limits::prefilter_headers` — which
+   exists to keep an over-ceiling frame away from an entry point that ignores
+   the ceiling — is re-examined. Until then they encode the *port's* write
+   sets, which is why each carries a pointer to this item: closing it without
+   updating them would fail P4's "and nothing else" half on a correct parity
+   fix, and then break P2, because `Decompress16` would start publishing
+   `SUBSAMP` while `publishes_for_compress` still says it does not.
+
+**Why deferred.** Filed rather than fixed inside the pull request that landed
+the P4-141 criterion-3 harness. Widening a decode's published set changes what
+every downstream caller reads back, and threading the handle's limits into the
+precision entry points is a decode-pipeline change; both need their own C
+cross-validation pass.
+
+## P4-200. `JPEGWIDTH` / `JPEGHEIGHT` Publish the Scaled and Cropped Output Dimensions Where Upstream Publishes the SOF's — **OPEN**
+
+**GitHub:** [#621](https://github.com/developer0hye/libjpeg-turbo-rs/issues/621) — found 2026-09-09 by the `rust-code-reviewer` pass on the P4-141 criterion-3 harness, as the one defect class that harness cannot see; under the [#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481) umbrella.
+
+**What upstream does.** `setDecompParameters`
+(`references/libjpeg-turbo/src/turbojpeg.c:514-536`) publishes the **frame
+header's** dimensions — `this->jpegWidth = this->dinfo.image_width` — which
+`jpeg_read_header` filled and which `jpeg_calc_output_dimensions` never
+touches; it writes `output_width` / `output_height` instead. The call sits at
+`turbojpeg-mp.c:190`, before any scaling or cropping is applied, and
+`turbojpeg-mp.c:195-198` then applies `TJPARAM_MAXPIXELS` to
+`jpegWidth * jpegHeight`, which only makes sense on the SOF figures.
+`tj3SetCroppingRegion` depends on it too: it derives `scaledWidth` from
+`this->jpegWidth` (`:2093`) in order to validate the region, so a `jpegWidth`
+that had already been cropped would make that check compare a region against
+itself.
+
+**What we do.** `TjHandle::decompress` (`src/api/tj3.rs:1206-1207`) publishes the
+*decoded output* dimensions, `img.width` / `img.height` — post-scaling and
+post-cropping. Measured on `tests/fixtures/photo_64x64_420.jpg` (64x64):
+
+| call | configuration | handle `Width` | C publishes |
+|---|---|---|---|
+| `decompress` | scaling 1/2 | **32** | 64 |
+| `decompress_header` | scaling 1/2 | 64 ✅ | 64 |
+| `decompress` | crop 8x8 | **8** | 64 |
+| `decompress_header` | crop 8x8 | 64 ✅ (since P4-197, 2026-10-07) | 64 |
+
+The port already knows the rule and applies it in two of the four cases;
+the `decompress_header`-under-crop row was **8** until P4-197 (#618) made
+`decompress_header` suspend the cropping region as well as the scaling factor,
+because upstream's `tj3DecompressHeader` never consults the region.
+`decompress_header`'s doc says it outright (`:1009-1011`) — "`JPEGWIDTH`/
+`JPEGHEIGHT` must reflect the ORIGINAL JPEG dimensions per the libjpeg-turbo
+spec, not the scaled output" — and implements it by saving the scaling factor,
+setting it to 1:1 and calling `decompress` (`:1022-1034`), a route that
+neutralises scaling and, until P4-197 also suspended the region there, could
+say nothing about cropping.
+
+Distinct from the two items filed beside it:
+[P4-199](#p4-199-setdecompparameters-publishes-thirteen-handle-parameters-our-8-bit-decode-publishes-eight-and-the-1216-bit-ones-publish-three-and-ignore-the-handles-limits--open)
+(#620) enumerates *which* parameters a decode publishes and never their values,
+and [P4-198](#p4-198-tjhandle-merges-upstreams-two-icc-buffers-so-a-decode-changes-the-profile-a-later-compress-embeds--open)
+(#619) is about ICC.
+
+**Why the API-sequence harness cannot see it — and why that is worth
+recording.** P4's first half in `tests/helpers/api_sequence.rs` compares the
+live handle against a reference that replayed the *same* `SetScaling` /
+`SetCrop`, so both publish the same wrong value and agree.
+`criterion_named_sequence_leaves_no_state_behind` drives exactly the triggering
+configuration — `SetScaling { index: 12 }` and `SetCrop { 8x8 }` before a
+decode — across eleven fixtures, and passes. A differential oracle has no notion
+of a *correct* published value, only of a *consistent* one. That limit is now
+stated in the harness's module doc rather than left to be rediscovered, which
+is the same lesson #320 taught about coverage claims.
+
+**The initial value diverges too — added 2026-09-09.** The P4-141 criterion-3
+process-isolated C-ABI harness compares the whole `TJPARAM` vector of a handle
+that has read nothing (`handle_defaults` in
+`crates/libjpeg-turbo-rs-capi/examples/cabi_misuse_harness.c`). Of the 26
+parameters, on all three init types, exactly these two disagree:
+
+| parameter | stock 3.2.0 | ours |
+|---|---|---|
+| `TJPARAM_JPEGWIDTH` | -1 | **0** |
+| `TJPARAM_JPEGHEIGHT` | -1 | **0** |
+
+`tj3InitVersion` seeds them explicitly — `this->jpegWidth = -1;
+this->jpegHeight = -1;` (`turbojpeg.c:600-601`) — alongside `quality = -1`,
+`subsamp = TJSAMP_UNKNOWN` and `colorspace = TJCS_DEFAULT`, all of which we do
+match. -1 is the documented "not read yet" sentinel; 0 is a value a caller
+cannot distinguish from a legal (if degenerate) dimension. It belongs here
+rather than in a new item because it is the same two fields and any fix touches
+the same publishing path.
+
+**Acceptance criteria.**
+
+1. `TjHandle::decompress`, `decompress_header`, `decompress_12bit` and
+   `decompress_16bit` publish `JPEGWIDTH` / `JPEGHEIGHT` from the frame header,
+   unaffected by `TJPARAM_SCALINGFACTOR` and by the cropping region;
+   cross-validated against `tj3Get` after `tj3Decompress8` on a scaled decode
+   and on a cropped one, against real TurboJPEG rather than against our own
+   previous output.
+2. `decompress_header` stops implementing the rule by round-tripping the
+   scaling factor, since that route cannot express the cropping half.
+3. `TJPARAM_MAXPIXELS` is applied to the published (SOF) dimensions, as
+   `turbojpeg-mp.c:195-198` does.
+4. `docs/C_API_REFERENCE.md`'s `TJPARAM_JPEGWIDTH` / `TJPARAM_JPEGHEIGHT` rows
+   record the divergence until it closes.
+5. `tests/helpers/api_sequence.rs` gains a property that derives the expected
+   `Width` / `Height` from the SOF independently — `Decoder::new(jpeg).header()`
+   is already in hand in `exceeds_limits` — rather than from a second handle.
+   Until this closes such a property would fail, which is why it is not there
+   today.
+6. A fresh `TjHandle` reports `JPEGWIDTH` = `JPEGHEIGHT` = -1 on all three init
+   types, and
+   `crates/libjpeg-turbo-rs-capi/tests/cabi_misuse_harness.rs` drops the six
+   `default_*_JPEG{WIDTH,HEIGHT}` entries from `KNOWN_DIVERGENCES`;
+   `known_divergences_are_live` fails until they go, so the fix cannot land
+   while the record of the defect stays behind.
+
+**Why deferred.** Filed rather than fixed inside the pull request that landed
+the P4-141 criterion-3 harness. Changing what a decode publishes is a
+public-API behaviour change needing its own C cross-validation pass, and the
+fix has to decide what `decompress_12bit` / `decompress_16bit` do as well,
+which overlaps P4-199.
+
+## P4-201. The C-Parity Corpus Adopts Every File Under `tests/fixtures/` and Compares It Through the 8-Bit `decompress()`, So a Precision-Specific Fixture Is Reported as a Crash — **OPEN**
+
+**GitHub:** [#623](https://github.com/developer0hye/libjpeg-turbo-rs/issues/623) — found 2026-09-09 by the pull request that landed the P4-141 criterion-3 harness, whose first push turned both `Corpus Test (C parity)` legs red; under the [#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481) umbrella.
+
+**What it is.** `examples/generate_corpus.rs` copies **the whole of
+`tests/fixtures/`**, recursively and unfiltered, into the C-parity corpus
+(`copy_jpgs(&fixtures_src, &fixtures_dir)`), and `examples/corpus_test.rs`
+compares every corpus file against `djpeg`/`cjpeg`/`jpegtran` through the
+**8-bit** entry point, classifying any error from it as a *crash*
+(`run_decode_test`, `examples/corpus_test.rs:511-520`). One 16-bit lossless
+fixture — `cjpeg -precision 16 -lossless 1`, which only `decompress_16bit`
+reads — therefore produced
+
+```
+Decode:  9738 pass, 2 expected-reject, 1 known-mismatch, 0 fail, 1 crash, 0 skip
+Encode:  9404 pass, 1 expected-reject, 0 known-mismatch, 0 fail, 1 crash, 0 skip
+```
+
+with the two offending rows written to `corpus-test.tsv` some nine thousand
+lines before the `tail -200` the workflow prints. The job log named neither the
+file, nor its precision, nor the fact that the corpus's *premise* rather than
+the library was what broke; reproducing it took a local corpus run over a
+two-file directory.
+
+**The premise is worth keeping, which is why this is not simply "filter by
+precision".** `decompress()` reads 12-bit sources too:
+`tests/fixtures/real_world/libjpeg_testorig12_227x149_12bit.jpg` passes the
+corpus comparison byte-exactly (measured 2026-09-09). Filtering the fixture
+bucket by declared precision would *remove* real coverage. The true premise is
+narrower — "the 8-bit entry point can read it" — and it is nowhere stated or
+enforced. The fuzz-seed bucket, by contrast, *is* filtered, by a predicate that
+does not depend on our code (`retain_matching_files(..., strict_djpeg_accepts)`).
+
+**Acceptance criteria.**
+
+1. A fixture the corpus's decode comparison cannot run is either excluded at
+   corpus-assembly time or reported with a distinct outcome — not as `crash`,
+   which is the harness's word for "Rust errored where C succeeded".
+2. The rule is enforced rather than documented: adding such a file to
+   `tests/fixtures/` fails a *named* check that says which file and why. The
+   filter must not be able to silently drop a fixture we have merely regressed
+   on — which is why `strict_djpeg_accepts` is safe as a predicate and "our
+   decoder accepts it" would not be.
+3. The corpus job surfaces the offending rows: `tail -200` over a
+   nine-thousand-line TSV cannot show a failure near the top. Upload
+   `corpus-test.tsv` as an artifact, or grep the non-`pass` rows before the
+   tail.
+4. `tests/inputs/README.md` — the stopgap filed alongside this item — is
+   replaced by the enforced rule, or kept and pointed at it.
+
+**Stopgap in place.** `tests/inputs/` holds the one file, outside the tree the
+corpus copies, and `the_sixteen_bit_builtin_stays_out_of_the_c_parity_corpus`
+in `tests/api_sequence_state.rs` asserts both halves: that the 8-bit entry
+point really does refuse the stream (the reason) and that no copy of it sits
+under `tests/fixtures/` (the consequence). It compares bytes rather than names,
+so renaming does not evade it — verified by planting a copy under a different
+name, which fails it. That guard covers this one input; it does not cover the
+next one.
+
+**Why deferred.** Filed rather than fixed inside the pull request that surfaced
+it, which lands test infrastructure for a different item. Criteria 1 and 2
+change what the corpus job admits and how it classifies an outcome, which is a
+release-gate mechanism; criterion 3 is a workflow edit whose value is that it
+*runs*.
+
+---
+
+## P4-202. `tj3Compress8` Accepts a Width or Height Above `JPEG_MAX_DIMENSION` and Emits a Frame Stock `djpeg` Refuses — **OPEN**
+
+**GitHub:** [#624](https://github.com/developer0hye/libjpeg-turbo-rs/issues/624) — found 2026-09-09 by the P4-141 (#480) criterion-3
+process-isolated C-ABI harness, on its first differential run; under the
+[#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481) umbrella.
+
+**What upstream does.** `jpeg_start_compress` reaches `jinit_compress_master`
+(`jcinit.c:36`) and through it `initial_setup`, which refuses an image whose
+width or height exceeds `JPEG_MAX_DIMENSION` (65,500) with `JERR_IMAGE_TOO_BIG`
+(`references/libjpeg-turbo/src/jcmaster.c:186-188`). `tj3Compress8` therefore
+returns -1 for a 65,501-pixel axis, with `tj3GetErrorStr` reading "Maximum
+supported image dimension is 65500 pixels".
+
+**What we do.** `tj3Compress8` returns **0** and produces a JPEG whose SOF0
+carries `width = 65501`. Measured 2026-09-09 on this port's debug cdylib, a
+65,501 x 1 grayscale at quality 75:
+
+| | `tj3Compress8(65501, 1)` | `tj3Compress8(1, 65501)` |
+|---|---|---|
+| stock TurboJPEG 3.2.0 | `-1` | `-1` |
+| ours | **`0`**, 6,473 bytes, `SOF0 w=65501` | **`0`** |
+
+The frame is then unreadable by the library it claims parity with:
+`/tmp/ljt8/prefix/bin/djpeg` on that output prints "Maximum supported image
+dimension is 65500 pixels" and exits 1. So the divergence is not a lenience
+that costs nothing — it produces an artifact no stock consumer can decode, and
+it does so silently.
+
+**Where the check is missing.** `TjHandle::decode_limits` (`src/api/tj3.rs`)
+already carries `max_width: 65_500` / `max_height: 65_500` and calls them "C's
+`JPEG_MAX_DIMENSION` … an unconditional library-level cap" — but
+`DecodeLimits`, as the name says, is applied on the **decode** side only. The
+classic `jpeg_*` path raises `JERR_IMAGE_TOO_BIG` (P4-137's span work added
+it); the TurboJPEG compress path goes through the Rust `Encoder` instead and
+has no equivalent.
+
+**Acceptance criteria.**
+
+1. `tj3Compress8`, `tj3Compress12` and `tj3Compress16` refuse a `width` or
+   `height` above `JPEG_MAX_DIMENSION` with -1, and the error string matches
+   upstream's `JERR_IMAGE_TOO_BIG` rendering.
+2. The same holds for the compress-from-YUV entry points, which take their own
+   dimensions.
+3. `crates/libjpeg-turbo-rs-capi/tests/cabi_misuse_harness.rs` drops the
+   `compress_over_max_width_rc` / `compress_over_max_height_rc` entries from
+   `KNOWN_DIVERGENCES`; `known_divergences_are_live` fails until they are
+   removed, so the fix cannot land without closing this item's record of it.
+4. A regression test cross-validates the *rejection* against stock
+   TurboJPEG, not against our own previous output.
+
+**Why deferred.** Filed rather than fixed inside the pull request that surfaced
+it: that PR lands test infrastructure for P4-141, and adding an encoder-side
+dimension gate changes what every compress entry point accepts. It needs its own
+C cross-validation pass across the precisions and the YUV entry points.
+
+---
+
+## P4-203. `TJPARAM_PRECISION` Reports the Decode Path's Output Precision, Not the Frame's `data_precision` — **OPEN**
+
+**GitHub:** [#625](https://github.com/developer0hye/libjpeg-turbo-rs/issues/625) — found 2026-09-09 by the P4-141 (#480) criterion-3
+process-isolated C-ABI harness; under the
+[#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481) umbrella.
+
+**What upstream does.** `setDecompParameters` publishes the *frame's* sample
+precision: `this->precision = dinfo->data_precision`
+(`references/libjpeg-turbo/src/turbojpeg.c:514-536`), which is the value
+`jpeg_read_header` read out of the SOF. `TJPARAM_PRECISION` is documented as
+"the JPEG image's data precision", and callers use it to choose between
+`tj3Decompress8`, `tj3Decompress12` and `tj3Decompress16`.
+
+**What we do.** `TjHandle::decompress` sets `self.precision = img.precision`
+(`src/api/tj3.rs`), where `img` is the **decoded output**. The 8-bit path
+produces an 8-bit image whatever the frame said, so a 12-bit JPEG reports 8.
+
+Measured 2026-09-09, both libraries reading the *same* bytes — a 64 x 48
+grayscale written by `tj3Compress12` at quality 95, byte-identical between the
+two implementations (`md5 9bf50c62…`), SOF precision 12 in both:
+
+| reader | JPEG written by | `tj3DecompressHeader` | `TJPARAM_PRECISION` |
+|---|---|---|---|
+| stock 3.2.0 | stock | 0 | 12 |
+| stock 3.2.0 | ours | 0 | 12 |
+| ours | stock | 0 | **8** |
+| ours | ours | 0 | **8** |
+
+So this is a read-side defect, independent of who produced the stream: a caller
+following the documented "read the header, then pick the entry point that
+matches `TJPARAM_PRECISION`" sequence is routed to `tj3Decompress8` for every
+12-bit input.
+
+**Relation to the two items filed beside it.** [P4-199](#p4-199-setdecompparameters-publishes-thirteen-handle-parameters-our-8-bit-decode-publishes-eight-and-the-1216-bit-ones-publish-three-and-ignore-the-handles-limits--open)
+(#620) is about *which* parameters a decode publishes and explicitly counts
+`Precision` among the eight our 8-bit path already writes — it does not question
+the value. [P4-200](#p4-200-jpegwidth--jpegheight-publish-the-scaled-and-cropped-output-dimensions-where-upstream-publishes-the-sofs--open)
+(#621) is the same *shape* — an output-derived value published where upstream
+publishes the frame's — for `JPEGWIDTH`/`JPEGHEIGHT`. This is the third field
+with that shape, and the three of them together suggest the publishing step
+should read the `FrameInfo` the header parse already produced rather than the
+`Image` the decode returned.
+
+**Acceptance criteria.**
+
+1. `TJPARAM_PRECISION` after `tj3DecompressHeader` and after any
+   `tj3Decompress*` equals the SOF's `data_precision`, cross-validated against
+   stock TurboJPEG on 8-, 12- and 16-bit fixtures.
+2. `crates/libjpeg-turbo-rs-capi/tests/cabi_misuse_harness.rs` drops the
+   `precision12`/`precision` entry from `KNOWN_DIVERGENCES`.
+3. The documented routing works end to end: read the header, branch on
+   `TJPARAM_PRECISION`, call the matching entry point, on all three precisions.
+
+**Why deferred.** Filed rather than fixed inside the pull request that surfaced
+it. Changing a published parameter's value changes what every downstream caller
+reads back, and it overlaps P4-199's re-derivation of the whole published set —
+fixing one field in isolation would have to be redone there.
+
+---
+
+## P4-204. The C ABI's `tjtransform.customFilter` Is Rejected, While `FEATURE_PARITY.md` and `C_API_REFERENCE.md` Record It as Delivered — **OPEN**
+
+**GitHub:** [#626](https://github.com/developer0hye/libjpeg-turbo-rs/issues/626) — found 2026-09-09 while scoping the callback-reentry
+half of P4-141 (#480) criterion 3; under the
+[#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481) umbrella.
+
+**What upstream does.** `tj3Transform` calls `t->customFilter` once per
+coefficient *array* — in this implementation one block row, `barray[y][0]` with
+`arrayRegion.w = width_in_blocks * DCTSIZE` and `arrayRegion.h = DCTSIZE` —
+passing that array, the array region, the plane region, the component index, the
+transform index and the `tjtransform` itself
+(`references/libjpeg-turbo/src/turbojpeg.c:3052-3080`). It is the API's only user callback and the mechanism
+`jpegtran`-style consumers use to inspect or edit coefficients in flight.
+
+**What we do.** `tj3Transform` refuses outright:
+
+```rust
+if t.custom_filter.is_some() {
+    inst.set_error(
+        format!("tj3Transform[{i}]: customFilter callback is not supported yet"),
+        TJERR_FATAL,
+    );
+    return -1;
+}
+```
+
+(`crates/libjpeg-turbo-rs-capi/src/transform.rs:202-207`.) The module doc says
+so plainly. **The parity documents do not**:
+`docs/FEATURE_PARITY.md` carries `- [x] tjtransform.customFilter — User
+callback for coefficient inspection/modification`, and
+`docs/C_API_REFERENCE.md` marks `tjtransform` ✅ with "(all fields incl.
+`custom_filter`)". Both are true of the *Rust* `TransformOptions::custom_filter`
+(`src/transform/mod.rs:157`, applied at `src/api/coefficient.rs:1157`) and false
+of the C ABI, which is the surface those two documents describe. The two
+sentences are corrected by the pull request that filed this item; the gap they
+were hiding is this one.
+
+**Why it matters beyond parity.** It is the C ABI's only callback into caller
+code, so it is the whole of what a "callback reentry" harness — P4-141
+criterion 3's last named scenario — could drive on the TurboJPEG surface. Until
+it is forwarded, reentry testing there has nothing to reenter, and the criterion
+falls back to the classic `jpeg_*` managers.
+
+**Acceptance criteria.**
+
+1. `tj3Transform` forwards a non-NULL `customFilter` to the coefficient
+   pipeline, with the six arguments upstream passes and the same call order
+   (per component, then per block row — one call per row, not per block).
+2. A `-1` return from the callback aborts the transform the way upstream does
+   (`turbojpeg.c:3073-3075` tests `== -1`, and `turbojpeg.h:1235` documents 0 or
+   -1); any other value is ignored, as upstream ignores it.
+3. Cross-validated against stock TurboJPEG: the same filter applied through
+   both libraries produces byte-identical output JPEGs.
+4. `FEATURE_PARITY.md` and `C_API_REFERENCE.md` say "delivered" only once the
+   C ABI does it.
+5. `crates/libjpeg-turbo-rs-capi/examples/cabi_misuse_harness.c` gains a
+   `callback_reentry` case: a filter that calls back into `tj3Transform`,
+   `tj3Destroy` and `tj3Set` on the live handle, compared against upstream.
+
+**Why deferred.** Filed rather than fixed inside the pull request that surfaced
+it: forwarding an arbitrary C function pointer into the coefficient pipeline is
+a feature, not a documentation fix, and the pull request that found it lands
+test infrastructure for a different item.
+
+---
+
+## P4-205. `tj3Alloc(0)` Returns NULL Where Upstream Returns a Freeable Pointer, and the Code Comment Claims the Opposite — **OPEN**
+
+**GitHub:** [#627](https://github.com/developer0hye/libjpeg-turbo-rs/issues/627) — found 2026-09-09 by the
+`rust-code-reviewer` pass on the P4-141 (#480) criterion-3 C-ABI harness, which
+asked what the `tj3Alloc` case would have to see in order to fail; under the
+[#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481) umbrella.
+
+**What upstream does.** `tj3Alloc` is a bare allocation with no zero-size
+special case — `return MALLOC(bytes);`
+(`references/libjpeg-turbo/src/turbojpeg.c:934-937`, where `MALLOC` is
+`malloc`). `malloc(0)` is implementation-defined by ISO C, but on every platform
+this project ships to — glibc, musl and macOS — it returns a unique pointer that
+may be passed to `free`. Measured against the pinned 3.2.0 oracle: `tj3Alloc(0)`
+returns non-NULL.
+
+**What we do.** `libc_malloc` returns NULL for `size == 0` before it reaches
+`malloc` (`crates/libjpeg-turbo-rs-capi/src/alloc.rs:48-51`), so `tj3Alloc(0)`
+returns NULL. A caller writing the ordinary
+`if ((buf = tj3Alloc(n)) == NULL) fail();` sees a spurious allocation failure at
+`n == 0` here and not upstream.
+
+**The comment is the other half of it.** `alloc.rs:45-47` says the NULL is
+"matching TurboJPEG behavior". Upstream has no zero-size branch at all, so that
+is not true of the mechanism — and it is why the divergence survived: anyone
+reading `alloc.rs` was told the question had been answered.
+
+**Acceptance criteria.**
+
+1. Decide, and record the decision where the code is: either `tj3Alloc(0)`
+   returns what `malloc(0)` returns on the host, or the branch stays and the
+   comment says *why it deliberately differs* instead of claiming parity.
+2. If parity is chosen, `tj3Free` must accept the resulting pointer, and the
+   internal `libc_malloc` callers that rely on "NULL means nothing to allocate"
+   have to be audited — that contract is used inside the crate as well as at the
+   ABI.
+3. `crates/libjpeg-turbo-rs-capi/tests/cabi_misuse_harness.rs` drops the
+   `alloc_ownership`/`alloc_zero` entry from `KNOWN_DIVERGENCES`;
+   `known_divergences_are_live` fails until it goes.
+
+**Why deferred.** Filed rather than fixed inside the pull request that surfaced
+it. Criterion 2 makes it a change to an internal invariant several call sites
+depend on, not a one-line edit.
+
+---
+
+## P4-206. `TJPARAM_NOREALLOC` Accepts a Buffer Exactly the Size of the Output, Where Upstream Needs One Byte More — **OPEN**
+
+**GitHub:** [#628](https://github.com/developer0hye/libjpeg-turbo-rs/issues/628) — found 2026-09-09 by the
+P4-141 (#480) criterion-3 C-ABI harness, after the `rust-code-reviewer` pass
+replaced a hard-coded "obviously too small" capacity with the measured boundary;
+under the [#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481)
+umbrella.
+
+**What upstream does.** With `TJPARAM_NOREALLOC` set, `jpeg_mem_dest_tj`
+installs a destination manager whose `empty_output_buffer` is an unconditional
+error when `alloc` is false — `if (!dest->alloc) ERREXIT(cinfo, JERR_BUFFER_SIZE);`
+(`references/libjpeg-turbo/src/jdatadst-tj.c`). libjpeg's `emit_byte` calls
+`dump_buffer` as soon as `free_in_buffer` reaches zero — after writing the byte
+that fills the buffer, not before the next one — so a buffer *exactly* the size
+of the finished JPEG trips it.
+
+**What we do.** We accept it. Measured on a 96 x 64 RGB gradient at quality 80,
+4:2:0, whose compressed output is **1097 bytes on both libraries, byte for
+byte**, binary-searching the smallest capacity each accepts:
+
+| | smallest accepted capacity | at exactly 1097 |
+|---|---|---|
+| stock 3.2.0 | **1098** (output + 1) | `-1`, "Buffer passed to JPEG library is too small" |
+| ours | **1097** (output + 0) | `0` |
+
+Every smaller capacity is refused by both, neither moves the caller's pointer,
+and the guard page after the destination never fires — so this is a
+boundary-condition difference, not an overrun. The harness pins both sides of
+it in one transcript: at 1097 the return codes diverge, and at 1098 — its
+`one_over` slot — both libraries accept and emit the same bytes. It is the last byte of the
+`TJPARAM_NOREALLOC` contract [P4-145](#p4-145-tjparam_norealloc-is-honoured-by-tj3compress8-only--closed-2026-08-12)
+established.
+
+**Which way it should go.** Ours is the more permissive side, so a program
+written against upstream keeps working here; the hazard is the reverse — a
+program sized against this port fails when linked against the real library,
+which is the direction a drop-in replacement is judged on. The fix is either to
+reproduce upstream's off-by-one (and say so, since it is an artifact of
+libjpeg's buffering rather than a documented rule) or to record the difference
+in `docs/C_API_REFERENCE.md`. What it must not stay is undocumented.
+
+**Acceptance criteria.**
+
+1. The six compressing entry points agree with upstream on the smallest
+   `TJPARAM_NOREALLOC` capacity they accept, cross-validated by binary search
+   against stock TurboJPEG on at least three images of different sizes — or the
+   difference is documented in `docs/C_API_REFERENCE.md` citing #628.
+2. `crates/libjpeg-turbo-rs-capi/tests/cabi_misuse_harness.rs` drops the four
+   `undersized_output`/`norealloc_exact_*` entries from `KNOWN_DIVERGENCES`.
+3. `tests/norealloc_buffer_capacity.rs`, which today pins "too small is refused"
+   with a generous margin, gains the exact boundary.
+
+**Why deferred.** Filed rather than fixed inside the pull request that surfaced
+it. Criterion 1 is a behaviour change across six entry points and needs its own
+C cross-validation pass.
+
+---
+
+## P4-207. `tj3Set` Accepts Sixteen Parameter/Instance-Type Pairs Upstream Refuses as Not Applicable — **OPEN**
+
+**GitHub:** [#629](https://github.com/developer0hye/libjpeg-turbo-rs/issues/629) — found 2026-09-09 by the
+P4-141 (#480) criterion-3 C-ABI harness, while strengthening a lifecycle check
+that had been writing `TJPARAM_QUALITY` to a decompression handle; under the
+[#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481) umbrella.
+
+**What upstream does.** `tj3Set` is not a plain setter. It refuses a parameter
+that does not apply to the handle's `initType`, returns -1 with a named error
+and leaves the stored value alone
+(`references/libjpeg-turbo/src/turbojpeg.c:731` onward):
+
+```c
+  case TJPARAM_QUALITY:
+    if (!(this->init & COMPRESS))
+      THROW("TJPARAM_QUALITY is not applicable to decompression instances.");
+```
+
+A `TJINIT_TRANSFORM` handle is initialised for both roles, so the
+role-conditioned guards do not fire on it; the read-only parameters are refused
+on every instance type.
+
+**What we do.** We accept every parameter on every instance type. Probing all 26
+`TJPARAM`s against all three init types, each with a value inside its own legal
+range so a rejection is the applicability rule and not a range check,
+**sixteen (init type, parameter) pairs diverge**:
+
+| instance | parameters `tj3Set` accepts and upstream refuses |
+|---|---|
+| `TJINIT_COMPRESS` (2) | `FASTUPSAMPLE`, `SCANLIMIT` |
+| `TJINIT_DECOMPRESS` (14) | `NOREALLOC`, `QUALITY`, `COLORSPACE`, `OPTIMIZE`, `PROGRESSIVE`, `ARITHMETIC`, `LOSSLESS`, `LOSSLESSPSV`, `LOSSLESSPT`, `RESTARTBLOCKS`, `RESTARTROWS`, `XDENSITY`, `YDENSITY`, `DENSITYUNITS` |
+| `TJINIT_TRANSFORM` (0) | — matches upstream exactly |
+
+Out-of-range parameter indices (`-1`, `TJ_NUMPARAM`) are rejected identically by
+both, so the range guard exists; the applicability layer above it is what is
+missing.
+
+**Why it matters.** It is a silent-success divergence, which is the worse
+direction. A program setting `TJPARAM_QUALITY` on a decompression handle has a
+bug; upstream says so on the spot, and here the call succeeds and the value sits
+in the handle until something picks it up. `TjHandle` is one struct for both
+roles, and [P4-198](#p4-198-tjhandle-merges-upstreams-two-icc-buffers-so-a-decode-changes-the-profile-a-later-compress-embeds--open)
+and [P4-199](#p4-199-setdecompparameters-publishes-thirteen-handle-parameters-our-8-bit-decode-publishes-eight-and-the-1216-bit-ones-publish-three-and-ignore-the-handles-limits--open)
+are already about parameters leaking between roles on that struct — this is the
+same seam, from the write side.
+
+**Acceptance criteria.**
+
+1. `tj3Set` refuses each of the sixteen pairs with -1 and the error text
+   upstream produces, leaving the stored value unchanged — cross-validated
+   against stock TurboJPEG across the full 26 x 3 matrix rather than a sample.
+2. `tj3Get`'s own applicability rules are checked the same way in the same
+   change; this item measured `tj3Set` only.
+3. `crates/libjpeg-turbo-rs-capi/tests/cabi_misuse_harness.rs` drops the sixteen
+   `APPLICABILITY_DIVERGENCES` entries.
+
+**Why deferred.** Filed rather than fixed inside the pull request that surfaced
+it. Sixteen new entry-point rejections will fail any existing test or downstream
+harness that has been setting a parameter on the wrong instance type, so it
+needs its own pass over this crate's suites — a test-visible behaviour change,
+not a fix that can ride along.
+
+---
+## P4-208. `c_boundary_asan`'s Header Says Its C Driver Is Un-Instrumented and That This Is Required; Both Drivers Are Compiled With `-fsanitize=address,undefined` — **OPEN**
+
+**GitHub:** [#630](https://github.com/developer0hye/libjpeg-turbo-rs/issues/630) — under the
+[#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481) umbrella.
+Found 2026-09-09 by the `docs-drift-auditor` pass on the P4-141 criterion-3
+C-ABI harness, which added a second compile step in the same shape.
+
+**What the job says.** `.github/workflows/sanitizers.yml`'s `c_boundary_asan`
+header describes "a tiny **un-instrumented** C driver that `dlopen`s an
+ASan-instrumented Rust cdylib", and states the reason as a correctness
+requirement:
+
+> WHY THIS IS THE CORRECT CONFIGURATION: The bidirectional ASan handoff
+> (un-instrumented C → instrumented Rust → un-instrumented C) is exactly what
+> OSS-Fuzz / Pulse / Pizza expect for Rust-codec-via-C-driver enrollment.
+> Un-instrumented C is **actively required** here: instrumenting the harness
+> would re-introduce the parallel-test-runner false positives the `asan` job
+> documents.
+
+**What the job does.** Both C drivers are instrumented. The step is even named
+for it — "Compile C harness with `-fsanitize=address,undefined`" — and its own
+comment gives the opposite rationale ("trip on FFI-boundary memory errors and
+undefined behavior in the C side of the call"). The 2026-09-09 misuse-harness
+step compiles with the same flags. P4-11's own closure record carries both
+halves in one sentence — "a tiny un-instrumented C driver … compiles the harness
+with `-fsanitize=address,undefined`" — and `examples/sanitizer_c_harness/
+harness.c`'s header repeats the "un-instrumented" description, so there are
+three sites to reconcile, not one.
+
+**Why it is not just a stale sentence.** The two claims landed in the *same*
+commit (`8a47439`, 2026-05-17, the P4-11 closure), so the question they disagree
+about has never been answered. Either:
+
+- un-instrumented C really is required, and this job has never had the
+  configuration it documents — in which case what it proves about the FFI
+  boundary is not what the header says it proves; or
+- instrumenting the driver is the better configuration (it is what catches an
+  error on the *C* side of the handoff), and the "actively required" rationale
+  is wrong. The imported reason is suspect on its face: the false positives the
+  `asan` job documents are macOS NEON shadow-map races under a *parallel test
+  runner*, and this job is a single-process `ubuntu-latest` binary.
+
+Nothing here is measured, which is the point — the claim has stood for four
+months and the job passing says nothing about it either way.
+
+**Acceptance criteria.**
+
+1. Decide which configuration the job wants, and make the header say what the
+   steps do — with the reason that actually applies, not the `asan` job's.
+2. If un-instrumented C is kept as a requirement, drop `-fsanitize=` from the
+   two harness compile steps and state what the instrumented Rust side still
+   covers on its own.
+3. Either way, `docs/UNSAFE_INVENTORY_CAPI.md`'s **C-boundary ASan** bullet —
+   which currently records the steps correctly ("both compiled with
+   `-fsanitize=address,undefined`") — must keep agreeing with the workflow.
+
+**Why deferred.** Filed rather than fixed by the documentation pass that found
+it: choosing between the two readings is a decision about what the sanitizer
+leg is for, and the pull request that surfaced it lands test infrastructure for
+P4-141.
+
+## P4-209. The Mainline Decode Destination Is Allocated Infallibly, So an Allocator Refusal Aborts the Process — **CLOSED 2026-10-07**
+
+**GitHub:** [#632](https://github.com/developer0hye/libjpeg-turbo-rs/issues/632) — found by [P4-141](#p4-141-soundness-verification-program-mirisanitizerfuzz-coverage-gaps-and-an-unsafe-inventory-gate--partial-criteria-3-4-and-5-landed-and-gated-except-criterion-3s-callback-reentry-scenario-criterion-1-landed-except-the-pre-existing-integration-suites-criteria-2-6-and-7-open) criterion 1.
+
+**What happens.** `decompress()` allocates its destination with
+`vec![0u8; size]` in `take_out_buf` (`src/decode/pipeline_impl/output.rs`),
+where `size` is `output_buffer_size()` — derived from the SOF. `vec![]` calls
+`handle_alloc_error` on refusal, which **aborts the process**: there is no
+`Result` to return and nothing a caller can catch. Measured on `a9f32b0` with a
+`#[global_allocator]` refusing exactly the destination's size, decoding a 64×64 4:2:0 RGB baseline
+JPEG (12,288-byte destination): `memory allocation of 12288 bytes failed`,
+`SIGABRT`. Patching that single site to
+`common::try_alloc::try_filled_vec` turns it into
+`Err(JpegError::AllocationFailed { .. })`, after which the caller continues and
+a later unrefused decode returns byte-identical pixels.
+
+**Why it is a defect.** `src/common/try_alloc.rs`'s own module documentation
+states the rule this violates: an input-derived size that goes through an
+infallible allocation "turns a hostile or merely large file into an uncatchable
+denial of service, so every such size goes through `try_reserve_exact` here and
+surfaces refusal as `JpegError::AllocationFailed`". P4-136 criterion 4 and
+P4-144 applied it to the progressive output, the arithmetic component planes,
+the ICC reassembly and the marker copies. The **primary** decode entry point was
+never brought in, which inverts the risk ordering: the API almost every caller
+uses is the one that aborts.
+
+**Scope.** `take_out_buf` is the site that aborts for the simplest decode and it
+is not alone. Geometry-derived infallible allocations under `src/decode/` —
+`vec![0u8; …]`, `vec![0; …]`, `Vec::with_capacity(…)` whose argument mentions
+`width`/`height`/`size`/`blocks`/`plane` — number **59 in 8 files**
+(`pipeline_impl/output.rs` 23, `merged_upsample.rs` 10,
+`pipeline_impl/colorspace.rs` 8, `pipeline_impl/lossless.rs` 7,
+`pipeline_impl/color.rs` 5, `toggles.rs` 3, `pipeline_impl/raw.rs` 2,
+`pipeline_impl/baseline.rs` 1). Not all are reachable with an attacker-chosen
+size; the count is the search space, not the defect count.
+
+**Why no existing job saw it.** No job in this repository had ever refused an
+allocation a decode actually makes. The two pre-existing refusal probes —
+`try_alloc::tests::reserving_more_than_the_machine_can_serve_is_an_error` and
+`progressive_output::tests::allocator_refusal_is_an_error_not_an_abort` — ask
+`try_alloc`'s helpers directly for an unservable `isize::MAX` and are
+`#[cfg_attr(miri, ignore)]`d, so neither can aim a refusal at a chosen site on a
+real decode path; and `tests/decode_limits.rs` proves the *limit* checks reject
+oversized geometry, which is a different mechanism (a limit refusing a header is
+not an allocator refusing a buffer). The injection harness landed with P4-141
+criterion 1 and this was its first finding.
+
+**Acceptance criteria.**
+
+1. `decompress` / `Decoder::decode_image` report `JpegError::AllocationFailed`
+   rather than aborting when the destination allocation is refused.
+   `tests/miri_alloc_failure.rs::the_mainline_decode_reports_refusal_instead_of_aborting`
+   is the committed regression test, `#[ignore]`d citing #632 and passing with
+   the fix — closing this item means deleting the attribute.
+2. The 59 candidate sites are triaged: each either routed through
+   `common::try_alloc` or documented as bounded by something other than the
+   input.
+3. The rule gets a mechanism in the shape `tests/parser_unsafe_gate.rs` set for
+   `unsafe` — a gate that fails when a new geometry-derived infallible
+   allocation appears under `src/decode/` — or an explicit statement of why that
+   gate cannot be written.
+
+**Why deferred.** Filed rather than fixed by the landing that found it: the fix
+is one line at the site that aborts and an audit of the fifty-eight others, and
+bundling an audit of the decode pipeline's allocation discipline into the pull
+request that built the injection harness would put the harness's own review
+behind it.
+
+**Status (2026-10-07): closed.** Criterion 1:
+`take_out_buf` (`decode/pipeline_impl/output.rs`) allocates through
+`try_filled_vec(size, 0u8, "decode output buffer")`, and
+`tests/miri_alloc_failure.rs::the_mainline_decode_reports_refusal_instead_of_aborting`
+runs without its `#[ignore]`, now also pinning the refused buffer's name and
+size; un-ignored on the unfixed tree it died with
+`memory allocation of 12288 bytes failed` / `SIGABRT`. Criterion 2: the
+triage measured **78** infallible-allocation lines (`vec![…]`,
+`Vec::with_capacity(…)`, `.to_vec()`) in non-test `src/decode/` code — the
+issue's 59 was a narrower grep, and counting inline `#[cfg(test)]` modules
+gives 113 — and **36 were converted** to `common::try_alloc`: every
+component plane not already fallible (baseline ×2, the arithmetic multi-scan
+twin, the windowed-streaming planes, lossless ×4), every destination
+(`take_out_buf`, the 12-bit downscale ×5, the grayscale exact-copy, the lenient
+neutral raster, the merged-upsample RGB and RGB565 buffers, the 4-component
+output, the lossless outputs ×3, the grayscale and legacy colourspace
+overrides ×3), the full-plane upsample buffers (`cb_full`/`cr_full`, the YCCK
+chroma planes, `upsample_component_plane`'s `active`/`full`), the crop copies
+(three `cropped` chroma planes, the crop-shifted planes, the vertical-crop
+`.to_vec()`), plus two input-sized allocations the patterns do not match on the
+same paths (the 12-bit grayscale `collect()` and the crop-shift
+`plane.clone()`). Block smoothing's DC snapshot is fallible on the decode path
+through a new `try_apply_block_smoothing_coeffs`; the public
+`apply_block_smoothing_coeffs` keeps its `()` signature. A new
+`try_alloc::try_with_capacity::<T>` covers non-byte element types, with unit
+tests for the reservation and the inexpressible-byte-count limit. The **42**
+remaining lines are classified in `docs/decode_alloc_inventory.tsv` as
+`fixed-size`, `component-count` (≤ `MAX_COMPONENTS`), `row-scratch` (one row,
+≤ 512 KiB by the SOF's 16-bit width) or `infallible-public-signature` (two:
+`Image::apply_orientation_value` and the public smoothing wrapper). Criterion 3:
+`tests/decode_alloc_gate.rs` diffs that inventory against the sources on every
+native leg — unlisted, stale and miscounted rows fail with the rows to add or
+delete — skipping comment lines, `*_tests.rs` and inline `#[cfg(test)] mod`
+blocks (brace-counted outside literals, pinned by
+`the_test_module_skip_resumes_after_the_module`, and
+`every_scanned_file_ends_with_balanced_braces` fails if the scanner ends any
+file with a brace, string or skip open), with
+`the_gate_actually_scans_the_library_sources` as the non-vacuity check; adding a
+`vec![0u8; n]` to `pipeline_impl/raw.rs` was reported as an unlisted row.
+Beyond the mainline, three more converted sites are pinned through distinct
+public configurations, each red with `SIGABRT` on the unfixed tree at the
+predicted size and green after:
+`a_refused_merged_upsample_buffer_reports_instead_of_aborting` (6720 bytes,
+`set_merged_upsample`),
+`a_refused_lossless_sample_plane_reports_instead_of_aborting` (3000 bytes, SOF3)
+and `a_refused_vertical_crop_copy_reports_instead_of_aborting` (3840 bytes,
+`set_crop_y`), each requiring exactly one refusal and identical bytes from the
+same `Decoder` afterwards; `tests/miri_coverage_gate.rs` lists all four. The
+gate sees only the three textual patterns, so an input-sized `.clone()` or
+`.collect()` elsewhere in the decoder remains possible by construction; the
+gate's module documentation says so rather than claiming the class closed.
+Out of scope by the item's own wording (`src/decode/`): the sample decode of a
+12-bit source, which `decode_12bit_as_8bit` delegates to
+`api::precision::decompress_12bit`, still allocates its planes with `vec![]`,
+as do other `src/api/` modules. Not measured here: the converted zero-filled
+buffers trade `vec![0; n]`'s `alloc_zeroed` for `try_reserve_exact` plus an
+explicit fill. `experiments/progressive.tsv` measured that exact swap neutral on
+an 8K progressive decode (P4-136 criterion 4); the baseline mainline has no row
+of its own yet.
+
+## P4-210. `Encoder::scan_script` Is Silently Ignored Outside the Huffman YCbCr/Grayscale Progressive Path — **OPEN**
+
+**GitHub:** [#636](https://github.com/developer0hye/libjpeg-turbo-rs/issues/636) — found 2026-10-07 while fixing P4-192 (#610); tracked under #635 Milestone A.
+
+**The defect.** `Encoder::encode` reads `self.scan_script` in one branch only
+— the Huffman progressive encode of YCbCr/grayscale output. Three branches
+dispatch ahead of it and always build C's default script, so a caller who sets
+`.progressive(true).scan_script(s)` gets `Ok` and a stream that does not follow
+`s` when any of these is also set:
+
+* `.arithmetic(true)` — `compress_arithmetic_progressive` and
+  `compress_arithmetic_progressive_rgb_direct`
+  (`simple_progression_for`, `src/encode/pipeline_impl/arithmetic.rs`);
+* `.colorspace(ColorSpace::Rgb)` (RGB-direct) — `compress_progressive_rgb_direct`;
+* custom per-component sampling factors — the `use_custom_sampling` branch.
+
+C honours `scan_info` independently of the entropy coder and the colorspace
+(`cjpeg -arithmetic -scans`, `cjpeg -rgb -scans`, `cjpeg -sample … -scans`).
+Found by the `rust-code-reviewer` pass on the P4-192 fix (RGB-direct and custom
+sampling) after the arithmetic case.
+
+**Acceptance criteria.**
+
+1. Each of the three combinations either encodes with the caller's script —
+   validated by `validate_scan_script` exactly as the Huffman path is since
+   P4-192 — or returns a typed error naming it unsupported. Silent
+   substitution is the defect.
+2. If honoured, the SOS `Ss/Se/Ah/Al` sequence is cross-validated against the
+   matching `cjpeg … -scans` invocation on the same script and the pixels
+   against `djpeg`.
+3. An invalid script on any of these paths returns `JpegError::InvalidScanScript`.
+4. The `Encoder::scan_script` doc, which names the three exceptions today, is
+   updated to match.
+
+Not a memory-safety issue: the arithmetic path never reads the caller's bands.
+
+**Why deferred.** Found while fixing P4-192, whose pull request closes a
+memory-safety defect and should not also carry an arithmetic-coder behaviour
+change with its own C cross-validation.
+
+## P4-211. Non-Interleaved Progressive DC Scans Walked the Frame's MCU Grid, and Every DC Scan Emitted Both Table Slots — **CLOSED 2026-10-07**
+
+**Found 2026-10-07** by the P4-192 fix's C oracle: once
+`tests/scan_script_validation.rs::accepted_scripts_match_cjpeg` compared the
+encoded bytes with `cjpeg -scans` instead of only decoding them, the
+per-component DC script `0: 0 0 0 0; 1: …; 2: …;` differed (363 vs 300 bytes
+at 32x32). Two independent defects, both reachable only through
+`Encoder::scan_script` — the built-in scripts send every component's DC in one
+interleaved scan, so their output is unchanged:
+
+1. **Block order.** A scan with one component is non-interleaved (T.81 A.2.2):
+   C walks that component's own `width_in_blocks x height_in_blocks` grid in
+   raster order, one block per MCU. The DC path (first and refinement) walked
+   the frame's MCU grid with the component's sampling factors, so a
+   subsampled-frame luma DC scan was coded in MCU order — and, where the frame
+   is not a multiple of the MCU, with the padding column/row C does not code.
+   The AC path already used the component grid.
+2. **Tables.** Every DC-first scan wrote both DC table slots, so a scan of Y
+   alone carried an empty chrominance table and a scan of Cb or Cr an empty
+   luminance one. `jcphuff.c` writes only the slots the scan's components use.
+
+**Status (2026-10-07): closed.** `compress_progressive_with_scans` gives a
+single-component DC scan the component's grid (`h_blocks = v_blocks = 1`,
+`comp_wib x comp_hib` MCUs) and writes only used DC slots.
+`accepted_scripts_match_cjpeg` now requires byte equality with `cjpeg -scans`
+for seven scripts at 40x40 (luma grid 5 blocks, MCU-padded 6), including
+non-interleaved DC first and refinement scans and a Cb+Cr-only DC scan;
+measured discriminating — with the single-component geometry disabled the
+per-component case differs (325 vs 318 bytes).
+
+## P4-212. The `image` Adapter Decoded Eagerly, Ignored `image::Limits` and Dropped EXIF/XMP/IPTC/Orientation — **CLOSED 2026-10-07**
+
+**GitHub:** [#637](https://github.com/developer0hye/libjpeg-turbo-rs/issues/637) — #635 Milestone B, first execution tickets 4 and 5.
+
+**The gap.** `libjpeg-turbo-rs-image 0.1.0`'s `JpegDecoder::new` decoded the
+whole image and kept it; `read_image` copied it into the caller's buffer, so a
+read held two decoded images and every byte of work happened before a caller
+could apply limits. `set_limits` fell back to the trait default (accept,
+enforce nothing); only `icc_profile` was implemented, so `orientation()` was
+always `NoTransforms` where `image`'s built-in decoder reported the EXIF tag;
+every codec error became `ImageError::Decoding`.
+
+**Status (2026-10-07): closed.** Per #637 criterion:
+
+1. Construction parses headers only; `new` copies the compressed stream once
+   (fallibly), `from_vec` takes ownership. `tests/adapter_memory.rs` measures
+   it with a counting allocator: 36,734 bytes at 2048x1536.
+2. `read_image` calls `Decoder::decode_image_into` on the caller's buffer.
+   Same test: the read's working set peaks at 4,745,446 bytes above the
+   caller's buffer against a 9,437,184-byte decoded image (4:2:0 YCbCr),
+   asserted `<` one image; the remainder is component planes, stated in the
+   docs, not called allocation-free. **Scoped:** that holds for 8-bit
+   grayscale and three-component streams; the core still stages
+   four-component, 12-bit and lossless decodes in a full-size buffer, so those
+   reads keep two images — filed as P4-213 and stated in the adapter docs.
+3. `set_limits` maps `max_image_width`/`max_image_height` onto
+   `DecodeLimits::max_width/max_height` and `max_alloc` onto `max_memory`
+   (whose estimate counts the output), and runs the core's header-limit checks
+   through `output_buffer_size` so refusal precedes any pixel allocation;
+   previous limits stay in force on refusal. Error categories follow
+   `classify_error`. Pinned by `limits_are_enforced_at_set_limits` and
+   `default_limits_refuse_a_header_bomb_at_set_limits`. `read_image` re-runs
+   the same header checks through the core decoder; that path is structural —
+   reaching it needs a correctly sized destination, which `set_limits` has
+   already refused — and is not claimed as tested.
+4. Metadata accessors are compared with `image 0.25.10`'s built-in decoder
+   (`metadata_matches_image_builtin_decoder`: with and without metadata, two
+   EXIF segments, an Extended XMP chunk, an empty APP13). The adapter reads the
+   raw segments with zune's rule — last segment wins, standard XMP packet only,
+   IPTC as the Photoshop IRB after `Photoshop 3.0\0` — because the core's own
+   accessors differ on all three. `original_color_type()` deliberately
+   reports `Cmyk8` where the built-in decoder reports `Rgb8`; documented. `orientation_is_applied_once_by_the_application`
+   pins that orientation is reported, never applied. The core gained
+   header-time `Decoder::{icc_profile, exif_data, xmp_data, iptc_data}`.
+5. `tests/image_traits.rs` covers baseline 4:2:0/4:2:2/4:4:4, progressive,
+   arithmetic, grayscale and CMYK through the traits with pixel parity against
+   the core decode, one direct `djpeg -ppm` comparison, malformed and truncated
+   input (strict error, `set_lenient` fill), destination sizing, unsupported
+   output formats and the encoder through `write_with_encoder` (byte-identical
+   to core `compress`).
+6. `examples/thumbnail_pipeline.rs` (decode → limits → orient → resize →
+   encode, changed lines marked `// was:`) builds under the CI
+   `cargo test --locked -p libjpeg-turbo-rs-image` step; the crate docs and
+   README state that only explicitly constructed decoders/encoders use this
+   backend.
+
+Publishing the updated adapter and the clean external-consumer run against
+registry packages remain #635 Milestone B release items, not this one. The
+adapter's changes are breaking (see `CHANGELOG.md`), so it ships as **0.2.0**
+and must require the root release that adds the header accessors; both
+manifest bumps belong to that release's preparation, because a path
+dependency's `version` must match the workspace root until then.
+
+## P4-213. CMYK/YCCK, 12-Bit and Lossless Decodes Stage a Full-Size Copy Even When Given a Caller Buffer — **OPEN**
+
+**Found 2026-10-07** by the `rust-code-reviewer` pass on P4-212 (#637).
+`Decoder::decode_image_into` hands the caller's buffer only to the paths that
+call `take_out_buf`. Four-component streams go through `decode_4_component` →
+`convert_4comp_output`, which allocates `width * height * bpp` and is copied
+out (`src/decode/pipeline_impl/colorspace.rs`, `output.rs`); YCCK with
+subsampled chroma also allocates two full planes. 12-bit-as-8-bit and
+lossless decodes build an owned image the same way, and so does the
+merged-upsample branch (`set_merged_upsample(true)` allocates a full-size
+`merged_rgb`), which `decode_image_into`'s own doc comment omits from its list
+of staged paths. A caller — the `image`
+adapter included — therefore holds two decoded images for these inputs, and
+the memory estimate `max_memory` enforces counts neither the staging buffer
+nor the upsample planes, so the limit is non-strict there.
+
+**Acceptance criteria.**
+
+1. `convert_4comp_output` (and the 12-bit/lossless output steps, where the
+   format allows) write through `take_out_buf`, so `decode_image_into`
+   performs no full-size staging for them; pixels unchanged (C cross-checks).
+2. `check_header_limits`' estimate counts whatever staging remains.
+3. The adapter's `tests/adapter_memory.rs` gains a CMYK case asserting the
+   read's working set stays below one decoded image, and the adapter docs drop
+   the exception.
+
+**Why deferred.** A decode-pipeline change across three output paths with
+their own C parity, found while reviewing an adapter pull request.
+
+## P4-215. Lenient Decodes Collect One Warning String per Corrupt MCU Without a Cap, and Clone the List Infallibly Into Every `Image` — **OPEN**
+
+**GitHub:** [#641](https://github.com/developer0hye/libjpeg-turbo-rs/issues/641) — found 2026-10-07 by the P4-209 allocation audit.
+
+A lenient baseline decode pushes one `DecodeWarning::HuffmanError` with a heap
+`String` per corrupt MCU, unbounded, so a stream corrupt everywhere produces a
+list proportional to the MCU count (about 16.7 M entries for a 65500x65500
+frame). The list is then `warnings.clone()`d infallibly at about a dozen
+`Image` construction sites in `src/decode/pipeline_impl/output.rs`, which
+`tests/decode_alloc_gate.rs` cannot see because it matches allocation macros
+textually. C counts warnings (`num_warnings`) and keeps one message.
+
+**Acceptance criteria.** (1) The list is bounded — a cap plus a "further
+warnings suppressed" entry, or a count plus first/last messages — and the bound
+is documented on `DecodeWarning`/`Image::warnings`. (2) The list is moved into
+the `Image`, or cloned fallibly. (3) A test drives a fully corrupt lenient
+decode and asserts the bound.
+
+**Why deferred.** Found while closing P4-209, whose scope was the allocation
+macros under `src/decode/`; bounding warnings is an API-visible decision.
+
+## P4-216. The 12-/16-Bit Decode Entry Points in `src/api` Still Allocate Geometry-Sized Buffers Infallibly — **OPEN**
+
+**GitHub:** [#642](https://github.com/developer0hye/libjpeg-turbo-rs/issues/642) — found 2026-10-07 by the P4-209 allocation audit, which was scoped to `src/decode/`.
+
+`api::precision::decompress_12bit`/`decompress_16bit` and the `src/api/`
+modules that build their planes allocate geometry-derived buffers with
+`vec![…; n]`, so a 12-bit or lossless-16 decode still aborts on allocator
+refusal — the defect P4-209 removed from the 8-bit path. With P4-199 (these
+entry points ignore the handle's limits) the size is bounded only by the
+default `max_pixels`.
+
+**Acceptance criteria.** (1) Every geometry-derived allocation reachable from
+the 12/16-bit decode entry points goes through `common::try_alloc`. (2) The
+decode allocation gate, or a sibling, covers those `src/api/` modules. (3)
+`tests/miri_alloc_failure.rs` gains a 12-bit refusal case.
+
+**Why deferred.** Outside P4-209's `src/decode/` scope; the precision entry
+points are also being reworked by P4-199.
+
+## P4-219. 12-Bit Decodes Ignore the Horizontal Crop, and `TjHandle`'s 12/16-Bit Decompress Ignores the Cropping Region Entirely — **OPEN**
+
+**Found 2026-10-07** while closing
+[P4-197](#p4-197-a-cropping-region-whose-left-boundary-exceeds-the-scaled-width-decodes-to-zero-columns-and-trips-a-false-debug_assert--closed-2026-10-07)
+(#618), checking every crop entry point. Measured on a 32x32 single-component
+12-bit baseline JPEG (`precision::compress_12bit`, quality 90) with the region
+`16x8+8+4`:
+
+| entry point | output | C |
+|---|---|---|
+| `Decoder::set_crop_region` + `decode_image` | **32x8** — the vertical crop applies, the horizontal one is dropped | `djpeg -crop 16x8+8+4` (3.2.0): 16x8 |
+| `TjHandle::set_cropping_region` + `decompress_12bit` | **32x32** — no crop at all | `tj3Decompress12` crops (`turbojpeg-mp.c:211-227` and `:234-279` are compiled for every `BITS_IN_JSAMPLE != 16`) |
+
+The `TjHandle` row was measured before P4-197 landed; P4-197 made
+`decompress_12bit` / `decompress_16bit` refuse a stored region
+(`Unsupported`, naming this item) and `TjHandle::decompress` refuse a decode
+whose size differs from the region, so neither hands a C caller more pixels
+than its buffer holds. The `Decoder` row is unchanged: it is still a crop
+silently not applied.
+
+**Root cause.** `decode_image_inner` dispatches a 12-bit frame to
+`decode_12bit_as_8bit` before the horizontal crop is computed, and only the
+post-decode vertical slice in `decode_image_with_sink` sees the region —
+`output_buffer_size` says so ("apply neither scaled decode nor horizontal
+crop"). `TjHandle::decompress_12bit` / `decompress_16bit` call the handle-free
+`precision::decompress_12bit` / `decompress_16bit`, which take no region, and
+they record no frame header, so the C ABI's `tj3SetCroppingRegion` after only
+a `tj3Decompress12` reports "JPEG header has not yet been read" where upstream
+validates against the header that decode read. The P4-197 bounds check does
+run on these paths, so nothing degenerates; the region is simply not honoured.
+Upstream refuses a crop on a lossless frame (`jpeg_crop_scanline` raises
+`JERR_NOTIMPL`, `tj3SetCroppingRegion` "Cannot partially decompress lossless
+JPEG images"), so the 16-bit half is a refusal to add, not a crop to apply.
+
+**Acceptance criteria.**
+
+1. A 12-bit `Decoder` decode honours the horizontal crop with
+   `jpeg12_crop_scanline`'s alignment, cross-validated against `djpeg -crop`
+   pixel for pixel.
+2. `TjHandle::decompress_12bit` applies the cropping region with the same
+   rules `decompress` applies, and records the frame header for
+   `resolve_cropping_region`; `decompress_16bit` and a lossless 12-bit frame
+   refuse a stored region. That is a deliberate divergence: upstream's
+   `tj3Decompress16` compiles every crop reference out (`#if
+   BITS_IN_JSAMPLE != 16`) and so ignores a stored region and decodes the
+   full frame; refusing tells the caller the region was not applied, which
+   ignoring does not. Keep or match upstream — decide and record it. Cross-validated against
+   `tj3Decompress12` / `tj3Decompress16` in the `cabi_misuse_harness`
+   `cropping_region` case or a sibling case.
+3. A lossless `Decoder` decode with a crop matches djpeg's refusal.
+
+**Why deferred.** P4-197 is about regions that exceed the image; this is a
+missing feature on a different decode path, overlapping
+[P4-199](#p4-199-setdecompparameters-publishes-thirteen-handle-parameters-our-8-bit-decode-publishes-eight-and-the-1216-bit-ones-publish-three-and-ignore-the-handles-limits--open)'s
+work on what the 12/16-bit entry points read from the handle.
+
+## P4-217. No Written Release, SemVer, MSRV or Security Policy, No Private Reporting Route, and No API Check Before Publish — **PARTIAL: policy, API gate and affected-version record landed; private reporting route not enabled, OSS-Fuzz not submitted**
+
+**GitHub:** [#638](https://github.com/developer0hye/libjpeg-turbo-rs/issues/638) — #635 Milestone E (first execution ticket 8, policy half) and Milestone A's disclosure review.
+
+**The gap.** No `SECURITY.md`; GitHub private vulnerability reporting was
+disabled (`gh api repos/developer0hye/libjpeg-turbo-rs/private-vulnerability-reporting`
+→ `{"enabled":false}`); SemVer, backport, feature, deprecation, error and
+thread policies were unwritten; nothing compared a release's API with the
+previous one, while `main` already carries breaking changes since 0.8.0.
+
+**Status (2026-10-07): partial.**
+
+1. `SECURITY.md` (supported versions, backport rule, private route, scope) and
+   `docs/security/AFFECTED_VERSIONS.md` (every known memory-safety/abort finding
+   mapped to the published versions it affects, from the crates.io tarballs).
+   **Remaining:** the route it names — GitHub private vulnerability reporting —
+   must be enabled on the repository by the maintainer, and the 7-day
+   acknowledgement it promises confirmed.
+2. `docs/STABILITY.md` (SemVer per crate, what is public API — the low-level
+   `pub mod`s are explicitly not covered yet — MSRV, features, deprecation,
+   `#[non_exhaustive]` errors, threads, resource limits per #516) and
+   `docs/RELEASE.md` (procedure), linked from README and CONTRIBUTING.
+3. `scripts/semver_check_release.sh` + the `semver-check` job in `release.yml`,
+   which gates every crates.io publish job (`publish` and `publish-capi`
+   directly, `publish-image` through `publish-capi`). Both sides are documented with
+   `cargo rustdoc --locked` because `cargo semver-checks`' own mode resolves
+   dependencies unlocked. Verified locally three ways: unchanged versions skip;
+   `v0.7.0 → HEAD` (a 0.x minor) passes; a throwaway `0.8.1` commit over `main`
+   fails with seven breaking checks and exit 1.
+4. `main@7f9e5e5` vs `v0.8.0` is recorded in `docs/RELEASE.md`: seven breaking
+   checks, so the next root release is 0.9.0.
+5. Licensing in what is distributed (`cargo package --list`): the capi and
+   image crates shipped no licence file — each now carries `LICENSE-MIT` and
+   `LICENSE-APACHE` and the IJG attribution in its README — and the root crate
+   shipped development files (`.cargo/config.toml`, hooks, `scripts/`, the
+   OSS-Fuzz project) plus the reference submodule's own READMEs, now excluded.
+   README states the project is not affiliated with libjpeg-turbo or the IJG.
+6. OSS-Fuzz preparation re-checked against the current Rust integration guide:
+   `project.yaml` listed `undefined` and `memory`, which OSS-Fuzz does not
+   support for Rust (address only), and `build.sh` installed `cargo-fuzz` at
+   build time with `|| true`; both fixed, and `oss-fuzz/README.md` no longer
+   claims readiness. **Remaining (maintainer):** confirm the contact address in
+   `project.yaml` (it names a work address), run `helper.py build_fuzzers`, and
+   submit to `google/oss-fuzz` — or run an equivalent sustained campaign.
+
+## P4-221. Encode-Path Allocations Are All Infallible and No Gate Tracks Them — **OPEN**
+
+**Found 2026-10-07** by the `docs-drift-auditor` pass on P4-217, while checking
+`docs/STABILITY.md`'s allocation sentence: `src/encode/` has 87
+`vec![x; n]` / `Vec::with_capacity(n)` sites (131 `vec!` uses of any shape)
+and no `common::try_alloc` call, so an
+allocator refusal during an encode aborts the process. P4-209 and its gate
+(`tests/decode_alloc_gate.rs`) cover `src/decode/` only; P4-216 covers the
+12/16-bit decode entry points in `src/api/`.
+
+**Why it is lower priority than P4-209.** An encode's buffers are sized from
+the caller's own pixel buffer and options, not from an untrusted stream, so
+the amplification a hostile file gets on decode does not exist here — but the
+coefficient buffers of the progressive and optimised encoders are a multiple
+of the input size, and a server encoding caller-sized uploads still wants a
+`Result`, not an abort.
+
+**Acceptance criteria.**
+
+1. Every allocation sized from the frame geometry on the encode paths goes
+   through `common::try_alloc` and reports `JpegError::AllocationFailed`.
+2. The decode allocation gate (or a sibling) covers `src/encode/` with an
+   inventory of the bounded remainder.
+3. `tests/miri_alloc_failure.rs` gains an encode refusal case.

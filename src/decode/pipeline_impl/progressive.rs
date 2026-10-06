@@ -146,7 +146,7 @@ impl<'a> Decoder<'a> {
                     // can hold DC values decoded by interleaved scans; C's
                     // decompress_smooth_data never reads them as neighbors
                     // nor smooths them (P4-29, fuzz smoke run 28921468958).
-                    crate::decode::toggles::apply_block_smoothing_coeffs(
+                    crate::decode::toggles::try_apply_block_smoothing_coeffs(
                         &mut coeff_bufs[comp_idx],
                         ci.blocks_x,
                         ci.width_in_blocks,
@@ -154,7 +154,7 @@ impl<'a> Decoder<'a> {
                         ci.v_samp,
                         &coef_bits_all[comp_idx],
                         quant_tables[comp_idx],
-                    );
+                    )?;
                 }
             }
         }

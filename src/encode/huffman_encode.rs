@@ -92,6 +92,16 @@ pub(crate) struct BitWriter {
     /// Available bits in the accumulator. Starts at 64, decrements per put_bits.
     /// Goes negative to trigger flush in put_and_flush.
     free_bits: i32,
+    /// Which compilation of the x86_64 AC body every block written through
+    /// this writer takes (P4-133, #464 criterion 3). Resolved from CPUID
+    /// once, when the writer is built — that is once per encode operation,
+    /// where the operation's plan is built, since every entropy-coded
+    /// operation constructs exactly one writer — and read per block by
+    /// [`HuffmanEncoder::encode_block`]. It lives on the writer rather than
+    /// in a process-wide static so the choice travels with the operation
+    /// that made it, and so a writer can be pinned to a lower tier.
+    #[cfg(all(target_arch = "x86_64", feature = "simd"))]
+    ac_tier: AcTier,
 }
 
 // `Send` is now automatic: `Vec<u8>` is `Send`, so the manual `unsafe impl`
@@ -113,7 +123,74 @@ impl BitWriter {
             pos: 0,
             put_buffer: 0,
             free_bits: 64,
+            #[cfg(all(target_arch = "x86_64", feature = "simd"))]
+            ac_tier: AcTier::detect(),
         }
+    }
+
+    /// Reservation for a whole sequential scan: one byte per pixel, which
+    /// [`BitWriter::new`] then doubles.
+    ///
+    /// The figure lives here rather than being spelled out at each call site
+    /// because `tests/miri_public_api.rs` re-derives it. That suite infers "the
+    /// arena grew" from a scan payload longer than this reservation, so a call
+    /// site that raised its own argument would leave the suite computing the
+    /// old, smaller number, observing no growth and still passing — the
+    /// vacuous comparison this repository keeps finding at the bottom of a
+    /// green harness. One definition is one thing for
+    /// `frame_and_progressive_reservations_are_what_the_miri_suite_models` to
+    /// pin (rust-code-reviewer, 2026-09-09).
+    ///
+    /// Plain `*`, not `saturating_mul`: the product is the caller's own frame
+    /// geometry, already bounded by the encode entry point's limits, and
+    /// P4-139 keeps saturating arithmetic out of sizing expressions.
+    pub(crate) fn for_frame(width: usize, height: usize) -> Self {
+        Self::new(width * height)
+    }
+
+    /// Reservation for one progressive scan.
+    ///
+    /// A quarter of the frame because the progressive encoder `reset`s one
+    /// writer per scan rather than building a new one, so what has to fit is a
+    /// single scan's payload. Pinned alongside [`BitWriter::for_frame`] for the
+    /// same reason.
+    pub(crate) fn for_progressive_scan(width: usize, height: usize) -> Self {
+        Self::new(width * height / 4)
+    }
+
+    /// Create a writer pinned to a specific x86_64 AC tier, or `None` if
+    /// this CPU cannot execute that tier.
+    ///
+    /// The refusal is what keeps this safe: each elevated tier is a
+    /// `#[target_feature]` compilation, and running one on a CPU without
+    /// the feature is undefined behaviour, so a tier above the detected one
+    /// is never installed. Tiers are nested supersets (SSE2 ⊂ BMI1+LZCNT ⊂
+    /// BMI1+LZCNT+BMI2), which is why "at or below the detected tier" is
+    /// the whole availability check.
+    #[cfg(all(test, target_arch = "x86_64", feature = "simd"))]
+    pub(crate) fn with_ac_tier(capacity: usize, ac_tier: AcTier) -> Option<Self> {
+        if (ac_tier as u8) > (AcTier::detect() as u8) {
+            return None;
+        }
+        // `new` installs the detected tier; the check above is what makes
+        // replacing it with a lower one safe.
+        Some(Self {
+            ac_tier,
+            ..Self::new(capacity)
+        })
+    }
+
+    /// The x86_64 AC tier this writer resolved when it was built.
+    ///
+    /// The hoisted MCU paths read it once next to [`Self::begin_block`] —
+    /// per MCU in `mcu.rs`'s four `encode_mcu_*` paths, per MCU row in the
+    /// `baseline.rs` 4:2:0 fast path — and hand it to
+    /// [`HuffmanEncoder::encode_block_hoisted`] alongside the other hoisted
+    /// state.
+    #[cfg(all(target_arch = "x86_64", feature = "simd"))]
+    #[inline(always)]
+    pub(crate) fn ac_tier(&self) -> AcTier {
+        self.ac_tier
     }
 
     /// Ensure at least `additional` bytes of spare capacity, growing if needed.
@@ -530,6 +607,10 @@ impl HuffmanEncoder {
         {
             // Hoist put_buffer/free_bits/buf to registers for entire block,
             // matching the aarch64 path. Avoids store-reload on every flush.
+            // The AC tier is the writer's, resolved when the writer was
+            // built; read it once here with the rest of the hoisted state.
+            #[cfg(all(target_arch = "x86_64", feature = "simd"))]
+            let ac_tier: AcTier = writer.ac_tier();
             // SAFETY: begin_block/end_block contract upheld — no other BitWriter
             // methods called between them. SSE2 is only used for bitmap
             // construction (available on all x86_64 CPUs).
@@ -556,16 +637,37 @@ impl HuffmanEncoder {
                 // --- AC coefficients ---
                 #[cfg(all(target_arch = "x86_64", feature = "simd"))]
                 {
-                    if crate::cpu_has!("bmi1") && crate::cpu_has!("lzcnt") {
-                        encode_ac_x86_64_bmi1_lzcnt(
-                            &mut pb,
-                            &mut fb,
-                            &mut buf,
-                            coeffs_zigzag,
-                            ac_table,
-                        );
-                    } else {
-                        encode_ac_x86_64(&mut pb, &mut fb, &mut buf, coeffs_zigzag, ac_table);
+                    // Same tier dispatch as `encode_block_hoisted`. Each arm
+                    // records itself under `cfg(test)` so the tests see the
+                    // arm taken, not the value matched on.
+                    match ac_tier {
+                        AcTier::Bmi1LzcntBmi2 => {
+                            #[cfg(test)]
+                            LAST_AC_TIER.with(|taken| taken.set(Some(AcTier::Bmi1LzcntBmi2)));
+                            encode_ac_x86_64_bmi1_lzcnt_bmi2(
+                                &mut pb,
+                                &mut fb,
+                                &mut buf,
+                                coeffs_zigzag,
+                                ac_table,
+                            )
+                        }
+                        AcTier::Bmi1Lzcnt => {
+                            #[cfg(test)]
+                            LAST_AC_TIER.with(|taken| taken.set(Some(AcTier::Bmi1Lzcnt)));
+                            encode_ac_x86_64_bmi1_lzcnt(
+                                &mut pb,
+                                &mut fb,
+                                &mut buf,
+                                coeffs_zigzag,
+                                ac_table,
+                            )
+                        }
+                        AcTier::Sse2 => {
+                            #[cfg(test)]
+                            LAST_AC_TIER.with(|taken| taken.set(Some(AcTier::Sse2)));
+                            encode_ac_x86_64(&mut pb, &mut fb, &mut buf, coeffs_zigzag, ac_table)
+                        }
                     }
                 }
                 #[cfg(all(
@@ -593,16 +695,25 @@ impl HuffmanEncoder {
     /// Encode a block using already-hoisted BitWriter state.
     ///
     /// Avoids the begin_block/end_block overhead, allowing MCU-level hoisting
-    /// where one begin/end pair covers all blocks in the MCU.
+    /// where one begin/end pair covers all blocks in the MCU (or, in the
+    /// `baseline.rs` 4:2:0 fast path, in the MCU row). `ac_tier` is part of
+    /// that hoisted state: the caller reads it from the same writer
+    /// ([`BitWriter::ac_tier`]) once, next to `begin_block`, so the tier the
+    /// writer resolved when the operation was planned is what every block
+    /// under that begin/end pair takes.
     ///
     /// # Safety
-    /// `pb`, `fb`, `buf` must be valid hoisted state from `BitWriter::begin_block`.
+    /// `pb`, `fb`, `buf` must be valid hoisted state from `BitWriter::begin_block`,
+    /// and `ac_tier` must be the tier of that same writer — a writer only
+    /// ever holds a tier this CPU was detected to support.
     #[cfg(all(target_arch = "x86_64", feature = "simd"))]
     #[inline(always)]
-    pub unsafe fn encode_block_hoisted(
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) unsafe fn encode_block_hoisted(
         pb: &mut u64,
         fb: &mut i32,
         buf: &mut *mut u8,
+        ac_tier: AcTier,
         coeffs_zigzag: &[i16; 64],
         prev_dc: &mut i16,
         dc_table: &HuffTable,
@@ -613,7 +724,7 @@ impl HuffmanEncoder {
             // Adversarial / corrupt input can produce a quantized DC pair whose
             // difference exceeds i16 range. Use wrapping_sub to match the bit
             // pattern Huffman category encoding expects (and the existing
-            // baseline-encoder convention at lines 461 / 495); silent overflow
+            // baseline-encoder convention at lines 559 / 597); silent overflow
             // in release stayed silent only by luck and panicked under fuzz.
             let diff: i16 = dc.wrapping_sub(*prev_dc);
             *prev_dc = dc;
@@ -625,15 +736,30 @@ impl HuffmanEncoder {
             let combined: u32 = (huff_code << category) | mag_masked;
             local_put_bits(pb, fb, buf, combined, huff_size + category);
 
-            // BMI1+LZCNT runtime dispatch (one branch per block; the cached
-            // `is_x86_feature_detected!` macro is essentially free after first
-            // call). The elevated path skips the inner indirect call that
-            // wrapping `encode_ac_corrected_lsb` would otherwise impose, so the
-            // TZCNT + BLSR savings flow through without offsetting overhead.
-            if crate::cpu_has!("bmi1") && crate::cpu_has!("lzcnt") {
-                encode_ac_x86_64_bmi1_lzcnt(pb, fb, buf, coeffs_zigzag, ac_table);
-            } else {
-                encode_ac_x86_64(pb, fb, buf, coeffs_zigzag, ac_table);
+            // Runtime dispatch across three compilations of the same AC body:
+            // one match on the writer's tier and one direct call per block.
+            // The elevated paths skip the inner indirect call that wrapping
+            // `encode_ac_corrected_lsb` would otherwise impose, so the
+            // TZCNT + BLSR savings (BMI1/LZCNT, P4-8) and the SHLX-family
+            // shifts in the inlined bit packer (BMI2, P4-133 / #464) flow
+            // through without offsetting overhead. Each arm records itself
+            // under `cfg(test)` so the tests see the arm taken.
+            match ac_tier {
+                AcTier::Bmi1LzcntBmi2 => {
+                    #[cfg(test)]
+                    LAST_AC_TIER.with(|taken| taken.set(Some(AcTier::Bmi1LzcntBmi2)));
+                    encode_ac_x86_64_bmi1_lzcnt_bmi2(pb, fb, buf, coeffs_zigzag, ac_table)
+                }
+                AcTier::Bmi1Lzcnt => {
+                    #[cfg(test)]
+                    LAST_AC_TIER.with(|taken| taken.set(Some(AcTier::Bmi1Lzcnt)));
+                    encode_ac_x86_64_bmi1_lzcnt(pb, fb, buf, coeffs_zigzag, ac_table)
+                }
+                AcTier::Sse2 => {
+                    #[cfg(test)]
+                    LAST_AC_TIER.with(|taken| taken.set(Some(AcTier::Sse2)));
+                    encode_ac_x86_64(pb, fb, buf, coeffs_zigzag, ac_table)
+                }
             }
         }
     }
@@ -651,6 +777,60 @@ impl HuffmanEncoder {
         );
         if category > 0 && category < 16 {
             writer.write_bits(magnitude_bits, category);
+        }
+    }
+}
+
+/// Which compilation of the x86_64 AC body a block takes.
+///
+/// The three tiers are one `#[inline(always)]` body re-emitted under three
+/// `target_feature` contexts (P4-8 added `bmi1,lzcnt`; P4-133 / #464 added
+/// `bmi2` for the `SHLX`-family shifts in the inlined bit packer). A
+/// [`BitWriter`] resolves its tier from CPUID when it is built and carries
+/// it for the operation; nothing here is process-wide. The discriminants
+/// order the tiers as nested supersets, which
+/// [`BitWriter::with_ac_tier`] relies on.
+#[cfg(all(target_arch = "x86_64", feature = "simd"))]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum AcTier {
+    /// SSE2 only — the x86_64 baseline.
+    Sse2 = 1,
+    /// BMI1 + LZCNT: TZCNT/BLSR in the bitmap walk.
+    Bmi1Lzcnt = 2,
+    /// BMI1 + LZCNT + BMI2: the above plus SHLX/SHRX in the bit packer.
+    Bmi1LzcntBmi2 = 3,
+}
+
+// Test-only observation point for the dispatch (P4-133, #464 criterion 3).
+// The three tiers emit identical bytes, so output alone cannot show which
+// body a block took; each dispatch arm records itself here (the arm taken,
+// not the value matched on), per thread so parallel tests do not see each
+// other. `cfg(test)` only — the shipped library carries nothing.
+#[cfg(all(test, target_arch = "x86_64", feature = "simd"))]
+std::thread_local! {
+    pub(crate) static LAST_AC_TIER: core::cell::Cell<Option<AcTier>> =
+        const { core::cell::Cell::new(None) };
+}
+
+#[cfg(all(target_arch = "x86_64", feature = "simd"))]
+impl AcTier {
+    /// The tier this CPU takes. Three `is_x86_feature_detected!` probes,
+    /// which is why it runs once per [`BitWriter`] and never per block —
+    /// the probes were of the same order as the 1.3–2.9 % BMI2 win they
+    /// unlock.
+    ///
+    /// BMI2 does not imply BMI1/LZCNT architecturally (a VM can expose one
+    /// without the others), and BLSR faults without BMI1, so all three are
+    /// checked; a CPU with BMI1+LZCNT but not BMI2 (AMD Piledriver /
+    /// Steamroller) keeps the middle tier.
+    pub(crate) fn detect() -> AcTier {
+        let has_bmi1_lzcnt: bool = crate::cpu_has!("bmi1") && crate::cpu_has!("lzcnt");
+        if has_bmi1_lzcnt && crate::cpu_has!("bmi2") {
+            AcTier::Bmi1LzcntBmi2
+        } else if has_bmi1_lzcnt {
+            AcTier::Bmi1Lzcnt
+        } else {
+            AcTier::Sse2
         }
     }
 }
@@ -729,8 +909,8 @@ unsafe fn encode_ac_x86_64_body(
 /// Default x86_64 entry point — SSE2 baseline (no BMI1/LZCNT).
 ///
 /// Wraps the `#[inline(always)]` body so callers always have one stable
-/// indirect symbol regardless of whether the elevated `_bmi1_lzcnt` variant
-/// is dispatched.
+/// indirect symbol regardless of whether an elevated `_bmi1_lzcnt` /
+/// `_bmi1_lzcnt_bmi2` variant is dispatched.
 #[cfg(all(target_arch = "x86_64", feature = "simd"))]
 unsafe fn encode_ac_x86_64(
     pb: &mut u64,
@@ -749,16 +929,43 @@ unsafe fn encode_ac_x86_64(
 ///
 /// `encode_ac_x86_64_body` is `#[inline(always)]`, so its full call tree
 /// (including the `#[inline(always)]` `encode_ac_corrected_lsb`) is inlined
-/// here under the `bmi1,lzcnt` context. The dispatcher in
-/// `encode_block_hoisted` selects between this function and the default one
-/// once per block based on `is_x86_feature_detected!`, with no inner indirect
-/// call inside the hot loop.
+/// here under the `bmi1,lzcnt` context. The dispatchers in `encode_block` and
+/// `encode_block_hoisted` select between this function, the BMI2 tier below
+/// and the default one once per block on the writer's [`AcTier`] — which
+/// CPUID resolved once, when the operation's `BitWriter` was built — with
+/// no inner indirect call inside the hot loop.
 ///
 /// # Safety
-/// CPU must support BMI1 + LZCNT (caller checks via `is_x86_feature_detected!`).
+/// CPU must support BMI1 + LZCNT (a `BitWriter` holds this tier only when
+/// both were detected).
 #[cfg(all(target_arch = "x86_64", feature = "simd"))]
 #[target_feature(enable = "bmi1,lzcnt")]
 unsafe fn encode_ac_x86_64_bmi1_lzcnt(
+    pb: &mut u64,
+    fb: &mut i32,
+    buf: &mut *mut u8,
+    coeffs_zigzag: &[i16; 64],
+    ac_table: &HuffTable,
+) {
+    unsafe { encode_ac_x86_64_body(pb, fb, buf, coeffs_zigzag, ac_table) }
+}
+
+/// BMI1 + LZCNT + BMI2-elevated entry point (P4-133, #464).
+///
+/// The 2026-09-08 portable-vs-native A/B found `+bmi2` alone worth 1.3–2.9 %
+/// of the whole 1080p encode on Zen 3 and Zen 4 — not PEXT/PDEP, which
+/// nothing here uses, but the `SHLX`/`SHRX` variable shifts the compiler
+/// emits for `local_put_bits` once BMI2 is in the feature context. That
+/// packer is inlined into this body, so the third compilation reaches them
+/// from a baseline build; the middle tier stays for CPUs that have BMI1 and
+/// LZCNT without BMI2.
+///
+/// # Safety
+/// CPU must support BMI1 + LZCNT + BMI2 (a `BitWriter` holds this tier only
+/// when all three were detected).
+#[cfg(all(target_arch = "x86_64", feature = "simd"))]
+#[target_feature(enable = "bmi1,lzcnt,bmi2")]
+unsafe fn encode_ac_x86_64_bmi1_lzcnt_bmi2(
     pb: &mut u64,
     fb: &mut i32,
     buf: &mut *mut u8,
@@ -1363,6 +1570,44 @@ mod tests {
     use super::*;
     use crate::encode::tables::*;
 
+    /// Both figures `tests/miri_public_api.rs` re-derives, pinned where they
+    /// are defined.
+    ///
+    /// That suite infers "the arena must have grown" from a scan payload
+    /// longer than the reservation an encode starts with, and it computes that
+    /// reservation itself: the multiplier (`2 *`, floored at 1024) from
+    /// [`BitWriter::new`] and the argument from
+    /// [`BitWriter::for_frame`] / [`BitWriter::for_progressive_scan`]. Raising
+    /// either would leave the integration test comparing a real payload against
+    /// a stale, smaller number — observing no growth and still passing, which
+    /// is the vacuous comparison that suite exists to avoid
+    /// (rust-code-reviewer, 2026-09-09).
+    ///
+    /// `assert_eq!`, not `>=`: a *larger* reservation than the test-side copy
+    /// expects is exactly the direction that goes vacuous.
+    ///
+    /// In this module rather than in `bitwriter_unwind_tests`, which is
+    /// `#[cfg(panic = "unwind")]` — `tests/miri_public_api.rs` runs on the
+    /// `wasm32-wasip1` leg too, where `panic = "abort"` would have compiled the
+    /// pin out and left exactly that leg unpinned (`docs-drift-auditor`,
+    /// 2026-09-09).
+    #[test]
+    fn new_reserves_double_the_request_floored_at_1024() {
+        assert_eq!(BitWriter::new(1024).capacity(), 2048);
+        assert_eq!(BitWriter::new(576).capacity(), 1152);
+        assert_eq!(BitWriter::new(16).capacity(), 1024);
+    }
+
+    /// The two reservations the encoders actually start from — the second
+    /// input of that same inference.
+    #[test]
+    fn frame_and_progressive_reservations_are_what_the_miri_suite_models() {
+        // 32x32 baseline: `SIDE * SIDE` pixels, doubled.
+        assert_eq!(BitWriter::for_frame(32, 32).capacity(), 2048);
+        // 48x48 progressive: a quarter of the frame, doubled.
+        assert_eq!(BitWriter::for_progressive_scan(48, 48).capacity(), 1152);
+    }
+
     fn encode_block_reference(
         coeffs: &[i16; 64],
         prev_dc: &mut i16,
@@ -1372,7 +1617,7 @@ mod tests {
         let mut writer = BitWriter::new(256);
 
         let dc: i16 = coeffs[0];
-        // wrapping_sub: see lines 461/495 for rationale (adversarial DC pairs
+        // wrapping_sub: see lines 559/597 for rationale (adversarial DC pairs
         // can exceed i16 range; wrap matches the baseline-encoder convention).
         let diff: i16 = dc.wrapping_sub(*prev_dc);
         *prev_dc = dc;
@@ -1655,6 +1900,330 @@ mod tests {
                 mag_corr, mag_scalar,
                 "magnitude mismatch for v={v}: scalar={mag_scalar}, corrected={mag_corr}"
             );
+        }
+    }
+
+    /// P4-133 (#464) criterion 3 for the Huffman loop: the AC tier is
+    /// resolved from CPUID once per encode operation — when the operation's
+    /// `BitWriter` is built — and carried on that writer, not in a
+    /// process-wide static. The resolved tier must be the uncached CPU
+    /// answer, and a writer built for a lower tier keeps it, which is what
+    /// distinguishes per-writer state from a global.
+    #[cfg(all(target_arch = "x86_64", feature = "simd"))]
+    #[test]
+    fn x86_64_bit_writer_resolves_ac_tier_at_construction_and_matches_detection() {
+        let detected: AcTier = AcTier::detect();
+        let expected: AcTier = if crate::cpu_has!("bmi1") && crate::cpu_has!("lzcnt") {
+            if crate::cpu_has!("bmi2") {
+                AcTier::Bmi1LzcntBmi2
+            } else {
+                AcTier::Bmi1Lzcnt
+            }
+        } else {
+            AcTier::Sse2
+        };
+        assert_eq!(detected, expected, "detect() disagrees with the CPU");
+
+        let writer = BitWriter::new(16);
+        assert_eq!(
+            writer.ac_tier(),
+            detected,
+            "a new writer carries the detected tier"
+        );
+        let another = BitWriter::new(4096);
+        assert_eq!(
+            another.ac_tier(),
+            detected,
+            "every writer resolves to the same tier"
+        );
+
+        // The baseline is always available and a writer built for it keeps
+        // it — the tier is the writer's, not a global the CPU overrides.
+        let baseline = BitWriter::with_ac_tier(16, AcTier::Sse2)
+            .expect("the SSE2 tier exists on every x86_64 CPU");
+        assert_eq!(baseline.ac_tier(), AcTier::Sse2);
+        assert_eq!(
+            BitWriter::new(16).ac_tier(),
+            detected,
+            "building a baseline writer must not change what later writers resolve"
+        );
+
+        // A tier the CPU cannot execute is refused rather than installed:
+        // running a `target_feature` body without the feature is UB.
+        let above_detected: Option<AcTier> = match detected {
+            AcTier::Sse2 => Some(AcTier::Bmi1Lzcnt),
+            AcTier::Bmi1Lzcnt => Some(AcTier::Bmi1LzcntBmi2),
+            AcTier::Bmi1LzcntBmi2 => None,
+        };
+        match above_detected {
+            Some(tier) => assert!(
+                BitWriter::with_ac_tier(16, tier).is_none(),
+                "{tier:?} is above this CPU's {detected:?} and must be refused"
+            ),
+            None => eprintln!("NOTE: this CPU has every tier; nothing to refuse"),
+        }
+    }
+
+    /// The blocks the writer-tier dispatch tests encode: EOB-only, sparse,
+    /// dense, and a ZRL run ending in a category-10 magnitude.
+    #[cfg(all(target_arch = "x86_64", feature = "simd"))]
+    fn writer_tier_dispatch_blocks() -> Vec<[i16; 64]> {
+        let mut blocks: Vec<[i16; 64]> = Vec::new();
+        blocks.push([0i16; 64]);
+        let mut sparse: [i16; 64] = [0i16; 64];
+        sparse[0] = 17;
+        sparse[3] = -3;
+        sparse[20] = 2;
+        sparse[37] = -1;
+        sparse[63] = 1;
+        blocks.push(sparse);
+        let mut dense: [i16; 64] = [0i16; 64];
+        dense[0] = -23;
+        for (idx, value) in [1, -2, 3, -4, 5, -6, 7, -8, 9].into_iter().enumerate() {
+            dense[idx + 1] = value;
+        }
+        blocks.push(dense);
+        let mut zrl: [i16; 64] = [0i16; 64];
+        zrl[0] = 5;
+        zrl[40] = -1023;
+        zrl[63] = 1;
+        blocks.push(zrl);
+        blocks
+    }
+
+    /// P4-133 (#464): `HuffmanEncoder::encode_block` dispatches on the tier
+    /// its writer carries — observed through `LAST_AC_TIER`, because the
+    /// three tiers emit identical bytes and output alone cannot tell "took
+    /// SSE2 because the writer said so" from "took BMI2 because the CPU has
+    /// it". On a BMI2 host the SSE2-pinned writer fails this the moment the
+    /// dispatch goes back to reading the CPU. The bytes are also held to the
+    /// reference encoder at every tier the CPU can run; on a CPU without
+    /// BMI1/LZCNT only the SSE2 tier runs and both checks still apply.
+    #[cfg(all(target_arch = "x86_64", feature = "simd"))]
+    #[test]
+    fn x86_64_encode_block_dispatches_on_the_writer_tier() {
+        let dc_table = build_huff_table(&DC_LUMINANCE_BITS, &DC_LUMINANCE_VALUES);
+        let ac_table = build_huff_table(&AC_LUMINANCE_BITS, &AC_LUMINANCE_VALUES);
+        let blocks: Vec<[i16; 64]> = writer_tier_dispatch_blocks();
+
+        // The reference pads each block to a byte boundary, so it is
+        // compared block by block; the DC predictor still runs across the
+        // sequence on both sides.
+        let mut ref_prev_dc: i16 = -5;
+        let expected: Vec<Vec<u8>> = blocks
+            .iter()
+            .map(|block| encode_block_reference(block, &mut ref_prev_dc, &dc_table, &ac_table))
+            .collect();
+
+        let detected: AcTier = AcTier::detect();
+        let mut exercised: Vec<AcTier> = Vec::new();
+        for tier in [AcTier::Sse2, AcTier::Bmi1Lzcnt, AcTier::Bmi1LzcntBmi2] {
+            if BitWriter::with_ac_tier(512, tier).is_none() {
+                continue;
+            }
+            let mut prev_dc: i16 = -5;
+            for (block_index, block) in blocks.iter().enumerate() {
+                let mut writer = BitWriter::with_ac_tier(512, tier)
+                    .expect("the tier was constructible a moment ago");
+                assert_eq!(writer.ac_tier(), tier);
+                LAST_AC_TIER.with(|taken| taken.set(None));
+                HuffmanEncoder::encode_block(
+                    &mut writer,
+                    block,
+                    &mut prev_dc,
+                    &dc_table,
+                    &ac_table,
+                );
+                assert_eq!(
+                    LAST_AC_TIER.with(|taken| taken.get()),
+                    Some(tier),
+                    "block {block_index}: the dispatch took a tier other than the writer's {tier:?}"
+                );
+                writer.flush();
+                assert_eq!(
+                    writer.data(),
+                    expected[block_index].as_slice(),
+                    "block {block_index}: tier {tier:?} diverged from the reference encoder"
+                );
+            }
+            assert_eq!(prev_dc, ref_prev_dc);
+            exercised.push(tier);
+        }
+        assert!(
+            exercised.contains(&AcTier::Sse2),
+            "the SSE2 tier exists on every x86_64 CPU"
+        );
+        assert!(
+            exercised.contains(&detected),
+            "the detected tier {detected:?} must be constructible"
+        );
+        eprintln!("tiers exercised through encode_block: {exercised:?}");
+    }
+
+    /// P4-133 (#464): the hoisted entry takes the tier it is handed, which
+    /// the MCU loops read from the writer next to `begin_block`. Same
+    /// observation as the `encode_block` test, through
+    /// `encode_block_hoisted`, at every tier the CPU can run.
+    #[cfg(all(target_arch = "x86_64", feature = "simd"))]
+    #[test]
+    fn x86_64_encode_block_hoisted_takes_the_writer_tier_it_is_handed() {
+        let dc_table = build_huff_table(&DC_LUMINANCE_BITS, &DC_LUMINANCE_VALUES);
+        let ac_table = build_huff_table(&AC_LUMINANCE_BITS, &AC_LUMINANCE_VALUES);
+        let blocks: Vec<[i16; 64]> = writer_tier_dispatch_blocks();
+        let mut ref_prev_dc: i16 = 3;
+        let expected: Vec<Vec<u8>> = blocks
+            .iter()
+            .map(|block| encode_block_reference(block, &mut ref_prev_dc, &dc_table, &ac_table))
+            .collect();
+
+        let mut exercised: Vec<AcTier> = Vec::new();
+        for tier in [AcTier::Sse2, AcTier::Bmi1Lzcnt, AcTier::Bmi1LzcntBmi2] {
+            if BitWriter::with_ac_tier(512, tier).is_none() {
+                continue;
+            }
+            let mut prev_dc: i16 = 3;
+            for (block_index, block) in blocks.iter().enumerate() {
+                let mut writer = BitWriter::with_ac_tier(512, tier)
+                    .expect("the tier was constructible a moment ago");
+                // As the MCU loops do: the tier is read from the writer
+                // before `begin_block`, then travels with the hoisted state.
+                let ac_tier: AcTier = writer.ac_tier();
+                LAST_AC_TIER.with(|taken| taken.set(None));
+                // SAFETY: begin_block/end_block bracket one hoisted call with
+                // no other BitWriter method in between, and `ac_tier` is this
+                // writer's own tier, which `with_ac_tier` refused to set above
+                // what the CPU supports.
+                unsafe {
+                    let (mut pb, mut fb, mut buf) = writer.begin_block(512);
+                    HuffmanEncoder::encode_block_hoisted(
+                        &mut pb,
+                        &mut fb,
+                        &mut buf,
+                        ac_tier,
+                        block,
+                        &mut prev_dc,
+                        &dc_table,
+                        &ac_table,
+                    );
+                    writer.end_block(pb, fb, buf);
+                }
+                assert_eq!(
+                    LAST_AC_TIER.with(|taken| taken.get()),
+                    Some(tier),
+                    "block {block_index}: the hoisted dispatch took a tier other than {tier:?}"
+                );
+                writer.flush();
+                assert_eq!(
+                    writer.data(),
+                    expected[block_index].as_slice(),
+                    "block {block_index}: tier {tier:?} diverged from the reference encoder"
+                );
+            }
+            assert_eq!(prev_dc, ref_prev_dc);
+            exercised.push(tier);
+        }
+        assert!(
+            exercised.contains(&AcTier::Sse2),
+            "the SSE2 tier exists on every x86_64 CPU"
+        );
+        assert!(
+            exercised.contains(&AcTier::detect()),
+            "the detected tier must be constructible"
+        );
+        eprintln!("tiers exercised through encode_block_hoisted: {exercised:?}");
+    }
+
+    /// P4-133 (#464): the Huffman AC loop has three x86_64 tiers — SSE2,
+    /// BMI1+LZCNT, and BMI1+LZCNT+BMI2 — that are the *same* body compiled
+    /// under different `target_feature` contexts. They must emit identical
+    /// bytes for every block shape the emit loop distinguishes: EOB-only,
+    /// sparse, dense, ZRL runs (16+ zeros before a non-zero), a trailing
+    /// coefficient at position 63 (no EOB), and category-10 magnitudes.
+    #[cfg(all(target_arch = "x86_64", feature = "simd"))]
+    #[test]
+    fn x86_64_ac_kernel_tiers_emit_identical_bytes() {
+        let ac_table = build_huff_table(&AC_LUMINANCE_BITS, &AC_LUMINANCE_VALUES);
+
+        type AcKernel = unsafe fn(&mut u64, &mut i32, &mut *mut u8, &[i16; 64], &HuffTable);
+        let mut tiers: Vec<(&str, AcKernel)> = vec![("sse2", encode_ac_x86_64 as AcKernel)];
+        if crate::cpu_has!("bmi1") && crate::cpu_has!("lzcnt") {
+            tiers.push(("bmi1+lzcnt", encode_ac_x86_64_bmi1_lzcnt as AcKernel));
+        }
+        if crate::cpu_has!("bmi2") && crate::cpu_has!("bmi1") && crate::cpu_has!("lzcnt") {
+            tiers.push((
+                "bmi1+lzcnt+bmi2",
+                encode_ac_x86_64_bmi1_lzcnt_bmi2 as AcKernel,
+            ));
+        }
+        if tiers.len() == 1 {
+            eprintln!(
+                "SKIP: this CPU has no BMI1/LZCNT tier; only the SSE2 body exists to compare"
+            );
+            return;
+        }
+        eprintln!(
+            "tiers exercised: {:?}",
+            tiers.iter().map(|(name, _)| *name).collect::<Vec<_>>()
+        );
+
+        let mut state: u32 = 0x2545_F491;
+        let mut next_u32 = move || -> u32 {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state
+        };
+
+        let mut blocks: Vec<[i16; 64]> = Vec::new();
+        blocks.push([0i16; 64]); // EOB only
+        let mut trailing: [i16; 64] = [0i16; 64];
+        trailing[63] = -1; // 62 zeros: three ZRLs, then no EOB
+        blocks.push(trailing);
+        let mut category_10: [i16; 64] = [0i16; 64];
+        category_10[1] = 1023;
+        category_10[2] = -1023;
+        category_10[40] = 512;
+        blocks.push(category_10);
+        for block_index in 0..600usize {
+            let mut block: [i16; 64] = [0i16; 64];
+            // Vary density so both the sparse (mostly runs) and dense
+            // (mostly symbols) branches of the emit loop are covered.
+            let density: u32 = [2, 8, 32, 100][block_index % 4];
+            for coefficient in block.iter_mut().skip(1) {
+                if next_u32() % 100 < density {
+                    let magnitude: i16 = (next_u32() % 1024) as i16;
+                    *coefficient = if next_u32() & 1 == 0 {
+                        magnitude
+                    } else {
+                        -magnitude
+                    };
+                }
+            }
+            blocks.push(block);
+        }
+
+        for (block_index, block) in blocks.iter().enumerate() {
+            let mut outputs: Vec<(&str, Vec<u8>)> = Vec::new();
+            for (name, kernel) in &tiers {
+                let mut writer = BitWriter::new(512);
+                // SAFETY: begin_block/end_block bracket exactly one kernel
+                // call with no other BitWriter method in between, and the
+                // tier was pushed only after its CPU features were detected.
+                unsafe {
+                    let (mut pb, mut fb, mut buf) = writer.begin_block(512);
+                    kernel(&mut pb, &mut fb, &mut buf, block, &ac_table);
+                    writer.end_block(pb, fb, buf);
+                }
+                writer.flush();
+                outputs.push((name, writer.data().to_vec()));
+            }
+            let (baseline_name, baseline_bytes) = &outputs[0];
+            for (name, bytes) in &outputs[1..] {
+                assert_eq!(
+                    bytes, baseline_bytes,
+                    "block {block_index}: tier {name} diverged from tier {baseline_name}"
+                );
+            }
         }
     }
 }

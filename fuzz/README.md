@@ -25,10 +25,12 @@ so libFuzzer starts from meaningful inputs. The generator covers:
 - Real-world fixtures from `tests/fixtures/` (7 files)
 - Wide-aspect (8×64) and tall-aspect (64×8) images exercising dimension-extreme paths
 - Restart-marker JPEGs (DRI segment injected after SOI, interval=2)
-- 16 structural edge-case byte sequences (bare SOI, truncated SOF0, multi-COM, APP1/APP2/APP14,
+- 15 structural edge-case byte sequences (bare SOI, truncated SOF0, multi-COM, APP1/APP2/APP14,
   zero-dimension SOF0, all-0xFF, non-JPEG bytes, etc.)
 - `fuzz_transform_options`-specific seeds: 6 source JPEGs × 15 option combos + edge cases
   (117 seeds total for that target)
+- `fuzz_api_sequence`-specific seeds: 9 operation programs × (6 source JPEGs + 15 structural
+  edge-case bodies) = 189 seeds, each an `encode_program` byte prefix followed by one of those bodies
 
 ## JPEG marker dictionary
 
@@ -55,6 +57,10 @@ cargo +nightly fuzz run fuzz_decompress -- -dict=fuzz/jpeg.dict -max_total_time=
 | `fuzz_progressive_decoder` | Progressive scan-by-scan decoder | ~350 |
 | `fuzz_encode_roundtrip` | Structured header + raw pixels → encode → decode assertion | ~294 |
 | `fuzz_transform_options` | `transform_jpeg_with_options` with all TransformOp × option combos | ~117 |
+| `fuzz_api_sequence` | Ordered `TjHandle` lifecycles — configure/probe/decode/reset/transform on one handle, each result compared against a handle built fresh from the same configuration (P4-141 criterion 3) | 189 |
+| `fuzz_decode_diff_c` | Differential decode against a subprocess `djpeg` (P2-7) | 330 |
+| `fuzz_encode_diff_c` | Differential encode round-trip against subprocess `cjpeg`/`djpeg` (P2-7) | 299 |
+| `fuzz_transform_diff_c` | Differential transform against a subprocess `jpegtran` (P2-7) | 10 |
 
 ## Run
 

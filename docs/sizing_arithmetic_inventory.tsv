@@ -79,12 +79,9 @@ src/decode/marker.rs	1	bounds-check	if total > end.saturating_sub(self.pos) || s
 src/decode/marker.rs	2	clamped-difference	let data_len = data_end.saturating_sub(data_start);
 src/decode/pipeline_impl/color.rs	1	bounds-check	if output_x_offset.saturating_add(out_width) > full_width || out_height > full_height {
 src/decode/pipeline_impl/output.rs	1	clamped-difference	*off = (cx * comp_w / full_width).min(comp_w.saturating_sub(1));
-src/decode/pipeline_impl/output.rs	1	clamped-difference	ch.min(base_h.saturating_sub(offset))
 src/decode/pipeline_impl/output.rs	1	clamped-difference	cw.min(out_width.saturating_sub(cx))
-src/decode/pipeline_impl/output.rs	1	clamped-difference	expanded_w.min(base_w.saturating_sub(aligned_x))
 src/decode/pipeline_impl/output.rs	1	clamped-difference	let above_idx: usize = cy.saturating_sub(1);
 src/decode/pipeline_impl/output.rs	1	clamped-difference	let clamped_w: usize = expanded_w.min(out_width.saturating_sub(aligned_x));
-src/decode/pipeline_impl/output.rs	1	clamped-difference	let height: usize = ch.min(image.height.saturating_sub(offset));
 src/decode/pipeline_impl/output.rs	1	clamped-difference	let last_cy: usize = actual_cb_h.saturating_sub(1);
 src/decode/pipeline_impl/progressive.rs	1	clamped-difference	let mcu_start = mcu_start.saturating_sub(1);
 src/decode/toggles.rs	1	bounds-check	if cw < out_width || component_planes[0].len() < out_height.saturating_mul(cw) {

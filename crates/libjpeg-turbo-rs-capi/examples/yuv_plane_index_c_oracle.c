@@ -2,8 +2,8 @@
  * C oracle for the TurboJPEG YUV plane-dimension component bound (P4-126).
  *
  * Upstream rejects an out-of-range component index in tj3YUVPlaneWidth /
- * tj3YUVPlaneHeight (references/libjpeg-turbo/src/turbojpeg.c:1115, lines
- * 1123-1125):
+ * tj3YUVPlaneHeight (references/libjpeg-turbo/src/turbojpeg.c:1118, lines
+ * 1126-1128):
  *
  *     nc = (subsamp == TJSAMP_GRAY ? 1 : 3);
  *     if (componentID < 0 || componentID >= nc)

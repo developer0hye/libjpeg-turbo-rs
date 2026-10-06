@@ -40,6 +40,32 @@ pub enum JpegError {
     #[error("allocation of {bytes} bytes for {what} failed")]
     AllocationFailed { what: &'static str, bytes: u64 },
 
+    /// A caller-supplied progressive scan script breaks a rule C's
+    /// `validate_script` (`jcmaster.c:276-436`) enforces, so it was refused
+    /// before any encoding work ran (issue #610).
+    ///
+    /// `entry` is the 1-based script entry, as C's `scanno` is; `0` means the
+    /// script as a whole — it is empty, or it never sends some component's DC
+    /// (C's `JERR_MISSING_DATA`).
+    #[error("invalid scan script at entry {entry}: {reason}")]
+    InvalidScanScript { entry: usize, reason: &'static str },
+
+    /// A cropping region was refused (issue #618).
+    ///
+    /// `Decoder` raises it when the region does not fit inside the scaled
+    /// output — `x + width > output_width` or `y + height > output_height`,
+    /// the bound `djpeg -crop` and `tj3SetCroppingRegion` enforce — or has a
+    /// zero width, instead of clamping it to a degenerate image. `TjHandle`
+    /// also raises it for TurboJPEG's other cropping rules (no header read
+    /// yet, a lossless frame, an unclassifiable subsampling, a left boundary
+    /// not divisible by the scaled iMCU width, a decode that does not match
+    /// the region).
+    ///
+    /// `reason` is upstream TurboJPEG's message, verbatim, so the C ABI can
+    /// report exactly what stock `tj3GetErrorStr` reports.
+    #[error("{reason}")]
+    InvalidCropRegion { reason: String },
+
     #[error("unexpected end of data")]
     UnexpectedEof,
 

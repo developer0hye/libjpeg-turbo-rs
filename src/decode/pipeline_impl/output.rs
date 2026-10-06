@@ -2,7 +2,10 @@ use super::color::{fancy_h2v2_row_dispatch, fancy_h2v2_strided_dispatch};
 use super::{upsample_generic_nearest, Decoder, Image, ImageInfo};
 use crate::common::error::{DecodeWarning, JpegError, Result};
 use crate::common::quant_table::QuantTable;
-use crate::common::try_alloc::{try_clone_opt, try_clone_opt_string, try_clone_saved_markers};
+use crate::common::try_alloc::{
+    try_clone_opt, try_clone_opt_string, try_clone_saved_markers, try_copy_of, try_filled_vec,
+    try_reserved_vec,
+};
 use crate::common::types::{ColorSpace, ComponentInfo, PixelFormat};
 use alloc::{
     borrow::Cow,
@@ -75,7 +78,15 @@ fn take_out_buf<'a>(sink: &mut Option<&'a mut [u8]>, size: usize) -> Result<OutB
             }
             Ok(OutBuf::Borrowed(&mut buf[..size]))
         }
-        None => Ok(OutBuf::Owned(vec![0u8; size])),
+        // P4-209 (#632): `size` comes from the SOF, and `vec![]` aborts the
+        // process on refusal. This is the owned destination most
+        // `decompress` paths allocate, so it was the abort the simplest
+        // decode hit.
+        None => Ok(OutBuf::Owned(try_filled_vec(
+            size,
+            0u8,
+            "decode output buffer",
+        )?)),
     }
 }
 
@@ -183,17 +194,59 @@ impl<'a> Decoder<'a> {
         Ok(())
     }
 
+    /// Refuse a cropping region that does not fit inside the output a decode
+    /// will emit (P4-197, #618).
+    ///
+    /// The bound is C's: `djpeg -crop` refuses `crop_x + crop_width >
+    /// output_width || crop_y + crop_height > output_height` once
+    /// `jpeg_start_decompress` has fixed the scaled size (`djpeg.c:854-858`),
+    /// and `tj3SetCroppingRegion` refuses the same shape
+    /// (`turbojpeg.c:2106-2109`). It is checked at decode time because
+    /// `set_crop*` may run before the `set_scale` that fixes the output size.
+    ///
+    /// The left boundary's iMCU alignment cannot change the outcome: the
+    /// output stage aligns `x` down and widens the width by the same amount,
+    /// so the right edge is `x + width` either way. A zero *width* is refused
+    /// too, as `jpeg_crop_scanline` refuses it (`jdapistd.c:213-216`,
+    /// `JERR_WIDTH_OVERFLOW`): aligning its `x` down would otherwise widen it
+    /// into columns nobody asked for. A zero *height* is not —
+    /// `StreamingDecoder::skip_scanlines` skips to the bottom with a
+    /// zero-height region at `y = output_height`, as `jpeg_skip_scanlines`
+    /// may skip every row.
+    pub(super) fn check_crop_region(&self) -> Result<()> {
+        let exceeds = |origin: usize, extent: usize, limit: usize| -> bool {
+            origin.checked_add(extent).is_none_or(|end| end > limit)
+        };
+        let horizontal_exceeds: bool = match (self.crop_x, self.crop_width) {
+            (Some(x), Some(width)) => width == 0 || exceeds(x, width, self.output_width()),
+            _ => false,
+        };
+        let vertical_exceeds: bool = match (self.crop_y, self.crop_height) {
+            (Some(y), Some(height)) => exceeds(y, height, self.output_height()),
+            _ => false,
+        };
+        if horizontal_exceeds || vertical_exceeds {
+            return Err(JpegError::InvalidCropRegion {
+                reason: "The cropping region exceeds the scaled image dimensions".to_string(),
+            });
+        }
+        Ok(())
+    }
+
     /// Bytes `decode_image_into` needs for this stream with the current
     /// decoder options. Exact for the standard paths; a safe upper
     /// bound when an output-colourspace override is active (sized at 4
-    /// bytes/pixel) or when cropping trims the image below the
-    /// MCU-aligned estimate.
+    /// bytes/pixel). A cropping region that does not fit the scaled output
+    /// is refused here exactly as the decode refuses it.
     #[must_use = "the returned size is the whole point of this query"]
     pub fn output_buffer_size(&self) -> Result<usize> {
         // Untrusted-input workflow is size -> allocate -> decode, so the
         // limits must fire here too or the caller OOMs before decode can
         // reject (codex P1 on #355).
         self.check_header_limits()?;
+        // Same reasoning for the crop: a size computed for a region the
+        // decode will refuse would only be allocated to be thrown away.
+        self.check_crop_region()?;
         let frame = &self.metadata.frame;
         let num_components: usize = frame.components.len();
         let bpp: usize = if self.output_colorspace.is_some() {
@@ -225,8 +278,9 @@ impl<'a> Decoder<'a> {
         };
 
         // Horizontal crop mirrors decode_image_inner: X aligns down to
-        // the scaled iMCU boundary and the width expands to compensate,
-        // then clamps to the image.
+        // the scaled iMCU boundary and the width expands to compensate.
+        // check_crop_region above has already refused a region that does not
+        // fit, so neither crop needs clamping here.
         let out_w: usize = if !scale_and_hcrop_apply {
             base_w
         } else if let (Some(cx), Some(cw)) = (self.crop_x, self.crop_width) {
@@ -238,15 +292,13 @@ impl<'a> Decoder<'a> {
                 .unwrap_or(1);
             let scaled_imcu_w: usize = max_h_samp * self.scale.block_size();
             let aligned_x: usize = (cx / scaled_imcu_w) * scaled_imcu_w;
-            let expanded_w: usize = cw + (cx - aligned_x);
-            expanded_w.min(base_w.saturating_sub(aligned_x))
+            cw + (cx - aligned_x)
         } else {
             base_w
         };
         // Vertical crop is applied as a post-slice in decode_image.
-        let out_h: usize = if let (Some(cy), Some(ch)) = (self.crop_y, self.crop_height) {
-            let offset: usize = cy.min(base_h);
-            ch.min(base_h.saturating_sub(offset))
+        let out_h: usize = if let (Some(_), Some(ch)) = (self.crop_y, self.crop_height) {
+            ch
         } else {
             base_h
         };
@@ -351,27 +403,25 @@ impl<'a> Decoder<'a> {
         // crop_y..crop_y+crop_height region. Horizontal crop is handled
         // during decode; vertical crop is applied here to avoid threading
         // the offset through every output path.
+        //
+        // `data` holds all `width * height` pixels of the decode here: a
+        // vertical crop keeps `decode_image_into` off the sink path, so this
+        // image was decoded into an owned buffer. `check_crop_region` has
+        // refused any region with `crop_y + crop_height` past the output, and
+        // the decode emits at least that many rows (it caps at the iMCU row
+        // after the crop's last one, never before it). A zero-height region
+        // slices to empty without special-casing (P4-197, #618: an assertion
+        // here used to claim empty data was unreachable, and an ordinary
+        // decode reached it with a region starting past the right edge).
         if let (Some(cy), Some(ch)) = (self.crop_y, self.crop_height) {
             // Crop coordinates are in the output (post-scale) space
-            let offset: usize = cy.min(image.height);
-            let height: usize = ch.min(image.height.saturating_sub(offset));
-            if offset > 0 || height < image.height {
-                // A sink-claimed decode returns empty data; vertical crop
-                // is excluded from sink mode in decode_image_into, so this
-                // is unreachable — keep it panic-free if that invariant
-                // ever breaks rather than indexing out of range.
-                debug_assert!(
-                    !image.data.is_empty(),
-                    "vertical crop cannot apply to a sink-claimed decode"
-                );
-                if !image.data.is_empty() {
-                    let bpp: usize = image.pixel_format.bytes_per_pixel();
-                    let row_bytes: usize = image.width * bpp;
-                    let start: usize = offset * row_bytes;
-                    let end: usize = start + height * row_bytes;
-                    image.data = image.data[start..end].to_vec();
-                    image.height = height;
-                }
+            if cy > 0 || ch < image.height {
+                let bpp: usize = image.pixel_format.bytes_per_pixel();
+                let row_bytes: usize = image.width * bpp;
+                let start: usize = cy * row_bytes;
+                let end: usize = start + ch * row_bytes;
+                image.data = try_copy_of(&image.data[start..end], "vertically cropped output")?;
+                image.height = ch;
             }
         }
         Ok(image)
@@ -427,9 +477,17 @@ impl<'a> Decoder<'a> {
             let pad_off: Option<usize> = pad_alpha_offset(out_format);
             let bpp: usize = out_format.bytes_per_pixel();
             let data: Vec<u8> = match out_format {
-                PixelFormat::Grayscale => img12.data.iter().map(|&v| scale(v)).collect(),
+                PixelFormat::Grayscale => {
+                    // `collect()` into a `Vec` allocates infallibly too; the
+                    // gate's patterns do not see it, the allocator does.
+                    let mut out: Vec<u8> =
+                        try_reserved_vec(img12.data.len(), "12-bit downscaled output")?;
+                    out.extend(img12.data.iter().map(|&v| scale(v)));
+                    out
+                }
                 PixelFormat::Rgb | PixelFormat::Bgr => {
-                    let mut out: Vec<u8> = Vec::with_capacity(width * height * bpp);
+                    let mut out: Vec<u8> =
+                        try_reserved_vec(width * height * bpp, "12-bit downscaled output")?;
                     for &v12 in &img12.data {
                         let v: u8 = scale(v12);
                         out.extend_from_slice(&[v, v, v]);
@@ -445,7 +503,8 @@ impl<'a> Decoder<'a> {
                 | PixelFormat::Argb
                 | PixelFormat::Abgr => {
                     let pad: usize = pad_off.expect("4bpp format has a pad offset");
-                    let mut out: Vec<u8> = Vec::with_capacity(width * height * bpp);
+                    let mut out: Vec<u8> =
+                        try_reserved_vec(width * height * bpp, "12-bit downscaled output")?;
                     for &v12 in &img12.data {
                         let mut px: [u8; 4] = [scale(v12); 4];
                         px[pad] = 255;
@@ -459,7 +518,8 @@ impl<'a> Decoder<'a> {
                         // grayscale path (codex review on issue #394:
                         // set_dither_565 must not be silently ignored).
                         // One row of 8-bit scratch, not a full plane.
-                        let mut out: Vec<u8> = vec![0u8; width * height * 2];
+                        let mut out: Vec<u8> =
+                            try_filled_vec(width * height * 2, 0u8, "12-bit downscaled output")?;
                         let mut row8: Vec<u8> = vec![0u8; width];
                         for y in 0..height {
                             for (dst, &v12) in
@@ -476,7 +536,8 @@ impl<'a> Decoder<'a> {
                         }
                         out
                     } else {
-                        let mut out: Vec<u8> = Vec::with_capacity(width * height * 2);
+                        let mut out: Vec<u8> =
+                            try_reserved_vec(width * height * 2, "12-bit downscaled output")?;
                         for &v12 in &img12.data {
                             let v: u8 = scale(v12);
                             let packed: u16 = (((v as u16) >> 3) << 11)
@@ -508,7 +569,8 @@ impl<'a> Decoder<'a> {
             // Color image: img12.data is interleaved RGB (3 values per pixel).
             // Convert to the requested output format.
             let bpp: usize = out_format.bytes_per_pixel();
-            let mut data: Vec<u8> = vec![0u8; width * height * bpp];
+            let mut data: Vec<u8> =
+                try_filled_vec(width * height * bpp, 0u8, "12-bit downscaled output")?;
 
             let r_off: Option<usize> = out_format.red_offset();
             let g_off: Option<usize> = out_format.green_offset();
@@ -602,6 +664,11 @@ impl<'a> Decoder<'a> {
                 self.detect_color_space()
             )));
         }
+
+        // After the colour-conversion refusal, as djpeg checks its crop only
+        // once `jpeg_start_decompress` (which raises
+        // JERR_CONVERSION_NOTIMPL) has returned; before any decoding work.
+        self.check_crop_region()?;
 
         // P4-144: all four are input-sized allocations that used to abort the
         // process when the allocator refused. This function already returns
@@ -738,11 +805,10 @@ impl<'a> Decoder<'a> {
         // Crop-aware output: when crop_x/crop_width are set, the output
         // narrows to the crop width. Matches C jpeg_crop_scanline behavior:
         // X is aligned down to iMCU boundary, width is expanded accordingly.
-        // Crop coordinates are in the original image space; align then scale
-        // to output space so they index correctly into scaled component planes.
         // Crop coordinates are in the output (post-scale) space, matching C
         // djpeg -crop behavior. Align X down to the scaled iMCU boundary and
-        // expand width to compensate.
+        // expand width to compensate. check_crop_region has refused a region
+        // past the output, so the clamp below never shortens a request.
         let scaled_imcu_w: usize = max_h * block_size; // iMCU width in scaled output pixels
         let (scaled_crop_x, scaled_crop_w): (Option<usize>, Option<usize>) =
             if let (Some(cx), Some(cw)) = (self.crop_x, self.crop_width) {
@@ -837,7 +903,7 @@ impl<'a> Decoder<'a> {
             let cropped_planes: Vec<Vec<u8>> = component_planes
                 .iter()
                 .enumerate()
-                .map(|(ci, plane)| {
+                .map(|(ci, plane)| -> Result<Vec<u8>> {
                     let comp_w: usize = mcus_x
                         * frame.components[ci].horizontal_sampling as usize
                         * comp_block_sizes[ci];
@@ -846,18 +912,19 @@ impl<'a> Decoder<'a> {
                         * comp_block_sizes[ci];
                     let off: usize = comp_x_offsets[ci];
                     if off == 0 {
-                        return plane.clone();
+                        return try_copy_of(plane, "crop-shifted component plane");
                     }
                     // Re-pack rows shifted by `off` pixels
-                    let mut shifted: Vec<u8> = Vec::with_capacity(plane.len());
+                    let mut shifted: Vec<u8> =
+                        try_reserved_vec(plane.len(), "crop-shifted component plane")?;
                     for row in 0..comp_h {
                         shifted.extend_from_slice(&plane[row * comp_w + off..(row + 1) * comp_w]);
                         // Pad to maintain stride
                         shifted.extend(core::iter::repeat_n(0, off));
                     }
-                    shifted
+                    Ok(shifted)
                 })
-                .collect();
+                .collect::<Result<Vec<Vec<u8>>>>()?;
             return crate::decode::toggles::decode_with_colorspace_override(
                 ColorSpace::YCbCr,
                 &cropped_planes,
@@ -879,8 +946,9 @@ impl<'a> Decoder<'a> {
         // Cap output height to the extended MCU range when vertical crop is set.
         // IDCT is skipped outside this range, so component planes contain
         // uninitialized data beyond it. The upsampler needs this cap to produce
-        // correct edge behavior. decode_image() then slices relative to this
-        // capped range using crop_y offset from the MCU-range start.
+        // correct edge behavior. The cap never falls short of crop_y +
+        // crop_height, and decode_image_with_sink then slices rows
+        // crop_y..crop_y + crop_height of this (still frame-origin) image.
         let out_height: usize = if let (Some(cy), Some(ch)) = (self.crop_y, self.crop_height) {
             let mcu_h: usize = max_v * block_size;
             let mcu_end: usize = (cy + ch).div_ceil(mcu_h);
@@ -921,7 +989,8 @@ impl<'a> Decoder<'a> {
                 } else if exact_geometry {
                     core::mem::take(&mut component_planes[0])
                 } else {
-                    let mut data = Vec::with_capacity(out_width * out_height);
+                    let mut data: Vec<u8> =
+                        try_reserved_vec(out_width * out_height, "decode output buffer")?;
                     for y in 0..out_height {
                         data.extend_from_slice(
                             &component_planes[0][y * comp_w + off..y * comp_w + off + out_width],
@@ -1192,7 +1261,11 @@ impl<'a> Decoder<'a> {
                 // contract holds. Pixel-correct decoding is tracked as P4-21.
                 let mut recovered_warnings: Vec<DecodeWarning> = warnings.clone();
                 recovered_warnings.push(DecodeWarning::UnsupportedRecovered { detail });
-                let data: Vec<u8> = vec![128u8; out_width * out_height * bpp];
+                let data: Vec<u8> = try_filled_vec(
+                    out_width * out_height * bpp,
+                    128u8,
+                    "lenient neutral raster",
+                )?;
                 return Ok(Image {
                     xmp_data: try_clone_opt(&xmp_data, "XMP metadata")?,
                     iptc_data: try_clone_opt(&iptc_data, "IPTC metadata")?,
@@ -1284,7 +1357,8 @@ impl<'a> Decoder<'a> {
                     // task.
                     let merged_bpp: usize = 3;
                     let merged_size: usize = out_width * out_height * merged_bpp;
-                    let mut merged_rgb: Vec<u8> = vec![0u8; merged_size];
+                    let mut merged_rgb: Vec<u8> =
+                        try_filled_vec(merged_size, 0u8, "merged upsample RGB buffer")?;
 
                     if v_factor == 1 {
                         // H2V1 (4:2:2): one chroma row per Y row
@@ -1335,7 +1409,11 @@ impl<'a> Decoder<'a> {
                     } else {
                         // RGB565 little-endian: word = (R5 << 11) | (G6 << 5) | B5,
                         // with 5-6-5 truncation matching upstream.
-                        let mut packed: Vec<u8> = vec![0u8; out_width * out_height * bpp];
+                        let mut packed: Vec<u8> = try_filled_vec(
+                            out_width * out_height * bpp,
+                            0u8,
+                            "merged RGB565 output",
+                        )?;
                         for i in 0..(out_width * out_height) {
                             let r: u16 = merged_rgb[i * 3] as u16;
                             let g: u16 = merged_rgb[i * 3 + 1] as u16;
@@ -1757,8 +1835,10 @@ impl<'a> Decoder<'a> {
 
                 // All remaining paths need full-plane cb_full/cr_full buffers.
                 let alloc_size = full_width * full_height;
-                let mut cb_full = vec![0u8; alloc_size];
-                let mut cr_full = vec![0u8; alloc_size];
+                let mut cb_full: Vec<u8> =
+                    try_filled_vec(alloc_size, 0u8, "upsampled chroma plane")?;
+                let mut cr_full: Vec<u8> =
+                    try_filled_vec(alloc_size, 0u8, "upsampled chroma plane")?;
 
                 // Upsample each chroma component independently using its own factors.
                 // This handles non-uniform chroma sampling (e.g. Cb=2x1, Cr=1x1)
@@ -1818,7 +1898,8 @@ impl<'a> Decoder<'a> {
                         }
                     } else if use_box_filter {
                         if comp_off > 0 {
-                            let mut cropped: Vec<u8> = Vec::with_capacity(actual_w * actual_h);
+                            let mut cropped: Vec<u8> =
+                                try_reserved_vec(actual_w * actual_h, "cropped chroma plane")?;
                             for row in 0..comp_h.min(actual_h) {
                                 let s: usize = row * comp_w + comp_off;
                                 cropped.extend_from_slice(&comp_plane[s..s + actual_w]);
@@ -1854,7 +1935,8 @@ impl<'a> Decoder<'a> {
                     } else if comp_hf == 1 && comp_vf == 2 {
                         // H1V2: vertical-only 2x fancy upsample.
                         if comp_off > 0 {
-                            let mut cropped: Vec<u8> = Vec::with_capacity(actual_w * actual_h);
+                            let mut cropped: Vec<u8> =
+                                try_reserved_vec(actual_w * actual_h, "cropped chroma plane")?;
                             for row in 0..actual_h {
                                 let s: usize = row * comp_w + comp_off;
                                 cropped.extend_from_slice(&comp_plane[s..s + actual_w]);
@@ -1866,7 +1948,8 @@ impl<'a> Decoder<'a> {
                     } else {
                         // Generic fallback: nearest-neighbor for any factor combination.
                         if comp_off > 0 {
-                            let mut cropped: Vec<u8> = Vec::with_capacity(actual_w * actual_h);
+                            let mut cropped: Vec<u8> =
+                                try_reserved_vec(actual_w * actual_h, "cropped chroma plane")?;
                             for row in 0..comp_h.min(actual_h) {
                                 let s: usize = row * comp_w + comp_off;
                                 cropped.extend_from_slice(&comp_plane[s..s + actual_w]);

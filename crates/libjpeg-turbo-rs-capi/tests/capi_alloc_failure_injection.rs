@@ -2,18 +2,24 @@
 //!
 //! `JERR_OUT_OF_MEMORY` (56) is raised on two `jpeg_mem_dest` paths that no
 //! test could force before: the initial buffer allocation when the caller
-//! passes an empty slot (`jdatadst.c:271`, `ERREXIT1(…, 10)`), and the
-//! doubling growth in `empty_mem_output_buffer` (`jdatadst.c:132`, the same
-//! `ERREXIT1(…, 10)`). Everything funnels through `libc_malloc`, so
+//! passes an empty slot (`jdatadst.c:285`, `ERREXIT1(…, 10)`), and the
+//! doubling growth in `empty_mem_output_buffer` (`jdatadst.c:146`,
+//! `ERREXIT1(…, 12)`). Everything funnels through `libc_malloc`, so
 //! `fail_nth_allocation_for_tests` — a thread-local countdown armed only
 //! here — makes the exact allocation fail the way a real allocator under
 //! pressure would.
 //!
+//! The two cases were both 10 until libjpeg-turbo 3.2.0 gave the growth
+//! failure its own number (12) and added a third, 13, for a doubling that
+//! would overflow `size_t` (`jdatadst.c:140-141`). Case 13 is mirrored in the
+//! shim but has no test: reaching it needs a buffer already past
+//! `SIZE_MAX / 2` bytes, which no injection can stage.
+//!
 //! There is no C oracle for these lines: no portable way exists to make
 //! stock libjpeg's `malloc` fail on the Nth call. What is compared against
 //! upstream instead is the *contract*: the code (56) and the `ERREXIT1`
-//! payload (`msg_parm.i[0] == 10`) are read from `jdatadst.c` and pinned
-//! here; the message rendering for the code is covered by the P4-146
+//! payloads (`msg_parm.i[0]`, 10 and 12) are read from `jdatadst.c` and
+//! pinned here; the message rendering for the code is covered by the P4-146
 //! whole-table gate.
 
 use std::cell::Cell;
@@ -33,8 +39,10 @@ const HEIGHT: usize = 64;
 const JCS_GRAYSCALE: c_int = 1;
 /// `jerror.h` at v8: `JERR_OUT_OF_MEMORY`.
 const JERR_OUT_OF_MEMORY: c_int = 56;
-/// `jdatadst.c:271` / `:132`: `ERREXIT1(cinfo, JERR_OUT_OF_MEMORY, 10)`.
-const OOM_CASE_MEM_DEST: c_int = 10;
+/// `jdatadst.c:285`: `ERREXIT1(cinfo, JERR_OUT_OF_MEMORY, 10)`.
+const OOM_CASE_MEM_DEST_INITIAL: c_int = 10;
+/// `jdatadst.c:146`: `ERREXIT1(cinfo, JERR_OUT_OF_MEMORY, 12)`.
+const OOM_CASE_MEM_DEST_GROWTH: c_int = 12;
 
 thread_local! {
     static FIRED: Cell<bool> = const { Cell::new(false) };
@@ -81,7 +89,7 @@ fn compress_scaffold() -> (Box<JpegCompressPublic>, Box<JpegErrorMgr>, *mut c_vo
     (cinfo, err, cinfo_ptr)
 }
 
-/// `jdatadst.c:271`: the empty-slot initial allocation fails → 56, case 10,
+/// `jdatadst.c:285`: the empty-slot initial allocation fails → 56, case 10,
 /// raised synchronously from `jpeg_mem_dest` itself.
 #[test]
 fn mem_dest_initial_allocation_failure_reports_oom_case_10() {
@@ -100,17 +108,17 @@ fn mem_dest_initial_allocation_failure_reports_oom_case_10() {
     assert_eq!(MSG_CODE.with(|c| c.get()), JERR_OUT_OF_MEMORY);
     assert_eq!(
         PARM0.with(|p| p.get()),
-        OOM_CASE_MEM_DEST,
+        OOM_CASE_MEM_DEST_INITIAL,
         "ERREXIT1's payload must survive to msg_parm.i[0]"
     );
     // SAFETY: destroy is null-safe for the partially-initialised object.
     unsafe { jpeg_destroy_compress(cinfo_ptr) };
 }
 
-/// `jdatadst.c:132`: the doubling growth fails mid-encode → 56, case 10,
+/// `jdatadst.c:146`: the doubling growth fails mid-encode → 56, case 12,
 /// surfacing through the deferred-encode flush at `jpeg_finish_compress`.
 #[test]
-fn mem_dest_growth_failure_reports_oom_case_10() {
+fn mem_dest_growth_failure_reports_oom_case_12() {
     reset_recorder();
     let (mut cinfo, _err, cinfo_ptr) = compress_scaffold();
     let mut buf: *mut u8 = std::ptr::null_mut();
@@ -151,8 +159,9 @@ fn mem_dest_growth_failure_reports_oom_case_10() {
     assert_eq!(MSG_CODE.with(|c| c.get()), JERR_OUT_OF_MEMORY);
     assert_eq!(
         PARM0.with(|p| p.get()),
-        OOM_CASE_MEM_DEST,
-        "ERREXIT1's payload must survive to msg_parm.i[0]"
+        OOM_CASE_MEM_DEST_GROWTH,
+        "ERREXIT1's payload must survive to msg_parm.i[0]; 3.2.0 renumbered \
+         the growth failure from case 10 to 12"
     );
     // SAFETY: destroyed once; the manager's own buffer is freed by destroy.
     unsafe { jpeg_destroy_compress(cinfo_ptr) };

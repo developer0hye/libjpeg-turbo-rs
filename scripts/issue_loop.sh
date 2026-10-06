@@ -102,15 +102,26 @@ pick_issue() {
 # issue — is the progress signal, because a large issue is often advanced one
 # milestone per run. Both fields count: a title-only citation read as no
 # progress would block an issue that was in fact being advanced.
+#
+# A citation is `#N` at the start of a line or after whitespace or the
+# punctuation prose puts before it — not the `>#N</a>` a rendered link leaves
+# behind. On 2026-09-07 dependabot's changelog for actions/download-artifact
+# linked *that* repository's issue 461 and the loop credited it to ours,
+# resetting the failure counter for a run that had merged nothing. Bots
+# (`app/*` logins) never advance an issue here, so their PRs are skipped too.
+cites_issue_filter() {
+  printf '((.author.login // "") | startswith("app/") | not) and (((.body // "") + " " + (.title // "")) | test("(^|[[:space:](\\\\[,;:])#%s\\\\b"))' "$1"
+}
+
 merged_refs() {
-  gh pr list --state merged --limit 30 --json body,title \
-    --jq "[.[] | select((.body // \"\") + \" \" + (.title // \"\") | test(\"#$1\\\\b\"))] | length" \
+  gh pr list --state merged --limit 30 --json author,body,title \
+    --jq "[.[] | select($(cites_issue_filter "$1"))] | length" \
     2>/dev/null || echo 0
 }
 
 open_ref_pr() {
-  gh pr list --state open --limit 30 --json number,body,title \
-    --jq "[.[] | select((.body // \"\") + \" \" + (.title // \"\") | test(\"#$1\\\\b\"))][0].number // empty" \
+  gh pr list --state open --limit 30 --json author,number,body,title \
+    --jq "[.[] | select($(cites_issue_filter "$1"))][0].number // empty" \
     2>/dev/null
 }
 
@@ -194,7 +205,23 @@ while true; do
   # log holds the agent's prose too, and a looser pattern turned an agent that
   # merely wrote "rate limit" into an hour-long sleep and an endless retry of
   # the same issue.
-  if tail -c 4000 "$log" | grep -qiE "usage limit reached|reached your .{0,40} limit|/usage-credits"; then
+  #
+  # The phrase test alone is still a heuristic over prose, so it is gated on
+  # the harness's own verdict. That verdict is `is_error`, not `subtype`: a
+  # limit hit comes back as `"subtype":"success","is_error":true,
+  # "terminal_reason":"api_error"` with the message in `result`, so keying
+  # on `subtype` (as this guard first did) would have hidden every real
+  # limit. A run whose envelope says `"is_error":false` completed, whatever
+  # its summary mentions — on 2026-09-07 an agent that had merged its pull
+  # request wrote that *codex* was unavailable "because of a usage limit",
+  # and the older, unguarded pattern parked the loop for an hour and
+  # re-queued the finished issue. Later that day three runs died in ninety
+  # seconds on "You've hit your session limit · resets 11:30pm", a wording
+  # none of the phrases matched, so the loop counted them as failures,
+  # mislabelled an issue and tripped its own circuit breaker.
+  run_succeeded=0
+  grep -q '"is_error":false' "$log" && run_succeeded=1
+  if (( ! run_succeeded )) && tail -c 4000 "$log" | grep -qiE "usage limit|session limit|(hit|reached) your .{0,40}limit|/usage-credits"; then
     processed=$((processed - 1))
     echo "usage limit reached — sleeping $((USAGE_LIMIT_SLEEP / 60))m, then retrying this issue."
     sleep "$USAGE_LIMIT_SLEEP"

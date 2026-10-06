@@ -19,53 +19,20 @@ use std::sync::atomic::{AtomicU64, Ordering};
 // C tool discovery
 // ===========================================================================
 
-/// Generic C tool discovery.
+/// The oracle-selection rule, shared with the corpus harness in `examples/`.
 ///
-/// `LIBJPEG_TURBO_PREFIX` names the C install to compare against, exactly as it
-/// does for the C-ABI crate's oracle helpers: when it is set, the tool is taken
-/// from `<prefix>/bin` and from nowhere else. Otherwise discovery is the
-/// historical `/opt/homebrew/bin` then `which` order.
-///
-/// The variable is what lets the P4-130 dual-oracle matrix run the same suites
-/// against two libjpeg-turbo releases and *know* which one answered. PATH alone
-/// cannot express it — `/opt/homebrew/bin` is read first, so on macOS the
-/// homebrew build wins regardless of PATH.
-pub fn c_tool_path(name: &str) -> Option<PathBuf> {
-    c_tool_path_under(
-        name,
-        std::env::var_os("LIBJPEG_TURBO_PREFIX")
-            .map(PathBuf::from)
-            .as_deref(),
-    )
-}
+/// Lives in its own file because `examples/corpus_test.rs` and
+/// `examples/generate_corpus.rs` include it by path: they are binaries, so they
+/// cannot reach a test-only module, and each of them used to carry a private
+/// copy that ignored `LIBJPEG_TURBO_PREFIX` entirely (P4-130).
+pub mod oracle_prefix;
 
-/// [`c_tool_path`] with the oracle prefix passed in rather than read from the
-/// environment.
-///
-/// `cargo` runs `#[test]`s as parallel threads of one process, so a test that
-/// set `LIBJPEG_TURBO_PREFIX` to exercise the override would race every other
-/// test in the binary. Taking the prefix as an argument makes both branches
-/// deterministically reachable.
-///
-/// An explicit prefix is **exclusive**: if the tool is not under it, the answer
-/// is `None`. Falling back would let a leg that claims to measure one release
-/// silently measure another and report green.
-pub fn c_tool_path_under(name: &str, oracle_prefix: Option<&Path>) -> Option<PathBuf> {
-    if let Some(prefix) = oracle_prefix {
-        let pinned: PathBuf = prefix.join("bin").join(name);
-        return pinned.exists().then_some(pinned);
-    }
-    let homebrew: PathBuf = PathBuf::from(format!("/opt/homebrew/bin/{}", name));
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg(name)
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
+// `#![allow(dead_code)]` above covers unused *definitions*; a re-export that a
+// given test binary does not name is an unused *import*, a different lint. Every
+// binary including this module gets the whole of it, so silencing it here is the
+// same allowance the module already makes for its functions.
+#[allow(unused_imports)]
+pub use oracle_prefix::{c_tool_path, c_tool_path_under};
 
 /// Locate the djpeg binary. Returns `None` when not found.
 pub fn djpeg_path() -> Option<PathBuf> {

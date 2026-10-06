@@ -6,7 +6,7 @@
 //! remove all image data".
 //!
 //! Upstream never errors here. `trim_right_edge` and `trim_bottom_edge`
-//! (transupp.c:1570-1592) each open with `if (MCU_cols > 0 && …)` /
+//! (transupp.c:1576-1598) each open with `if (MCU_cols > 0 && …)` /
 //! `if (MCU_rows > 0 && …)`, so an axis with less than one whole iMCU is simply
 //! left untrimmed. `jpegtran -trim -flip vertical` on this exact input returns
 //! the full 35x27.
@@ -56,7 +56,7 @@ const EXPECTED: &[(TransformOp, &str, usize, usize)] = &[
     (TransformOp::HFlip, "hflip", 32, 27),
     // Trims the source height only — which the guard leaves alone.
     (TransformOp::VFlip, "vflip", 35, 27),
-    // Trims neither: transpose never trims (transupp.c:1873).
+    // Trims neither: transpose never trims (transupp.c:1879).
     (TransformOp::Transpose, "transpose", 27, 35),
     // Output width comes from source height (untrimmable), so nothing changes.
     (TransformOp::Rot90, "rot90", 27, 35),

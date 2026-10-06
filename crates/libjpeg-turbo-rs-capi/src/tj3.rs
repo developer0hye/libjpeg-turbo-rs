@@ -32,7 +32,7 @@ pub(crate) struct TjInstance {
     pub(crate) last_error_code: c_int,
     /// Upstream registers marker processors on the handle's shared dinfo the
     /// first time a transform batch saves markers (`jcopy_markers_setup`,
-    /// `turbojpeg.c:2976-2979`), and there is no unregister API — the
+    /// `turbojpeg.c:2991-2994`), and there is no unregister API — the
     /// registration outlives `jpeg_abort_decompress` for the handle's whole
     /// life. The legacy NOREALLOC bridge consults this to tell a *cold*
     /// handle (the capacity pre-read starves marker saving — the P4-156
@@ -83,9 +83,9 @@ impl TjInstance {
 /// TJSAMP_UNKNOWN`; the lossy compress entries refuse until the caller
 /// supplies both (`turbojpeg-mp.c:95-98` — skipped entirely when
 /// `TJPARAM_LOSSLESS` is set), the YUV compress entries refuse
-/// unconditionally (`turbojpeg.c:1347-1350` — YUV compress is inherently
+/// unconditionally (`turbojpeg.c:1350-1353` — YUV compress is inherently
 /// lossy), and the YUV encode/decode entries need only the subsampling
-/// (`turbojpeg.c:1592-1593`, `:2578-2579`). Runs after argument validation,
+/// (`turbojpeg.c:1597-1598`, `:2589-2590`). Runs after argument validation,
 /// which is upstream's order. Returns `false` with the error stashed.
 pub(crate) fn require_specified(
     inst: &mut TjInstance,

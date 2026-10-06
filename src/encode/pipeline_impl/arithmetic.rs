@@ -213,7 +213,7 @@ fn compress_arithmetic_inner(
     let fdct_quantize_fn: fn(&mut [i16; 64], &QuantDivisors, &mut [i16; 64]) = match dct_method {
         DctMethod::IsLow => enc_simd.fdct_quantize,
         DctMethod::IsFast => crate::simd::scalar::scalar_fdct_ifast_quantize,
-        DctMethod::Float => crate::simd::scalar::scalar_fdct_float_quantize,
+        DctMethod::Float => enc_simd.fdct_float_quantize,
     };
     let mut all_blocks: Vec<[i16; 64]> = Vec::new();
     let mut prev_dc_y_gather: i16 = 0;
@@ -858,7 +858,7 @@ fn compress_arithmetic_progressive_inner(
     let fdct_quantize_fn: fn(&mut [i16; 64], &QuantDivisors, &mut [i16; 64]) = match dct_method {
         DctMethod::IsLow => enc_simd.fdct_quantize,
         DctMethod::IsFast => crate::simd::scalar::scalar_fdct_ifast_quantize,
-        DctMethod::Float => crate::simd::scalar::scalar_fdct_float_quantize,
+        DctMethod::Float => enc_simd.fdct_float_quantize,
     };
     let y_width_in_blocks: usize = width.div_ceil(8);
     let y_height_in_blocks: usize = height.div_ceil(8);

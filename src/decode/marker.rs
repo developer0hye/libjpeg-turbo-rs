@@ -96,10 +96,25 @@ pub struct JpegMetadata {
     pub entropy_data_offset: usize,
     /// For progressive: all scans with table snapshots.
     pub scans: Vec<ScanInfo>,
-    /// True if an Adobe APP14 marker was found.
+    /// True if an Adobe APP14 marker was found anywhere in the stream
+    /// (before or after the first SOS). Mirrors libjpeg's
+    /// `cinfo.saw_Adobe_marker`, which `examine_app14` keeps updating
+    /// between scans.
     pub saw_adobe_marker: bool,
-    /// Adobe color transform code (0 = CMYK/RGB, 1 = YCbCr, 2 = YCCK).
+    /// Adobe color transform code (0 = CMYK/RGB, 1 = YCbCr, 2 = YCCK) from
+    /// the last Adobe APP14 seen, matching `cinfo.Adobe_transform`.
     pub adobe_transform: u8,
+    /// Adobe transform byte as it stood when the first SOS was reached,
+    /// `None` if no Adobe APP14 preceded it. libjpeg classifies the
+    /// colorspace exactly once, in `default_decompress_parms` at
+    /// `JPEG_REACHED_SOS` (`jdapimin.c:137`), so an Adobe marker that
+    /// only appears between scans never changes `jpeg_color_space`;
+    /// this is the value that classification must read (P4-181).
+    pub adobe_transform_at_first_sos: Option<u8>,
+    /// `saw_jfif_marker` as it stood when the first SOS was reached —
+    /// the JFIF input to libjpeg's one-time colorspace classification,
+    /// see `adobe_transform_at_first_sos`.
+    pub saw_jfif_marker_at_first_sos: bool,
     /// ICC profile chunks from APP2 markers (reassembled via `common::icc`).
     pub icc_chunks: Vec<IccChunk>,
     /// Raw EXIF TIFF data from the first APP1 marker (after "Exif\0\0" header).
@@ -248,6 +263,8 @@ impl<'a> MarkerReader<'a> {
         let mut scans: Vec<ScanInfo> = Vec::new();
         let mut saw_adobe_marker: bool = false;
         let mut adobe_transform: u8 = 0;
+        let mut adobe_transform_at_first_sos: Option<u8> = None;
+        let mut saw_jfif_marker_at_first_sos: bool = false;
         let mut icc_chunks: Vec<IccChunk> = Vec::new();
         let mut exif_data: Option<Vec<u8>> = None;
         let mut xmp_data: Option<Vec<u8>> = None;
@@ -406,6 +423,13 @@ impl<'a> MarkerReader<'a> {
                         }
                     }
                     let offset = self.pos;
+                    if scans.is_empty() {
+                        // libjpeg runs `default_decompress_parms` once, when
+                        // the first SOS is reached; markers between later
+                        // scans update `saw_*` but never re-classify.
+                        adobe_transform_at_first_sos = saw_adobe_marker.then_some(adobe_transform);
+                        saw_jfif_marker_at_first_sos = saw_jfif_marker;
+                    }
                     scans.push(ScanInfo {
                         header,
                         data_offset: offset,
@@ -661,6 +685,8 @@ impl<'a> MarkerReader<'a> {
             scans,
             saw_adobe_marker,
             adobe_transform,
+            adobe_transform_at_first_sos,
+            saw_jfif_marker_at_first_sos,
             icc_chunks,
             exif_data,
             xmp_data,

@@ -534,8 +534,22 @@ pub fn fdct_float(input: &[i16; 64], output: &mut [i32; 64]) {
 /// nudge the occasional quantized coefficient onto the wrong side of the
 /// `(int)(temp + 16384.5)` rounding boundary, breaking byte-parity with
 /// `cjpeg -dct float`.
-#[allow(clippy::approx_constant)]
 pub fn fdct_float_workspace(data: &mut [f32; 64]) {
+    fdct_float_workspace_body(data);
+}
+
+/// The body of [`fdct_float_workspace`], `#[inline(always)]` so that a
+/// `#[target_feature(enable = "fma")]` caller re-emits it under its own
+/// feature context (P4-133, #464): there the `__mul_add_compat` rotators —
+/// `f32::mul_add` on `std` — become one `vfmadd` each instead of a libm
+/// `fmaf` call. The result is bit-identical either way, because `mul_add`
+/// is a single-rounding fused operation by contract; only the emission
+/// changes, never the coefficients. (A `no_std` build routes both copies
+/// through the unfused `float_compat` shim, so they stay identical to each
+/// other there too, though not to `cjpeg -dct float`.)
+#[allow(clippy::approx_constant)]
+#[inline(always)]
+pub(crate) fn fdct_float_workspace_body(data: &mut [f32; 64]) {
     // Cosine constants taken verbatim from libjpeg-turbo `jfdctflt.c` so that
     // `0.707106781_f64 as f32` matches `(FAST_FLOAT)0.707106781` exactly.
     // Using `f64::consts::FRAC_1_SQRT_2` would round identically here, but

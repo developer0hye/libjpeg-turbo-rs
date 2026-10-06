@@ -48,6 +48,7 @@ pub fn encoder_routines() -> EncoderSimdRoutines {
     EncoderSimdRoutines {
         rgb_to_ycbcr_row: color_encode::neon_rgb_to_ycbcr_row,
         fdct_quantize: neon_fdct_quantize,
+        fdct_float_quantize: crate::simd::scalar::scalar_fdct_float_quantize,
     }
 }
 

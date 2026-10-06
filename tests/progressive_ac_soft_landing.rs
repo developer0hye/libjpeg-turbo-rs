@@ -23,8 +23,9 @@
 //!    most carrying 1-byte entropy) where pixels diverged from djpeg
 //!    by max abs diff = 61 / mean ~4.34 / 72 of 768 bytes off by >16.
 //!
-//! Both fixtures are pinned here so a future "tighten the bounds check"
-//! refactor cannot silently re-introduce the divergence.
+//! Fixture 2 is pinned here so a future "tighten the bounds check"
+//! refactor cannot silently re-introduce the divergence. Fixture 1 is not
+//! in this file: the AC-first soft-landing has no pinned regression case.
 
 use libjpeg_turbo_rs::{Decoder, PixelFormat};
 use std::io::Write;

@@ -89,7 +89,7 @@ const YUV_PLANE_COUNT: usize = 3;
 ///
 /// Returns 0 for a component index the model has no plane for, which is how
 /// `tj3YUVPlaneWidth` reports an invalid argument
-/// (`references/libjpeg-turbo/src/turbojpeg.c:1123-1125`). A 4-component
+/// (`references/libjpeg-turbo/src/turbojpeg.c:1126-1128`). A 4-component
 /// CMYK/YCCK frame's fourth component is **not** a chroma plane, so callers
 /// must not size it through here — see `decompress_to_yuv_planes`, which sizes
 /// it at full resolution.

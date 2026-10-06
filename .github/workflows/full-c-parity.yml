@@ -39,6 +39,9 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+permissions:
+  contents: read
+
 jobs:
   full-c-parity-x86:
     name: Full C Parity (x86_64, oracle 3.1.4.1)
@@ -67,16 +70,16 @@ jobs:
           /usr/local/bin/cjpeg -version 2>&1 | grep -q "version 3.1.4.1"
           /usr/local/bin/jpegtran -version 2>&1 | grep -q "version 3.1.4.1"
       - name: c_tjdecomptest_full
-        run: cargo test --features full-c-parity --test c_tjdecomptest -- c_tjdecomptest_full
+        run: cargo test --locked --features full-c-parity --test c_tjdecomptest -- c_tjdecomptest_full
         timeout-minutes: 10
       - name: c_tjcomptest_full
-        run: cargo test --features full-c-parity --test c_tjcomptest
+        run: cargo test --locked --features full-c-parity --test c_tjcomptest
         timeout-minutes: 10
       - name: c_tjtrantest_full
-        run: cargo test --features full-c-parity --test c_tjtrantest
+        run: cargo test --locked --features full-c-parity --test c_tjtrantest
         timeout-minutes: 10
       - name: c_croptest_full
-        run: cargo test --features full-c-parity --test c_croptest
+        run: cargo test --locked --features full-c-parity --test c_croptest
         timeout-minutes: 10
 
   full-c-parity-x86-current-oracle:
@@ -110,16 +113,16 @@ jobs:
           /opt/libjpeg-turbo/bin/cjpeg -version 2>&1 | grep -q "version 3.2.0"
           /opt/libjpeg-turbo/bin/jpegtran -version 2>&1 | grep -q "version 3.2.0"
       - name: c_tjdecomptest_full
-        run: cargo test --features full-c-parity --test c_tjdecomptest -- c_tjdecomptest_full
+        run: cargo test --locked --features full-c-parity --test c_tjdecomptest -- c_tjdecomptest_full
         timeout-minutes: 10
       - name: c_tjcomptest_full
-        run: cargo test --features full-c-parity --test c_tjcomptest
+        run: cargo test --locked --features full-c-parity --test c_tjcomptest
         timeout-minutes: 10
       - name: c_tjtrantest_full
-        run: cargo test --features full-c-parity --test c_tjtrantest
+        run: cargo test --locked --features full-c-parity --test c_tjtrantest
         timeout-minutes: 10
       - name: c_croptest_full
-        run: cargo test --features full-c-parity --test c_croptest
+        run: cargo test --locked --features full-c-parity --test c_croptest
         timeout-minutes: 10
 
   # The aarch64 pair. These are separate measurements, not repeats of the
@@ -161,16 +164,16 @@ jobs:
           /tmp/ljt3141/prefix/bin/cjpeg -version 2>&1 | grep -q "version 3.1.4.1"
           /tmp/ljt3141/prefix/bin/jpegtran -version 2>&1 | grep -q "version 3.1.4.1"
       - name: c_tjdecomptest_full
-        run: cargo test --features full-c-parity --test c_tjdecomptest -- c_tjdecomptest_full
+        run: cargo test --locked --features full-c-parity --test c_tjdecomptest -- c_tjdecomptest_full
         timeout-minutes: 10
       - name: c_tjcomptest_full
-        run: cargo test --features full-c-parity --test c_tjcomptest
+        run: cargo test --locked --features full-c-parity --test c_tjcomptest
         timeout-minutes: 10
       - name: c_tjtrantest_full
-        run: cargo test --features full-c-parity --test c_tjtrantest
+        run: cargo test --locked --features full-c-parity --test c_tjtrantest
         timeout-minutes: 10
       - name: c_croptest_full
-        run: cargo test --features full-c-parity --test c_croptest
+        run: cargo test --locked --features full-c-parity --test c_croptest
         timeout-minutes: 10
 
   full-c-parity-arm64-current-oracle:
@@ -200,14 +203,14 @@ jobs:
           /tmp/ljt320/prefix/bin/cjpeg -version 2>&1 | grep -q "version 3.2.0"
           /tmp/ljt320/prefix/bin/jpegtran -version 2>&1 | grep -q "version 3.2.0"
       - name: c_tjdecomptest_full
-        run: cargo test --features full-c-parity --test c_tjdecomptest -- c_tjdecomptest_full
+        run: cargo test --locked --features full-c-parity --test c_tjdecomptest -- c_tjdecomptest_full
         timeout-minutes: 10
       - name: c_tjcomptest_full
-        run: cargo test --features full-c-parity --test c_tjcomptest
+        run: cargo test --locked --features full-c-parity --test c_tjcomptest
         timeout-minutes: 10
       - name: c_tjtrantest_full
-        run: cargo test --features full-c-parity --test c_tjtrantest
+        run: cargo test --locked --features full-c-parity --test c_tjtrantest
         timeout-minutes: 10
       - name: c_croptest_full
-        run: cargo test --features full-c-parity --test c_croptest
+        run: cargo test --locked --features full-c-parity --test c_croptest
         timeout-minutes: 10

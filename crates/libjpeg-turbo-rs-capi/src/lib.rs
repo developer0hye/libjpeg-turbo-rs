@@ -100,9 +100,10 @@
 //!   alias the pointed-to memory. Source and destination buffers must not
 //!   overlap unless a function documents otherwise.
 //! - **Threading.** A single `tjhandle` or `j_common_ptr` must not be used
-//!   concurrently from two threads. Distinct instances are independent. The
-//!   classic `jpeg_*` state additionally carries a per-`cinfo` thread-affinity
-//!   constraint tracked as P4-132.
+//!   concurrently from two threads. Distinct instances are independent, and
+//!   an instance may be handed from one thread to another between calls —
+//!   its private state travels with it (P4-132). The full contract is the
+//!   "Threading contract" section of `docs/ABI_COMPATIBILITY.md`.
 //!
 //! ## What this crate does and does not guarantee
 //!

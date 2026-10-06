@@ -1,0 +1,6 @@
+# The staging scripts run under Git for Windows' bash on the Windows legs of
+# ci.yml (`capi-abi-checks`) and release.yml (`native-artifacts`) — P4-131.
+# Git for Windows defaults to `core.autocrlf=true`, which would check them out
+# CRLF, and bash then reads the `\r` as part of every command name.
+*.sh text eol=lf
+.githooks/* text eol=lf

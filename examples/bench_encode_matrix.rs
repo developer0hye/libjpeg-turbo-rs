@@ -1,7 +1,35 @@
 /// Standalone encoding benchmark matrix.
 /// Usage: cargo run --release --example bench_encode_matrix
+///
+/// `BENCH_DCT_METHOD=islow|ifast|float` selects the forward DCT (default
+/// `islow`, the same default `compress()` uses). The float method is the one
+/// path where FMA codegen matters (P4-133 / #464), so the portable-vs-native
+/// A/B runs the matrix once per method from the same binary.
 fn main() {
-    use libjpeg_turbo_rs::{PixelFormat, Subsampling};
+    use libjpeg_turbo_rs::{DctMethod, Encoder, PixelFormat, Subsampling};
+
+    let dct_method: DctMethod = match std::env::var("BENCH_DCT_METHOD").as_deref() {
+        Err(_) | Ok("") | Ok("islow") => DctMethod::IsLow,
+        Ok("ifast") => DctMethod::IsFast,
+        Ok("float") => DctMethod::Float,
+        Ok(other) => panic!("BENCH_DCT_METHOD must be islow, ifast or float, got {other:?}"),
+    };
+    let dct_label: &str = match dct_method {
+        DctMethod::IsLow => "islow",
+        DctMethod::IsFast => "ifast",
+        DctMethod::Float => "float",
+    };
+    // Quality stays 75 on purpose: below 50 the builder takes the
+    // force_baseline-aware quantization path that `compress()` never did,
+    // and the numbers stop being comparable with experiments/encode.tsv.
+    let encode = |pixels: &[u8], width: usize, height: usize, subsampling: Subsampling| {
+        Encoder::new(pixels, width, height, PixelFormat::Rgb)
+            .quality(75)
+            .subsampling(subsampling)
+            .dct_method(dct_method)
+            .encode()
+            .unwrap()
+    };
 
     struct EncodeCase {
         fixture: &'static str,
@@ -71,6 +99,7 @@ fn main() {
         },
     ];
 
+    println!("dct_method: {dct_label}");
     println!(
         "{:<50} {:>10} {:>12} {:>8}",
         "Case", "Size", "Time", "Iters"
@@ -93,29 +122,13 @@ fn main() {
 
         // Warmup
         for _ in 0..100 {
-            let _ = libjpeg_turbo_rs::compress(
-                pixels,
-                width,
-                height,
-                PixelFormat::Rgb,
-                75,
-                case.subsampling,
-            )
-            .unwrap();
+            let _ = encode(pixels, width, height, case.subsampling);
         }
 
         // Benchmark
         let start = std::time::Instant::now();
         for _ in 0..case.iters {
-            let result = libjpeg_turbo_rs::compress(
-                pixels,
-                width,
-                height,
-                PixelFormat::Rgb,
-                75,
-                case.subsampling,
-            )
-            .unwrap();
+            let result = encode(pixels, width, height, case.subsampling);
             std::hint::black_box(&result);
         }
         let elapsed = start.elapsed();

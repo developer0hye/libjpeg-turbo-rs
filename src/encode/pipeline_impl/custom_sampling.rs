@@ -133,7 +133,7 @@ pub fn compress_custom_sampling(
     let fdct_quantize_fn = enc_simd.fdct_quantize;
 
     // Entropy encode all MCUs
-    let mut bit_writer: BitWriter = BitWriter::new(width * height);
+    let mut bit_writer: BitWriter = BitWriter::for_frame(width, height);
     let mut prev_dc_y: i16 = 0;
     let mut prev_dc_cb: i16 = 0;
     let mut prev_dc_cr: i16 = 0;

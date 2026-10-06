@@ -18,8 +18,8 @@
 //! Because the struct has no room for Rust-owned state (adding a
 //! trailing field would overflow the caller's
 //! `sizeof(struct jpeg_decompress_struct)` allocation), the private
-//! Rust-side state lives in a thread-local side table keyed by the
-//! `cinfo` pointer and is freed in `jpeg_destroy_decompress`.
+//! Rust-side state hangs off the opaque `master` slot upstream reserves for
+//! its own per-instance state, and is freed in `jpeg_destroy_decompress`.
 
 use std::ffi::{c_int, c_long, c_short, c_uint, c_void, CString};
 
@@ -193,9 +193,8 @@ pub struct JpegMarkerStructPublic {
 // (historically at offset ~524 on LP64 targets), which stock `djpeg`
 // validates before producing output.
 //
-// Private Rust-side state (`DecompressPrivate`) is held in a
-// thread-local side table keyed by the `cinfo` pointer; see
-// `private_state_for`.
+// Private Rust-side state (`DecompressPrivate`) is boxed behind the opaque
+// `master` field; see `decompress_private_raw`.
 
 /// Byte-exact ABI mirror of libjpeg's `struct jpeg_decompress_struct`.
 #[repr(C)]
@@ -381,67 +380,129 @@ const DSTATE_BUFPOST: c_int = 208; // looking for SOS/EOI in jpeg_finish_output
 const DSTATE_RDCOEFS: c_int = 209; // reading file in jpeg_read_coefficients
 const DSTATE_STOPPING: c_int = 210; // looking for EOI in jpeg_finish_decompress
 
+/// Live `DecompressPrivate` instances, for the leak assertions in
+/// `tests/capi_thread_affinity.rs` (P4-132, #463). Counted at construction
+/// and in `Drop`, so it is right wherever the box is created or released.
+static LIVE_DECOMPRESS_PRIVATE: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Live `CompressPrivate` instances; the compress-side twin of
+/// [`LIVE_DECOMPRESS_PRIVATE`].
+static LIVE_COMPRESS_PRIVATE: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Test hook (P4-132, #463): how many decompressors currently own private
+/// state. A create on one thread followed by a destroy on another must bring
+/// this back to where it started. Not part of the C ABI: the symbol is not
+/// `extern "C"` and is not exported from the cdylib.
+#[doc(hidden)]
+pub fn live_decompress_private_count_for_tests() -> usize {
+    LIVE_DECOMPRESS_PRIVATE.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Compress-side twin of [`live_decompress_private_count_for_tests`].
+#[doc(hidden)]
+pub fn live_compress_private_count_for_tests() -> usize {
+    LIVE_COMPRESS_PRIVATE.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 // ---------------------------------------------------------------------------
-// Side table for Rust-owned `DecompressPrivate` state.
+// Rust-owned `DecompressPrivate` state hangs off `cinfo->master`.
 //
 // `JpegDecompressPublic` mirrors the real libjpeg struct byte-for-byte, so
 // we cannot append a trailing `priv_ptr` field — the caller allocates only
 // `sizeof(struct jpeg_decompress_struct)` bytes, and writing past that
-// boundary would corrupt stack/heap memory. Instead we key the private
-// state on the `cinfo` pointer via a thread-local map, created on
-// `jpeg_CreateDecompress` and destroyed on `jpeg_destroy_decompress`.
+// boundary would corrupt stack/heap memory. Upstream keeps its own
+// per-instance state behind the opaque `struct jpeg_decomp_master *master`
+// slot (`jdmaster.c`), which no consumer dereferences, so the box lives
+// there — exactly as the compress side keeps `CompressPrivate` behind
+// `jpeg_compress_struct::master`. Created in `jpeg_CreateDecompress`,
+// released in `jpeg_destroy_decompress` and nowhere else.
+//
+// P4-132 (#463): this used to be a `thread_local!` map keyed by the `cinfo`
+// address. That made a `cinfo` unusable on any thread but its creator, and
+// dropped its state when that thread exited — upstream's contract allows
+// ownership transfer between threads, and FFmpeg's frame-threaded path does
+// it. A field on the object moves with the object, costs nothing to look
+// up, and leaves no key to collide when an address is reused: the destroy
+// nulls the slot before any later create can fill it.
 // ---------------------------------------------------------------------------
 
-thread_local! {
-    static DECOMPRESS_PRIVATE_STATE: std::cell::RefCell<
-        std::collections::HashMap<usize, Box<DecompressPrivate>>,
-    > = std::cell::RefCell::new(std::collections::HashMap::new());
-}
-
-fn decompress_private_key(cinfo: *const c_void) -> usize {
-    cinfo as usize
-}
-
 fn decompress_private_insert(cinfo: *mut c_void, private: Box<DecompressPrivate>) {
-    let key: usize = decompress_private_key(cinfo);
-    DECOMPRESS_PRIVATE_STATE.with(|s| {
-        s.borrow_mut().insert(key, private);
-    });
+    // SAFETY: only `jpeg_CreateDecompress` calls this, after the ABI guards
+    // have established that `cinfo` is a full, writable mirror.
+    unsafe {
+        (*(cinfo as *mut JpegDecompressPublic)).master = Box::into_raw(private) as *mut c_void;
+    }
 }
 
+/// Take the private state back from `cinfo`, nulling the slot. The single
+/// release point: after this, `decompress_private_raw` reports NULL.
 fn decompress_private_remove(cinfo: *mut c_void) -> Option<Box<DecompressPrivate>> {
-    let key: usize = decompress_private_key(cinfo);
-    DECOMPRESS_PRIVATE_STATE.with(|s| s.borrow_mut().remove(&key))
+    let raw: *mut c_void = decompress_private_raw(cinfo);
+    if raw.is_null() {
+        return None;
+    }
+    // SAFETY: `raw` was produced by `Box::into_raw` in
+    // `decompress_private_insert` and has not been released — the slot is
+    // nulled here, in the only place that releases it.
+    unsafe {
+        (*(cinfo as *mut JpegDecompressPublic)).master = std::ptr::null_mut();
+        Some(Box::from_raw(raw as *mut DecompressPrivate))
+    }
 }
 
 /// Execute `f` with a mutable borrow on the private state for `cinfo`.
 /// Returns `None` if no state was registered (caller forgot to invoke
 /// `jpeg_CreateDecompress`, or is operating on a destroyed handle).
-#[allow(dead_code)]
+///
+/// Used by the resync path's `store_resync_discarded` and
+/// `resync_to_restart_impl`; it carried a stale `#[allow(dead_code)]` from
+/// before those call sites existed, which the P4-141 criterion-4 inventory
+/// mistook for evidence that the function was unreachable.
 fn with_decompress_private<F, R>(cinfo: *mut c_void, f: F) -> Option<R>
 where
     F: FnOnce(&mut DecompressPrivate) -> R,
 {
-    let key: usize = decompress_private_key(cinfo);
-    DECOMPRESS_PRIVATE_STATE.with(|s| {
-        let mut map = s.borrow_mut();
-        map.get_mut(&key).map(|boxed| f(boxed.as_mut()))
-    })
+    let raw: *mut c_void = decompress_private_raw(cinfo);
+    // SAFETY: `raw` is either NULL or the live box installed by
+    // `decompress_private_insert`; the closure's borrow ends before return.
+    unsafe { priv_from_ptr(raw) }.map(f)
 }
 
-/// Raw-pointer accessor for legacy call sites that previously stashed a
-/// `priv_ptr` in the struct. The returned pointer is valid for as long
-/// as the `cinfo` handle exists (i.e., until `jpeg_destroy_decompress`).
+/// Private-state pointer for a `cinfo` the caller already holds a reference
+/// to. The returned pointer is valid for as long as the `cinfo` handle exists
+/// (i.e., until `jpeg_destroy_decompress`).
 ///
-/// Returns NULL when no private state is registered for `cinfo`.
+/// Reads `mem` and `master` *through* `c`. Reading them through the raw
+/// `cinfo` instead would be a parent-tag access that invalidates `c` under
+/// Stacked Borrows, and every entry point goes on to use `c` — Miri flags the
+/// very next reborrow (found in review of P4-132). Use
+/// [`decompress_private_raw`] only where no reference exists.
+///
+/// Returns NULL when the object was never created or was already destroyed:
+/// `mem` is NULL on a zeroed object and on one a rejected create left behind
+/// (P4-110), which are the reachable cases. A caller that hands over
+/// uninitialised memory violates the pointer contract, exactly as it does on
+/// the compress side and upstream.
+fn decompress_private_of(c: &JpegDecompressPublic) -> *mut c_void {
+    if c.mem.is_null() {
+        return std::ptr::null_mut();
+    }
+    c.master
+}
+
+/// [`decompress_private_of`] for the places that hold only the raw `cinfo`:
+/// the single release point and the ABI-visible source-manager callbacks,
+/// which by the P4-109 discipline form no reference over the caller's
+/// struct at all.
 fn decompress_private_raw(cinfo: *mut c_void) -> *mut c_void {
-    let key: usize = decompress_private_key(cinfo);
-    DECOMPRESS_PRIVATE_STATE.with(|s| {
-        s.borrow_mut()
-            .get_mut(&key)
-            .map(|boxed| boxed.as_mut() as *mut DecompressPrivate as *mut c_void)
-            .unwrap_or(std::ptr::null_mut())
-    })
+    if common_mem_is_null(cinfo, COMMON_MEM_OFFSET) {
+        return std::ptr::null_mut();
+    }
+    // SAFETY: a non-null `mem` means `jpeg_CreateDecompress` wrote the whole
+    // mirror, so `master` lies inside the caller's allocation.
+    unsafe { (*(cinfo as *const JpegDecompressPublic)).master }
 }
 
 /// Source-of-JPEG variants. The memory variant borrows into the caller's
@@ -576,9 +637,8 @@ struct OwnedMarker {
     payload: Box<[u8]>,
 }
 
-/// Rust-side private state reached via the thread-local side table
-/// keyed by the `cinfo` pointer. Owned via `Box`; freed in
-/// `jpeg_destroy_decompress`.
+/// Rust-side private state, boxed behind `JpegDecompressPublic::master`.
+/// Freed in `jpeg_destroy_decompress`.
 struct DecompressPrivate {
     source: JpegSource,
     /// Owned storage backing the caller-visible `JpegSourceMgr`. We keep
@@ -745,10 +805,16 @@ struct DecompressPrivate {
     /// `TRUE` once the EOI marker has been drained into `source`, i.e. the input
     /// is complete and the buffered decode can run.
     eoi_seen: bool,
+    /// Lazily decoded 12-/16-bit samples for the `jpeg12_*` / `jpeg16_*`
+    /// scanline entry points. Used to sit in a second `thread_local!` map
+    /// keyed by this box's address (P4-132, #463); living here it is released
+    /// with the box and moves threads with it.
+    high_precision: HighPrecisionSlot,
 }
 
 impl Default for DecompressPrivate {
     fn default() -> Self {
+        LIVE_DECOMPRESS_PRIVATE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Self {
             source: JpegSource::None,
             source_mgr: None,
@@ -779,12 +845,14 @@ impl Default for DecompressPrivate {
             body_incomplete: false,
             body_scan_cursor: 0,
             eoi_seen: false,
+            high_precision: HighPrecisionSlot::default(),
         }
     }
 }
 
 impl Drop for DecompressPrivate {
     fn drop(&mut self) {
+        LIVE_DECOMPRESS_PRIVATE.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
         // The `jvirt_barray_ptr*` array we returned from
         // `jpeg_read_coefficients` was allocated through this
         // cinfo's `JpegMemoryMgr` (JPOOL_IMAGE) and is freed when the
@@ -839,8 +907,8 @@ unsafe fn cinfo_mut<'a>(cinfo: *mut c_void) -> Option<&'a mut JpegDecompressPubl
     }
 }
 
-/// Dereference the private state for a `cinfo` handle, previously stored
-/// in the thread-local side table on `jpeg_CreateDecompress`.
+/// Dereference the private state for a `cinfo` handle, installed behind
+/// `master` by `jpeg_CreateDecompress`.
 ///
 /// `priv_ptr` is expected to be the value returned by
 /// `decompress_private_raw(cinfo)` — we keep the parameter name for
@@ -852,8 +920,8 @@ unsafe fn cinfo_mut<'a>(cinfo: *mut c_void) -> Option<&'a mut JpegDecompressPubl
 ///
 /// # Safety
 /// `priv_ptr` must either be NULL or point to a live `DecompressPrivate`
-/// whose lifetime is tied to the current `cinfo` handle (see the
-/// thread-local map in [`DECOMPRESS_PRIVATE_STATE`]).
+/// whose lifetime is tied to the current `cinfo` handle (see
+/// [`decompress_private_raw`]).
 unsafe fn priv_from_ptr<'a>(priv_ptr: *mut c_void) -> Option<&'a mut DecompressPrivate> {
     if priv_ptr.is_null() {
         None
@@ -1057,8 +1125,9 @@ unsafe extern "C" fn default_output_message(cinfo: *mut c_void) {
 // Coverage is uneven: `tests/capi_classic_dest_ownership.rs` cross-checks
 // `JERR_BUFFER_SIZE` and `JERR_FILE_WRITE` against a reference v8 build,
 // `tests/capi_classic_lifecycle_pathological.rs` pins `JERR_CANT_SUSPEND`
-// against upstream's own enum, and `JERR_OUT_OF_MEMORY` is unpinned — no test
-// can force the `malloc` failure that reaches it.
+// against upstream's own enum, and `JERR_OUT_OF_MEMORY`'s memory-destination
+// cases (10, 12) are pinned by `tests/capi_alloc_failure_injection.rs`, which
+// forces the `malloc` failure that reaches them (P4-120).
 #[allow(dead_code)]
 /// "DCT coefficient (lossy) or spatial difference (lossless) out of range"
 const JERR_BAD_DCT_COEF: c_int = 6;
@@ -1165,6 +1234,16 @@ fn checked_staging_span(samples_per_row: usize, height: usize, elem_size: usize)
 /// (`jmemmgr.c:364-380`). `JERR_OUT_OF_MEMORY`'s message is
 /// "Insufficient memory (case %d)".
 const OOM_CASE_ALLOC_TOO_LARGE: c_int = 8;
+/// `jdatadst.c:285`: `jpeg_mem_dest`'s initial `OUTPUT_BUF_SIZE` allocation
+/// failed — `ERREXIT1(cinfo, JERR_OUT_OF_MEMORY, 10)`.
+const OOM_CASE_MEM_DEST_INITIAL: c_int = 10;
+/// `jdatadst.c:146`: `empty_mem_output_buffer`'s doubling allocation failed —
+/// `ERREXIT1(cinfo, JERR_OUT_OF_MEMORY, 12)`. Case 10 until 3.2.0 gave the
+/// growth failure its own number.
+const OOM_CASE_MEM_DEST_GROWTH: c_int = 12;
+/// `jdatadst.c:140-141`: the doubling itself would overflow `size_t` —
+/// `ERREXIT1(cinfo, JERR_OUT_OF_MEMORY, 13)`, new in 3.2.0.
+const OOM_CASE_MEM_DEST_GROWTH_OVERFLOW: c_int = 13;
 
 /// `JERR_OUT_OF_MEMORY` case for P4-13's 256 MiB suspended-body cap.
 ///
@@ -1950,8 +2029,8 @@ fn common_mem_is_null(cinfo: *mut c_void, mem_offset: usize) -> bool {
 ///
 /// Populates the caller-allocated `jpeg_decompress_struct` with libjpeg's
 /// standard defaults (as implemented by `default_decompress_parms` in
-/// `references/libjpeg-turbo/src/jdapimin.c`) and registers private
-/// Rust-side state in the thread-local side table.
+/// `references/libjpeg-turbo/src/jdapimin.c`) and installs the private
+/// Rust-side state behind `master`.
 ///
 /// # Safety
 ///
@@ -2140,7 +2219,7 @@ pub unsafe extern "C" fn jpeg_CreateDecompress(
             (&raw mut (*p).cquantize).write(std::ptr::null_mut());
         }
 
-        // Register Rust-side private state in the thread-local side table.
+        // Install the Rust-side private state behind `master`.
         decompress_private_insert(cinfo, Box::default());
     })
 }
@@ -2167,14 +2246,8 @@ pub unsafe extern "C" fn jpeg_destroy_decompress(cinfo: *mut c_void) {
         if common_mem_is_null(cinfo, std::mem::offset_of!(JpegDecompressPublic, mem)) {
             return;
         }
-        // Release the private state from the side table. Drop any
-        // high-precision (12/16-bit) decoded state parked in the thread-local
-        // `HIGH_PRECISION_STATE` map, keyed by the private pointer, before the
-        // box itself goes out of scope.
-        let priv_raw: *mut c_void = decompress_private_raw(cinfo);
-        if !priv_raw.is_null() {
-            hp_drop_for(priv_raw);
-        }
+        // Release the private state — the 12/16-bit decoded state lives
+        // inside it and goes with the box.
         let _dropped: Option<Box<DecompressPrivate>> = decompress_private_remove(cinfo);
         if let Some(c) = unsafe { cinfo_mut(cinfo) } {
             // Release the memory manager and every pool it owns before
@@ -2409,7 +2482,7 @@ pub unsafe extern "C" fn jpeg_mem_src(
             Some(c) => c,
             None => return,
         };
-        let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
+        let priv_ptr: *mut c_void = decompress_private_of(c);
         let priv_state: &mut DecompressPrivate = match unsafe { priv_from_ptr(priv_ptr) } {
             Some(p) => p,
             None => return,
@@ -2493,7 +2566,7 @@ pub unsafe extern "C" fn jpeg_stdio_src(cinfo: *mut c_void, infile: *mut c_void)
             Some(c) => c,
             None => return,
         };
-        let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
+        let priv_ptr: *mut c_void = decompress_private_of(c);
         let priv_state: &mut DecompressPrivate = match unsafe { priv_from_ptr(priv_ptr) } {
             Some(p) => p,
             None => return,
@@ -3124,7 +3197,7 @@ pub unsafe extern "C" fn jpeg_read_header(cinfo: *mut c_void, require_image: CBo
             Some(c) => c,
             None => return JPEG_SUSPENDED,
         };
-        let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
+        let priv_ptr: *mut c_void = decompress_private_of(c);
         let priv_state: &mut DecompressPrivate = match unsafe { priv_from_ptr(priv_ptr) } {
             Some(p) => p,
             None => return JPEG_SUSPENDED,
@@ -3768,7 +3841,7 @@ pub unsafe extern "C" fn jpeg_start_decompress(cinfo: *mut c_void) -> CBoolean {
             Some(c) => c,
             None => return 0,
         };
-        let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
+        let priv_ptr: *mut c_void = decompress_private_of(c);
         let priv_state: &mut DecompressPrivate = match unsafe { priv_from_ptr(priv_ptr) } {
             Some(p) => p,
             None => return 0,
@@ -3851,7 +3924,7 @@ pub unsafe extern "C" fn jpeg_start_decompress(cinfo: *mut c_void) -> CBoolean {
         // `jpeg_start_decompress` with `JERR_NO_BACKING_STORE` — checked
         // before the precision dispatch below so 12/16-bit streams are
         // bounded the same way (upstream's 12-bit build shares
-        // `realize_virt_arrays`, `jdmaster.c:709-714`).
+        // `realize_virt_arrays`, `jdmaster.c:720-725`).
         if classic_budget_refuses_start(&bytes, classic_decode_budget(c), c.buffered_image != 0) {
             raise_classic_error(
                 cinfo,
@@ -4093,7 +4166,7 @@ fn coef_array_geometries(frame: &libjpeg_turbo_rs::FrameHeader) -> Vec<CoefArray
 /// Whole-image coefficient arrays exist only for multi-scan streams —
 /// progressive *or* non-interleaved sequential (`has_multiple_scans`,
 /// `jdinput.c:153-156`) — and for any stream in buffered-image mode
-/// (`jdmaster.c:709-714`, both precisions). Everything else is unbounded;
+/// (`jdmaster.c:720-725`, both precisions). Everything else is unbounded;
 /// bounding baseline would refuse what stock accepts (measured:
 /// classic_budget_oracle vs stock 3.1.4.1).
 ///
@@ -4265,7 +4338,7 @@ pub unsafe extern "C" fn jpeg_read_scanlines(
             Some(c) => c,
             None => return 0,
         };
-        let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
+        let priv_ptr: *mut c_void = decompress_private_of(c);
         let priv_state: &mut DecompressPrivate = match unsafe { priv_from_ptr(priv_ptr) } {
             Some(p) => p,
             None => return 0,
@@ -4477,7 +4550,7 @@ pub unsafe extern "C" fn jpeg_finish_decompress(cinfo: *mut c_void) -> CBoolean 
             let in_pass: bool = state == DSTATE_SCANNING || state == DSTATE_RAW_OK;
             if in_pass && !buffered {
                 if c.output_scanline < c.output_height {
-                    let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
+                    let priv_ptr: *mut c_void = decompress_private_of(c);
                     if let Some(priv_state) = unsafe { priv_from_ptr(priv_ptr) } {
                         raise_classic_error(
                             cinfo,
@@ -4490,7 +4563,7 @@ pub unsafe extern "C" fn jpeg_finish_decompress(cinfo: *mut c_void) -> CBoolean 
                     return 0;
                 }
             } else if !(in_pass && buffered) && state != DSTATE_STOPPING {
-                let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
+                let priv_ptr: *mut c_void = decompress_private_of(c);
                 if let Some(priv_state) = unsafe { priv_from_ptr(priv_ptr) } {
                     raise_classic_error(
                         cinfo,
@@ -4525,7 +4598,7 @@ pub unsafe extern "C" fn jpeg_finish_decompress(cinfo: *mut c_void) -> CBoolean 
         // retries — the repeat call re-enters through the STOPPING arm.
         // `term_source` and the cleanup must not run for a stream that has
         // not reached EOI.
-        let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
+        let priv_ptr: *mut c_void = decompress_private_of(c);
         if let Some(priv_state) = unsafe { priv_from_ptr(priv_ptr) } {
             if priv_state.body_incomplete {
                 return 0;
@@ -4562,7 +4635,7 @@ pub unsafe extern "C" fn jpeg_finish_decompress(cinfo: *mut c_void) -> CBoolean 
         // caller that reuses the same decompressor with a *different*
         // direct source manager would silently re-decode the previous
         // image's bytes.
-        let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
+        let priv_ptr: *mut c_void = decompress_private_of(c);
         if let Some(priv_state) = unsafe { priv_from_ptr(priv_ptr) } {
             priv_state.decoded = None;
             priv_state.source = JpegSource::None;
@@ -4871,7 +4944,7 @@ pub unsafe extern "C" fn jpeg_skip_scanlines(
         // — measured: stock reports `complete 1` after a full-height skip
         // (#468 review probe p3). P4-104.
         if c.output_scanline >= total {
-            let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
+            let priv_ptr: *mut c_void = decompress_private_of(c);
             if let Some(p) = unsafe { priv_from_ptr(priv_ptr) } {
                 if !p.body_incomplete {
                     p.eoi_seen = true;
@@ -4913,7 +4986,7 @@ pub unsafe extern "C" fn jpeg_crop_scanline(
             Some(c) => c,
             None => return,
         };
-        let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
+        let priv_ptr: *mut c_void = decompress_private_of(c);
         let priv_state: &mut DecompressPrivate = match unsafe { priv_from_ptr(priv_ptr) } {
             Some(p) => p,
             None => return,
@@ -4968,11 +5041,11 @@ pub unsafe extern "C" fn jpeg_save_markers(
     length_limit: c_uint,
 ) {
     crate::unwind_guard!((), {
-        let _c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
+        let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
             Some(c) => c,
             None => return,
         };
-        let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
+        let priv_ptr: *mut c_void = decompress_private_of(c);
         let priv_state: &mut DecompressPrivate = match unsafe { priv_from_ptr(priv_ptr) } {
             Some(p) => p,
             None => return,
@@ -5029,11 +5102,11 @@ pub unsafe extern "C" fn jpeg_set_marker_processor(
     routine: Option<MarkerParserFn>,
 ) {
     crate::unwind_guard!((), {
-        let _c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
+        let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
             Some(c) => c,
             None => return,
         };
-        let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
+        let priv_ptr: *mut c_void = decompress_private_of(c);
         let priv_state: &mut DecompressPrivate = match unsafe { priv_from_ptr(priv_ptr) } {
             Some(p) => p,
             None => return,
@@ -5075,11 +5148,11 @@ pub unsafe extern "C" fn jpeg_read_icc_profile(
     icc_data_len: *mut c_uint,
 ) -> CBoolean {
     crate::unwind_guard!(0, {
-        let _c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
+        let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
             Some(c) => c,
             None => return 0,
         };
-        let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
+        let priv_ptr: *mut c_void = decompress_private_of(c);
         let priv_state: &mut DecompressPrivate = match unsafe { priv_from_ptr(priv_ptr) } {
             Some(p) => p,
             None => return 0,
@@ -5159,7 +5232,7 @@ pub unsafe extern "C" fn jpeg_read_coefficients(cinfo: *mut c_void) -> *mut c_vo
             Some(c) => c,
             None => return std::ptr::null_mut(),
         };
-        let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
+        let priv_ptr: *mut c_void = decompress_private_of(c);
         let priv_state: &mut DecompressPrivate = match unsafe { priv_from_ptr(priv_ptr) } {
             Some(p) => p,
             None => return std::ptr::null_mut(),
@@ -5624,7 +5697,7 @@ unsafe fn snapshot_src_for_copy(srcinfo: *mut c_void) -> Option<SrcCriticalSnaps
     // hold the canonical zigzag values — pull from there so jpegtran-style
     // sequences (`read_header → read_coefficients → copy_critical_parameters`)
     // see non-zero quant tables on the dst cinfo.
-    let priv_ptr: *mut c_void = decompress_private_raw(srcinfo);
+    let priv_ptr: *mut c_void = decompress_private_of(src);
     if let Some(p) = unsafe { priv_from_ptr(priv_ptr) } {
         if let Some(handle) = p.coefficients.as_deref() {
             for (tblno, table) in handle.inner.quant_tables.iter().enumerate() {
@@ -5718,85 +5791,52 @@ struct Decoded16 {
     cursor: JDimension,
 }
 
-// High-precision state is hung off a private-state extension pointer.
-// We store it inside a `RefCell` attached to a thread-local because the
-// `DecompressPrivate` struct is already a minimal subset and grows
-// version-sensitively; using a side table keeps the base layout stable.
-thread_local! {
-    static HIGH_PRECISION_STATE: std::cell::RefCell<
-        std::collections::HashMap<usize, HighPrecisionSlot>,
-    > = std::cell::RefCell::new(std::collections::HashMap::new());
-}
-
+/// The 12-/16-bit decoded state, one slot per `DecompressPrivate`
+/// (`DecompressPrivate::high_precision`). Populated lazily by the first
+/// `jpeg12_read_scanlines` / `jpeg16_read_scanlines` call.
 #[derive(Default)]
 struct HighPrecisionSlot {
     dec12: Option<Decoded12>,
     dec16: Option<Decoded16>,
 }
 
-fn hp_key(priv_ptr: *mut c_void) -> usize {
-    priv_ptr as usize
-}
-
 fn hp_take_or_init_12(
-    priv_ptr: *mut c_void,
+    priv_state: &mut DecompressPrivate,
     bytes: &[u8],
 ) -> Result<(), libjpeg_turbo_rs::JpegError> {
-    let key: usize = hp_key(priv_ptr);
-    let already_initialised: bool = HIGH_PRECISION_STATE.with(|s| {
-        s.borrow()
-            .get(&key)
-            .map(|slot| slot.dec12.is_some())
-            .unwrap_or(false)
-    });
-    if already_initialised {
+    if priv_state.high_precision.dec12.is_some() {
         return Ok(());
     }
     let img: libjpeg_turbo_rs::precision::Image12 =
         libjpeg_turbo_rs::precision::decompress_12bit(bytes)?;
-    HIGH_PRECISION_STATE.with(|s| {
-        let mut map = s.borrow_mut();
-        let slot: &mut HighPrecisionSlot = map.entry(key).or_default();
-        slot.dec12 = Some(Decoded12 {
-            data: img.data,
-            width: img.width,
-            height: img.height,
-            num_components: img.num_components,
-            cursor: 0,
-            crop_x: 0,
-            crop_w: img.width as u32,
-            crop_active: false,
-        });
+    priv_state.high_precision.dec12 = Some(Decoded12 {
+        data: img.data,
+        width: img.width,
+        height: img.height,
+        num_components: img.num_components,
+        cursor: 0,
+        crop_x: 0,
+        crop_w: img.width as u32,
+        crop_active: false,
     });
     Ok(())
 }
 
 fn hp_take_or_init_16(
-    priv_ptr: *mut c_void,
+    priv_state: &mut DecompressPrivate,
     bytes: &[u8],
 ) -> Result<(), libjpeg_turbo_rs::JpegError> {
-    let key: usize = hp_key(priv_ptr);
-    let already_initialised: bool = HIGH_PRECISION_STATE.with(|s| {
-        s.borrow()
-            .get(&key)
-            .map(|slot| slot.dec16.is_some())
-            .unwrap_or(false)
-    });
-    if already_initialised {
+    if priv_state.high_precision.dec16.is_some() {
         return Ok(());
     }
     let img: libjpeg_turbo_rs::precision::Image16 =
         libjpeg_turbo_rs::precision::decompress_16bit(bytes)?;
-    HIGH_PRECISION_STATE.with(|s| {
-        let mut map = s.borrow_mut();
-        let slot: &mut HighPrecisionSlot = map.entry(key).or_default();
-        slot.dec16 = Some(Decoded16 {
-            data: img.data,
-            width: img.width,
-            height: img.height,
-            num_components: img.num_components,
-            cursor: 0,
-        });
+    priv_state.high_precision.dec16 = Some(Decoded16 {
+        data: img.data,
+        width: img.width,
+        height: img.height,
+        num_components: img.num_components,
+        cursor: 0,
     });
     Ok(())
 }
@@ -5826,7 +5866,7 @@ pub unsafe extern "C" fn jpeg12_read_scanlines(
             Some(c) => c,
             None => return 0,
         };
-        let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
+        let priv_ptr: *mut c_void = decompress_private_of(c);
         let priv_state: &mut DecompressPrivate = match unsafe { priv_from_ptr(priv_ptr) } {
             Some(p) => p,
             None => return 0,
@@ -5842,18 +5882,17 @@ pub unsafe extern "C" fn jpeg12_read_scanlines(
                 return 0;
             }
         };
-        if let Err(e) = hp_take_or_init_12(priv_ptr, &bytes) {
+        if let Err(e) = hp_take_or_init_12(priv_state, &bytes) {
             priv_state.last_error =
                 CString::new(format!("jpeg12_read_scanlines: {e}")).unwrap_or_default();
             return 0;
         }
-        let produced: JDimension = HIGH_PRECISION_STATE.with(|s| {
-            let mut map = s.borrow_mut();
-            let slot: &mut HighPrecisionSlot =
-                map.get_mut(&hp_key(priv_ptr)).expect("just inserted above");
-            let dec: &mut Decoded12 = slot.dec12.as_mut().expect("just inserted above");
-            read_scanlines_12_inner(dec, scanlines, max_lines)
-        });
+        let dec: &mut Decoded12 = priv_state
+            .high_precision
+            .dec12
+            .as_mut()
+            .expect("just inserted above");
+        let produced: JDimension = read_scanlines_12_inner(dec, scanlines, max_lines);
         // Mirror jdapistd.c: the public scanline counter drives wrppm's main
         // loop (`while output_scanline < output_height`). Not advancing it
         // here causes the caller to spin forever.
@@ -5919,20 +5958,17 @@ pub unsafe extern "C" fn jpeg12_skip_scanlines(
             Some(c) => c,
             None => return 0,
         };
-        let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
-        let skipped: JDimension = HIGH_PRECISION_STATE.with(|s| {
-            let mut map = s.borrow_mut();
-            let slot: Option<&mut HighPrecisionSlot> = map.get_mut(&hp_key(priv_ptr));
-            let dec: &mut Decoded12 = match slot.and_then(|s| s.dec12.as_mut()) {
-                Some(d) => d,
-                None => return 0,
-            };
-            let total: JDimension = dec.height as JDimension;
-            let remaining: JDimension = total.saturating_sub(dec.cursor);
-            let skip: JDimension = std::cmp::min(num_lines, remaining);
-            dec.cursor += skip;
-            skip
-        });
+        let priv_ptr: *mut c_void = decompress_private_of(c);
+        let dec: &mut Decoded12 = match unsafe { priv_from_ptr(priv_ptr) }
+            .and_then(|p| p.high_precision.dec12.as_mut())
+        {
+            Some(d) => d,
+            None => return 0,
+        };
+        let total: JDimension = dec.height as JDimension;
+        let remaining: JDimension = total.saturating_sub(dec.cursor);
+        let skipped: JDimension = std::cmp::min(num_lines, remaining);
+        dec.cursor += skipped;
         c.output_scanline = c.output_scanline.saturating_add(skipped);
         skipped
     })
@@ -5955,38 +5991,36 @@ pub unsafe extern "C" fn jpeg12_crop_scanline(
     width: *mut JDimension,
 ) {
     crate::unwind_guard!((), {
-        let _c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
+        let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
             Some(c) => c,
             None => return,
         };
         if xoffset.is_null() || width.is_null() {
             return;
         }
-        let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
-        HIGH_PRECISION_STATE.with(|s| {
-            let mut map = s.borrow_mut();
-            let slot: Option<&mut HighPrecisionSlot> = map.get_mut(&hp_key(priv_ptr));
-            let dec: &mut Decoded12 = match slot.and_then(|s| s.dec12.as_mut()) {
-                Some(d) => d,
-                None => return,
-            };
-            // SAFETY: caller-supplied pointers checked for NULL above.
-            let (mut x, mut w): (JDimension, JDimension) = unsafe { (*xoffset, *width) };
-            let out_w: JDimension = dec.width as JDimension;
-            if x >= out_w {
-                x = out_w;
-                w = 0;
-            } else if x.saturating_add(w) > out_w {
-                w = out_w - x;
-            }
-            dec.crop_x = x;
-            dec.crop_w = w;
-            dec.crop_active = true;
-            unsafe {
-                *xoffset = x;
-                *width = w;
-            }
-        });
+        let priv_ptr: *mut c_void = decompress_private_of(c);
+        let dec: &mut Decoded12 = match unsafe { priv_from_ptr(priv_ptr) }
+            .and_then(|p| p.high_precision.dec12.as_mut())
+        {
+            Some(d) => d,
+            None => return,
+        };
+        // SAFETY: caller-supplied pointers checked for NULL above.
+        let (mut x, mut w): (JDimension, JDimension) = unsafe { (*xoffset, *width) };
+        let out_w: JDimension = dec.width as JDimension;
+        if x >= out_w {
+            x = out_w;
+            w = 0;
+        } else if x.saturating_add(w) > out_w {
+            w = out_w - x;
+        }
+        dec.crop_x = x;
+        dec.crop_w = w;
+        dec.crop_active = true;
+        unsafe {
+            *xoffset = x;
+            *width = w;
+        }
     })
 }
 
@@ -6013,7 +6047,7 @@ pub unsafe extern "C" fn jpeg16_read_scanlines(
             Some(c) => c,
             None => return 0,
         };
-        let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
+        let priv_ptr: *mut c_void = decompress_private_of(c);
         let priv_state: &mut DecompressPrivate = match unsafe { priv_from_ptr(priv_ptr) } {
             Some(p) => p,
             None => return 0,
@@ -6029,16 +6063,17 @@ pub unsafe extern "C" fn jpeg16_read_scanlines(
                 return 0;
             }
         };
-        if let Err(e) = hp_take_or_init_16(priv_ptr, &bytes) {
+        if let Err(e) = hp_take_or_init_16(priv_state, &bytes) {
             priv_state.last_error =
                 CString::new(format!("jpeg16_read_scanlines: {e}")).unwrap_or_default();
             return 0;
         }
-        let produced: JDimension = HIGH_PRECISION_STATE.with(|s| {
-            let mut map = s.borrow_mut();
-            let slot: &mut HighPrecisionSlot =
-                map.get_mut(&hp_key(priv_ptr)).expect("just inserted above");
-            let dec: &mut Decoded16 = slot.dec16.as_mut().expect("just inserted above");
+        let dec: &mut Decoded16 = priv_state
+            .high_precision
+            .dec16
+            .as_mut()
+            .expect("just inserted above");
+        let produced: JDimension = {
             let row_samples: usize = dec.width * dec.num_components;
             let total: JDimension = dec.height as JDimension;
             let remaining: JDimension = total.saturating_sub(dec.cursor);
@@ -6060,25 +6095,10 @@ pub unsafe extern "C" fn jpeg16_read_scanlines(
             }
             dec.cursor += to_copy;
             to_copy
-        });
+        };
         c.output_scanline = c.output_scanline.saturating_add(produced);
         produced
     })
-}
-
-// ---------------------------------------------------------------------------
-// Update `jpeg_destroy_decompress` side effects: release HP state and
-// drop any buffered coefficient/marker state.
-// ---------------------------------------------------------------------------
-
-/// Hook called from `jpeg_destroy_decompress` to clear per-handle HP state.
-///
-/// Kept as a standalone `fn` (not in the same edit block as the public
-/// destroy) so the drop path stays centralised.
-fn hp_drop_for(priv_ptr: *mut c_void) {
-    HIGH_PRECISION_STATE.with(|s| {
-        s.borrow_mut().remove(&hp_key(priv_ptr));
-    });
 }
 
 // ---------------------------------------------------------------------------
@@ -6148,7 +6168,7 @@ pub unsafe extern "C" fn jpeg_read_raw_data(
             Some(c) => c,
             None => return 0,
         };
-        let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
+        let priv_ptr: *mut c_void = decompress_private_of(c);
         let priv_state: &mut DecompressPrivate = match unsafe { priv_from_ptr(priv_ptr) } {
             Some(p) => p,
             None => return 0,
@@ -6342,7 +6362,7 @@ pub unsafe extern "C" fn jpeg12_read_raw_data(
             Some(c) => c,
             None => return 0,
         };
-        let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
+        let priv_ptr: *mut c_void = decompress_private_of(c);
         let priv_state: &mut DecompressPrivate = match unsafe { priv_from_ptr(priv_ptr) } {
             Some(p) => p,
             None => return 0,
@@ -6625,7 +6645,7 @@ pub unsafe extern "C" fn jpeg_consume_input(cinfo: *mut c_void) -> c_int {
         // the caller's post-header tweaks (out_color_space, comp_info,
         // quantize_colors, …), because that is the state a successful parse
         // lands on from either entry point (P4-104, #468).
-        let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
+        let priv_ptr: *mut c_void = decompress_private_of(c);
 
         // P4-13: a suspending source delivered the header (through the first
         // SOS) but not yet the whole body. Drive the remaining body in lock-step
@@ -6857,7 +6877,7 @@ pub unsafe extern "C" fn jpeg_input_complete(cinfo: *mut c_void) -> CBoolean {
         // `P4_13_MAX_BODY_BYTES` cap exit sets it too, so the documented
         // polling loop terminates even for the caller that ignores the
         // raised error (the hang an earlier eoi-keyed draft had).
-        let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
+        let priv_ptr: *mut c_void = decompress_private_of(c);
         if let Some(p) = unsafe { priv_from_ptr(priv_ptr) } {
             if p.eoi_seen && !p.body_incomplete {
                 return 1;
@@ -6937,7 +6957,7 @@ pub unsafe extern "C" fn jpeg_start_output(cinfo: *mut c_void, scan_number: c_in
         let state: c_int = c.global_state;
         let in_pass: bool = state == DSTATE_SCANNING || state == DSTATE_RAW_OK;
         if !(in_pass && c.buffered_image != 0) {
-            let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
+            let priv_ptr: *mut c_void = decompress_private_of(c);
             if let Some(p) = unsafe { priv_from_ptr(priv_ptr) } {
                 raise_classic_error(
                     cinfo,
@@ -6982,7 +7002,7 @@ pub unsafe extern "C" fn jpeg_finish_output(cinfo: *mut c_void) -> CBoolean {
         let state: c_int = c.global_state;
         let in_pass: bool = state == DSTATE_SCANNING || state == DSTATE_RAW_OK;
         if !(in_pass && c.buffered_image != 0) && state != DSTATE_BUFPOST {
-            let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
+            let priv_ptr: *mut c_void = decompress_private_of(c);
             if let Some(p) = unsafe { priv_from_ptr(priv_ptr) } {
                 raise_classic_error(
                     cinfo,
@@ -7004,7 +7024,7 @@ pub unsafe extern "C" fn jpeg_finish_output(cinfo: *mut c_void) -> CBoolean {
         // reports EOI after the first pass — buffered-image pass semantics
         // belong to P4-13/P4-26. A still-draining P4-13 body keeps the flag
         // with the drain.
-        let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
+        let priv_ptr: *mut c_void = decompress_private_of(c);
         if let Some(p) = unsafe { priv_from_ptr(priv_ptr) } {
             if !p.body_incomplete {
                 p.eoi_seen = true;
@@ -7080,7 +7100,7 @@ pub unsafe extern "C" fn jpeg_abort_compress(cinfo: *mut c_void) {
             p.pending_coef_arrays = std::ptr::null();
             // Upstream keeps the destination manager across abort so a second
             // image can be written without re-calling `jpeg_stdio_dest` /
-            // `jpeg_mem_dest` (jdatadst.c:196-198). Keep it — but clear any
+            // `jpeg_mem_dest` (jdatadst.c:211-213). Keep it — but clear any
             // failure it recorded, or the aborted image's I/O error would be
             // reported against the next one.
             if let Some(ref mut mgr) = p.dest_mgr {
@@ -7115,7 +7135,7 @@ pub unsafe extern "C" fn jpeg_abort_decompress(cinfo: *mut c_void) {
             Some(c) => c,
             None => return,
         };
-        let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
+        let priv_ptr: *mut c_void = decompress_private_of(c);
         if let Some(p) = unsafe { priv_from_ptr(priv_ptr) } {
             p.decoded = None;
             // Unhook the foreign array from the global side table BEFORE
@@ -7650,12 +7670,12 @@ const CSTATE_WRCOEFS: c_int = 103;
 // more than 4-component JPEGs.
 const MAX_COMPS_OWNED: usize = 4;
 
-/// libjpeg's `OUTPUT_BUF_SIZE` (jdatadst.c:38). It is the stdio staging size
+/// libjpeg's `OUTPUT_BUF_SIZE` (jdatadst.c:41). It is the stdio staging size
 /// *and* the initial allocation `jpeg_mem_dest` makes when the caller supplies
 /// no buffer, so the value is observable through `*outsize` and must match.
 const OUTPUT_BUF_SIZE: usize = 4096;
 
-/// Mirror of upstream `my_mem_destination_mgr` (jdatadst.c:43-51).
+/// Mirror of upstream `my_mem_destination_mgr` (jdatadst.c:46-54).
 ///
 /// The ownership split is the whole point: `buffer` is whatever we are
 /// currently filling — possibly memory the *application* owns — while
@@ -7672,7 +7692,7 @@ struct MemDestState {
     bufsize: usize,
 }
 
-/// Mirror of upstream `my_destination_mgr` (jdatadst.c:29-34).
+/// Mirror of upstream `my_destination_mgr` (jdatadst.c:32-37).
 struct StdioDestState {
     outfile: *mut c_void,
 }
@@ -7777,6 +7797,7 @@ struct CompressPrivate {
 
 impl Default for CompressPrivate {
     fn default() -> Self {
+        LIVE_COMPRESS_PRIVATE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Self {
             error_reported: false,
             dest_mgr: None,
@@ -7803,6 +7824,12 @@ impl Default for CompressPrivate {
             raw_plane_heights: Vec::new(),
             raw_plane_buffers_12: Vec::new(),
         }
+    }
+}
+
+impl Drop for CompressPrivate {
+    fn drop(&mut self) {
+        LIVE_COMPRESS_PRIVATE.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -8139,7 +8166,7 @@ pub unsafe extern "C" fn jpeg_destroy_compress(cinfo: *mut c_void) {
 // manager*, reachable only through `cinfo->dest`. Upstream does the same:
 // `my_mem_destination_mgr` embeds the public `jpeg_destination_mgr` as its
 // first member and every callback recovers itself with
-// `(my_mem_dest_ptr)cinfo->dest` (jdatadst.c:43-53, 125).
+// `(my_mem_dest_ptr)cinfo->dest` (jdatadst.c:46-56, 128).
 //
 // Keeping it there rather than in `CompressPrivate` is a soundness
 // requirement, not a stylistic echo. The callbacks run underneath a Rust frame
@@ -8153,13 +8180,13 @@ pub unsafe extern "C" fn jpeg_destroy_compress(cinfo: *mut c_void) {
 ///
 /// `pub_mgr` **must** stay the first field: `cinfo->dest` points at it and the
 /// callbacks cast straight back, mirroring upstream's `struct
-/// jpeg_destination_mgr pub` first member (jdatadst.c:30, 44).
+/// jpeg_destination_mgr pub` first member (jdatadst.c:33, 47).
 #[repr(C)]
 struct OwnedDestMgr {
     pub_mgr: JpegDestinationMgr,
     kind: JpegDest,
     /// stdio staging block; upstream's `JPOOL_IMAGE` `OUTPUT_BUF_SIZE` buffer
-    /// (jdatadst.c:67-69). The memory destination never uses it — like
+    /// (jdatadst.c:70-72). The memory destination never uses it — like
     /// upstream it fills the caller's buffer directly.
     staging: Vec<u8>,
     /// A failure detected inside a callback, as an upstream `JERR_*` code.
@@ -8173,7 +8200,8 @@ struct OwnedDestMgr {
     /// The C-visible behaviour is identical — `jpeg_finish_compress` still
     /// leaves through `error_exit` with the same `msg_code`.
     /// `(code, msg_parm.i[0])` — the parm carries upstream's `ERREXIT1`
-    /// payload where one exists (`jdatadst.c`'s OOM twins are case 10).
+    /// payload where one exists (`jdatadst.c`'s growth failure is case 12,
+    /// its overflow guard case 13).
     pending_error: Option<(c_int, Option<c_int>)>,
 }
 
@@ -8218,12 +8246,12 @@ unsafe fn owned_dest_mut<'a>(cinfo: *mut c_void) -> Option<&'a mut OwnedDestMgr>
     Some(unsafe { &mut *(dest as *mut OwnedDestMgr) })
 }
 
-/// Upstream `init_mem_destination` (jdatadst.c:75-79): deliberately empty.
+/// Upstream `init_mem_destination` (jdatadst.c:78-82): deliberately empty.
 /// `jpeg_mem_dest` has already published `next_output_byte` / `free_in_buffer`,
 /// and re-initialising here would discard bytes on a buffered-image restart.
 unsafe extern "C" fn mem_init_destination(_cinfo: *mut c_void) {}
 
-/// Upstream `empty_mem_output_buffer` (jdatadst.c:120-147): the current buffer
+/// Upstream `empty_mem_output_buffer` (jdatadst.c:123-161): the current buffer
 /// is full, so allocate a double-sized replacement, copy everything written so
 /// far into it, and free *only* a block we allocated ourselves.
 unsafe extern "C" fn mem_empty_output_buffer(cinfo: *mut c_void) -> CBoolean {
@@ -8246,26 +8274,29 @@ unsafe extern "C" fn mem_empty_output_buffer(cinfo: *mut c_void) -> CBoolean {
         return 0;
     }
 
-    // Exact doubling, as upstream (jdatadst.c:128). `bufsize` is never 0 here:
+    // Exact doubling, as upstream (jdatadst.c:142). `bufsize` is never 0 here:
     // `jpeg_mem_dest` replaces a zero-capacity caller buffer with its own
     // `OUTPUT_BUF_SIZE` allocation, so this cannot degenerate to `malloc(0)`.
     let old_bufsize: usize = state.bufsize;
     // `checked_mul`, not saturating: an overflow here must not turn into
-    // `usize::MAX`, which is the worst value to hand an allocator. Both arms
-    // land on upstream's `JERR_OUT_OF_MEMORY` anyway, so the error contract is
-    // unchanged — what changes is that the size is never a wrapped or
-    // saturated lie (P4-139 criterion 3).
+    // `usize::MAX`, which is the worst value to hand an allocator. Upstream
+    // guards the same doubling with `bufsize > SIZE_MAX / 2` and reports it as
+    // `JERR_OUT_OF_MEMORY` case 13 (jdatadst.c:140-141, new in 3.2.0), so the
+    // overflow arm carries that case rather than the allocation failure's.
+    // Either way the size is never a wrapped or saturated lie (P4-139
+    // criterion 3).
     let nextsize: usize = match old_bufsize.checked_mul(2) {
         Some(n) => n,
         None => {
-            owned.pending_error = Some((JERR_OUT_OF_MEMORY, Some(10)));
+            owned.pending_error =
+                Some((JERR_OUT_OF_MEMORY, Some(OOM_CASE_MEM_DEST_GROWTH_OVERFLOW)));
             return 0;
         }
     };
     let nextbuffer: *mut u8 = crate::alloc::libc_malloc(nextsize);
     if nextbuffer.is_null() {
-        // Upstream: ERREXIT1(cinfo, JERR_OUT_OF_MEMORY, 10).
-        owned.pending_error = Some((JERR_OUT_OF_MEMORY, Some(10)));
+        // Upstream: ERREXIT1(cinfo, JERR_OUT_OF_MEMORY, 12) (jdatadst.c:146).
+        owned.pending_error = Some((JERR_OUT_OF_MEMORY, Some(OOM_CASE_MEM_DEST_GROWTH)));
         return 0;
     }
     // SAFETY: `state.buffer` is a live `old_bufsize`-byte block (either the
@@ -8275,7 +8306,7 @@ unsafe extern "C" fn mem_empty_output_buffer(cinfo: *mut c_void) -> CBoolean {
         std::ptr::copy_nonoverlapping(state.buffer, nextbuffer, old_bufsize);
     }
     // Only ever free memory this library allocated. A caller-supplied buffer
-    // stays caller-owned (jdatadst.c:231-233) — freeing it would be a
+    // stays caller-owned (jdatadst.c:245-247) — freeing it would be a
     // free-of-stack/static or a double free once the caller frees it too.
     if !state.newbuffer.is_null() {
         crate::alloc::libc_free(state.newbuffer);
@@ -8290,7 +8321,7 @@ unsafe extern "C" fn mem_empty_output_buffer(cinfo: *mut c_void) -> CBoolean {
     1
 }
 
-/// Upstream `term_mem_destination` (jdatadst.c:176-183): publish the buffer
+/// Upstream `term_mem_destination` (jdatadst.c:190-197): publish the buffer
 /// actually in use and the number of bytes written into it.
 unsafe extern "C" fn mem_term_destination(cinfo: *mut c_void) {
     let owned: &mut OwnedDestMgr = match unsafe { owned_dest_mut(cinfo) } {
@@ -8311,7 +8342,7 @@ unsafe extern "C" fn mem_term_destination(cinfo: *mut c_void) {
     }
 }
 
-/// Upstream `init_destination` (jdatadst.c:61-73): hand the compressor an
+/// Upstream `init_destination` (jdatadst.c:64-76): hand the compressor an
 /// `OUTPUT_BUF_SIZE` staging block to fill.
 unsafe extern "C" fn stdio_init_destination(cinfo: *mut c_void) {
     let owned: &mut OwnedDestMgr = match unsafe { owned_dest_mut(cinfo) } {
@@ -8324,7 +8355,7 @@ unsafe extern "C" fn stdio_init_destination(cinfo: *mut c_void) {
     owned.pub_mgr.free_in_buffer = OUTPUT_BUF_SIZE;
 }
 
-/// Upstream `empty_output_buffer` (jdatadst.c:105-118): write the staging
+/// Upstream `empty_output_buffer` (jdatadst.c:108-121): write the staging
 /// block out and reset it. A short write is `JERR_FILE_WRITE`.
 unsafe extern "C" fn stdio_empty_output_buffer(cinfo: *mut c_void) -> CBoolean {
     let owned: &mut OwnedDestMgr = match unsafe { owned_dest_mut(cinfo) } {
@@ -8360,7 +8391,7 @@ unsafe extern "C" fn stdio_empty_output_buffer(cinfo: *mut c_void) -> CBoolean {
     1
 }
 
-/// Upstream `term_destination` (jdatadst.c:159-174): flush the tail, `fflush`,
+/// Upstream `term_destination` (jdatadst.c:173-188): flush the tail, `fflush`,
 /// and fail on any `ferror` the stream accumulated.
 unsafe extern "C" fn stdio_term_destination(cinfo: *mut c_void) {
     let owned: &mut OwnedDestMgr = match unsafe { owned_dest_mut(cinfo) } {
@@ -8428,7 +8459,7 @@ fn dest_mgr_is_ours(c: &JpegCompressPublic, priv_state: &CompressPrivate) -> boo
 
 /// Reject reusing a destination manager this function did not create.
 ///
-/// Upstream (jdatadst.c:204-212 / 252-257) compares `init_destination` against
+/// Upstream (jdatadst.c:218-226 / 266-271) compares `init_destination` against
 /// its own callback: the manager's private area behind the public struct may be
 /// a different size, so reinterpreting a foreign one would read and write out
 /// of bounds. We compare the manager's *address* against our own box and check
@@ -8501,7 +8532,7 @@ pub unsafe extern "C" fn jpeg_stdio_dest(cinfo: *mut c_void, outfile: *mut c_voi
 /// Install a destination manager that fills the caller's buffer, growing into
 /// library-allocated memory only when the caller's capacity runs out.
 ///
-/// Mirrors upstream `jpeg_mem_dest` (jdatadst.c:236-277) including its
+/// Mirrors upstream `jpeg_mem_dest` (jdatadst.c:250-291) including its
 /// ownership rule: `*outsize` is the caller buffer's **capacity**, and a
 /// caller-supplied buffer is never freed by this library.
 ///
@@ -8531,7 +8562,7 @@ pub unsafe extern "C" fn jpeg_mem_dest(
             None => return,
         };
         if outbuffer.is_null() || outsize.is_null() {
-            // Upstream: ERREXIT(cinfo, JERR_BUFFER_SIZE) (jdatadst.c:242-243).
+            // Upstream: ERREXIT(cinfo, JERR_BUFFER_SIZE) (jdatadst.c:256-257).
             invoke_error_exit(cinfo, JERR_BUFFER_SIZE);
             return;
         }
@@ -8556,11 +8587,11 @@ pub unsafe extern "C" fn jpeg_mem_dest(
         };
         if caller_buffer.is_null() || caller_capacity == 0 {
             // No usable caller buffer: allocate one and publish it right away,
-            // exactly as upstream does (jdatadst.c:267-273). Consumers such as
+            // exactly as upstream does (jdatadst.c:281-287). Consumers such as
             // libtiff read `*outbuffer` before any compression happens.
             let fresh: *mut u8 = crate::alloc::libc_malloc(OUTPUT_BUF_SIZE);
             if fresh.is_null() {
-                invoke_error_exit_parm(cinfo, JERR_OUT_OF_MEMORY, 10);
+                invoke_error_exit_parm(cinfo, JERR_OUT_OF_MEMORY, OOM_CASE_MEM_DEST_INITIAL);
                 return;
             }
             state.newbuffer = fresh;
@@ -8585,7 +8616,7 @@ pub unsafe extern "C" fn jpeg_mem_dest(
         );
         if let Some(ref mut mgr) = priv_state.dest_mgr {
             // Upstream publishes the write cursor from `jpeg_mem_dest` itself,
-            // not from `init_destination` (jdatadst.c:275-276).
+            // not from `init_destination` (jdatadst.c:289-290).
             mgr.pub_mgr.next_output_byte = buffer;
             mgr.pub_mgr.free_in_buffer = bufsize;
         }
@@ -9475,8 +9506,9 @@ fn finish_dest_flush(
         })
         .unwrap_or_default();
         priv_state.error_reported = true;
-        // The OOM twins carry upstream's `ERREXIT1` payload (`jdatadst.c`
-        // case 10) — reachable since P4-120's allocation-failure injection.
+        // The OOM cases carry upstream's `ERREXIT1` payload (`jdatadst.c`
+        // case 12 for the growth failure, 13 for an overflowing doubling);
+        // case 12 is reachable since P4-120's allocation-failure injection.
         match parm {
             Some(p) => invoke_error_exit_parm(c as *mut JpegCompressPublic as *mut c_void, code, p),
             None => invoke_error_exit(c as *mut JpegCompressPublic as *mut c_void, code),
@@ -9515,101 +9547,6 @@ fn inject_markers_after_soi(encoded: &[u8], priv_state: &CompressPrivate) -> Vec
     }
     out.extend_from_slice(&encoded[split..]);
     out
-}
-
-/// Replace any leading JFIF APP0 segment in `encoded` with an Adobe
-/// APP14 marker whose `color_transform` byte equals `transform`. JPEG
-/// forbids JFIF on 4-component images, and a stray JFIF (or a missing
-/// Adobe APP14 when the source had one) makes downstream decoders
-/// mis-detect the colorspace, so the caller decides the transform byte
-/// from `JpegCoefficients::adobe_transform` first and the destination
-/// `jpeg_color_space` only as a fallback.
-fn swap_jfif_for_adobe_app14(encoded: &[u8], transform: u8) -> Vec<u8> {
-    if encoded.len() < 4 || encoded[0] != 0xFF || encoded[1] != 0xD8 {
-        return encoded.to_vec();
-    }
-    let mut out: Vec<u8> = Vec::with_capacity(encoded.len() + 16);
-    out.extend_from_slice(&encoded[..2]);
-    write_adobe_app14_segment(&mut out, transform);
-    let mut p: usize = 2;
-    while p + 4 <= encoded.len() {
-        if encoded[p] != 0xFF {
-            break;
-        }
-        let marker: u8 = encoded[p + 1];
-        let seg_len: usize = ((encoded[p + 2] as usize) << 8) | encoded[p + 3] as usize;
-        if seg_len < 2 || p + 2 + seg_len > encoded.len() {
-            break;
-        }
-        let payload: &[u8] = &encoded[p + 4..p + 2 + seg_len];
-        // Drop only the JFIF APP0; preserve everything else (including
-        // any Adobe APP14 the writer might have emitted, though our
-        // writers do not currently emit one).
-        if marker == 0xE0 && payload.starts_with(b"JFIF\0") {
-            p += 2 + seg_len;
-            continue;
-        }
-        break;
-    }
-    out.extend_from_slice(&encoded[p..]);
-    out
-}
-
-/// Insert an Adobe APP14 segment immediately after SOI plus any
-/// leading JFIF APP0, preserving both. Used when the source had Adobe
-/// APP14 metadata that must survive the transcode but the writer's
-/// auto-emitted JFIF is still legal (3-component output).
-fn inject_adobe_app14_after_jfif(encoded: &[u8], transform: u8) -> Vec<u8> {
-    if encoded.len() < 2 || encoded[0] != 0xFF || encoded[1] != 0xD8 {
-        return encoded.to_vec();
-    }
-    let split: usize = scan_past_jfif_app14(encoded);
-    // If the encoder already emitted an Adobe APP14 (current writers
-    // do not, but be defensive) leave the stream untouched rather than
-    // double-emit.
-    if has_adobe_marker(&encoded[2..split]) {
-        return encoded.to_vec();
-    }
-    let mut out: Vec<u8> = Vec::with_capacity(encoded.len() + 16);
-    out.extend_from_slice(&encoded[..split]);
-    write_adobe_app14_segment(&mut out, transform);
-    out.extend_from_slice(&encoded[split..]);
-    out
-}
-
-/// Return true if `region` contains an APP14 segment whose identifier
-/// is "Adobe". Used to avoid double-emitting an Adobe APP14 when the
-/// writer already produced one.
-fn has_adobe_marker(region: &[u8]) -> bool {
-    let mut p: usize = 0;
-    while p + 9 <= region.len() {
-        if region[p] != 0xFF {
-            break;
-        }
-        let marker: u8 = region[p + 1];
-        let seg_len: usize = ((region[p + 2] as usize) << 8) | region[p + 3] as usize;
-        if seg_len < 2 || p + 2 + seg_len > region.len() {
-            break;
-        }
-        if marker == 0xEE && &region[p + 4..p + 9] == b"Adobe" {
-            return true;
-        }
-        p += 2 + seg_len;
-    }
-    false
-}
-
-/// Emit an Adobe APP14 segment with the given color-transform byte.
-/// Layout matches libjpeg `write_adobe_marker`: identifier `"Adobe"`,
-/// version=100, flags0=0, flags1=0, transform=color_transform.
-fn write_adobe_app14_segment(buf: &mut Vec<u8>, color_transform: u8) {
-    buf.push(0xFF);
-    buf.push(0xEE);
-    let seg_len: u16 = 14;
-    buf.extend_from_slice(&seg_len.to_be_bytes());
-    buf.extend_from_slice(b"Adobe");
-    buf.extend_from_slice(&[0u8, 100u8, 0u8, 0u8, 0u8, 0u8]);
-    buf.push(color_transform);
 }
 
 /// Return the byte offset just past SOI plus any leading JFIF (APP0 with
@@ -11301,13 +11238,11 @@ fn populate_dst_block_dims_for_transform(c: &mut JpegCompressPublic) {
 /// and assemble them into a `JpegCoefficients` ready for re-encoding.
 ///
 /// The returned coefficients carry only the fields the encoder reads
-/// (dimensions, components, quant tables, restart, density). Adobe
-/// transform classification is intentionally left as `None` — the
-/// destination cinfo's `write_Adobe_marker` flag and `jpeg_color_space`
-/// drive the existing 4-component CMYK/YCCK branch in
-/// `run_coefficient_writer_and_flush` to inject Adobe APP14 with the
-/// right transform byte, and any source APP14 transupp wanted to
-/// preserve has already been queued onto `pending_markers` via
+/// (dimensions, components, quant tables, restart, density) plus the
+/// JFIF/Adobe classification inputs derived from the destination cinfo's
+/// `write_JFIF_header` / `write_Adobe_marker` / `jpeg_color_space` — see
+/// the comment at the derivation site below. Any source APP14 transupp
+/// wanted to preserve has already been queued onto `pending_markers` via
 /// `jcopy_markers_execute → jpeg_write_marker`.
 fn materialize_foreign_coef_arrays(
     c: &JpegCompressPublic,
@@ -11527,42 +11462,62 @@ fn materialize_foreign_coef_arrays(
         c.image_height
     };
 
-    // Preserve the source's Adobe APP14 transform classification when
-    // we can recover it AND when the destination output keeps a
-    // colourspace where APP14 is meaningful (3 or 4 components).
+    // The core writers classify the output colorspace from
+    // `saw_jfif_marker` / `adobe_transform` / component IDs exactly as
+    // `jdapimin.c` classifies a source, then emit the JFIF or Adobe
+    // header that `jpeg_set_colorspace` + `write_file_header` would —
+    // the transform byte is derived from that classification (0 for
+    // RGB/CMYK, 2 for YCCK), never copied from the source (P4-181).
     //
-    // The encoder's 4-component CMYK/YCCK branch injects an Adobe
-    // APP14 with the right transform byte regardless, but for
-    // 3-component sources that DID carry an Adobe APP14 (e.g. an
-    // RGB-encoded JPEG that wants to be re-emitted with
-    // `transform=0` to keep the RGB classification) the field is
-    // load-bearing because `inject_adobe_app14_after_jfif` only
-    // fires when `adobe_transform.is_some()`.
-    //
-    // For 1-component grayscale outputs (e.g. transupp's
+    // Arrays registered by *this* shim's `jpeg_read_coefficients`
+    // carry the source's markers in the side-table CoefHandle, which
+    // reproduces `jpeg_copy_critical_parameters` forwarding
+    // `srcinfo->jpeg_color_space`. For 1-component outputs (transupp's
     // `-grayscale` no-workspace path leaves the dst cinfo at
     // `num_components = 1` while still handing us the registered
-    // 3-component source array), copying the source's transform
-    // would emit a stale APP14 marker that libjpeg's parser would
-    // suppress on read — flagged in codex round-8 review of b7f690d.
+    // 3-component source array) the source's transform is dropped —
+    // a stale APP14 on a grayscale stream is exactly what libjpeg's
+    // parser would suppress on read (codex round-8 review of b7f690d).
     //
-    // Pull from the side-table CoefHandle when the array was
-    // registered by *this* shim's `jpeg_read_coefficients`. Foreign
-    // workspace arrays from transupp's `-rotate` etc. preserve
-    // Adobe via `jcopy_markers_execute → jpeg_write_marker`
-    // instead, so falling through to `None` in that case is
-    // correct.
-    let adobe_transform: Option<u8> = if n == 3 || n == 4 {
-        match coef_lookup_handle(handle) {
-            Some(handle_ptr) => unsafe { (*handle_ptr).inner.adobe_transform },
-            None => None,
+    // Foreign workspace arrays from transupp's `-rotate` etc. have no
+    // side-table entry; there the destination cinfo is the only
+    // source of truth. `write_JFIF_header` / `write_Adobe_marker` /
+    // `jpeg_color_space` are folded into the classifier's two inputs,
+    // which round-trips the four states `jpeg_set_colorspace` produces
+    // (grayscale and YCbCr → JFIF; RGB and CMYK → Adobe 0; YCCK →
+    // Adobe 2, the byte `emit_adobe_app14` derives at
+    // `jcmarker.c:423-429`). It cannot express the states an application
+    // reaches by hand — both flags clear (`JCS_UNKNOWN`, or
+    // `write_JFIF_header = FALSE`), or `write_Adobe_marker` set on a
+    // YCbCr destination — which `write_file_header` would honour; that
+    // residue is tracked under P4-182. Any source APP14 transupp wanted
+    // to keep has already been queued onto `pending_markers` via
+    // `jcopy_markers_execute → jpeg_write_marker`.
+    let (saw_jfif_marker, adobe_transform): (bool, Option<u8>) = match coef_lookup_handle(handle) {
+        Some(handle_ptr) => {
+            // SAFETY: the CoefHandle behind `handle_ptr` lives until
+            // `jpeg_destroy_decompress` frees it, and this shared borrow
+            // does not outlive the match arm.
+            let inner: &libjpeg_turbo_rs::JpegCoefficients = unsafe { &(*handle_ptr).inner };
+            let adobe_transform: Option<u8> = if n == 3 || n == 4 {
+                inner.adobe_transform
+            } else {
+                None
+            };
+            (inner.saw_jfif_marker, adobe_transform)
         }
-    } else {
-        None
-    };
-    let saw_jfif_marker: bool = match coef_lookup_handle(handle) {
-        Some(handle_ptr) => unsafe { (*handle_ptr).inner.saw_jfif_marker },
-        None => c.write_JFIF_header != 0,
+        None => {
+            let adobe_transform: Option<u8> = if c.write_Adobe_marker != 0 {
+                Some(match c.jpeg_color_space {
+                    JCS_YCBCR => 1,
+                    JCS_YCCK => 2,
+                    _ => 0,
+                })
+            } else {
+                None
+            };
+            (c.write_JFIF_header != 0, adobe_transform)
+        }
     };
 
     Ok(libjpeg_turbo_rs::JpegCoefficients {
@@ -11723,33 +11678,16 @@ fn run_coefficient_writer_and_flush(
                 return None;
             }
         };
-        // Adobe APP14 handling — see the original comment block above
-        // the function: 4-component output strips JFIF and substitutes
-        // Adobe APP14; 3-component source with Adobe APP14 keeps both.
-        let with_app14: Vec<u8> = if adjusted.components.len() == 4 {
-            let transform: u8 = adjusted.adobe_transform.unwrap_or({
-                if c.jpeg_color_space == JCS_YCCK {
-                    2
-                } else {
-                    0
-                }
-            });
-            let r = swap_jfif_for_adobe_app14(&raw_encoded, transform);
-            drop(raw_encoded);
-            r
-        } else if let Some(transform) = adjusted.adobe_transform {
-            let r = inject_adobe_app14_after_jfif(&raw_encoded, transform);
-            drop(raw_encoded);
-            r
-        } else {
-            raw_encoded
-        };
+        // The core writer already emitted the JFIF/Adobe header that
+        // `write_file_header` would (see `materialize_foreign_coef_arrays`
+        // for how the classification inputs are chosen), so the stream
+        // only needs the caller's queued markers spliced in after it.
         let with_markers: Vec<u8> =
             if priv_state.pending_markers.is_empty() && priv_state.icc_profile.is_none() {
-                with_app14
+                raw_encoded
             } else {
-                let r = inject_markers_after_soi(&with_app14, priv_state);
-                drop(with_app14);
+                let r = inject_markers_after_soi(&raw_encoded, priv_state);
+                drop(raw_encoded);
                 r
             };
         let ok = push_bytes_through_dest_mgr(c, priv_state, &with_markers);

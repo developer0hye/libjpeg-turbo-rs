@@ -5,11 +5,11 @@
 //! about them. Each gets a test here:
 //!
 //! * `tj3SaveImage8` read a **negative** `pitch` as "tight rows". Upstream
-//!   rejects it outright (`turbojpeg-mp.c:511-513`).
+//!   rejects it outright (`turbojpeg-mp.c:515-517`).
 //! * `tj3LoadImage8` ran `align.max(1)`, so `0`, a negative, and a
 //!   non-power-of-two all silently became some stride the caller could not
 //!   have predicted. Upstream refuses all three
-//!   (`turbojpeg-mp.c:317-321`).
+//!   (`turbojpeg-mp.c:321-325`).
 //! * The 12-/16-bit entry points guarded their source span with a bare
 //!   `pitch.checked_mul(height)` over `i16`/`u16` elements, leaving the ×2 out
 //!   of the chain. `slice::from_raw_parts` requires `len * size_of::<T>() <=
@@ -105,7 +105,7 @@ fn c_path(path: &Path) -> CString {
 // ---------------------------------------------------------------------------
 
 /// Upstream's argument gate refuses `pitch < 0` before it opens the output
-/// file (`references/libjpeg-turbo/src/turbojpeg-mp.c:511-513`). This port
+/// file (`references/libjpeg-turbo/src/turbojpeg-mp.c:515-517`). This port
 /// used `pitch <= 0` to mean "dense", so `-1` produced a file — built from a
 /// stride the caller never asked for — and returned success.
 #[test]
@@ -154,7 +154,7 @@ fn tj3_save_image8_rejects_a_negative_pitch() {
 }
 
 /// The companion: `pitch == 0` is upstream's own spelling of "dense"
-/// (`turbojpeg-mp.c:587`) and must keep working, so the check above cannot be
+/// (`turbojpeg-mp.c:591`) and must keep working, so the check above cannot be
 /// "satisfied" by rejecting every non-positive pitch.
 #[test]
 fn tj3_save_image8_still_reads_pitch_zero_as_dense() {
@@ -206,7 +206,7 @@ fn tj3_save_image8_still_reads_pitch_zero_as_dense() {
 /// offsets. This is what `ImageLayout::row_offset` replaced `y * stride`
 /// with, and the source is allocated at exactly upstream's minimum —
 /// `(height - 1) * pitch + width * bpp`, since upstream copies only
-/// `width * ps` bytes from the final row (`turbojpeg-mp.c:594-598`) — so a
+/// `width * ps` bytes from the final row (`turbojpeg-mp.c:600-604`) — so a
 /// span that charged the last row's padding would read past this `Vec` and
 /// the sanitizer legs would say so.
 #[test]
@@ -285,7 +285,7 @@ fn load_with_align(handle: *mut c_void, path: &Path, align: c_int) -> (*mut u8, 
 }
 
 /// `align < 1` is upstream's "Invalid argument"
-/// (`references/libjpeg-turbo/src/turbojpeg-mp.c:317-319`). `align.max(1)`
+/// (`references/libjpeg-turbo/src/turbojpeg-mp.c:321-323`). `align.max(1)`
 /// used to turn it into a dense load that reported success.
 #[test]
 fn tj3_load_image8_rejects_a_non_positive_align() {
@@ -315,7 +315,7 @@ fn tj3_load_image8_rejects_a_non_positive_align() {
 }
 
 /// A positive non-power-of-two is upstream's "Alignment must be a power of 2"
-/// (`turbojpeg-mp.c:320-321`), and is the case `align.max(1)` did not even
+/// (`turbojpeg-mp.c:324-325`), and is the case `align.max(1)` did not even
 /// look at: `align == 3` produced rows padded to a multiple of 3, a stride no
 /// documented caller computes. It is also the rule `tj3YUVBufSize` already
 /// enforces for the same parameter (`bufsize.rs`), so accepting it here made
@@ -343,7 +343,7 @@ fn tj3_load_image8_rejects_a_non_power_of_two_align() {
 }
 
 /// The companion, and the check that the returned buffer is still the full
-/// `pitch * height` rectangle upstream mallocs (`turbojpeg-mp.c:400-408`) —
+/// `pitch * height` rectangle upstream mallocs (`turbojpeg-mp.c:404-412`) —
 /// padding past the final row included. `ImageLayout`'s strided total
 /// deliberately excludes that last padding, so sizing this allocation from it
 /// would hand back a buffer one pad short of what every caller's own
@@ -576,7 +576,7 @@ mod source_span_bounds {
 /// A padded destination sized at exactly upstream's minimum —
 /// `(height - 1) * pitch + width * components` samples, because upstream
 /// writes only `width * ps` samples into the final row
-/// (`turbojpeg-mp.c:242`). The old guard sized the slice at `pitch * height`,
+/// (`turbojpeg-mp.c:246`). The old guard sized the slice at `pitch * height`,
 /// so `from_raw_parts_mut` covered memory past this `Vec` before a single
 /// sample was written: undefined behaviour on its own terms, and what the
 /// sanitizer legs catch.

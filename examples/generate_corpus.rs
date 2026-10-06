@@ -13,18 +13,15 @@ use std::path::{Path, PathBuf};
 // C tool helpers
 // ---------------------------------------------------------------------------
 
-fn c_tool_path(name: &str) -> Option<PathBuf> {
-    let homebrew = PathBuf::from(format!("/opt/homebrew/bin/{}", name));
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    std::process::Command::new("which")
-        .arg(name)
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
+/// The oracle-selection rule, shared with the differential test suites.
+///
+/// Included by path rather than copied: a private lookup here cannot be pointed
+/// at an oracle prefix, so a corpus leg labelled with one release would compare
+/// against whatever `djpeg` the machine happened to carry (P4-130).
+#[path = "../tests/helpers/oracle_prefix.rs"]
+mod oracle_prefix;
+
+use oracle_prefix::c_tool_path;
 
 fn run_cjpeg(cjpeg: &Path, input_ppm: &Path, output_jpg: &Path, args: &[&str]) -> bool {
     let output = std::process::Command::new(cjpeg)
@@ -34,7 +31,20 @@ fn run_cjpeg(cjpeg: &Path, input_ppm: &Path, output_jpg: &Path, args: &[&str]) -
         .arg(input_ppm)
         .output();
     match output {
-        Ok(o) if o.status.success() => true,
+        // An exit status alone does not say a file was written. The
+        // every-variant gate below counts what this returns, so a cjpeg that
+        // exited 0 having produced nothing must not count as generated.
+        Ok(o) if o.status.success() => {
+            let wrote_output: bool =
+                std::fs::metadata(output_jpg).is_ok_and(|metadata| metadata.len() > 0);
+            if !wrote_output {
+                eprintln!(
+                    "cjpeg exited 0 but wrote no output: {}",
+                    output_jpg.display()
+                );
+            }
+            wrote_output
+        }
         Ok(o) => {
             eprintln!("cjpeg failed: {}", String::from_utf8_lossy(&o.stderr));
             false
@@ -599,6 +609,29 @@ fn strict_djpeg_accepts(djpeg: &Path, jpeg: &Path) -> Result<bool, String> {
     Ok(output.status.success())
 }
 
+/// Every planned `cjpeg` variant has to be generated, not merely enough of them.
+///
+/// The bucket floor below is a *minimum*; the matrix is `variants x sources`
+/// exactly, so up to a couple of hundred variants could fail with the floor
+/// still satisfied. That tolerance was harmless while one release generated the
+/// corpus and became a hole the day a second one did (P4-130): a variant this
+/// release's `cjpeg` refuses is a 3.2 behaviour delta, and dropping it silently
+/// shrinks what the leg compares while leaving it green — the one outcome a
+/// paired oracle exists to make impossible. So a failure is a finding here, not
+/// a tolerance.
+fn assert_every_variant_generated(generated: usize, failed: usize) -> Result<(), String> {
+    if failed == 0 {
+        return Ok(());
+    }
+    Err(format!(
+        "{failed} of {} planned cjpeg outputs (variants x sources) failed to \
+         generate. The corpus this oracle produces is what the comparison then \
+         runs on, so a leg that drops outputs compares a smaller corpus and \
+         still reports green.",
+        generated + failed
+    ))
+}
+
 fn assert_bucket_minimums(
     generated_count: usize,
     fuzz_seed_source_count: usize,
@@ -635,7 +668,10 @@ fn assert_bucket_minimums(
 
 #[cfg(test)]
 mod tests {
-    use super::{assert_bucket_minimums, copy_jpgs, copy_selected_jpgs, retain_matching_files};
+    use super::{
+        assert_bucket_minimums, assert_every_variant_generated, copy_jpgs, copy_selected_jpgs,
+        retain_matching_files,
+    };
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -754,6 +790,20 @@ mod tests {
     }
 
     #[test]
+    fn a_single_failed_variant_is_not_a_tolerated_loss() {
+        assert!(assert_every_variant_generated(9_216, 0).is_ok());
+        // One short of the matrix still clears the 9_000 bucket floor, which is
+        // exactly the gap this rule closes: the floor cannot tell "this release
+        // generates the whole matrix" from "this release refuses 216 of it".
+        let error = assert_every_variant_generated(9_215, 1)
+            .expect_err("a failed variant is a finding, not a tolerance");
+        assert!(error.contains("1 of 9216"), "{error}");
+        let error = assert_every_variant_generated(9_000, 216)
+            .expect_err("the bucket floor is satisfied and the matrix is not");
+        assert!(error.contains("216 of 9216"), "{error}");
+    }
+
+    #[test]
     fn source_bucket_minimums_reject_silently_shrunken_corpora() {
         assert!(assert_bucket_minimums(9_000, 1_100, 300, 180).is_ok());
 
@@ -797,7 +847,9 @@ fn main() {
         Some(p) => p,
         None => {
             eprintln!(
-                "warning: cjpeg not found in /opt/homebrew/bin or PATH — cannot generate JPEG corpus"
+                "error: cjpeg not found — cannot generate JPEG corpus. With \
+                 LIBJPEG_TURBO_PREFIX set the tool is taken from <prefix>/bin \
+                 and from nowhere else; otherwise /opt/homebrew/bin then PATH."
             );
             eprintln!("install libjpeg-turbo (e.g. `brew install libjpeg-turbo`) and re-run.");
             std::process::exit(1);
@@ -847,6 +899,10 @@ fn main() {
     );
     let (generated, failed) = generate_jpegs(&cjpeg, &sources, &generated_dir);
     println!("  generated: {}  failed: {}", generated, failed);
+    if let Err(error) = assert_every_variant_generated(generated, failed) {
+        eprintln!("error: {error}");
+        std::process::exit(1);
+    }
 
     // Cleanup temp PPMs
     let _ = std::fs::remove_dir_all(&tmp_dir);

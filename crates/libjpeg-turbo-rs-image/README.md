@@ -1,140 +1,89 @@
 # libjpeg-turbo-rs-image
 
-An [`image`](https://crates.io/crates/image) crate adapter powered by
-[`libjpeg-turbo-rs`](https://crates.io/crates/libjpeg-turbo-rs), exposing JPEG
-decode and encode through the `image` crate's `ImageDecoder` and
-`ImageEncoder` traits.
+[`image`](https://crates.io/crates/image) crate backend powered by [`libjpeg-turbo-rs`](https://crates.io/crates/libjpeg-turbo-rs) — a fast pure-Rust JPEG codec with NEON/AVX2 SIMD acceleration.
 
-Use this crate when your application or library already depends on `image`
-traits but wants to select `libjpeg-turbo-rs` explicitly. Use the root codec
-crate directly when you need its full pixel-format, metadata, transform,
-high-precision, luminance/chrominance (YUV), scanline, or caller-owned-buffer
-Application Programming Interface (API).
-
-For the project-wide readiness and evaluation process, read
-[`docs/ADOPTION_GUIDE.md`](../../docs/ADOPTION_GUIDE.md) and
-[`docs/LAST_MILE.md`](../../docs/LAST_MILE.md).
-
-## Why an explicit adapter?
-
-The adapter keeps codec choice visible in your dependency graph and avoids
-assuming that changing a transitive `image` feature automatically replaces its
-JPEG implementation. It also provides a stable place to test color mapping,
-trait behavior, and bridge overhead separately from the core codec.
-
-A core-codec benchmark is not an end-to-end adapter benchmark. Measure the
-actual trait path and surrounding image representation your application uses.
-
-## Installation
+## Usage
 
 ```toml
 [dependencies]
 libjpeg-turbo-rs-image = "0.1"
-
-# Keep unrelated image formats out of the dependency graph, then add only the
-# formats your application uses.
-image = { version = "0.25", default-features = false }
+# default-features = false keeps image's other format codecs (and the
+# AVIF encoder's advisory-carrying rav1e chain) out of your build graph.
+# Add the formats you actually use, e.g. features = ["png"].
+image = { version = "0.25.9", default-features = false }
 ```
 
-This bridge follows the Minimum Supported Rust Version (MSRV) required by its
-`image` dependency, which may be higher than the root codec's MSRV.
+### Which `image` entry points use this backend
 
-## Decoding
+Only the ones you construct explicitly. This crate does **not** register
+itself with `image`: `image::open`, `ImageReader::decode`, `load_from_memory`
+and `DynamicImage::save` keep using `image`'s built-in JPEG codec. Build a
+`JpegDecoder` and pass it to `DynamicImage::from_decoder`, and pass a
+`JpegEncoder` to `DynamicImage::write_with_encoder`.
 
-```rust
-use image::ImageDecoder;
+### Decoding
+
+```rust,ignore
+// Inside a function returning Result<_, Box<dyn std::error::Error>>;
+// examples/thumbnail_pipeline.rs is the compiled version.
+use image::{DynamicImage, ImageDecoder, Limits};
 use libjpeg_turbo_rs_image::JpegDecoder;
 
-let mut decoder = JpegDecoder::new(&jpeg_bytes)?;
-let (width, height) = decoder.dimensions();
-let mut pixels = vec![0_u8; decoder.total_bytes() as usize];
-decoder.read_image(&mut pixels)?;
-
-println!("decoded {width}x{height}");
+let data: Vec<u8> = std::fs::read("photo.jpg")?;
+// was: image::codecs::jpeg::JpegDecoder::new(std::io::Cursor::new(&data))?
+let mut decoder = JpegDecoder::from_vec(data)?; // headers only; no pixels decoded yet
+decoder.set_limits(Limits::default())?;          // refused here, before any pixel buffer
+let orientation = decoder.orientation()?;        // reported, never applied
+let mut image = DynamicImage::from_decoder(decoder)?;
+image.apply_orientation(orientation);            // rotates exactly once
 ```
 
-The default output is RGB for color JPEGs and L8 for grayscale JPEGs.
-Use `JpegDecoder::new_with_format()` when you need one of the additional packed
-formats exposed by the bridge.
+`examples/thumbnail_pipeline.rs` is a complete decode → orient → resize →
+encode migration with the changed lines marked.
 
-## Encoding
+### Encoding
 
 ```rust
 use image::{ExtendedColorType, ImageEncoder};
 use libjpeg_turbo_rs_image::JpegEncoder;
 
 let pixels: Vec<u8> = vec![/* RGB pixels */];
-let mut output = Vec::new();
-
+let mut output: Vec<u8> = Vec::new();
 JpegEncoder::new_with_quality(&mut output, 85)
-    .write_image(&pixels, 640, 480, ExtendedColorType::Rgb8)?;
+    .write_image(&pixels, 640, 480, ExtendedColorType::Rgb8)
+    .unwrap();
+// output contains the compressed JPEG bytes
 ```
 
-Set quality explicitly so codec behavior remains visible in application code.
-For advanced subsampling, progressive, arithmetic, lossless, metadata, custom
-tables, or transform controls, use the root `libjpeg-turbo-rs::Encoder` and
-related APIs.
+## Behaviour
 
-## Color mapping
+| | |
+|---|---|
+| Construction | `JpegDecoder::new` copies the compressed stream once and parses headers; `from_vec` takes ownership and copies nothing. No pixel is decoded until `read_image`. |
+| `read_image` | Decodes into your buffer, which must be exactly `total_bytes()` long. For 8-bit grayscale and YCbCr/RGB streams no second decoded image exists; CMYK/YCCK, 12-bit and lossless streams are still staged in a full-size buffer and copied. Working memory remains either way (component planes, and coefficients for progressive streams). |
+| `set_limits` | `max_image_width`, `max_image_height` and `max_alloc` are checked against the header before any pixel allocation. `max_alloc` bounds the core's decode-memory *estimate*, which counts the output buffer; it is non-strict for the staged paths above. Refusals are `ImageError::Limits`. |
+| Metadata | `icc_profile`, `exif_metadata`, `xmp_metadata`, `iptc_metadata` and `orientation` return what `image 0.25.10`'s built-in JPEG decoder returns for the same file — the *last* segment when one repeats, the standard XMP packet without Extended XMP, IPTC as the Photoshop resource block. `original_color_type()` reports `Cmyk8` for four-component streams, where the built-in decoder reports `Rgb8`. |
+| Errors | Limit and allocation refusals → `Limits`; unsupported features → `Unsupported`; wrong buffer sizes → `Parameter`; I/O → `IoError`; everything else → `Decoding` / `Encoding`. |
+| Corrupt data | An error by default (as C libjpeg-turbo with `-strict`), where `image`'s built-in decoder fills what it cannot decode. `JpegDecoder::set_lenient(true)` opts into filling. |
 
-| JPEG source or requested output | `image::ColorType` / behavior |
-| --- | --- |
-| Grayscale, one component | `L8` |
-| YCbCr or RGB color source | `Rgb8` by default |
-| Other packed formats such as BGR/BGRA/CMYK | use `JpegDecoder::new_with_format()` and the bridge-specific API |
+## Color type mapping
 
-Do not assume that a four-byte packed format has alpha semantics merely because
-it has four bytes per pixel. Verify the selected format's alpha/padding and
-channel order.
+| JPEG source              | `color_type()` | `original_color_type()` |
+|--------------------------|----------------|-------------------------|
+| Grayscale (1 component)  | `L8`           | `L8`                    |
+| YCbCr / RGB (3)          | `Rgb8`         | `Rgb8`                  |
+| CMYK / YCCK (4)          | `Rgb8`         | `Cmyk8`                 |
 
-## When to use the root crate instead
+`JpegDecoder::new_with_format` selects `Rgba8` (or forces `L8` / `Rgb8`).
+Formats `image` has no color type for (BGR, BGRA, CMYK, ...) are refused with
+`ImageError::Unsupported`; decode those with `libjpeg_turbo_rs::Decoder`.
 
-Prefer `libjpeg-turbo-rs` directly when you need:
+## License and attribution
 
-- reusable caller-owned output buffers with no per-frame output allocation;
-- scanline or `std::io` streaming beyond the adapter contract;
-- coefficient-domain rotate/flip/transpose/crop;
-- Exchangeable Image File Format (EXIF), International Color Consortium (ICC),
-  XMP, IPTC, or marker-level control;
-- CMYK/YCCK policy beyond the adapter's color mapping;
-- 12/16-bit precision, lossless JPEG, arithmetic coding, or custom scan scripts;
-- raw YUV planes, custom Huffman/quantization tables, or advanced recovery;
-- `no_std + alloc` or direct WebAssembly integration.
+MIT OR Apache-2.0 (`LICENSE-MIT`, `LICENSE-APACHE`).
 
-## Evaluation checklist
-
-Before replacing an existing `image`-based JPEG path:
-
-- [ ] Run the same representative corpus through both adapters.
-- [ ] Compare dimensions, `ColorType`, row layout, channel order, and decoded
-      pixels.
-- [ ] Include grayscale, progressive, CMYK/YCCK, embedded color profiles,
-      metadata, very small images, and malformed inputs relevant to your data.
-- [ ] Benchmark the `ImageDecoder`/`ImageEncoder` calls end to end rather than
-      quoting only a root-codec benchmark.
-- [ ] Measure allocation and conversion overhead in the surrounding
-      `DynamicImage` or application buffer path.
-- [ ] Verify encoder quality and output color type explicitly.
-- [ ] Keep the previous adapter/version available until rollback has been
-      exercised.
-
-The repository's dated adapter evidence is recorded under
-[`experiments/`](../../experiments), while core feature and release readiness
-remain in [`docs/FEATURE_PARITY.md`](../../docs/FEATURE_PARITY.md) and
-[`docs/LAST_MILE.md`](../../docs/LAST_MILE.md).
-
-## Scope and limitations
-
-This crate is an adapter, not a promise to expose every root-codec capability
-through `image` traits. Trait contracts intentionally have a smaller option
-surface than the root builder APIs. New bridge behavior should be added only
-with trait-level compatibility tests and a clear downstream use case.
-
-The bridge inherits the root codec's safety and correctness status. It does not
-promote the experimental classic C ABI and does not depend on a C JPEG codec.
-
-## License
-
-MIT OR Apache-2.0, matching the root codec. See
-[`LICENSE-MIT`](../../LICENSE-MIT) and
-[`LICENSE-APACHE`](../../LICENSE-APACHE).
+This software is based in part on the work of the Independent JPEG Group.
+`libjpeg-turbo-rs` is an independent Rust implementation that follows
+[libjpeg-turbo](https://github.com/libjpeg-turbo/libjpeg-turbo)'s algorithms
+and API (IJG License / Modified BSD License); it is not affiliated with or
+endorsed by the libjpeg-turbo project or the IJG.
