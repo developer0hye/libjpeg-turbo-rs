@@ -6,7 +6,7 @@ use std::io::Cursor;
 use image::imageops::FilterType;
 use image::{DynamicImage, ExtendedColorType, ImageDecoder, ImageEncoder, RgbImage};
 
-use crate::ljt_api::{baseline, candidate};
+use crate::ljt_api::{baseline, candidate, Chroma};
 
 /// Quality for every encode row and the thumbnail's final encode.
 pub const ENCODE_QUALITY: u8 = 85;
@@ -22,14 +22,18 @@ const THUMBNAIL_FILTER: FilterType = FilterType::Triangle;
 pub enum EncodeBackend {
     Baseline,
     Candidate,
+    Baseline444,
+    Candidate444,
     CandidateImageAdapter,
     ImageBuiltin,
 }
 
 impl EncodeBackend {
-    pub const ALL: [EncodeBackend; 4] = [
+    pub const ALL: [EncodeBackend; 6] = [
         EncodeBackend::Baseline,
         EncodeBackend::Candidate,
+        EncodeBackend::Baseline444,
+        EncodeBackend::Candidate444,
         EncodeBackend::CandidateImageAdapter,
         EncodeBackend::ImageBuiltin,
     ];
@@ -38,6 +42,8 @@ impl EncodeBackend {
         match self {
             EncodeBackend::Baseline => "baseline",
             EncodeBackend::Candidate => "candidate",
+            EncodeBackend::Baseline444 => "baseline-444",
+            EncodeBackend::Candidate444 => "candidate-444",
             EncodeBackend::CandidateImageAdapter => "candidate-image-adapter",
             EncodeBackend::ImageBuiltin => "image-builtin",
         }
@@ -49,6 +55,12 @@ impl EncodeBackend {
                 "libjpeg-turbo-rs 0.8.0 (crates.io) `compress(q85, S420)`"
             }
             EncodeBackend::Candidate => "candidate `compress(q85, S420)`",
+            EncodeBackend::Baseline444 => {
+                "libjpeg-turbo-rs 0.8.0 (crates.io) `compress(q85, S444)` — like for like with image-builtin"
+            }
+            EncodeBackend::Candidate444 => {
+                "candidate `compress(q85, S444)` — like for like with image-builtin"
+            }
             EncodeBackend::CandidateImageAdapter => {
                 "candidate libjpeg-turbo-rs-image `JpegEncoder::new_with_quality(85)` (4:2:0 default)"
             }
@@ -62,8 +74,18 @@ impl EncodeBackend {
     /// into a caller-owned buffer through the API used here.
     pub fn encode(self, rgb: &[u8], width: usize, height: usize) -> Vec<u8> {
         match self {
-            EncodeBackend::Baseline => baseline::compress_rgb(rgb, width, height, ENCODE_QUALITY),
-            EncodeBackend::Candidate => candidate::compress_rgb(rgb, width, height, ENCODE_QUALITY),
+            EncodeBackend::Baseline => {
+                baseline::compress_rgb(rgb, width, height, ENCODE_QUALITY, Chroma::S420)
+            }
+            EncodeBackend::Candidate => {
+                candidate::compress_rgb(rgb, width, height, ENCODE_QUALITY, Chroma::S420)
+            }
+            EncodeBackend::Baseline444 => {
+                baseline::compress_rgb(rgb, width, height, ENCODE_QUALITY, Chroma::S444)
+            }
+            EncodeBackend::Candidate444 => {
+                candidate::compress_rgb(rgb, width, height, ENCODE_QUALITY, Chroma::S444)
+            }
             EncodeBackend::CandidateImageAdapter => {
                 let mut out: Vec<u8> = Vec::new();
                 libjpeg_turbo_rs_image::JpegEncoder::new_with_quality(&mut out, ENCODE_QUALITY)
@@ -192,6 +214,7 @@ pub fn thumbnail(
                 small.width() as usize,
                 small.height() as usize,
                 ENCODE_QUALITY,
+                Chroma::S420,
             )
         }
         ThumbnailBackend::Candidate | ThumbnailBackend::CandidateScaledDecode => {
@@ -207,6 +230,7 @@ pub fn thumbnail(
                 small.width() as usize,
                 small.height() as usize,
                 ENCODE_QUALITY,
+                Chroma::S420,
             )
         }
         ThumbnailBackend::CandidateImageAdapter => {

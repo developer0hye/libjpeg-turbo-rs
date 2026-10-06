@@ -62,9 +62,24 @@ name = "probe-none"
 path = "src/bin/probe_none.rs"
 
 [[bin]]
+name = "probe-baseline"
+path = "src/bin/probe_baseline.rs"
+required-features = ["baseline"]
+
+[[bin]]
 name = "probe-candidate"
 path = "src/bin/probe_candidate.rs"
 required-features = ["candidate"]
+
+[[bin]]
+name = "probe-adapter"
+path = "src/bin/probe_adapter.rs"
+required-features = ["adapter"]
+
+[[bin]]
+name = "probe-image"
+path = "src/bin/probe_image.rs"
+required-features = ["image-builtin"]
 
 [[bin]]
 name = "probe-zune"

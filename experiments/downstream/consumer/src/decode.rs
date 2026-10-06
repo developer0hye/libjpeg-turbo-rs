@@ -88,7 +88,7 @@ impl DecodeBackend {
             | DecodeBackend::CandidateReuse
             | DecodeBackend::ZuneReuse => "caller-owned, reused",
             DecodeBackend::CandidateImageAdapter => {
-                "caller-owned, reused (adapter decodes into its own Vec in `new`, then copies)"
+                "caller-owned output; adapter-internal staging is reported in the allocation columns"
             }
             DecodeBackend::ImageBuiltin => {
                 "caller-owned, reused (image copies the input stream into a Vec first)"
@@ -157,6 +157,11 @@ impl<'case> PreparedDecode<'case> {
             }
             DecodeBackend::CandidateReuse => {
                 candidate::output_size(&case.jpeg, case.layout, case.scale)
+            }
+            DecodeBackend::CandidateImageAdapter if scaled => {
+                return Preparation::NotApplicable(
+                    "the adapter's `ImageDecoder` exposes no scale option (the candidate itself has one)",
+                );
             }
             _ if scaled => {
                 return Preparation::NotApplicable(

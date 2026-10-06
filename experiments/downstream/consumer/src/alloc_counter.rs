@@ -1,8 +1,19 @@
 //! Counting global allocator.
 //!
-//! Wraps the system allocator and keeps four process-wide counters: number of
-//! allocation events, cumulative bytes requested, bytes currently live, and the
-//! peak of live bytes. `measure` snapshots them around a closure.
+//! Wraps the system allocator and, while a [`measure`] window is open, keeps
+//! four process-wide counters: allocation events, cumulative bytes requested,
+//! the live-heap delta since the window opened, and that delta's peak.
+//!
+//! Counting is switched on only inside [`measure`]. Outside it — in particular
+//! in every timed region — each allocator call costs one `Relaxed` load of the
+//! `COUNTING` flag on top of `System`, the same for every backend, and no
+//! counter is written.
+//!
+//! Live bytes are tracked as a *signed* delta from the moment the window
+//! opens, so a block allocated before the window and freed inside it lowers
+//! the delta below zero instead of underflowing an unsigned counter. Peak live
+//! is the highest that delta reached, i.e. the closure's working set above
+//! the heap it started with.
 //!
 //! The counters are atomics with `Relaxed` ordering. The harness is
 //! single-threaded and none of the measured backends spawn threads in the
@@ -11,25 +22,31 @@
 //! exact. Atomics are used only because `GlobalAlloc` must be `Sync`; if a
 //! backend ever did allocate from another thread the totals would still be
 //! correct, but "peak live" would be an approximation.
-//!
-//! Allocation stats are taken in a dedicated pass outside the timed loop:
-//! the atomic traffic is cheap but not free, and it is the same for every
-//! backend, so it does not bias the comparison — it is kept out of the timings
-//! anyway so that the timing numbers have nothing in them but the decode.
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 
 pub struct CountingAllocator;
 
+static COUNTING: AtomicBool = AtomicBool::new(false);
 static ALLOCATION_COUNT: AtomicU64 = AtomicU64::new(0);
 static ALLOCATED_BYTES: AtomicU64 = AtomicU64::new(0);
-static LIVE_BYTES: AtomicUsize = AtomicUsize::new(0);
-static PEAK_LIVE_BYTES: AtomicUsize = AtomicUsize::new(0);
+static LIVE_DELTA: AtomicI64 = AtomicI64::new(0);
+static PEAK_LIVE_DELTA: AtomicI64 = AtomicI64::new(0);
 
-fn record_growth(bytes: usize) {
-    let live: usize = LIVE_BYTES.fetch_add(bytes, Ordering::Relaxed) + bytes;
-    PEAK_LIVE_BYTES.fetch_max(live, Ordering::Relaxed);
+fn counting() -> bool {
+    COUNTING.load(Ordering::Relaxed)
+}
+
+fn record_allocation(bytes: usize) {
+    ALLOCATION_COUNT.fetch_add(1, Ordering::Relaxed);
+    ALLOCATED_BYTES.fetch_add(bytes as u64, Ordering::Relaxed);
+    record_live_change(bytes as i64);
+}
+
+fn record_live_change(delta: i64) {
+    let live: i64 = LIVE_DELTA.fetch_add(delta, Ordering::Relaxed) + delta;
+    PEAK_LIVE_DELTA.fetch_max(live, Ordering::Relaxed);
 }
 
 // SAFETY: every method forwards to `System` with the caller's arguments
@@ -38,27 +55,25 @@ fn record_growth(bytes: usize) {
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let pointer: *mut u8 = unsafe { System.alloc(layout) };
-        if !pointer.is_null() {
-            ALLOCATION_COUNT.fetch_add(1, Ordering::Relaxed);
-            ALLOCATED_BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
-            record_growth(layout.size());
+        if !pointer.is_null() && counting() {
+            record_allocation(layout.size());
         }
         pointer
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         let pointer: *mut u8 = unsafe { System.alloc_zeroed(layout) };
-        if !pointer.is_null() {
-            ALLOCATION_COUNT.fetch_add(1, Ordering::Relaxed);
-            ALLOCATED_BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
-            record_growth(layout.size());
+        if !pointer.is_null() && counting() {
+            record_allocation(layout.size());
         }
         pointer
     }
 
     unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
         unsafe { System.dealloc(pointer, layout) };
-        LIVE_BYTES.fetch_sub(layout.size(), Ordering::Relaxed);
+        if counting() {
+            record_live_change(-(layout.size() as i64));
+        }
     }
 
     /// A reallocation counts as one allocation event. Cumulative bytes grow
@@ -66,16 +81,11 @@ unsafe impl GlobalAlloc for CountingAllocator {
     /// 8 MiB more, not 16), and live bytes move by the signed difference.
     unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         let new_pointer: *mut u8 = unsafe { System.realloc(pointer, layout, new_size) };
-        if !new_pointer.is_null() {
+        if !new_pointer.is_null() && counting() {
             ALLOCATION_COUNT.fetch_add(1, Ordering::Relaxed);
             let old_size: usize = layout.size();
-            if new_size >= old_size {
-                let growth: usize = new_size - old_size;
-                ALLOCATED_BYTES.fetch_add(growth as u64, Ordering::Relaxed);
-                record_growth(growth);
-            } else {
-                LIVE_BYTES.fetch_sub(old_size - new_size, Ordering::Relaxed);
-            }
+            ALLOCATED_BYTES.fetch_add(new_size.saturating_sub(old_size) as u64, Ordering::Relaxed);
+            record_live_change(new_size as i64 - old_size as i64);
         }
         new_pointer
     }
@@ -98,19 +108,39 @@ pub struct AllocStats {
 /// *after* the snapshot so a library-owned output buffer is counted in
 /// `peak_live` like any other allocation the caller would hold.
 pub fn measure<R>(work: impl FnOnce() -> R) -> (R, AllocStats) {
-    let live_at_start: usize = LIVE_BYTES.load(Ordering::Relaxed);
-    PEAK_LIVE_BYTES.store(live_at_start, Ordering::Relaxed);
-    let count_at_start: u64 = ALLOCATION_COUNT.load(Ordering::Relaxed);
-    let bytes_at_start: u64 = ALLOCATED_BYTES.load(Ordering::Relaxed);
+    ALLOCATION_COUNT.store(0, Ordering::Relaxed);
+    ALLOCATED_BYTES.store(0, Ordering::Relaxed);
+    LIVE_DELTA.store(0, Ordering::Relaxed);
+    PEAK_LIVE_DELTA.store(0, Ordering::Relaxed);
+    COUNTING.store(true, Ordering::Relaxed);
 
     let result: R = work();
 
+    COUNTING.store(false, Ordering::Relaxed);
     let stats: AllocStats = AllocStats {
-        count: ALLOCATION_COUNT.load(Ordering::Relaxed) - count_at_start,
-        bytes: ALLOCATED_BYTES.load(Ordering::Relaxed) - bytes_at_start,
-        peak_live: PEAK_LIVE_BYTES
-            .load(Ordering::Relaxed)
-            .saturating_sub(live_at_start) as u64,
+        count: ALLOCATION_COUNT.load(Ordering::Relaxed),
+        bytes: ALLOCATED_BYTES.load(Ordering::Relaxed),
+        peak_live: PEAK_LIVE_DELTA.load(Ordering::Relaxed).max(0) as u64,
     };
     (result, stats)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Lower bounds only: the test harness runs other tests on other threads,
+    // and their allocations land in an open window too.
+    #[test]
+    fn a_window_sees_the_closures_allocation_and_is_closed_afterwards() {
+        let (buffer, stats) = measure(|| vec![7u8; 100_000]);
+        assert!(stats.count >= 1);
+        assert!(stats.bytes >= 100_000);
+        assert!(stats.peak_live >= 100_000);
+        assert!(!counting(), "the window must close when measure returns");
+        // Freeing a block allocated before the window drives the live delta
+        // negative; peak is clamped at zero rather than underflowing.
+        let ((), after) = measure(move || drop(buffer));
+        assert!(after.peak_live < 100_000);
+    }
 }

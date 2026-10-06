@@ -34,9 +34,12 @@ pub fn load_sample() -> String {
             shell("sysctl vm.swapusage"),
         )
     } else if cfg!(target_os = "linux") {
+        // top's first frame reports CPU since boot, not now; the second frame,
+        // one second later, is the current load.
         format!(
-            "$ top -bn1 | head -20\n{}\n\n$ free -m\n{}",
-            shell("top -bn1 | head -20"),
+            "$ top -bn2 -d1 | (second frame) | head -20\n{}\n\n$ vmstat 1 3\n{}\n\n$ free -m\n{}",
+            shell("top -bn2 -d1 | awk '/^top -/{frame++} frame==2' | head -20"),
+            shell("vmstat 1 3"),
             shell("free -m"),
         )
     } else {
@@ -178,22 +181,45 @@ pub fn read_build_info(path: Option<&Path>) -> Vec<(String, String)> {
 /// libjpeg-turbo-rs rows (pixel-identical to `djpeg` is the project's goal),
 /// so where present the report adds candidate-vs-C. Absence is reported, not
 /// fatal: hosted runners do not ship djpeg and this harness installs nothing.
+///
+/// `/usr/local` is deliberately not probed: it is where this repository's own
+/// C-ABI shim gets installed, and a `djpeg` linked against the shim would make
+/// the "oracle" our own code. Pass `--djpeg` or `DJPEG=` to use one there.
+/// The returned path is canonicalised so the report names the real binary,
+/// not a symlink in `bin/`.
 pub fn find_djpeg(explicit: Option<&Path>) -> Option<PathBuf> {
-    if let Some(path) = explicit {
-        return Some(path.to_path_buf());
+    let chosen: PathBuf = if let Some(path) = explicit {
+        path.to_path_buf()
+    } else if let Ok(path) = std::env::var("DJPEG") {
+        PathBuf::from(path)
+    } else {
+        [
+            "/opt/homebrew/bin/djpeg",
+            "/opt/libjpeg-turbo/bin/djpeg",
+            "/usr/bin/djpeg",
+        ]
+        .into_iter()
+        .map(PathBuf::from)
+        .find(|candidate| candidate.is_file())?
+    };
+    Some(std::fs::canonicalize(&chosen).unwrap_or(chosen))
+}
+
+/// The dynamic libraries `djpeg` resolves, so the report shows which libjpeg
+/// actually produced the C pixels (a `djpeg` binary says nothing about the
+/// library it loads).
+pub fn djpeg_link_map(path: &Path) -> String {
+    let quoted: String = format!("'{}'", path.display().to_string().replace('\'', "'\\''"));
+    if cfg!(target_os = "macos") {
+        // `@rpath/...` entries resolve through the binary's LC_RPATH list.
+        format!(
+            "$ otool -L {quoted}\n{}\n$ otool -l {quoted} | grep -A2 LC_RPATH | grep path\n{}",
+            shell(&format!("otool -L {quoted}")),
+            shell(&format!(
+                "otool -l {quoted} | grep -A2 LC_RPATH | grep path || true"
+            ))
+        )
+    } else {
+        format!("$ ldd {quoted}\n{}", shell(&format!("ldd {quoted}")))
     }
-    if let Ok(path) = std::env::var("DJPEG") {
-        return Some(PathBuf::from(path));
-    }
-    for candidate in [
-        "/opt/homebrew/bin/djpeg",
-        "/opt/libjpeg-turbo/bin/djpeg",
-        "/usr/local/bin/djpeg",
-        "/usr/bin/djpeg",
-    ] {
-        if Path::new(candidate).is_file() {
-            return Some(PathBuf::from(candidate));
-        }
-    }
-    None
 }

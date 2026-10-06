@@ -13,8 +13,10 @@ name: Downstream consumer benchmark
 # Manual only. Hosted runners are shared and their CPU model, frequency and
 # neighbours vary between runs, so a single dispatch is evidence of within-run
 # ratios, not an absolute number; see experiments/downstream/README.md
-# ("Hosted-runner noise"). No C reference is installed here, so the reports
-# carry no candidate-vs-C rows and say so; this job provisions no oracle.
+# ("Hosted-runner noise"). The harness runs with `--no-c-oracle`: this job
+# provisions no C reference, and whatever `djpeg` a runner image happens to
+# carry is an unpinned release, so the reports carry no candidate-vs-C rows
+# and say so.
 
 on:
   workflow_dispatch:
@@ -68,6 +70,8 @@ jobs:
         with:
           submodules: true
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
       # No rust-cache: the report's clean build time is only true for a
       # build that starts from nothing.
       - name: Validate inputs
@@ -77,6 +81,12 @@ jobs:
         run: |
           [[ "$ITERATIONS" =~ ^[1-9][0-9]*$ ]] || { echo "iterations must be a positive integer"; exit 1; }
           [[ "$WARMUP" =~ ^[0-9]+$ ]] || { echo "warmup must be a non-negative integer"; exit 1; }
+      # fmt, clippy -D warnings and the unit tests on the copied consumer, in
+      # its own work dir so the benchmark's build below still starts clean.
+      - name: Check the consumer crate
+        env:
+          DOWNSTREAM_WORK_DIR: ${{ runner.temp }}/downstream-check
+        run: experiments/downstream/run.sh --check
       - name: Run the downstream benchmark
         env:
           VARIANT: ${{ inputs.variant }}
@@ -85,7 +95,7 @@ jobs:
           DOWNSTREAM_WORK_DIR: ${{ runner.temp }}/downstream-work
           DOWNSTREAM_OUT_DIR: ${{ runner.temp }}/downstream-report
         run: |
-          experiments/downstream/run.sh --iterations "$ITERATIONS" --warmup "$WARMUP"
+          experiments/downstream/run.sh --iterations "$ITERATIONS" --warmup "$WARMUP" --no-c-oracle
           cat "$DOWNSTREAM_OUT_DIR/report.md" >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v7
         if: always()

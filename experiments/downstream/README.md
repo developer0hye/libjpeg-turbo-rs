@@ -85,41 +85,78 @@ These run outside every timed region.
   difference is a behaviour change to explain. zune-jpeg does not claim
   libjpeg-identical output, so its difference is reported but never fails the
   run.
-- **Candidate vs C.** If `djpeg` is installed (`DJPEG=<path>`, `--djpeg`, or a
-  standard prefix), every decode case also compares the candidate with C, which
-  is the project's contract. The hosted runners do not install `djpeg`, and
-  this harness installs nothing, so CI reports leave out these rows and say so.
+- **Candidate vs C.** If `djpeg` is available, every decode case also compares
+  the candidate with C, which is the project's contract. `--djpeg <path>` or
+  `DJPEG=<path>` selects one; otherwise the harness probes
+  `/opt/homebrew/bin`, `/opt/libjpeg-turbo/bin` and `/usr/bin`, but never
+  `/usr/local`, where this repository's own C-ABI shim gets installed. The
+  report records the resolved (canonical) path, `djpeg -version` and the
+  binary's link map (`otool -L` or `ldd`), so it shows which libjpeg actually
+  produced the C pixels. The first local smoke run (2026-10-07) compared
+  against Homebrew's 3.1.4.1. The re-run after review compared against a
+  stock 3.2.0 build, passed as
+  `DJPEG=/Volumes/T7/scratch/ljt320/prefix/bin/djpeg` (a local build on the
+  maintainer's machine). The workflow passes `--no-c-oracle`: it provisions
+  no C reference, and a `djpeg` that happens to be on a runner image is an
+  unpinned release.
 - **Encode PSNR.** PSNR is measured against the source pixels. The published
   baseline decodes every row's output. Each output's real subsampling is read
   back from its SOF marker. `image`'s encoder writes **4:4:4** at q85 even
   though its doc comments say 4:2:2, so its bytes and PSNR do not compare
-  directly with the 4:2:0 rows.
+  directly with the 4:2:0 rows. The `baseline-444` and `candidate-444` rows
+  encode at 4:4:4 to give a like-for-like comparison.
 
 ## Reproducing
 
 ```sh
 git submodule update --init references/libjpeg-turbo   # testorig.jpg / testimgint.jpg
+experiments/downstream/run.sh --check                   # fmt, clippy -D warnings, unit tests
 experiments/downstream/run.sh --iterations 30 --warmup 5
 ```
+
+On this project's development Mac, put the work dir on the external SSD when
+it is mounted, e.g.
+`DOWNSTREAM_WORK_DIR=/Volumes/T7/scratch/downstream-<variant>`. The seven
+clean builds (main plus six probes) use several hundred MB of target
+directories while they run. `run.sh` deletes them once it has the binary and
+the sizes, so a finished work dir holds only the copied consumer, the binary,
+`build-info.txt` and the report (about 15 MB, mostly `report/corpus/`).
 
 `run.sh` does the following:
 
 1. Copies `consumer/` to a fresh directory outside the repository (a
    `mktemp -d` directory, or `DOWNSTREAM_WORK_DIR` if that is set and empty).
-   It refuses to continue if any ancestor of that directory has a
-   `.cargo/config.toml`. `CARGO_HOME`'s config is the one exception: it
-   applies to every build on the machine, downstream builds included, so the
-   report records it instead.
-2. Replaces `@CANDIDATE@` in the manifest with this checkout's absolute path.
-3. Clears `RUSTFLAGS` and the `CARGO_PROFILE_RELEASE_*` overrides, then runs
-   `cargo build --release --locked` in a fresh target directory. It records
-   the clean build time and the binary size.
-4. Builds the three size probes (`probe-none`, `probe-candidate`,
-   `probe-zune`), each in its own fresh target directory. A probe's size minus
-   `probe-none`'s is that backend's contribution to a stock binary. Set
-   `SKIP_PROBES=1` to skip this step.
-5. Runs the harness and writes `report.md`, `report.json`, `build-info.txt`
-   and `corpus/` to `DOWNSTREAM_OUT_DIR`, which defaults to `$WORK/report`.
+2. Replaces `@CANDIDATE@` in the manifest with this checkout's absolute path,
+   and refuses a path containing `|`, `&`, `\` or `"`. It also refuses if the
+   manifest has gained a `[profile]` section.
+3. Refuses to continue if the copied consumer directory or any of its
+   ancestors has a `.cargo/config.toml`. `CARGO_HOME`'s config is the one
+   exception, because it applies to every build on the machine, downstream
+   builds included. `run.sh` refuses it too if it sets a profile, rustflags,
+   a rustc wrapper or `[target]` options; otherwise its contents go into
+   `build-info.txt`.
+4. Unsets every `CARGO_PROFILE_*`, `CARGO_BUILD_*` (except `CARGO_BUILD_JOBS`),
+   `CARGO_TARGET_*`, `CARGO_INCREMENTAL`, `RUSTC_WRAPPER`,
+   `RUSTC_WORKSPACE_WRAPPER`, `RUSTFLAGS` and `CARGO_ENCODED_RUSTFLAGS`, and
+   records which ones it cleared. It also records the remaining `CARGO_*` /
+   `RUST*` environment, with credentials filtered out.
+5. Runs `cargo fetch --locked` so downloads are not counted as build time,
+   then `cargo build --release --locked` in a fresh target directory. It
+   records the clean build time and the binary size.
+6. Builds the six size probes (`probe-none`, `-baseline`, `-candidate`,
+   `-adapter`, `-image`, `-zune`), each in its own fresh target directory. A
+   probe's size minus `probe-none`'s is that backend's contribution to a stock
+   binary. `probe-adapter` includes the candidate and `image`'s core traits.
+   Set `SKIP_PROBES=1` to skip this step.
+7. Deletes the target directories, then runs the harness from the consumer
+   directory, so its `rustc -Vv` resolves the same toolchain the build used.
+   The harness writes `report.md`, `report.json`, `build-info.txt` and
+   `corpus/` to `DOWNSTREAM_OUT_DIR`, which defaults to `$WORK/report`.
+
+`run.sh --check` stops after step 4. Instead of benchmarking, it runs
+`cargo fmt --check`, `cargo clippy --locked --release --all-targets -- -D
+warnings` and `cargo test --locked --release` on the copied consumer. The
+workflow runs this first, in a separate work dir.
 
 Build variants are separate, labelled runs. The default is the stock profile.
 
@@ -168,7 +205,13 @@ typosquat) before you copy the lock back.
 - **Timing columns** are milliseconds per operation. The timed region covers
   decoder construction, the decode itself, and dropping a library-owned output.
   `median` is the headline figure. `p10`/`p90` (nearest rank) and `min`/`max`
-  show the spread. MP/s is computed over **source** pixels, so the 1/4-scaled
+  show the spread. A row whose fastest warmup call took under 1 ms is timed
+  in samples of K back-to-back calls, divided by K. The median is then marked
+  `(×K)`, and the JSON field is `calls_per_sample`. This keeps timer
+  resolution and cold-call effects (first-touch page faults, cold branch
+  predictors) out of the small-image rows. The cost is that such a row
+  reports warm, repeated-call speed, not the first call an application makes
+  after start-up. MP/s is computed over **source** pixels, so the 1/4-scaled
   row's MP/s compares directly with the full decode of the same file.
 - **Each case runs its rows interleaved.** Every backend is warmed up, then
   each round times every row once, starting from a different row each round.
@@ -176,10 +219,19 @@ typosquat) before you copy the lock back.
   one report, not numbers taken from two reports.
 - **Allocation columns** come from one extra pass under the counting global
   allocator: allocation events, cumulative bytes requested (a `realloc` counts
-  its growth only), and peak live heap above the live heap at the start. These
-  numbers are deterministic, so machine load does not affect them.
+  its growth only), and peak live heap above the live heap at the start. The
+  allocator counts only inside that pass. In timed regions it costs one
+  relaxed atomic load per call, the same for every backend. These numbers are
+  deterministic, so machine load does not affect them.
 - **N/A** means the backend has no API for the case. The reason appears in the
   row.
+
+## Committing a report
+
+To commit a report under `experiments/`, commit `report.md`, `report.json`
+and `build-info.txt`. Leave `corpus/` out: it is regenerated byte for byte
+(the report records each file's SHA-256), and the 8K input alone is about
+8 MB.
 
 ## Regression budget
 

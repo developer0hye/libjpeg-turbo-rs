@@ -7,6 +7,16 @@
 //! stops compiling — which is itself the finding a downstream benchmark is
 //! for: every application written against 0.8.0 would break the same way.
 
+/// Chroma subsampling for the encode rows, independent of either crate's
+/// own `Subsampling` type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Chroma {
+    /// What thumbnailers and cameras use; the default comparison.
+    S420,
+    /// What `image`'s built-in encoder always writes, for a like-for-like row.
+    S444,
+}
+
 macro_rules! ljt_api {
     ($module:ident, $krate:ident) => {
         pub mod $module {
@@ -111,19 +121,23 @@ macro_rules! ljt_api {
                 (image.width, image.height, image.data)
             }
 
-            /// 4:2:0 baseline encode — the encode comparison's settings.
-            pub fn compress_rgb(rgb: &[u8], width: usize, height: usize, quality: u8) -> Vec<u8> {
-                $krate::compress(
-                    rgb,
-                    width,
-                    height,
-                    PixelFormat::Rgb,
-                    quality,
-                    Subsampling::S420,
-                )
-                .unwrap_or_else(|error| {
-                    panic!(concat!(stringify!($krate), " encode failed: {}"), error)
-                })
+            /// Baseline (sequential) RGB encode at the given chroma
+            /// subsampling.
+            pub fn compress_rgb(
+                rgb: &[u8],
+                width: usize,
+                height: usize,
+                quality: u8,
+                chroma: crate::ljt_api::Chroma,
+            ) -> Vec<u8> {
+                let subsampling: Subsampling = match chroma {
+                    crate::ljt_api::Chroma::S420 => Subsampling::S420,
+                    crate::ljt_api::Chroma::S444 => Subsampling::S444,
+                };
+                $krate::compress(rgb, width, height, PixelFormat::Rgb, quality, subsampling)
+                    .unwrap_or_else(|error| {
+                        panic!(concat!(stringify!($krate), " encode failed: {}"), error)
+                    })
             }
         }
     };

@@ -6,6 +6,8 @@ use std::time::Duration;
 #[derive(Debug, Clone, Copy)]
 pub struct TimingSummary {
     pub iterations: usize,
+    /// Calls timed together per sample; the figures below are per call.
+    pub calls_per_sample: usize,
     pub median_ms: f64,
     pub p10_ms: f64,
     pub p90_ms: f64,
@@ -13,15 +15,24 @@ pub struct TimingSummary {
     pub max_ms: f64,
 }
 
-/// Nearest-rank percentile over sorted samples. With the smoke run's two
-/// samples p10 is the minimum and p90 the maximum, which is what the report
-/// should say for so few samples rather than an interpolated fiction.
-fn nearest_rank(sorted: &[f64], percentile: f64) -> f64 {
-    let rank: usize = ((percentile / 100.0) * sorted.len() as f64).ceil() as usize;
+/// Nearest-rank percentile over sorted samples, in integer arithmetic so the
+/// rank cannot drift with float rounding: rank = ceil(p * n / 100). With the
+/// smoke run's two samples p10 is the minimum and p90 the maximum, which is
+/// what the report should say for so few samples rather than an interpolated
+/// fiction.
+fn nearest_rank(sorted: &[f64], percentile: usize) -> f64 {
+    let rank: usize = (percentile * sorted.len()).div_ceil(100);
     sorted[rank.clamp(1, sorted.len()) - 1]
 }
 
-pub fn summarize(samples: &[Duration]) -> TimingSummary {
+/// One row's timed samples, each already divided down to a single call.
+pub struct TimedSamples {
+    pub per_call: Vec<Duration>,
+    pub calls_per_sample: usize,
+}
+
+pub fn summarize(timed: &TimedSamples) -> TimingSummary {
+    let samples: &[Duration] = &timed.per_call;
     assert!(!samples.is_empty(), "a timed row needs at least one sample");
     let mut milliseconds: Vec<f64> = samples.iter().map(|d| d.as_secs_f64() * 1e3).collect();
     milliseconds.sort_by(|a, b| a.total_cmp(b));
@@ -33,9 +44,10 @@ pub fn summarize(samples: &[Duration]) -> TimingSummary {
     };
     TimingSummary {
         iterations: count,
+        calls_per_sample: timed.calls_per_sample,
         median_ms,
-        p10_ms: nearest_rank(&milliseconds, 10.0),
-        p90_ms: nearest_rank(&milliseconds, 90.0),
+        p10_ms: nearest_rank(&milliseconds, 10),
+        p90_ms: nearest_rank(&milliseconds, 90),
         min_ms: milliseconds[0],
         max_ms: milliseconds[count - 1],
     }
@@ -130,6 +142,8 @@ pub fn inspect_frame(jpeg: &[u8]) -> Option<FrameFacts> {
         let is_sof: bool = (0xC0..=0xCF).contains(&marker) && ![0xC4, 0xC8, 0xCC].contains(&marker);
         if is_sof {
             let segment: &[u8] = jpeg.get(segment_start..position + 2 + length)?;
+            // A truncated SOF must not index past its own segment.
+            segment.get(..6)?;
             let height: u16 = u16::from_be_bytes([segment[1], segment[2]]);
             let width: u16 = u16::from_be_bytes([segment[3], segment[4]]);
             let component_count: usize = segment[5] as usize;
@@ -228,7 +242,10 @@ mod tests {
 
     #[test]
     fn nearest_rank_percentiles_on_ten_samples() {
-        let samples: Vec<Duration> = (1..=10).map(Duration::from_millis).collect();
+        let samples: TimedSamples = TimedSamples {
+            per_call: (1..=10).map(Duration::from_millis).collect(),
+            calls_per_sample: 1,
+        };
         let summary: TimingSummary = summarize(&samples);
         assert_eq!(summary.median_ms, 5.5);
         assert_eq!(summary.p10_ms, 1.0);

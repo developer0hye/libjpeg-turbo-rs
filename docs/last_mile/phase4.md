@@ -12521,23 +12521,90 @@ exercised every case and every correctness invariant:
   (mean ≤ 0.36) on each of the seven cases they support. Neither has a
   scaled decode, so the 1/4 case is N/A for both.
 
-**Smoke-run observations to triage.** These come from the allocation columns
-and output geometry, which are deterministic, so machine load does not affect
-them. Unlike the timings, they hold even though they come from a smoke run.
+**Smoke-run observations.** These three come from the allocation columns,
+the output geometry and the SOF markers, all deterministic, so machine load
+does not affect them. Unlike the timings, they hold even though they come
+from a smoke run.
 
-- The candidate image adapter's `JpegDecoder` does not report EXIF orientation
-  (`ImageDecoder::orientation()` falls back to `NoTransforms`). The
-  thumbnail workload therefore produces 256x192 where every other row
-  produces the oriented 192x256.
-- `decompress_into` still allocates whole-image component planes. For the
-  12 MP 4:2:0 RGB decode the peak is 17.5 MiB (zune `decode_into`:
-  0.66 MiB), and for grayscale 1080p it is 2.0 MiB, the whole Y plane. The
-  baseline and candidate match.
+- The candidate image adapter on `main` decodes eagerly and does not report
+  EXIF orientation (`ImageDecoder::orientation()` falls back to
+  `NoTransforms`). The thumbnail workload therefore produces 256x192 where
+  every other row produces the oriented 192x256. P4-212 (PR #643, open as
+  of 2026-10-07) addresses both the eager decode and the missing metadata.
+- `decompress_into` still allocates whole-image component planes: a 17.5 MiB
+  peak on 12 MP 4:2:0 RGB (zune `decode_into`: 0.66 MiB) and 2.0 MiB on
+  grayscale 1080p. Filed as
+  [P4-218](#p4-218-the-buffer-reuse-decode-still-allocates-whole-image-component-planes--open).
 - `image`'s built-in encoder writes 4:4:4 at q85, so its encode bytes and
   PSNR do not compare like for like with the 4:2:0 rows. The report reads
-  the subsampling back from each output's SOF marker and labels it.
+  each output's subsampling back from its SOF marker, and the
+  `baseline-444` / `candidate-444` rows encode at 4:4:4 for a like-for-like
+  comparison.
+
+A re-run after review (`--smoke`, with stock 3.2.0 `djpeg` passed via
+`DJPEG`) was again identical to C on all eight decode cases. It also added
+the 4:4:4 encode rows, the baseline / adapter / image size probes, batched
+timing for sub-millisecond rows, and a `run.sh --check` mode.
 
 **Status (2026-10-07): harness landed; first measured report pending.**
 Criterion 6 needs a quiet machine and the first dispatch of the hosted job.
 GitHub registers a dispatch-only workflow only after the file reaches the
 default branch, so that dispatch waits until this lands on `main`.
+
+## P4-218. The Buffer-Reuse Decode Still Allocates Whole-Image Component Planes — **OPEN**
+
+**Found by:** [P4-214](#p4-214-no-benchmark-measures-a-default-profile-downstream-consumer--open)'s
+downstream-consumer harness, in its counting-allocator pass on 2026-10-07.
+Allocation counts and peaks are deterministic, so this smoke-run figure does
+not depend on machine load.
+
+**What happens.** `decompress_into` / `Decoder::decode_image_into` writes the
+pixels into the caller's buffer and, for the standard paths, allocates no
+output-sized buffer: issue #354 delivered that. It still allocates something
+almost as large. The peak live heap during one decode, measured above the
+heap at the start (`experiments/downstream/consumer`, `--smoke`, default
+release profile, aarch64-darwin):
+
+| Case | candidate `decompress_into` | candidate `decompress_to` | zune-jpeg `decode_into` |
+|---|---:|---:|---:|
+| 4032x3024 4:2:0 baseline, RGB8 | 17.5 MiB | 52.4 MiB | 0.66 MiB |
+| 7680x4320 4:2:0 baseline, RGB8 | 47.5 MiB | 142.4 MiB | 1.2 MiB |
+| 1920x1080 grayscale, L8 | 2.0 MiB | 2.0 MiB | 30.5 KiB |
+| 1920x1080 4:2:0 progressive, RGB8 | 9.1 MiB | 9.1 MiB | 6.3 MiB |
+
+17.5 MiB on 12 MP is 1.5 bytes per pixel, which is a full-resolution Y
+plane plus two quarter-size chroma planes. 2.0 MiB on grayscale 1080p is
+exactly the Y plane, the same size as the output. The baseline 0.8.0 release
+gives identical numbers. On grayscale the reuse path therefore saves nothing
+over `decompress_to`.
+
+**Root-cause hypothesis (not yet verified in code).** The sequential
+(baseline) path decodes every component into a whole-image plane before
+upsampling and colour conversion, rather than streaming iMCU row groups the
+way libjpeg's `jdmainct.c` / `jdcoefct.c` single-pass buffer controllers do.
+The progressive path needs whole-image coefficient buffers by design, as C's
+does, so its row is not part of this item.
+
+**Why it matters.** The buffer-reuse API exists for frame loops and
+memory-bounded services, and its documentation promises no output-sized
+allocation. A caller that sized its memory budget from that promise will
+find the decoder's working set grows with the image instead: 47.5 MiB extra
+for an 8K frame, against about 1 MiB for zune-jpeg on the same call.
+
+**Acceptance criteria.**
+
+1. On the sequential (non-progressive) standard paths, `decompress_into`
+   decodes in row strips (iMCU row groups) and the working set no longer
+   scales with image height. The 4:2:0 RGB and grayscale rows above drop to
+   O(width) per strip.
+2. A regression test asserts a peak-memory bound for `decompress_into` on a
+   large 4:2:0 and a grayscale image, using a counting global allocator in
+   the shape of the downstream harness's `alloc_counter.rs`. The bound must
+   be in terms of width x strip height, not width x height.
+3. Output stays byte-identical to `decompress_to` and to C `djpeg`.
+4. The downstream report's allocation columns show the drop.
+
+**Why deferred.** It was found by the benchmark harness, which only
+measures; changing the decode pipeline's buffering is a pipeline change with
+its own review.
+

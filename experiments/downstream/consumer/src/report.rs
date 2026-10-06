@@ -161,6 +161,7 @@ pub struct Report {
     pub lockfile: String,
     pub load_sample: String,
     pub c_oracle: String,
+    pub c_oracle_link_map: Option<String>,
     pub corpus: Vec<CorpusRecord>,
     pub decode: Vec<DecodeCaseReport>,
     pub encode: Vec<EncodeCaseReport>,
@@ -209,8 +210,13 @@ fn psnr_text(value: f64) -> String {
 fn timing_cells(timing: Option<&TimingSummary>, megapixels_per_second: Option<f64>) -> String {
     match (timing, megapixels_per_second) {
         (Some(t), Some(rate)) => format!(
-            "{} | {} | {} | {} | {} | {:.1}",
+            "{}{} | {} | {} | {} | {} | {:.1}",
             ms(t.median_ms),
+            if t.calls_per_sample > 1 {
+                format!(" (×{})", t.calls_per_sample)
+            } else {
+                String::new()
+            },
             ms(t.p10_ms),
             ms(t.p90_ms),
             ms(t.min_ms),
@@ -243,6 +249,7 @@ fn timing_json(timing: Option<&TimingSummary>) -> Json {
     Json::opt(timing, |t| {
         Json::object(vec![
             ("iterations", Json::int(t.iterations as u64)),
+            ("calls_per_sample", Json::int(t.calls_per_sample as u64)),
             ("median_ms", Json::num(t.median_ms)),
             ("p10_ms", Json::num(t.p10_ms)),
             ("p90_ms", Json::num(t.p90_ms)),
@@ -330,6 +337,12 @@ impl Report {
             let _ = writeln!(out, "  - {crate_name}: {features}");
         }
         let _ = writeln!(out, "\n```\n$ rustc -Vv\n{}\n```", self.rustc);
+        if let Some(link_map) = &self.c_oracle_link_map {
+            let _ = writeln!(
+                out,
+                "\nC reference decoder's link map:\n\n```\n{link_map}\n```"
+            );
+        }
 
         let _ = writeln!(
             out,
@@ -381,7 +394,9 @@ impl Report {
         let _ = writeln!(
             out,
             "\nTimes in ms per decode (decoder construction, decode, and dropping a \
-             library-owned output included). MP/s is over source pixels at the median. \
+             library-owned output included). A median marked (×K) comes from samples of \
+             K back-to-back calls (rows whose single call is under 1 ms), divided by K. \
+             MP/s is over source pixels at the median. \
              Allocation columns are one decode under the counting allocator: events, \
              cumulative bytes, peak live bytes above the start."
         );
@@ -458,6 +473,7 @@ impl Report {
             out,
             "\nQuality 85 everywhere. `subsampling` is read back from each output's SOF \
              marker: where it differs between rows, bytes and PSNR are not like for like. \
+             `image-builtin` writes 4:4:4, so compare it with `baseline-444` / `candidate-444`. \
              PSNR is against the source pixels, every output decoded by the same decoder \
              (the published baseline)."
         );
@@ -707,6 +723,10 @@ impl Report {
                         Json::Bool(self.candidate_simd_and_std),
                     ),
                     ("c_oracle", Json::str(&self.c_oracle)),
+                    (
+                        "c_oracle_link_map",
+                        Json::opt(self.c_oracle_link_map.as_deref(), Json::str),
+                    ),
                     (
                         "declared_features",
                         Json::Object(

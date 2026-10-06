@@ -31,7 +31,7 @@ use std::time::{Duration, Instant};
 use alloc_counter::{AllocStats, CountingAllocator};
 use corpus::{CorpusFile, OutputLayout, SourcePixels};
 use decode::{DecodeBackend, DecodeCase, Preparation, PreparedDecode};
-use measure::{FrameFacts, PixelDiff, TimingSummary};
+use measure::{FrameFacts, PixelDiff, TimedSamples, TimingSummary};
 use report::{
     CorpusRecord, CorrectnessRecord, DecodeCaseReport, DecodeRow, EncodeCaseReport, EncodeRow,
     Report, ThumbnailReport, ThumbnailRow,
@@ -110,28 +110,61 @@ fn parse_options() -> Options {
     options
 }
 
+/// Shortest sample worth timing on its own. Below this a single call is
+/// dominated by timer resolution and cold-call effects (first-touch page
+/// faults, branch predictors), so such rows are timed in batches.
+const MIN_SAMPLE: Duration = Duration::from_millis(1);
+const MAX_CALLS_PER_SAMPLE: usize = 1000;
+
 /// Warm every runner, then run `iterations` rounds in which each runner is
 /// timed once, starting from a different runner each round. The timed region
 /// includes dropping the output: freeing a library-owned buffer is part of
 /// the fresh path's cost to an application.
+///
+/// The warmup calls are timed too, and a runner whose fastest warmup call
+/// took under [`MIN_SAMPLE`] is timed `K` calls per sample, with `K` chosen so
+/// one sample spans about `MIN_SAMPLE`; every reported figure is per call.
 fn time_interleaved(
     runners: &mut [Box<dyn FnMut() + '_>],
     warmup: usize,
     iterations: usize,
-) -> Vec<Vec<Duration>> {
+) -> Vec<TimedSamples> {
+    let mut calls_per_sample: Vec<usize> = Vec::with_capacity(runners.len());
     for runner in runners.iter_mut() {
+        let mut fastest: Option<Duration> = None;
         for _ in 0..warmup {
+            let start: Instant = Instant::now();
             runner();
+            let elapsed: Duration = start.elapsed();
+            fastest = Some(fastest.map_or(elapsed, |f| f.min(elapsed)));
         }
+        let batch: usize = match fastest {
+            Some(call) if call < MIN_SAMPLE => {
+                let nanos: u128 = call.as_nanos().max(1);
+                (MIN_SAMPLE.as_nanos().div_ceil(nanos) as usize).clamp(1, MAX_CALLS_PER_SAMPLE)
+            }
+            _ => 1,
+        };
+        calls_per_sample.push(batch);
     }
     let count: usize = runners.len();
-    let mut samples: Vec<Vec<Duration>> = vec![Vec::with_capacity(iterations); count];
+    let mut samples: Vec<TimedSamples> = calls_per_sample
+        .iter()
+        .map(|batch| TimedSamples {
+            per_call: Vec::with_capacity(iterations),
+            calls_per_sample: *batch,
+        })
+        .collect();
     for round in 0..iterations {
         for offset in 0..count {
             let index: usize = (round + offset) % count;
+            let batch: usize = samples[index].calls_per_sample;
             let start: Instant = Instant::now();
-            (runners[index])();
-            samples[index].push(start.elapsed());
+            for _ in 0..batch {
+                (runners[index])();
+            }
+            let per_call: Duration = start.elapsed() / batch as u32;
+            samples[index].per_call.push(per_call);
         }
     }
     samples
@@ -356,7 +389,7 @@ fn run_decode_case(
 
     // 3. Timing.
     let backends: Vec<DecodeBackend> = prepared.iter().map(|ready| ready.backend).collect();
-    let samples: Vec<Vec<Duration>> = {
+    let samples: Vec<TimedSamples> = {
         let mut runners: Vec<Box<dyn FnMut() + '_>> = prepared
             .iter_mut()
             .map(|ready| {
@@ -462,7 +495,7 @@ fn run_encode_case(source: &SourcePixels, options: &Options) -> EncodeCaseReport
         drop(jpeg);
         row.alloc = stats;
     }
-    let samples: Vec<Vec<Duration>> = {
+    let samples: Vec<TimedSamples> = {
         let mut runners: Vec<Box<dyn FnMut() + '_>> = EncodeBackend::ALL
             .iter()
             .map(|backend| {
@@ -544,7 +577,7 @@ fn run_thumbnail(
             stats
         })
         .collect();
-    let samples: Vec<Vec<Duration>> = {
+    let samples: Vec<TimedSamples> = {
         let mut runners: Vec<Box<dyn FnMut() + '_>> = applicable
             .iter()
             .map(|backend| {
@@ -700,6 +733,7 @@ fn main() {
         None if !options.use_c_oracle => "disabled (--no-c-oracle)".to_string(),
         None => "not found (set DJPEG or pass --djpeg to add candidate-vs-C rows)".to_string(),
     };
+    let c_oracle_link_map: Option<String> = djpeg.as_deref().map(environment::djpeg_link_map);
 
     // Decode cases. A corpus file is generated only when a selected case uses
     // it, so `--only` also keeps a run small.
@@ -785,6 +819,7 @@ fn main() {
         lockfile: options.lockfile.display().to_string(),
         load_sample,
         c_oracle,
+        c_oracle_link_map,
         corpus: store.records,
         decode: decode_reports,
         encode: encode_reports,
