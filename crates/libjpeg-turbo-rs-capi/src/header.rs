@@ -12,10 +12,11 @@
 //! int tj3SetCroppingRegion(tjhandle handle, tjregion region);
 //! ```
 //!
-//! `tj3DecompressHeader` parses just enough of the JPEG stream to update
-//! the handle's `Width`/`Height`/`Precision`/`ColorSpace`/`Subsampling`
-//! parameters. Callers then read them via `tj3Get` to size the output
-//! buffer before invoking `tj3Decompress8`.
+//! `tj3DecompressHeader` parses the markers up to the first SOS — no entropy
+//! data — and publishes the thirteen parameters upstream's
+//! `setDecompParameters` writes (`turbojpeg.c:514-536`). Callers then read
+//! them via `tj3Get` to size the output buffer and to pick the
+//! `tj3Decompress{8,12,16}` that matches `TJPARAM_PRECISION`.
 
 use std::ffi::{c_int, c_void};
 
@@ -54,12 +55,9 @@ pub unsafe extern "C" fn tj3DecompressHeader(
             // SAFETY: caller guarantees `jpeg_buf` is valid for `jpeg_size` bytes.
             let jpeg: &[u8] = unsafe { std::slice::from_raw_parts(jpeg_buf, jpeg_size) };
 
-            // Header-only path: must report ORIGINAL dimensions (ignoring any
-            // `tj3SetScalingFactor`), per the libjpeg-turbo contract that
-            // `TJPARAM_JPEGWIDTH`/`TJPARAM_JPEGHEIGHT` reflect the raw JPEG
-            // frame size. `decompress_header` applies scaling factor 1:1
-            // internally, restoring the caller's scaling factor for subsequent
-            // `tj3Decompress*` calls.
+            // Header-only (P4-142): the published JPEGWIDTH/JPEGHEIGHT are the
+            // frame's, which neither the scaling factor nor the cropping
+            // region can move, so neither is consulted here.
             match inst.inner.decompress_header(jpeg) {
                 Ok(()) => {
                     inst.clear_error();

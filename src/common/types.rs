@@ -459,9 +459,10 @@ impl Default for DecodeLimits {
 }
 
 impl DecodeLimits {
-    /// Frame-dimension checks shared by every decode entry point,
-    /// including the ones without a limits API (`read_coefficients`,
-    /// `decompress_12bit`/`_16bit`), which apply the defaults.
+    /// Frame-dimension checks shared by every decode entry point. The
+    /// ones without a limits API (`read_coefficients`, and
+    /// `decompress_12bit`/`_16bit` — whose `_with_limits` spellings take a
+    /// budget) apply the defaults.
     pub(crate) fn check_frame(
         &self,
         width: usize,
@@ -491,6 +492,35 @@ impl DecodeLimits {
             });
         }
         Ok(())
+    }
+
+    /// The scan-count check every decode entry point shares, against the
+    /// scans the header walk found.
+    pub(crate) fn check_scans(&self, scans: usize) -> crate::common::error::Result<()> {
+        if scans > self.max_scans {
+            return Err(crate::common::error::JpegError::LimitExceeded {
+                what: "scan count",
+                actual: scans as u64,
+                limit: self.max_scans as u64,
+            });
+        }
+        Ok(())
+    }
+
+    /// Refuse a decode whose estimated allocations exceed `max_memory`.
+    /// Each entry point estimates its own geometry-sized buffers; what each
+    /// estimate counts is listed in README.md's "Resource limits".
+    pub(crate) fn check_memory(&self, estimated: u64) -> crate::common::error::Result<()> {
+        match self.max_memory {
+            Some(limit) if estimated > limit => {
+                Err(crate::common::error::JpegError::LimitExceeded {
+                    what: "estimated decode memory",
+                    actual: estimated,
+                    limit,
+                })
+            }
+            _ => Ok(()),
+        }
     }
 
     /// zune-jpeg `new_safe`-like values for callers that want tight

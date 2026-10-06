@@ -28,11 +28,14 @@ pub enum TjParam {
     Quality,
     /// TJPARAM_SUBSAMP: Chroma subsampling (0=444, 1=422, 2=420, 3=Gray, 4=440, 5=411).
     Subsampling,
-    /// TJPARAM_JPEGWIDTH: Image width (read-only after decompress).
+    /// TJPARAM_JPEGWIDTH: the frame header's width, as the last decompress or
+    /// header read published it — unaffected by scaling or cropping. -1 until
+    /// a header has been read.
     Width,
-    /// TJPARAM_JPEGHEIGHT: Image height (read-only after decompress).
+    /// TJPARAM_JPEGHEIGHT: the frame header's height; see `Width`.
     Height,
-    /// TJPARAM_PRECISION: Sample precision in bits (read-only).
+    /// TJPARAM_PRECISION: the frame header's sample precision after a
+    /// decompress or header read (8, 12 or 2-16 for lossless).
     Precision,
     /// TJPARAM_COLORSPACE: Color space (-1=Default/auto, 0=RGB, 1=YCbCr, 2=Gray, 3=CMYK, 4=YCCK).
     ColorSpace,
@@ -103,10 +106,11 @@ pub struct FrameInfo {
 ///
 /// Upstream's `setDecompParameters` (`turbojpeg.c:514-536`) records them from
 /// the SOF every time a header is read, and `tj3SetCroppingRegion`
-/// (`turbojpeg.c:2068-2115`) reads them back. They are kept apart from the
-/// handle's published `Width`/`Height`, which today carry the decoded *output*
-/// size (P4-200, #621) — validating against those would measure a region
-/// against a previously cropped image.
+/// (`turbojpeg.c:2068-2115`) reads them back. The handle's published
+/// `Width`/`Height`/`Subsampling`/`Precision`/`Lossless` hold the same values
+/// once a header is read (P4-199, P4-200); this copy exists because a caller
+/// may `set` the writable ones in between, and upstream validates against
+/// `jpegWidth`, which `tj3Set` cannot reach.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct CroppingGeometry {
     /// `jpegWidth`: the SOF's width, unscaled.
@@ -301,6 +305,10 @@ impl CroppingGeometry {
     }
 }
 
+/// `TJCS_DEFAULT` (`turbojpeg.h:541`): what `setDecompParameters` publishes
+/// for a `jpeg_color_space` it has no `TJCS_*` for (`turbojpeg.c:526`).
+const TJCS_DEFAULT: i32 = -1;
+
 /// TJ3-compatible handle for JPEG compression/decompression.
 ///
 /// Wraps all parameters in a single object with get/set accessors,
@@ -352,10 +360,13 @@ impl TjHandle {
             // substituted values a caller never chose (P4-155, #539).
             quality: -1,
             subsampling: -1, // TJSAMP_UNKNOWN
-            width: 0,
-            height: 0,
+            // tj3InitVersion seeds both to -1, the "no header read yet"
+            // sentinel (`turbojpeg.c:600-601`); 0 is a dimension a caller
+            // cannot tell from a degenerate frame (P4-200, #621).
+            width: -1,
+            height: -1,
             precision: 8,
-            color_space: -1, // TJCS_DEFAULT (auto-detect)
+            color_space: TJCS_DEFAULT,
             fast_upsample: 0,
             fast_dct: 0,
             optimize: 0,
@@ -671,23 +682,6 @@ impl TjHandle {
         ]
     }
 
-    /// Convert `ColorSpace` enum to TJ3 integer (TJCS_* constants).
-    fn color_space_to_tj(cs: ColorSpace) -> i32 {
-        match cs {
-            ColorSpace::Rgb => 0,
-            ColorSpace::YCbCr => 1,
-            ColorSpace::Grayscale => 2,
-            ColorSpace::Cmyk => 3,
-            ColorSpace::Ycck => 4,
-            ColorSpace::Unknown => 1, // default to YCbCr
-        }
-    }
-
-    /// Convert `Subsampling` enum to TJ3 integer (TJSAMP_* constants).
-    fn subsampling_to_tj(ss: Subsampling) -> i32 {
-        ss.to_tjsamp()
-    }
-
     /// Convert TJ3 integer to `ColorSpace` enum. -1 (TJCS_DEFAULT) returns None.
     fn tj_to_color_space(val: i32) -> Option<ColorSpace> {
         match val {
@@ -997,40 +991,101 @@ impl TjHandle {
         )
     }
 
-    /// Decompress JPEG data using current handle parameters.
+    /// Header-only read (matches `tj3DecompressHeader`, `turbojpeg.c:1872-1927`).
     ///
-    /// Delegates to the existing `Decoder`, translating handle parameters.
-    /// After successful decompression, updates handle state to reflect the
-    /// decoded image: `Width`, `Height`, `Precision`, `ColorSpace`,
-    /// `Subsampling`, density, and ICC profile.
-    /// Header-only decompress (matches `tj3DecompressHeader` semantics).
+    /// Parses the markers up to the first SOS — no entropy data is decoded
+    /// (P4-142) — and publishes the thirteen parameters
+    /// `setDecompParameters` writes, exactly as [`Self::decompress`] does.
+    /// Like upstream, it consults neither the scaling factor nor the cropping
+    /// region, and applies no `TJPARAM_MAXPIXELS` test: that belongs to the
+    /// decompress that follows. `TJPARAM_SCANLIMIT` still bounds the marker
+    /// walk, as it does for every parse here.
     ///
-    /// Unlike `decompress()`, this method:
-    /// - Ignores `scaling_factor` (`JPEGWIDTH`/`JPEGHEIGHT` must reflect the
-    ///   ORIGINAL JPEG dimensions per the libjpeg-turbo spec, not the
-    ///   scaled output).
-    /// - Ignores the cropping region, as `tj3DecompressHeader` does.
-    /// - Populates `width`, `height`, `precision`, `color_space`,
-    ///   `subsampling`, density, and ICC exactly as `decompress()` would,
-    ///   but without producing pixel data.
+    /// With `TJPARAM_SAVEMARKERS` 2 or 4 the ICC profile is captured, as by a
+    /// decompress; at 0, 1 or 3 the handle's profile is cleared, also as by a
+    /// decompress (the two share one buffer here, P4-198).
     ///
-    /// Implementation: temporarily reset the scaling factor to 1:1 and clear
-    /// the cropping region, call `decompress()`, then restore both. The
-    /// output from a subsequent `decompress()` call is still governed by the
-    /// original scaling factor and region — this method does NOT clobber
-    /// user-visible state beyond the read-only header params.
+    /// Refuses, after publishing, a frame whose colour space TurboJPEG cannot
+    /// name ("Could not determine colorspace of JPEG image", `:1919-1920`).
     pub fn decompress_header(&mut self, data: &[u8]) -> Result<()> {
-        // The cropping region is suspended for the same reason, and for one
-        // more: upstream's tj3DecompressHeader never consults it, so a region
-        // set for an earlier, larger image must not make reading a smaller
-        // image's header fail (P4-197, #618).
-        let saved_scaling: ScalingFactor = self.scaling_factor;
-        let saved_region: Option<CropRegion> = self.cropping_region.take();
-        self.scaling_factor = ScalingFactor::default();
-        let result: Result<Image> = self.decompress(data);
-        self.scaling_factor = saved_scaling;
-        self.cropping_region = saved_region;
-        result.map(|_| ())
+        let decoder: Decoder<'_> = Decoder::new_with_limits(data, self.decode_limits())?;
+        self.publish_header(&decoder)?;
+        if self.color_space == TJCS_DEFAULT {
+            return Err(JpegError::Unsupported(alloc::string::String::from(
+                "Could not determine colorspace of JPEG image",
+            )));
+        }
+        Ok(())
+    }
+
+    /// Everything a header read leaves on the handle, done once, right after
+    /// the parse, by all four decompress entry points: the thirteen
+    /// parameters ([`Self::publish_decomp_parameters`]) and the ICC profile —
+    /// with `TJPARAM_SAVEMARKERS` 2 or 4 the frame's (or `None` when it has
+    /// none), otherwise `None`.
+    ///
+    /// The ICC half is here, rather than after a successful decode, because a
+    /// later compress reads the field: the handle keeps one ICC buffer where
+    /// upstream keeps two (P4-198, #619), so an entry point that wrote it at a
+    /// different point — or not at all — would make a compress depend on
+    /// *which* decode ran last, and whether it got past the header, rather
+    /// than on the last header read.
+    fn publish_header(&mut self, decoder: &Decoder<'_>) -> Result<()> {
+        self.publish_decomp_parameters(decoder);
+        self.icc_profile = match self.save_markers {
+            2 | 4 => decoder.icc_profile()?,
+            _ => None,
+        };
+        Ok(())
+    }
+
+    /// Publish what upstream's `setDecompParameters` (`turbojpeg.c:514-536`)
+    /// writes, from the frame header `decoder` parsed: all thirteen of
+    /// `SUBSAMP`, `JPEGWIDTH`, `JPEGHEIGHT`, `PRECISION`, `COLORSPACE`,
+    /// `PROGRESSIVE`, `ARITHMETIC`, `LOSSLESS`, `LOSSLESSPSV`, `LOSSLESSPT`,
+    /// `XDENSITY`, `YDENSITY` and `DENSITYUNITS` (P4-199, #620).
+    ///
+    /// Every value is the *frame's*: the SOF's dimensions rather than the
+    /// scaled or cropped output's (P4-200, #621) and the SOF's precision
+    /// rather than the decode path's (P4-203, #625). `LOSSLESSPSV` and
+    /// `LOSSLESSPT` are `dinfo.Ss` / `dinfo.Al` of the first scan, which on a
+    /// progressive stream is the DC scan's point transform.
+    ///
+    /// Called, through [`Self::publish_header`], by every decompress entry
+    /// point right after the header parse and before any limit or crop
+    /// check, as upstream's shared body calls it before its
+    /// `TJPARAM_MAXPIXELS` refusal (`turbojpeg-mp.c:190`, `:195-199`) — so a
+    /// refused decode has still published.
+    fn publish_decomp_parameters(&mut self, decoder: &Decoder<'_>) {
+        let geometry: CroppingGeometry = CroppingGeometry::of(decoder);
+        let frame = decoder.header();
+        let first_scan = decoder.first_scan_header();
+        let density = decoder.density();
+        self.subsampling = geometry.subsampling;
+        self.width = i32::from(frame.width);
+        self.height = i32::from(frame.height);
+        self.precision = i32::from(frame.precision);
+        self.color_space = match decoder.jpeg_color_space() {
+            ColorSpace::Grayscale => 2,
+            ColorSpace::Rgb => 0,
+            ColorSpace::YCbCr => 1,
+            ColorSpace::Cmyk => 3,
+            ColorSpace::Ycck => 4,
+            ColorSpace::Unknown => TJCS_DEFAULT,
+        };
+        self.progressive = i32::from(frame.is_progressive);
+        self.arithmetic = i32::from(decoder.is_arithmetic());
+        self.lossless = i32::from(frame.is_lossless);
+        self.lossless_psv = i32::from(first_scan.spec_start);
+        self.lossless_pt = i32::from(first_scan.succ_low);
+        self.x_density = i32::from(density.x);
+        self.y_density = i32::from(density.y);
+        self.density_units = match density.unit {
+            DensityUnit::Unknown => 0,
+            DensityUnit::Dpi => 1,
+            DensityUnit::Dpcm => 2,
+        };
+        self.cropping_geometry = Some(geometry);
     }
 
     /// Resource limits derived from this handle's TurboJPEG params.
@@ -1089,8 +1144,20 @@ impl TjHandle {
         })
     }
 
+    /// Decompress JPEG data using current handle parameters (like
+    /// `tj3Decompress8`).
+    ///
+    /// Publishes the thirteen header parameters first — see
+    /// [`Self::decompress_header`] — then applies `TJPARAM_MAXPIXELS` to the
+    /// frame, then the scaling factor and cropping region, then decodes.
     pub fn decompress(&mut self, data: &[u8]) -> Result<Image> {
         let mut decoder = Decoder::new_with_limits(data, self.decode_limits())?;
+        self.publish_header(&decoder)?;
+        // Upstream's maxPixels test sits right after setDecompParameters and
+        // before scaling or cropping is consulted (`turbojpeg-mp.c:195-199`).
+        let (frame_width, frame_height): (usize, usize) =
+            (decoder.header().width(), decoder.header().height());
+        decoder.limits().check_frame(frame_width, frame_height)?;
 
         // Apply scaling
         if self.scaling_factor != ScalingFactor::default() {
@@ -1112,11 +1179,9 @@ impl TjHandle {
             decoder.set_fast_dct(true);
         }
 
-        // What upstream's setDecompParameters records once the header is
-        // read (`turbojpeg.c:514-536`, called at `turbojpeg-mp.c:190`), so a
-        // later resolve_cropping_region validates against this frame.
+        // Published above, so a later resolve_cropping_region validates
+        // against this frame.
         let geometry: CroppingGeometry = CroppingGeometry::of(&decoder);
-        self.cropping_geometry = Some(geometry);
 
         // Apply the crop region, resolved against *this* image with
         // tj3SetCroppingRegion's rules: refused with upstream's message
@@ -1169,10 +1234,6 @@ impl TjHandle {
             _ => {} // 0 = none (default)
         }
 
-        // Capture JPEG header metadata before decoding
-        let jpeg_color_space: ColorSpace = decoder.jpeg_color_space();
-        let jpeg_subsampling: Subsampling = decoder.jpeg_subsampling();
-
         let mut img: Image = decoder.decode_image()?;
 
         // The decode must have produced exactly the region, as upstream's
@@ -1202,51 +1263,20 @@ impl TjHandle {
             }
         }
 
-        // Update read-only params from decoded image
-        self.width = img.width as i32;
-        self.height = img.height as i32;
-        self.precision = img.precision as i32;
-
-        // Update color space from JPEG header (matches C tj3DecompressHeader)
-        self.color_space = Self::color_space_to_tj(jpeg_color_space);
-
-        // Update subsampling from JPEG header
-        // Grayscale has no chroma subsampling; map to TJSAMP_GRAY=3 matching C
-        self.subsampling = if jpeg_color_space == ColorSpace::Grayscale {
-            3 // TJSAMP_GRAY
-        } else {
-            Self::subsampling_to_tj(jpeg_subsampling)
-        };
-
-        // Update density from JFIF header
-        self.density_units = match img.density.unit {
-            DensityUnit::Unknown => 0,
-            DensityUnit::Dpi => 1,
-            DensityUnit::Dpcm => 2,
-        };
-        self.x_density = img.density.x as i32;
-        self.y_density = img.density.y as i32;
-
-        // Capture ICC profile based on SaveMarkers level (matches C tj3GetICCProfile semantics)
-        // Level 0/1: no ICC extraction; Level 2/4: extract ICC; Level 3: all except ICC
+        // The image's copy of the ICC profile follows the SaveMarkers level
+        // too; the handle's was stored with the header (`publish_header`).
+        // Level 0/1: no ICC; level 3: all markers except ICC; 2 and 4 keep it.
         match self.save_markers {
             0 | 1 => {
-                self.icc_profile = None;
                 img.icc_profile = None;
             }
             3 => {
-                self.icc_profile = None;
                 img.icc_profile = None;
                 // Remove ICC APP2 markers from saved_markers
                 img.saved_markers
                     .retain(|m| !(m.code == 0xE2 && m.data.starts_with(b"ICC_PROFILE\0")));
             }
-            _ => {
-                // Level 2 (all) and 4 (ICC only): extract ICC to handle while
-                // leaving the image copy intact (tj3GetICCProfile symmetry).
-                self.icc_profile =
-                    crate::common::try_alloc::try_clone_opt(&img.icc_profile, "ICC profile")?;
-            }
+            _ => {}
         }
 
         // Wire BottomUp: flip rows after decoding
@@ -1265,28 +1295,40 @@ impl TjHandle {
 
     /// Decompress JPEG to 12-bit pixels (like `tj3Decompress12`).
     ///
-    /// Returns 12-bit sample data (0-4095). Updates handle `Width`, `Height`,
-    /// and `Precision` from the decoded image.
+    /// Returns 12-bit sample data (0-4095). Upstream reaches all three
+    /// precisions through one body (`turbojpeg-mp.c:153`), so this publishes
+    /// the same thirteen parameters as [`Self::decompress`] and applies the
+    /// same handle limits — `TJPARAM_MAXPIXELS`, `TJPARAM_SCANLIMIT` and
+    /// `TJPARAM_MAXMEMORY` (P4-199, #620).
     pub fn decompress_12bit(&mut self, data: &[u8]) -> Result<crate::api::precision::Image12> {
+        let limits: crate::common::types::DecodeLimits = self.prepare_precision_decode(data)?;
         Self::refuse_unhonoured_crop(self.cropping_region, "12-bit")?;
-        let img = crate::api::precision::decompress_12bit(data)?;
-        self.width = img.width as i32;
-        self.height = img.height as i32;
-        self.precision = 12;
-        Ok(img)
+        crate::api::precision::decompress_12bit_with_limits(data, &limits)
     }
 
     /// Decompress JPEG to 16-bit pixels (like `tj3Decompress16`).
     ///
-    /// Returns 16-bit sample data. Updates handle `Width`, `Height`,
-    /// and `Precision` from the decoded image.
+    /// Returns 16-bit sample data. Publishes and limits exactly as
+    /// [`Self::decompress_12bit`] does.
     pub fn decompress_16bit(&mut self, data: &[u8]) -> Result<crate::api::precision::Image16> {
+        let limits: crate::common::types::DecodeLimits = self.prepare_precision_decode(data)?;
         Self::refuse_unhonoured_crop(self.cropping_region, "16-bit")?;
-        let img = crate::api::precision::decompress_16bit(data)?;
-        self.width = img.width as i32;
-        self.height = img.height as i32;
-        self.precision = img.precision as i32;
-        Ok(img)
+        crate::api::precision::decompress_16bit_with_limits(data, &limits)
+    }
+
+    /// The shared head of the 12/16-bit paths, in upstream's order: read the
+    /// header under the handle's scan limit, publish, then apply
+    /// `TJPARAM_MAXPIXELS` (`turbojpeg-mp.c:190`, `:195-199`). Returns the
+    /// limits the decode itself must honour.
+    fn prepare_precision_decode(
+        &mut self,
+        data: &[u8],
+    ) -> Result<crate::common::types::DecodeLimits> {
+        let limits: crate::common::types::DecodeLimits = self.decode_limits();
+        let decoder: Decoder<'_> = Decoder::new_with_limits(data, limits)?;
+        self.publish_header(&decoder)?;
+        limits.check_frame(decoder.header().width(), decoder.header().height())?;
+        Ok(limits)
     }
 }
 

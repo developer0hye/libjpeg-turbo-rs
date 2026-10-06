@@ -194,8 +194,9 @@ pub use api::incremental::{
     decompress_from_reader_incremental, decompress_from_reader_incremental_instrumented,
 };
 pub use api::precision::{
-    compress_12bit, compress_16bit, decompress_12bit, decompress_16bit, read_scanlines_12,
-    read_scanlines_16, write_scanlines_12, write_scanlines_16,
+    compress_12bit, compress_16bit, decompress_12bit, decompress_12bit_with_limits,
+    decompress_16bit, decompress_16bit_with_limits, read_scanlines_12, read_scanlines_16,
+    write_scanlines_12, write_scanlines_16,
 };
 pub use api::quality::quality_scaling;
 pub use api::quantize::requantize;
@@ -259,8 +260,9 @@ pub const fn simd_and_std_features_enabled() -> bool {
 pub mod precision {
     pub use crate::api::precision::{
         compress_12bit, compress_16bit, compress_lossless_arbitrary, decompress_12bit,
-        decompress_16bit, decompress_lossless_arbitrary, read_scanlines_12, read_scanlines_16,
-        write_scanlines_12, write_scanlines_16, Image12, Image16,
+        decompress_12bit_with_limits, decompress_16bit, decompress_16bit_with_limits,
+        decompress_lossless_arbitrary, read_scanlines_12, read_scanlines_16, write_scanlines_12,
+        write_scanlines_16, Image12, Image16,
     };
 }
 /// TJ3-compatible handle/parameter API.

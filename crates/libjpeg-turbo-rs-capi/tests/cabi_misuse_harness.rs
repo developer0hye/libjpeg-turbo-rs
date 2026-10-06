@@ -98,41 +98,6 @@ struct KnownDivergence {
 }
 
 const KNOWN_DIVERGENCES: &[KnownDivergence] = &[
-    // P4-200 (#621) gains a criterion for the initial values: upstream seeds
-    // `jpegWidth`/`jpegHeight` to -1 in `tj3InitVersion`
-    // (`references/libjpeg-turbo/src/turbojpeg.c:600-601`); ours leave them 0,
-    // so a caller using the documented -1 sentinel for "not read yet" sees a
-    // legal dimension instead.
-    KnownDivergence {
-        case: "handle_defaults",
-        key: "default_compress_JPEGWIDTH",
-        item: "P4-200 (#621)",
-    },
-    KnownDivergence {
-        case: "handle_defaults",
-        key: "default_compress_JPEGHEIGHT",
-        item: "P4-200 (#621)",
-    },
-    KnownDivergence {
-        case: "handle_defaults",
-        key: "default_decompress_JPEGWIDTH",
-        item: "P4-200 (#621)",
-    },
-    KnownDivergence {
-        case: "handle_defaults",
-        key: "default_decompress_JPEGHEIGHT",
-        item: "P4-200 (#621)",
-    },
-    KnownDivergence {
-        case: "handle_defaults",
-        key: "default_transform_JPEGWIDTH",
-        item: "P4-200 (#621)",
-    },
-    KnownDivergence {
-        case: "handle_defaults",
-        key: "default_transform_JPEGHEIGHT",
-        item: "P4-200 (#621)",
-    },
     // P4-202 (#624): `tj3Compress8` accepts a width or height above libjpeg's
     // JPEG_MAX_DIMENSION and emits a frame stock `djpeg` refuses to read.
     KnownDivergence {
@@ -144,13 +109,6 @@ const KNOWN_DIVERGENCES: &[KnownDivergence] = &[
         case: "max_dimensions",
         key: "compress_over_max_height_rc",
         item: "P4-202 (#624)",
-    },
-    // P4-203 (#625): `TJPARAM_PRECISION` reports the decode path's output
-    // precision, not the SOF's `data_precision`.
-    KnownDivergence {
-        case: "precision12",
-        key: "precision",
-        item: "P4-203 (#625)",
     },
     // P4-205 (#627): `tj3Alloc(0)` returns NULL; upstream is a bare
     // `malloc(bytes)` (`turbojpeg.c:934-937`), which returns a unique freeable

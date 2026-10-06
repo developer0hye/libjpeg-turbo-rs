@@ -504,6 +504,13 @@ impl<'a> Decoder<'a> {
             || self.metadata.scan.components.len() < self.metadata.frame.components.len()
     }
 
+    /// The header of the first scan — the SOS `jpeg_read_header` stops at,
+    /// whose `Ss` / `Al` TurboJPEG publishes as `TJPARAM_LOSSLESSPSV` /
+    /// `TJPARAM_LOSSLESSPT` (`turbojpeg.c:532-533`).
+    pub(crate) fn first_scan_header(&self) -> &crate::common::types::ScanHeader {
+        &self.metadata.scan
+    }
+
     /// Set the desired output pixel format.
     pub fn set_output_format(&mut self, format: PixelFormat) {
         self.output_format = Some(format);

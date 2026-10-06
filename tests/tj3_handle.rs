@@ -29,9 +29,10 @@ fn handle_default_values() {
     assert_eq!(handle.get(TjParam::XDensity), 1);
     assert_eq!(handle.get(TjParam::YDensity), 1);
     assert_eq!(handle.get(TjParam::DensityUnits), 0); // DPI
-                                                      // Width/Height default 0 (not yet decompressed)
-    assert_eq!(handle.get(TjParam::Width), 0);
-    assert_eq!(handle.get(TjParam::Height), 0);
+                                                      // Width/Height -1: no header read yet, as
+                                                      // tj3InitVersion seeds them (P4-200)
+    assert_eq!(handle.get(TjParam::Width), -1);
+    assert_eq!(handle.get(TjParam::Height), -1);
     // Lossless params
     assert_eq!(handle.get(TjParam::LosslessPsv), 1);
     assert_eq!(handle.get(TjParam::LosslessPt), 0);
@@ -657,8 +658,8 @@ fn handle_decompress_updates_width_height() {
     .unwrap();
 
     let mut handle = TjHandle::new();
-    assert_eq!(handle.get(TjParam::Width), 0);
-    assert_eq!(handle.get(TjParam::Height), 0);
+    assert_eq!(handle.get(TjParam::Width), -1);
+    assert_eq!(handle.get(TjParam::Height), -1);
 
     let _img = handle.decompress(&jpeg).unwrap();
     assert_eq!(handle.get(TjParam::Width), width as i32);
