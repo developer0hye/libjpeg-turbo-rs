@@ -13100,6 +13100,172 @@ of the input size, and a server encoding caller-sized uploads still wants a
    inventory of the bounded remainder.
 3. `tests/miri_alloc_failure.rs` gains an encode refusal case.
 
+## P4-214. No Benchmark Measures a Default-Profile Downstream Consumer — **OPEN**
+
+**GitHub:** [#640](https://github.com/developer0hye/libjpeg-turbo-rs/issues/640) — child of #635 Milestone C.
+
+**Why it matters.** The workspace sets `[profile.release] lto = true`, and
+Cargo ignores profiles that dependencies declare
+(<https://doc.rust-lang.org/cargo/reference/profiles.html>). An application
+built with its own default `release` profile therefore never gets that
+setting. It never gets the repository's `.cargo/config.toml` either. Every
+existing speed figure comes from `cargo bench` or
+`examples/bench_zune_matrix.rs`, and both run inside the workspace, so they
+measure a build no user ships. `bench_zune_matrix`'s `parity = ok` also
+compares only the output length, not the pixels.
+
+**Acceptance criteria** (from #640).
+
+1. A consumer crate is built **outside** this repository, so no parent
+   `.cargo/config.toml` applies. It uses the default `release` profile and no
+   `RUSTFLAGS`. Fat LTO, thin LTO and `target-cpu=native` get separate,
+   labelled tables. `Cargo.lock` is committed and builds use `--locked`.
+2. It compares the published baseline (`libjpeg-turbo-rs` from crates.io), the
+   candidate (this checkout), the `image` adapter, `image`'s built-in JPEG
+   decoder (zune-jpeg) and `zune-jpeg` directly. Every row uses the same
+   output format and states whether the caller or the library owns the buffer.
+   Pixel equality is checked outside the timed region. Where exact equality
+   does not hold, the measured difference is reported, against C where C is
+   the contract.
+3. The cases are: a small image, a phone-size photo, grayscale, progressive, a
+   large image, full-size vs 1/4-scaled decode, and the decode → orient →
+   resize → encode thumbnail workload. Encode is compared on time, file size
+   and PSNR against the source.
+4. Each case reports the median, the spread over repeated runs, MP/s,
+   allocation count, cumulative allocated bytes and peak live bytes, with the
+   fresh-decoder and buffer-reuse paths reported separately. The report also
+   gives the clean build time and each backend's binary-size contribution.
+5. The report records resolved crate versions, toolchain, CPU, OS, profile,
+   features, corpus source, licence and checksums, and a machine-load sample
+   taken before the run. The instructions let another developer reproduce it.
+   A `workflow_dispatch` job produces the x86_64 and aarch64 reports on hosted
+   runners, and its noise caveat is stated.
+6. The first report is committed under `experiments/`, including the cases the
+   candidate loses. It proposes regression budgets derived from its measured
+   spread.
+
+**What landed.** The harness: `experiments/downstream/consumer/` (a standalone
+crate with its own `[workspace]` and a committed lock),
+`experiments/downstream/run.sh`, `experiments/downstream/README.md` and
+`.github/workflows/downstream-bench.yml`. It covers criteria 1–5 as mechanisms.
+A local `--smoke` run on 2026-10-07 (aarch64-darwin, default variant)
+exercised every case and every correctness invariant:
+
+- candidate `decompress_into`, the image adapter and baseline reuse are each
+  byte-identical to their fresh twins, and candidate vs C `djpeg` (3.1.4.1)
+  is identical on all eight decode cases;
+- candidate vs baseline is identical on every case;
+- zune-jpeg and `image`'s decoder differ from the candidate by at most 5
+  (mean ≤ 0.36) on each of the seven cases they support. Neither has a
+  scaled decode, so the 1/4 case is N/A for both.
+
+**Smoke-run observations.** These three come from the allocation columns,
+the output geometry and the SOF markers, all deterministic, so machine load
+does not affect them. Unlike the timings, they hold even though they come
+from a smoke run.
+
+- The candidate image adapter measured here (this branch, forked from `main`
+  before PR #643) decodes eagerly and does not report EXIF orientation
+  (`ImageDecoder::orientation()` falls back to `NoTransforms`). The
+  thumbnail workload therefore produces 256x192 where every other row
+  produces the oriented 192x256. P4-212 fixed both the eager decode and the
+  missing metadata (PR #643, merged and CLOSED 2026-10-07), so on a
+  candidate that includes it the adapter's thumbnail row should become
+  192x256; not yet re-run.
+- `decompress_into` still allocates whole-image component planes: a 17.5 MiB
+  peak on 12 MP 4:2:0 RGB (zune `decode_into`: 0.65 MiB) and 2.0 MiB on
+  grayscale 1080p. Filed as
+  [P4-218](#p4-218-the-buffer-reuse-decode-still-allocates-whole-image-component-planes--open).
+- `image`'s built-in encoder writes 4:4:4 at q85, so its encode bytes and
+  PSNR do not compare like for like with the 4:2:0 rows. The report reads
+  each output's subsampling back from its SOF marker, and the
+  `baseline-444` / `candidate-444` rows encode at 4:4:4 for a like-for-like
+  comparison.
+
+A re-run after review (`--smoke`, with stock 3.2.0 `djpeg` passed via
+`DJPEG`) was again identical to C on all eight decode cases. It also added
+the 4:4:4 encode rows, the baseline / adapter / image size probes, batched
+timing for sub-millisecond rows, and a `run.sh --check` mode.
+
+After the codex review, C became a hard contract wherever a C tool is
+available:
+- every decode case asserts candidate and baseline pixel-identical to
+  `djpeg`;
+- every encode case asserts candidate and baseline `compress`
+  byte-identical to `cjpeg -quality 85`, and to `cjpeg -quality 85 -sample
+  1x1` for the 4:4:4 rows.
+
+Against stock 3.2.0, all of these held on 2026-10-07.
+
+**Status (2026-10-07): harness landed; first measured report pending.**
+Criterion 6 needs a quiet machine and the first dispatch of the hosted job.
+GitHub registers a dispatch-only workflow only after the file reaches the
+default branch, so that dispatch waits until this lands on `main`.
+
+## P4-218. The Buffer-Reuse Decode Still Allocates Whole-Image Component Planes — **OPEN**
+
+**Found by:** [P4-214](#p4-214-no-benchmark-measures-a-default-profile-downstream-consumer--open)'s
+downstream-consumer harness, in its counting-allocator pass on 2026-10-07.
+Allocation counts and peaks are deterministic, so this smoke-run figure does
+not depend on machine load.
+
+**What happens.** `decompress_into` / `Decoder::decode_image_into` writes the
+pixels into the caller's buffer and, for the standard paths, allocates no
+output-sized buffer: issue #354 delivered that. It still allocates something
+almost as large. The peak live heap during one decode, measured above the
+heap at the start (`experiments/downstream/consumer`, `--smoke`, default
+release profile, aarch64-darwin):
+
+| Case | candidate `decompress_into` | candidate `decompress_to` | zune-jpeg `decode_into` |
+|---|---:|---:|---:|
+| 4032x3024 4:2:0 baseline, RGB8 | 17.5 MiB | 52.4 MiB | 0.65 MiB |
+| 7680x4320 4:2:0 baseline, RGB8 | 47.5 MiB | 142.4 MiB | 1.2 MiB |
+| 1920x1080 grayscale, L8 | 2.0 MiB | 2.0 MiB | 30.5 KiB |
+| 1920x1080 4:2:0 progressive, RGB8 | 9.1 MiB | 9.1 MiB | 6.3 MiB |
+
+17.5 MiB on 12 MP is 1.5 bytes per pixel, which is a full-resolution Y
+plane plus two quarter-size chroma planes. 2.0 MiB on grayscale 1080p is
+exactly the Y plane, the same size as the output. The baseline 0.8.0 release
+gives identical numbers. On grayscale the reuse path therefore saves nothing
+over `decompress_to`.
+
+**Root-cause hypothesis (not yet verified in code).** The sequential
+(baseline) path decodes every component into a whole-image plane before
+upsampling and colour conversion, rather than streaming iMCU row groups the
+way libjpeg's `jdmainct.c` / `jdcoefct.c` single-pass buffer controllers do.
+The progressive path needs whole-image coefficient buffers by design, as C's
+does, so its row is not part of this item.
+
+**Why it matters.** The buffer-reuse API exists for frame loops and
+memory-bounded services, and its documentation promises no output-sized
+allocation (`src/api/high_level.rs:38-40`; `src/decode/pipeline_impl/output.rs:267-270`
+names grayscale and "every streamed subsampling mode" as writing directly
+into `out` — the grayscale row above allocates the output's size anyway). A caller that sized its memory budget from that promise will
+find the decoder's working set grows with the image instead: 47.5 MiB extra
+for an 8K frame, against about 1 MiB for zune-jpeg on the same call.
+
+**Acceptance criteria.**
+
+1. On the sequential (non-progressive) standard paths, `decompress_into`
+   decodes in row strips (iMCU row groups) and the working set no longer
+   scales with image height. The 4:2:0 RGB and grayscale rows above drop to
+   O(width) per strip.
+2. A regression test asserts a peak-memory bound for `decompress_into` on a
+   large 4:2:0 and a grayscale image, using a counting global allocator in
+   the shape of the downstream harness's `alloc_counter.rs`. The bound must
+   be in terms of width x strip height, not width x height.
+3. Output stays byte-identical to `decompress_to` and to C `djpeg`.
+4. The downstream report's allocation columns show the drop.
+5. The `decompress_into` / `Decoder::decode_image_into` docs
+   (`src/api/high_level.rs:38-40`, `src/decode/pipeline_impl/output.rs:267-270`)
+   describe the allocations that remain, rather than promising none for
+   grayscale. P4-213 covers the CMYK/12-bit/lossless staging paths; this item
+   is the standard sequential path.
+
+**Why deferred.** It was found by the benchmark harness, which only
+measures; changing the decode pipeline's buffering is a pipeline change with
+its own review.
+
 ## P4-220. TJ3 Entry Points Never Check the Handle's Instance Type — **OPEN**
 
 **Found 2026-10-07** in review of P4-139 criterion 4 (#478), which rewrote
