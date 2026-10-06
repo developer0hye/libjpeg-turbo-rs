@@ -10,8 +10,9 @@
 //! compare a fallback.
 //!
 //! None of that is visible in the test sources, so the ways it can silently
-//! stop holding all live in the workflow: the job's instrumentation flags
-//! dropped, the unfiltered `--lib` run narrowed by a filter or `--skip`, the
+//! stop holding all live in the workflow: the `pull_request` trigger dropped
+//! or narrowed by a `paths` filter, the job's instrumentation flags dropped or
+//! overridden by a step-level `RUSTFLAGS`, the unfiltered `--lib` run narrowed by a filter or `--skip`, the
 //! AVX2 requirement dropped, the confirmation step's count no longer asserted
 //! (`cargo test` exits 0 when a filter selects nothing) or left behind when a
 //! test is added or removed, or a job switched off by `if:` or forgiven by
@@ -154,6 +155,21 @@ fn declared_tests(source: &str) -> usize {
 /// can be driven over mutations of the real workflow below.
 fn problems(workflow: &str, declared: usize) -> Vec<String> {
     let mut found: Vec<String> = Vec::new();
+    // The jobs gate pull requests only if the workflow triggers on them, and
+    // a `paths` filter would let a pull request skip both jobs entirely.
+    let trigger: &str = workflow
+        .split("\non:\n")
+        .nth(1)
+        .and_then(|after| after.split("\n\n").next())
+        .unwrap_or("");
+    if !trigger.lines().any(|line| line.trim() == "pull_request:") {
+        found.push(format!("{WORKFLOW} no longer triggers on `pull_request`"));
+    }
+    if trigger.contains("paths") {
+        found.push(format!(
+            "{WORKFLOW}: a `paths` / `paths-ignore` filter lets a pull request skip the sanitizers"
+        ));
+    }
     for job in JOBS {
         let Some(block) = job_block(workflow, job) else {
             found.push(format!("{job}: job not found in {WORKFLOW}"));
@@ -175,6 +191,21 @@ fn problems(workflow: &str, declared: usize) -> Vec<String> {
                     "{job}: `{flags}` is missing, so its tests run uninstrumented"
                 ));
             }
+        }
+        // A step-level `RUSTFLAGS` (or an inline `RUSTFLAGS=` on a `run:`
+        // line) overrides the job-level one for that step, so the job's line
+        // must be the only place the variable is set.
+        let rustflags_settings: usize = block
+            .lines()
+            .map(str::trim_start)
+            .filter(|line| !line.starts_with('#'))
+            .filter(|line| line.contains("RUSTFLAGS") && !line.contains("RUSTDOCFLAGS"))
+            .count();
+        if rustflags_settings != 1 {
+            found.push(format!(
+                "{job}: `RUSTFLAGS` is set {rustflags_settings} times; any setting but \
+                 the job-level one can strip the instrumentation from a step"
+            ));
         }
         for line in COUNT_ENFORCEMENT {
             if !block.contains(line) {
@@ -305,7 +336,31 @@ fn each_way_the_jobs_can_go_stale_is_reported() {
         "real workflow must pass"
     );
 
-    let mutations: [(&str, String); 10] = [
+    let mutations: [(&str, String); 13] = [
+        (
+            "pull_request trigger removed",
+            workflow.replacen(
+                "\non:\n  pull_request:\n",
+                "\non:\n  workflow_dispatch:\n",
+                1,
+            ),
+        ),
+        (
+            "paths filter added",
+            workflow.replacen(
+                "    branches: [main]\n",
+                "    branches: [main]\n    paths: ['src/simd/**']\n",
+                1,
+            ),
+        ),
+        (
+            "step-level RUSTFLAGS override",
+            workflow.replacen(
+                "        env:\n          EXPECTED_KERNEL_BOUNDS_TESTS",
+                "        env:\n          RUSTFLAGS: \"\"\n          EXPECTED_KERNEL_BOUNDS_TESTS",
+                1,
+            ),
+        ),
         (
             "ASan instrumentation dropped",
             workflow.replacen("RUSTFLAGS: \"-Z sanitizer=address\"", "RUSTFLAGS: \"\"", 1),
