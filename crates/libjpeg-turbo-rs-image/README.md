@@ -51,6 +51,12 @@ JpegEncoder::new_with_quality(&mut output, 85)
 
 For other pixel formats (BGR, BGRA, CMYK, etc.) use `JpegDecoder::new_with_format()`.
 
-## License
+## License and attribution
 
-MIT OR Apache-2.0
+MIT OR Apache-2.0 (`LICENSE-MIT`, `LICENSE-APACHE`).
+
+This software is based in part on the work of the Independent JPEG Group.
+`libjpeg-turbo-rs` is an independent Rust implementation that follows
+[libjpeg-turbo](https://github.com/libjpeg-turbo/libjpeg-turbo)'s algorithms
+and API (IJG License / Modified BSD License); it is not affiliated with or
+endorsed by the libjpeg-turbo project or the IJG.

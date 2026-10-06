@@ -12461,3 +12461,40 @@ is one line at the site that aborts and an audit of the fifty-eight others, and
 bundling an audit of the decode pipeline's allocation discipline into the pull
 request that built the injection harness would put the harness's own review
 behind it.
+
+## P4-217. No Written Release, SemVer, MSRV or Security Policy, No Private Reporting Route, and No API Check Before Publish — **PARTIAL: policy, API gate and affected-version record landed; private reporting route not enabled**
+
+**GitHub:** [#638](https://github.com/developer0hye/libjpeg-turbo-rs/issues/638) — #635 Milestone E (first execution ticket 8, policy half) and Milestone A's disclosure review.
+
+**The gap.** No `SECURITY.md`; GitHub private vulnerability reporting was
+disabled (`gh api repos/developer0hye/libjpeg-turbo-rs/private-vulnerability-reporting`
+→ `{"enabled":false}`); SemVer, backport, feature, deprecation, error and
+thread policies were unwritten; nothing compared a release's API with the
+previous one, while `main` already carries breaking changes since 0.8.0.
+
+**Status (2026-10-07): partial.**
+
+1. `SECURITY.md` (supported versions, backport rule, private route, scope) and
+   `docs/security/AFFECTED_VERSIONS.md` (every known memory-safety/abort finding
+   mapped to the published versions it affects, from the crates.io tarballs).
+   **Remaining:** the route it names — GitHub private vulnerability reporting —
+   must be enabled on the repository by the maintainer, and the 7-day
+   acknowledgement it promises confirmed.
+2. `docs/STABILITY.md` (SemVer per crate, what is public API — the low-level
+   `pub mod`s are explicitly not covered yet — MSRV, features, deprecation,
+   `#[non_exhaustive]` errors, threads, resource limits per #516) and
+   `docs/RELEASE.md` (procedure), linked from README and CONTRIBUTING.
+3. `scripts/semver_check_release.sh` + the `semver-check` job in `release.yml`,
+   which every crates.io publish job now needs. Both sides are documented with
+   `cargo rustdoc --locked` because `cargo semver-checks`' own mode resolves
+   dependencies unlocked. Verified locally three ways: unchanged versions skip;
+   `v0.7.0 → HEAD` (a 0.x minor) passes; a throwaway `0.8.1` commit over `main`
+   fails with seven breaking checks and exit 1.
+4. `main@7f9e5e5` vs `v0.8.0` is recorded in `docs/RELEASE.md`: seven breaking
+   checks, so the next root release is 0.9.0.
+5. Licensing in what is distributed (`cargo package --list`): the capi and
+   image crates shipped no licence file — each now carries `LICENSE-MIT` and
+   `LICENSE-APACHE` and the IJG attribution in its README — and the root crate
+   shipped development files (`.cargo/config.toml`, hooks, `scripts/`, the
+   OSS-Fuzz project) plus the reference submodule's own READMEs, now excluded.
+   README states the project is not affiliated with libjpeg-turbo or the IJG.

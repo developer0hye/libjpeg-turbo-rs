@@ -15,6 +15,12 @@ documentation lives in [README.md](README.md) and on
   `jpegtran` where a C contract exists — see `CLAUDE.md` for the full
   testing rules, and `docs/LAST_MILE.md` for the live release gate.
 
+## Releases
+
+[`docs/RELEASE.md`](docs/RELEASE.md) is the release procedure; the version
+policy it applies is [`docs/STABILITY.md`](docs/STABILITY.md). Security
+reports go through [`SECURITY.md`](SECURITY.md), never a public issue.
+
 ## C-ABI regression coverage
 
 Both integration oracle jobs run every C-ABI test target, with PNG support:

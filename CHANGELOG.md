@@ -10,6 +10,16 @@ and `git log` between tags.
 
 ### Added
 
+- **`SECURITY.md`, `docs/STABILITY.md`, `docs/RELEASE.md` and
+  `docs/security/AFFECTED_VERSIONS.md`** (P4-217, #638): supported versions and
+  private reporting, the SemVer/MSRV/feature/deprecation/error/thread policy
+  and what counts as public API, the release procedure, and which published
+  versions each known memory-safety or abort finding affects.
+- **API compatibility gate before every crates.io publish** (P4-217):
+  `release.yml`'s `semver-check` job runs `scripts/semver_check_release.sh`,
+  which compares each crate with the previous release tag on `cargo rustdoc
+  --locked` output and fails a version bump that does not allow the change.
+
 - **Prebuilt native bundles on every tagged release** (P4-131, #462).
   `libjpeg-turbo-rs-capi-<version>-<target>.tar.gz` for
   `x86_64`/`aarch64-unknown-linux-gnu` and `x86_64`/`aarch64-apple-darwin`,
@@ -144,6 +154,9 @@ and `git log` between tags.
   runs system/Rust bidirectional cross-decodes.
 
 ### Fixed
+- **Packaging:** `libjpeg-turbo-rs-capi` and `libjpeg-turbo-rs-image` now
+  ship their licence files and IJG attribution; the root crate no longer ships
+  repository tooling or the reference submodule's READMEs (P4-217).
 - `Encoder::encode` validates the caller's pixel buffer against
   `width x height x bytes_per_pixel` **before** it rearranges it (P4-139,
   #478). `bottom_up`, `fancy_downsampling` and `grayscale_from_color` each
