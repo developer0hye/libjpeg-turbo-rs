@@ -7,7 +7,7 @@
 //! with overflow`, across five distinct minimized seeds and five distinct
 //! source lines (116, 117, 126, 131, 136). Only the `data.len() % 7 == 3`
 //! arm of the fuzz target reaches them, because that is the arm that sets
-//! `ScalingFactor::new(1, 2)` — the sole dispatcher of `idct_4x4`.
+//! a 1/2 `ScalingFactor` — the sole dispatcher of `idct_4x4`.
 //!
 //! Root cause: `idct_scaled.rs` was ported from `jidctred.c` with plain
 //! `+`/`-`/`*`. C's intermediates are `JLONG`, declared `long` at
@@ -100,7 +100,7 @@ fn scaled_decode_survives_saturated_quant_tables() {
     );
 
     let mut decoder = Decoder::new(&jpeg).expect("patched stream still parses a header");
-    decoder.set_scale(ScalingFactor::new(1, 2));
+    decoder.set_scale(ScalingFactor::try_new(1, 2).expect("supported scaling factor"));
     // Either outcome is acceptable; the contract under test is "no panic".
     let _ = decoder.decode_image();
 }
@@ -119,7 +119,7 @@ fn every_reduced_scale_survives_saturated_quant_tables() {
         let mut jpeg: Vec<u8> = base.clone();
         assert!(saturate_quant_tables(&mut jpeg) > 0);
         let mut decoder = Decoder::new(&jpeg).expect("patched stream still parses a header");
-        decoder.set_scale(ScalingFactor::new(num, denom));
+        decoder.set_scale(ScalingFactor::try_new(num, denom).expect("supported scaling factor"));
         let _ = decoder.decode_image();
     }
 }
@@ -135,7 +135,7 @@ fn unpatched_fixture_decodes_at_half_scale() {
         .expect("encode the control fixture");
 
     let mut decoder = Decoder::new(&jpeg).expect("header parses");
-    decoder.set_scale(ScalingFactor::new(1, 2));
+    decoder.set_scale(ScalingFactor::try_new(1, 2).expect("supported scaling factor"));
     let image = decoder
         .decode_image()
         .unwrap_or_else(|e| panic!("clean 1/2-scale decode must succeed: {e}"));

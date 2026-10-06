@@ -222,7 +222,9 @@ fn advertised_size_is_always_sufficient_across_options() {
     let configs: [(&str, Config); 3] = [
         ("plain", |_d| {}),
         ("half-scale", |d| {
-            d.set_scale(libjpeg_turbo_rs::ScalingFactor::new(1, 2))
+            d.set_scale(
+                libjpeg_turbo_rs::ScalingFactor::try_new(1, 2).expect("supported scaling factor"),
+            )
         }),
         // A vertical crop that fits every input here, the 8x8 lossless frame
         // included: one past the image is refused (P4-197, #618), by

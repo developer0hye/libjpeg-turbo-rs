@@ -116,7 +116,7 @@ fn c_testorig_decode_scaled_half() {
     let data: Vec<u8> = load_reference("testorig.jpg");
     let full: Image = decompress(&data).unwrap();
     let mut decoder: StreamingDecoder = StreamingDecoder::new(&data).unwrap();
-    decoder.set_scale(ScalingFactor::new(1, 2));
+    decoder.set_scale(ScalingFactor::try_new(1, 2).expect("supported scaling factor"));
     let half: Image = decoder.decode().unwrap();
 
     // Scaled dimensions should be approximately half (rounding rules apply).
@@ -142,7 +142,7 @@ fn c_testorig_decode_scaled_quarter() {
     let data: Vec<u8> = load_reference("testorig.jpg");
     let full: Image = decompress(&data).unwrap();
     let mut decoder: StreamingDecoder = StreamingDecoder::new(&data).unwrap();
-    decoder.set_scale(ScalingFactor::new(1, 4));
+    decoder.set_scale(ScalingFactor::try_new(1, 4).expect("supported scaling factor"));
     let quarter: Image = decoder.decode().unwrap();
 
     let expected_w: usize = full.width.div_ceil(4);
@@ -166,7 +166,7 @@ fn c_testorig_decode_scaled_eighth() {
     let data: Vec<u8> = load_reference("testorig.jpg");
     let full: Image = decompress(&data).unwrap();
     let mut decoder: StreamingDecoder = StreamingDecoder::new(&data).unwrap();
-    decoder.set_scale(ScalingFactor::new(1, 8));
+    decoder.set_scale(ScalingFactor::try_new(1, 8).expect("supported scaling factor"));
     let eighth: Image = decoder.decode().unwrap();
 
     let expected_w: usize = full.width.div_ceil(8);
