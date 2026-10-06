@@ -11759,9 +11759,13 @@ behind a test-infrastructure review.
    refused with "Unexplained mismatch … left boundary" (a `cjpeg -sample
    2x1,2x1,2x1` frame is TJSAMP_444 to TurboJPEG but decodes in 16-pixel
    columns; stock 3.2.0 refuses `x = 8` with the same text, measured with a C
-   probe; `tests/tj3_handle.rs::
-   handle_cropping_region_follows_turbojpeg_on_nonstandard_sampling` pins four
-   `cjpeg -sample` layouts against the probe's results), and a decode whose
+   probe; `crates/libjpeg-turbo-rs-capi/tests/crop_region_sampling_c_parity.rs`
+   drives stock 3.2.0 and our cdylib, one library per child process, through
+   header → set → decode on four committed `cjpeg -sample` layouts
+   (`tests/fixtures/crop_sampling_*.jpg`) and three regions each, and requires
+   identical return codes, messages and pixels — 12 of 12 match; `tests/
+   tj3_handle.rs::handle_cropping_region_follows_turbojpeg_on_nonstandard_sampling`
+   pins the Rust API to the same outcomes), and a decode whose
    size differs from the region is refused rather
    than returned — before this, both reached the C ABI as an image wider than
    the caller's buffer. `decompress_12bit` / `decompress_16bit` take no region

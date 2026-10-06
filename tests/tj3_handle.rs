@@ -358,10 +358,13 @@ fn handle_cropping_region() {
 
 /// Non-standard sampling factors, where TurboJPEG's subsampling
 /// classification (`getSubsamp`, `turbojpeg.c:431-510`), its iMCU rule and the
-/// decoder's real iMCU disagree. Each frame is written by `cjpeg -sample`, and
-/// each expected outcome for the region `{8, 0, 32, 16}` was measured on stock
-/// TurboJPEG 3.2.0 with a C probe (`tj3DecompressHeader`,
-/// `tj3SetCroppingRegion`, `tj3Decompress8`) on the same command's output:
+/// decoder's real iMCU disagree. Each frame is a committed
+/// `tests/fixtures/crop_sampling_*.jpg`, written by stock 3.2.0's
+/// `cjpeg -sample` from `testorig.ppm`, and each expected outcome for the
+/// region `{8, 0, 32, 16}` is what stock TurboJPEG 3.2.0 does —
+/// `crates/libjpeg-turbo-rs-capi/tests/crop_region_sampling_c_parity.rs` drives
+/// both libraries through the same calls on these files and requires identical
+/// return codes, messages and pixels; this test pins the Rust API to it:
 ///
 /// * `2x2,1x1,2x2` — TJSAMP_UNKNOWN; the set is refused.
 /// * `2x2,1x2,1x2` — 4:2:2 spelled with a 2x2 luma, a 16-pixel iMCU; the set
@@ -378,9 +381,12 @@ fn handle_cropping_region() {
 fn handle_cropping_region_follows_turbojpeg_on_nonstandard_sampling() {
     use libjpeg_turbo_rs::{CropRegion, JpegError};
 
-    let cjpeg: std::path::PathBuf = require_c_tool!("cjpeg");
-    let source: std::path::PathBuf = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("references/libjpeg-turbo/testimages/testorig.ppm");
+    let fixture = |sampling: &str| -> Vec<u8> {
+        let path: std::path::PathBuf = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(format!("crop_sampling_{}.jpg", sampling.replace(',', "_")));
+        std::fs::read(&path).unwrap_or_else(|e| panic!("read {path:?}: {e}"))
+    };
     let region: CropRegion = CropRegion {
         x: 8,
         y: 0,
@@ -405,9 +411,7 @@ fn handle_cropping_region_follows_turbojpeg_on_nonstandard_sampling() {
         ("2x1,2x1,2x1", None, Some(mismatch)),
     ];
     for (sampling, set_refusal, decode_refusal) in cases {
-        let out: helpers::TempFile = helpers::TempFile::new("tj3_handle_sampling.jpg");
-        helpers::run_c_cjpeg(&cjpeg, &["-sample", sampling], &source, out.path());
-        let jpeg: Vec<u8> = std::fs::read(out.path()).expect("read cjpeg output");
+        let jpeg: Vec<u8> = fixture(sampling);
         let mut handle: TjHandle = TjHandle::new();
         handle.decompress_header(&jpeg).expect("header");
 
@@ -433,9 +437,7 @@ fn handle_cropping_region_follows_turbojpeg_on_nonstandard_sampling() {
     }
 
     // A left boundary on both grids decodes to exactly the region.
-    let out: helpers::TempFile = helpers::TempFile::new("tj3_handle_2x1.jpg");
-    helpers::run_c_cjpeg(&cjpeg, &["-sample", "2x1,2x1,2x1"], &source, out.path());
-    let jpeg: Vec<u8> = std::fs::read(out.path()).expect("read cjpeg output");
+    let jpeg: Vec<u8> = fixture("2x1,2x1,2x1");
     let mut handle: TjHandle = TjHandle::new();
     handle.decompress_header(&jpeg).expect("header");
     let stored: CropRegion = handle
