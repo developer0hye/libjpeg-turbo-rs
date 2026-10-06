@@ -13078,8 +13078,7 @@ work on what the 12/16-bit entry points read from the handle.
 ## P4-223. 12-Bit Decodes Read Only the First Scan, So Progressive and Multi-Scan 12-Bit Streams Decode to Wrong Pixels With `Ok` — **OPEN**
 
 **Found 2026-10-07** while writing P4-199's `TJPARAM_SCANLIMIT` regression
-(#620), which needed a 12-bit stream with more than one scan. GitHub issue to
-be opened.
+(#620), which needed a 12-bit stream with more than one scan. GitHub: [#650](https://github.com/developer0hye/libjpeg-turbo-rs/issues/650).
 
 **What happens.** `api::precision::decompress_12bit` decodes `metadata.scan`
 — the first SOS — as if it were a single interleaved baseline scan, and never
@@ -13117,7 +13116,7 @@ a ride on P4-199's parameter work.
 ## P4-224. `Decoder`'s Memory Estimate Does Not Count the 12-Bit Staging When It Decodes a 12-Bit Frame — **OPEN**
 
 **Found 2026-10-07** while documenting what the memory budget covers for
-#635's Milestone A (README.md "Resource limits"). GitHub issue to be opened.
+#635's Milestone A (README.md "Resource limits"). GitHub: [#651](https://github.com/developer0hye/libjpeg-turbo-rs/issues/651).
 
 `Decoder::decode_image_inner` checks `check_header_limits` — the 8-bit
 estimate: output buffer, one byte per pixel per component, upsampling planes,
@@ -13143,7 +13142,7 @@ was about the TurboJPEG entry points.
 
 ## P4-225. `tj3DecompressToYUV8` / `tj3DecompressToYUVPlanes8` Publish Nothing, Where Upstream Calls `setDecompParameters` — **OPEN**
 
-**Found 2026-10-07** while closing P4-199 (#620). GitHub issue to be opened.
+**Found 2026-10-07** while closing P4-199 (#620). GitHub: [#652](https://github.com/developer0hye/libjpeg-turbo-rs/issues/652).
 
 Upstream calls `setDecompParameters` from four places, not two: the shared
 `tj3Decompress*` body (`turbojpeg-mp.c:190`), `tj3DecompressHeader`
@@ -13168,8 +13167,7 @@ harness drives.
 ## P4-226. `tj3Decompress8` Decodes a 12-Bit Frame That Stock TurboJPEG Refuses — **OPEN**
 
 **Found 2026-10-07** while building P4-199's C oracle (#620), whose header
-comment lists it as one of the cases the trace leaves out. GitHub issue to be
-opened.
+comment lists it as one of the cases the trace leaves out. GitHub: [#653](https://github.com/developer0hye/libjpeg-turbo-rs/issues/653).
 
 Measured on `tests/fixtures/real_world/libjpeg_testorig12_227x149_12bit.jpg`:
 stock 3.2.0's `tj3Decompress8(…, TJPF_RGB)` returns -1 with "Unsupported JPEG
