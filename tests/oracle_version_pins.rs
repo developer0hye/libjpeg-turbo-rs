@@ -1603,9 +1603,10 @@ fn oracle_install_on(line: &str) -> Option<OracleInstall> {
 /// list is identical to PyYAML's for all 52 jobs in the twelve workflows, name
 /// for name (re-checked when the cross-arch pairs took it from 42 to 45, at 46
 /// when the corpus leg gained its twin, at 47 when the C Interop leg gained
-/// its own, at 50 when `downstream-bench.yml` landed for P4-214, at 51 when
-/// `release.yml` gained `semver-check` for P4-217, and at 52 when `ci.yml`
-/// gained `downstream-consumer`). The
+/// its own, at 50 on the P4-214 branch that added `downstream-bench.yml`, at
+/// 51 when that branch merged onto `release.yml`'s `semver-check` (P4-217,
+/// already on `main`), and at 52 when `ci.yml` gained `downstream-consumer`).
+/// The
 /// standing protection is the sibling test —
 /// a workflow this returns nothing for is a workflow every gate here passes
 /// vacuously.

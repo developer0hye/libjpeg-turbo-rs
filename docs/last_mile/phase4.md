@@ -13198,9 +13198,13 @@ available:
 Against stock 3.2.0, all of these held on 2026-10-07.
 
 **Status (2026-10-07): harness landed; first measured report pending.**
-Criterion 6 needs a quiet machine and the first dispatch of the hosted job.
-GitHub registers a dispatch-only workflow only after the file reaches the
-default branch, so that dispatch waits until this lands on `main`.
+Criterion 6 needs a quiet machine and a successful dispatch of the hosted
+job. The first dispatch on `main` (run 37540052978) failed on both runners
+with E0599: P4-139 had replaced `ScalingFactor::new` with `try_new`, and the
+dispatch-only workflow was the only thing that compiled the consumer. The
+consumer's `ljt_api!` now takes a per-crate constructor, and `ci.yml`'s
+`downstream-consumer` job runs `run.sh --check` on every pull request so the
+next such break fails there.
 
 ## P4-218. The Buffer-Reuse Decode Still Allocates Whole-Image Component Planes — **OPEN**
 
