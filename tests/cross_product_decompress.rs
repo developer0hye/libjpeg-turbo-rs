@@ -233,7 +233,7 @@ fn assert_crop_refused(
     let refused_output: helpers::TempFile = helpers::TempFile::new("xprod_crop_refused.ppm");
     let output: std::process::Output = Command::new(djpeg)
         .arg("-scale")
-        .arg(format!("{}/{}", scale.num, scale.denom))
+        .arg(format!("{}/{}", scale.num(), scale.denom()))
         .arg("-crop")
         .arg(format!("{}x{}+{}+{}", c.width, c.height, c.x, c.y))
         .arg("-outfile")
@@ -670,7 +670,8 @@ fn tjdecomptest_grayscale_output_cross_product() {
                 if crop_exceeds_scaled(crop, scale, 64, 64) {
                     let label: String = format!(
                         "subsamp={subsamp:?} {crop:?} scale={}/{} refused",
-                        scale.num, scale.denom
+                        scale.num(),
+                        scale.denom()
                     );
                     assert_crop_refused(djpeg.as_deref(), &jpeg, *scale, crop, &label);
                     refused += 1;
