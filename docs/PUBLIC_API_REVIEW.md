@@ -19,8 +19,8 @@ commit: "external" means outside the root crate's `src/`.
 |---|---|---|---|
 | `api` | 14 items: `yuv::*` (8 fns), `streaming::StreamingDecoder`, `encoder::RestartConfig`, `quality::scale_quant_table_linear`, `high_level::compress_lossless_extended_precision`, `precision::compress_{12,16}bit_with_precision` | capi (`yuv`), benches (`StreamingDecoder`), 15 test files | **Supported, now at the root:** `yuv::*`, `StreamingDecoder`. The rest internal. |
 | `common` | 29 items: `layout::{ImageLayout, checked_span}`, `quant_table::{ZIGZAG_ORDER, NATURAL_ORDER, QuantTable}`, `huffman_table`, `tables`, `arith_tables`, `icc`, `exif` | capi (`layout` ×4, `NATURAL_ORDER`), 5 test files | **Internal, needed by workspace crates:** `layout`, `quant_table` orders. Rest internal. |
-| `decode` | 75 items across 16 submodules (kernels, entropy, marker reader, toggles) | capi (`boundary`), one example, 9 test files (+25 using `decode::pipeline` for root items) | **Internal, needed by workspace crates:** `boundary`. Kernels, `toggles` (P4-80) internal. |
-| `encode` | ~86 items: `pipeline` (31 incl. `CompressParams`), `marker_writer` (30), `fdct`, `color`, … | capi (`pipeline`), benches (`compute_reciprocal`), 4 examples, 11 test files; **README** imported `compress_with_params`/`CompressParams` | **Supported, now at the root:** `CompressParams`, `compress_with_params`. Other `pipeline` fns: internal, needed by capi. Rest internal. |
+| `decode` | 75 items across 16 submodules (kernels, entropy, marker reader, toggles) | capi (`boundary`), one example, 8 test files (25, some overlapping, reach root items via `decode::pipeline`) | **Internal, needed by workspace crates:** `boundary`. Kernels, `toggles` (P4-80) internal. |
+| `encode` | 86 items (not counting the 11 `common::tables` constants `encode::tables` re-exports): `pipeline` (31 incl. `CompressParams`), `marker_writer` (30), `fdct`, `color`, … | capi (`pipeline`), benches (`compute_reciprocal`), 4 examples, 11 test files; **README** imported `compress_with_params`/`CompressParams` | **Supported, now at the root:** `CompressParams`, `compress_with_params`. Other `pipeline` fns: internal, needed by capi. Rest internal. |
 | `simd` | `detect`, `detect_encoder`, `SimdRoutines`, `EncoderSimdRoutines`, `QuantDivisors` (backends already `pub(crate)` since P4-135) | benches, `tests/simd_dispatch_bounds.rs` | **Internal** (benches and tests only). |
 | `transform` | `TransformInfo`, `spatial::*` (18) | none | **Internal**; the three root types stay supported. |
 
@@ -45,7 +45,9 @@ name. One more path exposes everything: the capi crate's
    behind one `#[doc(hidden)]` namespace documented as unstable, so the capi
    crate keeps compiling while users stop seeing them.
 2. Everything classified **internal** becomes `pub(crate)`. Benches and the
-   37 test files that reach internals switch to root paths, to the hidden
+   38 test files that name module-only items (22 of them reach items
+   classified internal), plus the 28 that reach root items through module paths such as
+   `decode::pipeline::Decoder`, switch to root paths, to the hidden
    namespace, or to `#[cfg(test)]` unit tests. `tests/decode_pipeline_public_api.rs`
    and `tests/encode_pipeline_public_api.rs`, which pin the module paths
    today, are rewritten to pin the root paths.

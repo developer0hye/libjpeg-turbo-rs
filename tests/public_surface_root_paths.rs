@@ -8,8 +8,8 @@ use libjpeg_turbo_rs::{
     compress_with_params, CompressParams, PixelFormat, StreamingDecoder, Subsampling,
 };
 
-/// The root paths name the same items as the module paths they re-export:
-/// a value built through one is accepted by the other.
+/// The root paths resolve and behave like the module paths they re-export:
+/// encoding through either produces identical bytes.
 #[test]
 fn promoted_items_resolve_at_the_root() {
     let rgb: Vec<u8> = (0..(16 * 16 * 3)).map(|i: usize| (i % 251) as u8).collect();

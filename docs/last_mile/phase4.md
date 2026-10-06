@@ -12973,7 +12973,7 @@ modules and SIMD entry points as intentionally supported or implementation
 details; make necessary visibility changes in a documented breaking release."
 
 **The gap.** `src/lib.rs` declares `api`, `common`, `decode`, `encode`, `simd`
-and `transform` `pub`, so about 220 items outside the curated root re-exports
+and `transform` `pub`, so 228 items outside the curated root re-exports
 are reachable, a README example imported one of them, and the capi crate
 re-exports the whole crate as `inner`.
 
