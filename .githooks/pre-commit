@@ -1,5 +1,6 @@
 #!/bin/sh
 # Pre-commit hook: format check + clippy
+# `--locked`: like every cargo step here, build only what Cargo.lock pins
 # Installed via: git config core.hooksPath .githooks
 
 set -e
@@ -12,7 +13,7 @@ if [ $? -ne 0 ]; then
 fi
 
 echo "[pre-commit] Running cargo clippy..."
-cargo clippy --lib -- -D warnings
+cargo clippy --locked --lib -- -D warnings
 if [ $? -ne 0 ]; then
     echo "[pre-commit] Clippy failed. Fix warnings before committing."
     exit 1
