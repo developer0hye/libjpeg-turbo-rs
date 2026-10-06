@@ -3,7 +3,7 @@ use crate::common::error::{JpegError, Result};
 use crate::common::quant_table::QuantTable;
 use crate::decode::bitstream::BitReader;
 use crate::decode::entropy::{self, McuDecoder};
-use alloc::{format, vec, vec::Vec};
+use alloc::{format, vec::Vec};
 
 // P4-58 (issue #357): cross-call state for windowed interleaved-baseline
 // decode. The incremental reader checkpoints whole MCU rows and rebases the
@@ -88,9 +88,14 @@ impl<'a> Decoder<'a> {
             .map(|(ci, comp)| {
                 let comp_w = mcus_x * comp.horizontal_sampling as usize * comp_block_sizes[ci];
                 let comp_h = mcus_y * comp.vertical_sampling as usize * comp_block_sizes[ci];
-                vec![0u8; comp_w * comp_h]
+                // P4-209: frame-geometry sized, so refusal must be an error.
+                crate::common::try_alloc::try_filled_vec(
+                    comp_w * comp_h,
+                    0u8,
+                    "streaming component plane",
+                )
             })
-            .collect();
+            .collect::<Result<Vec<Vec<u8>>>>()?;
 
         Ok(BaselineStreamState {
             mcus_x,
