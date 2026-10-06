@@ -210,13 +210,15 @@ Check §8 if you decode 12-bit, lossless or CMYK input.
 
 **Performance.** Benchmark your build, not this workspace's: Cargo ignores a
 dependency's `[profile.release]`, so this workspace's `lto = true` does not
-reach your application, and the README's tables are in-tree builds. A
-standalone default-profile consumer harness (P4-214, `experiments/downstream/`)
-is in PR [#646](https://github.com/developer0hye/libjpeg-turbo-rs/pull/646),
-forthcoming. Until it reports, measure inside your application with the
-release profile you ship, portable and `target-cpu=native` separately, and
-record CPU, toolchain, flags and corpus with every number. Measure peak
-memory as well as latency (P4-218).
+reach your application, and the README's tables are in-tree builds. The
+standalone default-profile consumer harness (`experiments/downstream/`)
+measures that build. Its first report and the losing cases are in
+[`experiments/downstream/BUDGETS.md`](../experiments/downstream/BUDGETS.md).
+It ran on x86_64 hosted runners; no aarch64 figures are budget-grade yet
+(P4-229). Still measure inside your application with the release profile you
+ship, portable and `target-cpu=native` separately, and record CPU,
+toolchain, flags and corpus with every number. Measure peak memory as well as
+latency (P4-218).
 
 ## 10. Roll out and roll back
 

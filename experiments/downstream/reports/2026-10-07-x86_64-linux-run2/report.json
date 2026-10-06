@@ -1,0 +1,2871 @@
+{
+  "schema": "downstream-consumer-report/1",
+  "started_at": "2026-10-06T23:03:18Z",
+  "smoke": false,
+  "iterations": 30,
+  "warmup": 5,
+  "only": null,
+  "candidate_checkout": "/home/runner/work/libjpeg-turbo-rs/libjpeg-turbo-rs",
+  "build": {
+    "variant": "default",
+    "profile": "release; consumer manifest has no [profile] section (checked)",
+    "CARGO_PROFILE_RELEASE_LTO": "<unset: Cargo default lto=false>",
+    "RUSTFLAGS": "<unset>",
+    "CARGO_BUILD_JOBS": "<unset: one job per CPU>",
+    "scrubbed_env": "CARGO_INCREMENTAL",
+    "cargo": "cargo 1.99.0 (5f94df478 2026-08-27)",
+    "cargo_home_config": "<none>",
+    "env_CARGO_TERM_COLOR": "always",
+    "candidate_sha": "e56ace42e181fc1e4712d67bb383a8e4ccdb89fd",
+    "candidate_tracked_changes": "0",
+    "work_dir": "/home/runner/work/_temp/downstream-work",
+    "clean_build_seconds": "38.8 (all dependencies, fresh target dir, downloads excluded)",
+    "binary_bytes": "3640560 (downstream-consumer, unstripped)",
+    "probe_none_bytes": "455928 (contribution over probe-none: 0)",
+    "probe_none_clean_build_seconds": "0.1",
+    "probe_baseline_bytes": "1081400 (contribution over probe-none: 625472)",
+    "probe_baseline_clean_build_seconds": "12.6",
+    "probe_candidate_bytes": "1173272 (contribution over probe-none: 717344)",
+    "probe_candidate_clean_build_seconds": "13.7",
+    "probe_adapter_bytes": "1280520 (contribution over probe-none: 824592)",
+    "probe_adapter_clean_build_seconds": "28.6",
+    "probe_image_bytes": "816600 (contribution over probe-none: 360672)",
+    "probe_image_clean_build_seconds": "18.8",
+    "probe_zune_bytes": "673392 (contribution over probe-none: 217464)",
+    "probe_zune_clean_build_seconds": "1.8"
+  },
+  "environment": {
+    "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)\nbinary: rustc\ncommit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4\ncommit-date: 2026-09-28\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.0\nLLVM version: 23.1.1",
+    "cpu": "AMD EPYC 7763 64-Core Processor",
+    "logical_cpus": "4",
+    "os": "Ubuntu 24.04.5 LTS (Linux 6.17.0-1022-azure x86_64)",
+    "runtime_cpu_features": "x86_64 sse2=yes sse4.1=yes avx2=yes bmi2=yes fma=yes",
+    "baseline_simd_and_std": true,
+    "candidate_simd_and_std": true,
+    "c_oracle": "disabled (--no-c-oracle)",
+    "c_oracle_link_map": null,
+    "c_encoder": "disabled (--no-c-oracle)",
+    "c_encoder_link_map": null,
+    "declared_features": {
+      "libjpeg-turbo-rs (baseline and candidate)": "default features (`std`, `simd`)",
+      "libjpeg-turbo-rs-image (candidate)": "default features",
+      "image": "`default-features = false`, `features = [\"jpeg\"]`",
+      "zune-jpeg": "default features"
+    },
+    "load_sample": "$ top -bn2 -d1 | (second frame) | head -20\ntop - 23:03:16 up 3 min,  0 user,  load average: 3.71, 1.80, 0.71\nTasks: 165 total,   1 running, 164 sleeping,   0 stopped,   0 zombie\n%Cpu(s):  0.0 us,  0.0 sy,  0.0 ni,100.0 id,  0.0 wa,  0.0 hi,  0.0 si,  0.0 st \nMiB Mem :  15989.7 total,  11598.8 free,   1007.7 used,   3775.0 buff/cache     \nMiB Swap:   3072.0 total,   3072.0 free,      0.0 used.  14982.0 avail Mem \n\n    PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND\n      1 root      20   0   22840  14328   9808 S   0.0   0.1   0:03.50 systemd\n      2 root      20   0       0      0      0 S   0.0   0.0   0:00.00 kthreadd\n      3 root      20   0       0      0      0 S   0.0   0.0   0:00.00 pool_wo+\n      4 root       0 -20       0      0      0 I   0.0   0.0   0:00.00 kworker+\n      5 root       0 -20       0      0      0 I   0.0   0.0   0:00.00 kworker+\n      6 root       0 -20       0      0      0 I   0.0   0.0   0:00.00 kworker+\n      7 root       0 -20       0      0      0 I   0.0   0.0   0:00.00 kworker+\n      8 root       0 -20       0      0      0 I   0.0   0.0   0:00.00 kworker+\n      9 root      20   0       0      0      0 I   0.0   0.0   0:00.00 kworker+\n     10 root       0 -20       0      0      0 I   0.0   0.0   0:00.00 kworker+\n     11 root      20   0       0      0      0 I   0.0   0.0   0:00.27 kworker+\n     12 root      20   0       0      0      0 I   0.0   0.0   0:00.42 kworker+\n     13 root       0 -20       0      0      0 I   0.0   0.0   0:00.00 kworker+\n\n$ vmstat 1 3\nprocs -----------memory---------- ---swap-- -----io---- -system-- -------cpu-------\n r  b   swpd   free   buff  cache   si   so    bi    bo   in   cs us sy id wa st gu\n 0  0      0 11883032  93700 3771928    0    0  4892 26561 4083    6 70  3 25  2  0  0\n 0  0      0 11888076  93700 3771944    0    0     0     0  145  197  0  0 100  0  0  0\n 0  0      0 11893580  93700 3771944    0    0     0     0  125  203  0  0 100  0  0  0\n\n$ free -m\n               total        used        free      shared  buff/cache   available\nMem:           15989         992       11614          46        3775       14997\nSwap:           3071           0        3071"
+  },
+  "lockfile": "/home/runner/work/_temp/downstream-work/consumer/Cargo.lock",
+  "resolved_packages": [
+    {
+      "name": "autocfg",
+      "version": "1.5.0",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    },
+    {
+      "name": "bytemuck",
+      "version": "1.25.0",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    },
+    {
+      "name": "byteorder-lite",
+      "version": "0.1.0",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    },
+    {
+      "name": "downstream-consumer",
+      "version": "0.0.0",
+      "source": "path"
+    },
+    {
+      "name": "image",
+      "version": "0.25.10",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    },
+    {
+      "name": "libjpeg-turbo-rs",
+      "version": "0.8.0",
+      "source": "path"
+    },
+    {
+      "name": "libjpeg-turbo-rs",
+      "version": "0.8.0",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    },
+    {
+      "name": "libjpeg-turbo-rs-image",
+      "version": "0.1.0",
+      "source": "path"
+    },
+    {
+      "name": "moxcms",
+      "version": "0.8.1",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    },
+    {
+      "name": "num-traits",
+      "version": "0.2.19",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    },
+    {
+      "name": "proc-macro2",
+      "version": "1.0.106",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    },
+    {
+      "name": "pxfm",
+      "version": "0.1.28",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    },
+    {
+      "name": "quote",
+      "version": "1.0.45",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    },
+    {
+      "name": "syn",
+      "version": "3.0.3",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    },
+    {
+      "name": "thiserror",
+      "version": "2.0.20",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    },
+    {
+      "name": "thiserror-impl",
+      "version": "2.0.20",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    },
+    {
+      "name": "unicode-ident",
+      "version": "1.0.24",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    },
+    {
+      "name": "zune-core",
+      "version": "0.5.1",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    },
+    {
+      "name": "zune-jpeg",
+      "version": "0.5.15",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    }
+  ],
+  "corpus": [
+    {
+      "id": "synthetic-64x64-420",
+      "frame": "64x64 baseline 4:2:0",
+      "bytes": 1924,
+      "sha256": "805102b2876e163c091ecd5e09bfae2025ad1354f4a986c47d5c8a8b09e0b09e",
+      "origin": "synthetic (64x64 RGB, q90 4:2:0 baseline), generated by experiments/downstream/consumer/src/corpus.rs seed 0x6402026, encoded by the published baseline libjpeg-turbo-rs 0.8.0",
+      "licence": "generated by this harness; no third-party content"
+    },
+    {
+      "id": "synthetic-4032x3024-420",
+      "frame": "4032x3024 baseline 4:2:0",
+      "bytes": 3101756,
+      "sha256": "751981d29012a8951306555c5239ddb85a71b04ac04aa075882bf2664cf3c85e",
+      "origin": "synthetic (4032x3024 RGB, q90 4:2:0 baseline), generated by experiments/downstream/consumer/src/corpus.rs seed 0x6402026, encoded by the published baseline libjpeg-turbo-rs 0.8.0",
+      "licence": "generated by this harness; no third-party content"
+    },
+    {
+      "id": "synthetic-1920x1080-gray",
+      "frame": "1920x1080 baseline gray",
+      "bytes": 441634,
+      "sha256": "e075f396e1932dc709ae006f22199fddcb92cb2f187532859784193002a17759",
+      "origin": "synthetic (1920x1080 grayscale, q90 baseline), generated by experiments/downstream/consumer/src/corpus.rs seed 0x6402026, encoded by the published baseline libjpeg-turbo-rs 0.8.0",
+      "licence": "generated by this harness; no third-party content"
+    },
+    {
+      "id": "synthetic-1920x1080-420-progressive",
+      "frame": "1920x1080 progressive 4:2:0",
+      "bytes": 486394,
+      "sha256": "d46dad5c50fdb5377f40d81d214ec8620fc3ea30338e949f6100a9ad80a40493",
+      "origin": "synthetic (1920x1080 RGB, q90 4:2:0 progressive), generated by experiments/downstream/consumer/src/corpus.rs seed 0x6402026, encoded by the published baseline libjpeg-turbo-rs 0.8.0",
+      "licence": "generated by this harness; no third-party content"
+    },
+    {
+      "id": "synthetic-7680x4320-420",
+      "frame": "7680x4320 baseline 4:2:0",
+      "bytes": 8427869,
+      "sha256": "c667475025fa7e7c60d08040e7c5d99ccb26943ed2bcf4a641564769888bb694",
+      "origin": "synthetic (7680x4320 RGB, q90 4:2:0 baseline), generated by experiments/downstream/consumer/src/corpus.rs seed 0x6402026, encoded by the published baseline libjpeg-turbo-rs 0.8.0",
+      "licence": "generated by this harness; no third-party content"
+    },
+    {
+      "id": "testorig",
+      "frame": "227x149 baseline 4:2:0",
+      "bytes": 5770,
+      "sha256": "acc6ec555d41d15b368320edaa3b20958ee6fa97cb6e4a18d1213d5ae8bec73b",
+      "origin": "references/libjpeg-turbo/testimages/testorig.jpg (upstream libjpeg-turbo test image)",
+      "licence": "IJG License (references/libjpeg-turbo/testimages/LICENSE.txt, README.ijg)"
+    },
+    {
+      "id": "testimgint",
+      "frame": "227x149 baseline 4:2:0",
+      "bytes": 5756,
+      "sha256": "491679b8057739b3c8e5bacd1e918efb1691d271cbbd69820ff8d480dcb90963",
+      "origin": "references/libjpeg-turbo/testimages/testimgint.jpg (upstream libjpeg-turbo test image)",
+      "licence": "IJG License (references/libjpeg-turbo/testimages/LICENSE.txt, README.ijg)"
+    },
+    {
+      "id": "synthetic-4032x3024-420-exif6",
+      "frame": "4032x3024 baseline 4:2:0",
+      "bytes": 3101792,
+      "sha256": "fbed3057b29e3d77677879e09cf14e972ff37df7f73f98df7e4465fa2e705e06",
+      "origin": "synthetic (4032x3024 RGB, q90 4:2:0 baseline, EXIF orientation 6), generated by experiments/downstream/consumer/src/corpus.rs seed 0x6402026, encoded by the published baseline libjpeg-turbo-rs 0.8.0",
+      "licence": "generated by this harness; no third-party content"
+    }
+  ],
+  "decode": [
+    {
+      "id": "small-64x64-420",
+      "corpus_id": "synthetic-64x64-420",
+      "description": "small image, 4:2:0",
+      "source_width": 64,
+      "source_height": 64,
+      "output_layout": "RGB8",
+      "scale": null,
+      "rows": [
+        {
+          "backend": "baseline-fresh",
+          "api": "libjpeg-turbo-rs 0.8.0 (crates.io) `decompress_to`",
+          "buffer": "library-owned, new Vec per decode",
+          "path": "fresh",
+          "output": "RGB8 64x64",
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 33,
+            "median_ms": 0.030527000000000002,
+            "p10_ms": 0.030435,
+            "p90_ms": 0.030767,
+            "min_ms": 0.030372999999999997,
+            "max_ms": 0.031671000000000005
+          },
+          "megapixels_per_second": 134.17630294493398,
+          "alloc": {
+            "count": 19,
+            "bytes": 37542,
+            "peak_live_bytes": 37350
+          },
+          "not_applicable": null
+        },
+        {
+          "backend": "baseline-reuse",
+          "api": "libjpeg-turbo-rs 0.8.0 (crates.io) `decompress_into`",
+          "buffer": "caller-owned, reused",
+          "path": "buffer-reuse",
+          "output": "RGB8 64x64",
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 34,
+            "median_ms": 0.0301675,
+            "p10_ms": 0.030118,
+            "p90_ms": 0.030960999999999995,
+            "min_ms": 0.0301,
+            "max_ms": 0.031941
+          },
+          "megapixels_per_second": 135.77525482721472,
+          "alloc": {
+            "count": 18,
+            "bytes": 25254,
+            "peak_live_bytes": 25062
+          },
+          "not_applicable": null
+        },
+        {
+          "backend": "candidate-fresh",
+          "api": "candidate `decompress_to`",
+          "buffer": "library-owned, new Vec per decode",
+          "path": "fresh",
+          "output": "RGB8 64x64",
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 33,
+            "median_ms": 0.030635500000000003,
+            "p10_ms": 0.030518,
+            "p90_ms": 0.03126,
+            "min_ms": 0.030503,
+            "max_ms": 0.031503
+          },
+          "megapixels_per_second": 133.7010983989163,
+          "alloc": {
+            "count": 19,
+            "bytes": 37566,
+            "peak_live_bytes": 37374
+          },
+          "not_applicable": null
+        },
+        {
+          "backend": "candidate-reuse",
+          "api": "candidate `decompress_into`",
+          "buffer": "caller-owned, reused",
+          "path": "buffer-reuse",
+          "output": "RGB8 64x64",
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 35,
+            "median_ms": 0.0296555,
+            "p10_ms": 0.029608,
+            "p90_ms": 0.030166,
+            "min_ms": 0.029583,
+            "max_ms": 0.030775999999999998
+          },
+          "megapixels_per_second": 138.11940449495034,
+          "alloc": {
+            "count": 18,
+            "bytes": 25278,
+            "peak_live_bytes": 25086
+          },
+          "not_applicable": null
+        },
+        {
+          "backend": "candidate-image-adapter",
+          "api": "candidate libjpeg-turbo-rs-image `JpegDecoder::new` + `read_image`",
+          "buffer": "caller-owned output; adapter-internal staging is reported in the allocation columns",
+          "path": "buffer-reuse",
+          "output": "RGB8 64x64",
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 26,
+            "median_ms": 0.038432,
+            "p10_ms": 0.038366,
+            "p90_ms": 0.038912999999999996,
+            "min_ms": 0.038328,
+            "max_ms": 0.039113999999999996
+          },
+          "megapixels_per_second": 106.57785179017485,
+          "alloc": {
+            "count": 27,
+            "bytes": 45792,
+            "peak_live_bytes": 27010
+          },
+          "not_applicable": null
+        },
+        {
+          "backend": "image-builtin",
+          "api": "image `codecs::jpeg::JpegDecoder::new` + `read_image` (zune-jpeg inside)",
+          "buffer": "caller-owned, reused (image copies the input stream into a Vec first)",
+          "path": "buffer-reuse",
+          "output": "RGB8 64x64",
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 29,
+            "median_ms": 0.0361945,
+            "p10_ms": 0.036034000000000004,
+            "p90_ms": 0.037092,
+            "min_ms": 0.035969,
+            "max_ms": 0.037784000000000005
+          },
+          "megapixels_per_second": 113.16636505546423,
+          "alloc": {
+            "count": 19,
+            "bytes": 15652,
+            "peak_live_bytes": 14164
+          },
+          "not_applicable": null
+        },
+        {
+          "backend": "zune-fresh",
+          "api": "zune-jpeg `JpegDecoder::decode`",
+          "buffer": "library-owned, new Vec per decode",
+          "path": "fresh",
+          "output": "RGB8 64x64",
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 34,
+            "median_ms": 0.0299195,
+            "p10_ms": 0.02985,
+            "p90_ms": 0.030400999999999997,
+            "min_ms": 0.0298,
+            "max_ms": 0.031058
+          },
+          "megapixels_per_second": 136.90068350072696,
+          "alloc": {
+            "count": 18,
+            "bytes": 24528,
+            "peak_live_bytes": 24528
+          },
+          "not_applicable": null
+        },
+        {
+          "backend": "zune-reuse",
+          "api": "zune-jpeg `JpegDecoder::decode_into`",
+          "buffer": "caller-owned, reused",
+          "path": "buffer-reuse",
+          "output": "RGB8 64x64",
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 35,
+            "median_ms": 0.029637499999999997,
+            "p10_ms": 0.029519,
+            "p90_ms": 0.03007,
+            "min_ms": 0.029473,
+            "max_ms": 0.034259
+          },
+          "megapixels_per_second": 138.20328975115984,
+          "alloc": {
+            "count": 17,
+            "bytes": 12240,
+            "peak_live_bytes": 12240
+          },
+          "not_applicable": null
+        }
+      ],
+      "correctness": [
+        {
+          "subject": "baseline-fresh",
+          "compared_to": "candidate-fresh",
+          "diff": {
+            "max_abs": 0,
+            "mean_abs": 0,
+            "differing_samples": 0
+          },
+          "note": null
+        },
+        {
+          "subject": "baseline-reuse",
+          "compared_to": "candidate-fresh",
+          "diff": {
+            "max_abs": 0,
+            "mean_abs": 0,
+            "differing_samples": 0
+          },
+          "note": null
+        },
+        {
+          "subject": "candidate-reuse",
+          "compared_to": "candidate-fresh",
+          "diff": {
+            "max_abs": 0,
+            "mean_abs": 0,
+            "differing_samples": 0
+          },
+          "note": null
+        },
+        {
+          "subject": "candidate-image-adapter",
+          "compared_to": "candidate-fresh",
+          "diff": {
+            "max_abs": 0,
+            "mean_abs": 0,
+            "differing_samples": 0
+          },
+          "note": null
+        },
+        {
+          "subject": "image-builtin",
+          "compared_to": "candidate-fresh",
+          "diff": {
+            "max_abs": 3,
+            "mean_abs": 0.359130859375,
+            "differing_samples": 3186
+          },
+          "note": null
+        },
+        {
+          "subject": "zune-fresh",
+          "compared_to": "candidate-fresh",
+          "diff": {
+            "max_abs": 3,
+            "mean_abs": 0.359130859375,
+            "differing_samples": 3186
+          },
+          "note": null
+        },
+        {
+          "subject": "zune-reuse",
+          "compared_to": "candidate-fresh",
+          "diff": {
+            "max_abs": 3,
+            "mean_abs": 0.359130859375,
+            "differing_samples": 3186
+          },
+          "note": null
+        }
+      ]
+    },
+    {
+      "id": "phone-4032x3024-420",
+      "corpus_id": "synthetic-4032x3024-420",
+      "description": "12 MP phone-size photo, 4:2:0",
+      "source_width": 4032,
+      "source_height": 3024,
+      "output_layout": "RGB8",
+      "scale": null,
+      "rows": [
+        {
+          "backend": "baseline-fresh",
+          "api": "libjpeg-turbo-rs 0.8.0 (crates.io) `decompress_to`",
+          "buffer": "library-owned, new Vec per decode",
+          "path": "fresh",
+          "output": "RGB8 4032x3024",
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 1,
+            "median_ms": 50.594216,
+            "p10_ms": 50.153686,
+            "p90_ms": 51.738249,
+            "min_ms": 50.116256,
+            "max_ms": 52.378397
+          },
+          "megapixels_per_second": 240.99134177709163,
+          "alloc": {
+            "count": 19,
+            "bytes": 54902438,
+            "peak_live_bytes": 54902246
+          },
+          "not_applicable": null
+        },
+        {
+          "backend": "baseline-reuse",
+          "api": "libjpeg-turbo-rs 0.8.0 (crates.io) `decompress_into`",
+          "buffer": "caller-owned, reused",
+          "path": "buffer-reuse",
+          "output": "RGB8 4032x3024",
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 1,
+            "median_ms": 47.446104000000005,
+            "p10_ms": 47.231801,
+            "p90_ms": 48.163996,
+            "min_ms": 46.962014,
+            "max_ms": 48.708057
+          },
+          "megapixels_per_second": 256.9814372956734,
+          "alloc": {
+            "count": 18,
+            "bytes": 18324134,
+            "peak_live_bytes": 18323942
+          },
+          "not_applicable": null
+        },
+        {
+          "backend": "candidate-fresh",
+          "api": "candidate `decompress_to`",
+          "buffer": "library-owned, new Vec per decode",
+          "path": "fresh",
+          "output": "RGB8 4032x3024",
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 1,
+            "median_ms": 51.091252499999996,
+            "p10_ms": 50.873684000000004,
+            "p90_ms": 52.599139,
+            "min_ms": 50.759988,
+            "max_ms": 53.683526
+          },
+          "megapixels_per_second": 238.64687991354293,
+          "alloc": {
+            "count": 19,
+            "bytes": 54902462,
+            "peak_live_bytes": 54902270
+          },
+          "not_applicable": null
+        },
+        {
+          "backend": "candidate-reuse",
+          "api": "candidate `decompress_into`",
+          "buffer": "caller-owned, reused",
+          "path": "buffer-reuse",
+          "output": "RGB8 4032x3024",
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 1,
+            "median_ms": 47.035455,
+            "p10_ms": 45.986250999999996,
+            "p90_ms": 47.585939,
+            "min_ms": 45.692532,
+            "max_ms": 47.997749999999996
+          },
+          "megapixels_per_second": 259.2250462975217,
+          "alloc": {
+            "count": 18,
+            "bytes": 18324158,
+            "peak_live_bytes": 18323966
+          },
+          "not_applicable": null
+        },
+        {
+          "backend": "candidate-image-adapter",
+          "api": "candidate libjpeg-turbo-rs-image `JpegDecoder::new` + `read_image`",
+          "buffer": "caller-owned output; adapter-internal staging is reported in the allocation columns",
+          "path": "buffer-reuse",
+          "output": "RGB8 4032x3024",
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 1,
+            "median_ms": 46.439163,
+            "p10_ms": 46.137494000000004,
+            "p90_ms": 47.864612,
+            "min_ms": 46.120371,
+            "max_ms": 48.421422
+          },
+          "megapixels_per_second": 262.5535692794463,
+          "alloc": {
+            "count": 27,
+            "bytes": 21444504,
+            "peak_live_bytes": 21425722
+          },
+          "not_applicable": null
+        },
+        {
+          "backend": "image-builtin",
+          "api": "image `codecs::jpeg::JpegDecoder::new` + `read_image` (zune-jpeg inside)",
+          "buffer": "caller-owned, reused (image copies the input stream into a Vec first)",
+          "path": "buffer-reuse",
+          "output": "RGB8 4032x3024",
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 1,
+            "median_ms": 59.337457,
+            "p10_ms": 59.295554,
+            "p90_ms": 59.498491,
+            "min_ms": 59.276487,
+            "max_ms": 59.5728
+          },
+          "megapixels_per_second": 205.48180890192174,
+          "alloc": {
+            "count": 19,
+            "bytes": 3782108,
+            "peak_live_bytes": 3780620
+          },
+          "not_applicable": null
+        },
+        {
+          "backend": "zune-fresh",
+          "api": "zune-jpeg `JpegDecoder::decode`",
+          "buffer": "library-owned, new Vec per decode",
+          "path": "fresh",
+          "output": "RGB8 4032x3024",
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 1,
+            "median_ms": 62.505011499999995,
+            "p10_ms": 62.359372,
+            "p90_ms": 62.67007099999999,
+            "min_ms": 62.294975,
+            "max_ms": 62.776572
+          },
+          "megapixels_per_second": 195.06864661563975,
+          "alloc": {
+            "count": 18,
+            "bytes": 37257168,
+            "peak_live_bytes": 37257168
+          },
+          "not_applicable": null
+        },
+        {
+          "backend": "zune-reuse",
+          "api": "zune-jpeg `JpegDecoder::decode_into`",
+          "buffer": "caller-owned, reused",
+          "path": "buffer-reuse",
+          "output": "RGB8 4032x3024",
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 1,
+            "median_ms": 58.786806999999996,
+            "p10_ms": 58.713086,
+            "p90_ms": 58.940270000000005,
+            "min_ms": 58.677217,
+            "max_ms": 59.012494
+          },
+          "megapixels_per_second": 207.40653595967544,
+          "alloc": {
+            "count": 17,
+            "bytes": 678864,
+            "peak_live_bytes": 678864
+          },
+          "not_applicable": null
+        }
+      ],
+      "correctness": [
+        {
+          "subject": "baseline-fresh",
+          "compared_to": "candidate-fresh",
+          "diff": {
+            "max_abs": 0,
+            "mean_abs": 0,
+            "differing_samples": 0
+          },
+          "note": null
+        },
+        {
+          "subject": "baseline-reuse",
+          "compared_to": "candidate-fresh",
+          "diff": {
+            "max_abs": 0,
+            "mean_abs": 0,
+            "differing_samples": 0
+          },
+          "note": null
+        },
+        {
+          "subject": "candidate-reuse",
+          "compared_to": "candidate-fresh",
+          "diff": {
+            "max_abs": 0,
+            "mean_abs": 0,
+            "differing_samples": 0
+          },
+          "note": null
+        },
+        {
+          "subject": "candidate-image-adapter",
+          "compared_to": "candidate-fresh",
+          "diff": {
+            "max_abs": 0,
+            "mean_abs": 0,
+            "differing_samples": 0
+          },
+          "note": null
+        },
+        {
+          "subject": "image-builtin",
+          "compared_to": "candidate-fresh",
+          "diff": {
+            "max_abs": 5,
+            "mean_abs": 0.3407578164367599,
+            "differing_samples": 8986085
+          },
+          "note": null
+        },
+        {
+          "subject": "zune-fresh",
+          "compared_to": "candidate-fresh",
+          "diff": {
+            "max_abs": 5,
+            "mean_abs": 0.3407578164367599,
+            "differing_samples": 8986085
+          },
+          "note": null
+        },
+        {
+          "subject": "zune-reuse",
+          "compared_to": "candidate-fresh",
+          "diff": {
+            "max_abs": 5,
+            "mean_abs": 0.3407578164367599,
+            "differing_samples": 8986085
+          },
+          "note": null
+        }
+      ]
+    },
+    {
+      "id": "phone-4032x3024-420-scale-1/4",
+      "corpus_id": "synthetic-4032x3024-420",
+      "description": "the same photo, 1/4-scaled decode",
+      "source_width": 4032,
+      "source_height": 3024,
+      "output_layout": "RGB8",
+      "scale": "1/4",
+      "rows": [
+        {
+          "backend": "baseline-fresh",
+          "api": "libjpeg-turbo-rs 0.8.0 (crates.io) `decompress_to`",
+          "buffer": "library-owned, new Vec per decode",
+          "path": "fresh",
+          "output": "RGB8 1008x756",
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 1,
+            "median_ms": 49.329509,
+            "p10_ms": 47.544584,
+            "p90_ms": 51.424932999999996,
+            "min_ms": 46.583769,
+            "max_ms": 51.885656000000004
+          },
+          "megapixels_per_second": 247.16986337731436,
+          "alloc": {
+            "count": 15,
+            "bytes": 4591142,
+            "peak_live_bytes": 4590950
+          },
+          "not_applicable": null
+        },
+        {
+          "backend": "baseline-reuse",
+          "api": "libjpeg-turbo-rs 0.8.0 (crates.io) `decompress_into`",
+          "buffer": "caller-owned, reused",
+          "path": "buffer-reuse",
+          "output": "RGB8 1008x756",
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 1,
+            "median_ms": 49.7717655,
+            "p10_ms": 46.941428,
+            "p90_ms": 50.498463,
+            "min_ms": 46.368667,
+            "max_ms": 51.060323
+          },
+          "megapixels_per_second": 244.97358848964276,
+          "alloc": {
+            "count": 14,
+            "bytes": 2304998,
+            "peak_live_bytes": 2304998
+          },
+          "not_applicable": null
+        },
+        {
+          "backend": "candidate-fresh",
+          "api": "candidate `decompress_to`",
+          "buffer": "library-owned, new Vec per decode",
+          "path": "fresh",
+          "output": "RGB8 1008x756",
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 1,
+            "median_ms": 44.671977999999996,
+            "p10_ms": 44.606885,
+            "p90_ms": 44.885757,
+            "min_ms": 44.570888000000004,
+            "max_ms": 45.114613999999996
+          },
+          "megapixels_per_second": 272.9399624972953,
+          "alloc": {
+            "count": 15,
+            "bytes": 4591166,
+            "peak_live_bytes": 4590974
+          },
+          "not_applicable": null
+        },
+        {
+          "backend": "candidate-reuse",
+          "api": "candidate `decompress_into`",
+          "buffer": "caller-owned, reused",
+          "path": "buffer-reuse",
+          "output": "RGB8 1008x756",
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 1,
+            "median_ms": 44.8468345,
+            "p10_ms": 44.667709,
+            "p90_ms": 44.998047,
+            "min_ms": 44.623137,
+            "max_ms": 45.285503
+          },
+          "megapixels_per_second": 271.8757775423369,
+          "alloc": {
+            "count": 14,
+            "bytes": 2305022,
+            "peak_live_bytes": 2305022
+          },
+          "not_applicable": null
+        },
+        {
+          "backend": "candidate-image-adapter",
+          "api": "candidate libjpeg-turbo-rs-image `JpegDecoder::new` + `read_image`",
+          "buffer": "caller-owned output; adapter-internal staging is reported in the allocation columns",
+          "path": "buffer-reuse",
+          "output": "—",
+          "timing": null,
+          "megapixels_per_second": null,
+          "alloc": null,
+          "not_applicable": "the adapter's `ImageDecoder` exposes no scale option (the candidate itself has one)"
+        },
+        {
+          "backend": "image-builtin",
+          "api": "image `codecs::jpeg::JpegDecoder::new` + `read_image` (zune-jpeg inside)",
+          "buffer": "caller-owned, reused (image copies the input stream into a Vec first)",
+          "path": "buffer-reuse",
+          "output": "—",
+          "timing": null,
+          "megapixels_per_second": null,
+          "alloc": null,
+          "not_applicable": "no scaled-decode API (DCT-domain scaling is a libjpeg feature)"
+        },
+        {
+          "backend": "zune-fresh",
+          "api": "zune-jpeg `JpegDecoder::decode`",
+          "buffer": "library-owned, new Vec per decode",
+          "path": "fresh",
+          "output": "—",
+          "timing": null,
+          "megapixels_per_second": null,
+          "alloc": null,
+          "not_applicable": "no scaled-decode API (DCT-domain scaling is a libjpeg feature)"
+        },
+        {
+          "backend": "zune-reuse",
+          "api": "zune-jpeg `JpegDecoder::decode_into`",
+          "buffer": "caller-owned, reused",
+          "path": "buffer-reuse",
+          "output": "—",
+          "timing": null,
+          "megapixels_per_second": null,
+          "alloc": null,
+          "not_applicable": "no scaled-decode API (DCT-domain scaling is a libjpeg feature)"
+        }
+      ],
+      "correctness": [
+        {
+          "subject": "baseline-fresh",
+          "compared_to": "candidate-fresh",
+          "diff": {
+            "max_abs": 0,
+            "mean_abs": 0,
+            "differing_samples": 0
+          },
+          "note": null
+        },
+        {
+          "subject": "baseline-reuse",
+          "compared_to": "candidate-fresh",
+          "diff": {
+            "max_abs": 0,
+            "mean_abs": 0,
+            "differing_samples": 0
+          },
+          "note": null
+        },
+        {
+          "subject": "candidate-reuse",
+          "compared_to": "candidate-fresh",
+          "diff": {
+            "max_abs": 0,
+            "mean_abs": 0,
+            "differing_samples": 0
+          },
+          "note": null
+        }
+      ]
+    },
+    {
+      "id": "gray-1920x1080",
+      "corpus_id": "synthetic-1920x1080-gray",
+      "description": "grayscale 1080p",
+      "source_width": 1920,
+      "source_height": 1080,
+      "output_layout": "L8",
+      "scale": null,
+      "rows": [
+        {
+          "backend": "baseline-fresh",
+          "api": "libjpeg-turbo-rs 0.8.0 (crates.io) `decompress_to`",
+          "buffer": "library-owned, new Vec per decode",
+          "path": "fresh",
+          "output": "L8 1920x1080",
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 1,
+            "median_ms": 4.975451,
+            "p10_ms": 4.958393999999999,
+            "p90_ms": 5.032463,
+            "min_ms": 4.9507900000000005,
+            "max_ms": 5.135185
+          },
+          "megapixels_per_second": 416.7662388796513,
+          "alloc": {
+            "count": 8,
+            "bytes": 2083138,
+            "peak_live_bytes": 2083138
+          },
+          "not_applicable": null
+        },
+        {
+          "backend": "baseline-reuse",
+          "api": "libjpeg-turbo-rs 0.8.0 (crates.io) `decompress_into`",
+          "buffer": "caller-owned, reused",
+          "path": "buffer-reuse",
+          "output": "L8 1920x1080",
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 1,
+            "median_ms": 5.055531,
+            "p10_ms": 5.023035,
+            "p90_ms": 5.097435,
+            "min_ms": 5.00956,
+            "max_ms": 5.260489
+          },
+          "megapixels_per_second": 410.1646295908382,
+          "alloc": {
+            "count": 8,
+            "bytes": 2083138,
+            "peak_live_bytes": 2083138
+          },
+          "not_applicable": null
+        },
+        {
+          "backend": "candidate-fresh",
+          "api": "candidate `decompress_to`",
+          "buffer": "library-owned, new Vec per decode",
+          "path": "fresh",
+          "output": "L8 1920x1080",
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 1,
+            "median_ms": 4.94814,
+            "p10_ms": 4.937405,
+            "p90_ms": 4.966009000000001,
+            "min_ms": 4.932576,
+            "max_ms": 5.154711
+          },
+          "megapixels_per_second": 419.06655834313494,
+          "alloc": {
+            "count": 8,
+            "bytes": 2083210,
+            "peak_live_bytes": 2083210
+          },
+          "not_applicable": null
+        },
+        {
+          "backend": "candidate-reuse",
+          "api": "candidate `decompress_into`",
+          "buffer": "caller-owned, reused",
+          "path": "buffer-reuse",
+          "output": "L8 1920x1080",
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 1,
+            "median_ms": 5.119445,
+            "p10_ms": 5.101711999999999,
+            "p90_ms": 5.180692,
+            "min_ms": 5.099849,
+            "max_ms": 5.91942
+          },
+          "megapixels_per_second": 405.04390612654305,
+          "alloc": {
+            "count": 8,
+            "bytes": 2083210,
+            "peak_live_bytes": 2083210
+          },
+          "not_applicable": null
+        },
+        {
+          "backend": "candidate-image-adapter",
+          "api": "candidate libjpeg-turbo-rs-image `JpegDecoder::new` + `read_image`",
+          "buffer": "caller-owned output; adapter-internal staging is reported in the allocation columns",
+          "path": "buffer-reuse",
+          "output": "L8 1920x1080",
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 1,
+            "median_ms": 5.1459145,
+            "p10_ms": 5.131538,
+            "p90_ms": 5.176582,
+            "min_ms": 5.118283000000001,
+            "max_ms": 5.4022239999999995
+          },
+          "megapixels_per_second": 402.9604456117566,
+          "alloc": {
+            "count": 15,
+            "bytes": 2534358,
+            "peak_live_bytes": 2524844
+          },
+          "not_applicable": null
+        },
+        {
+          "backend": "image-builtin",
+          "api": "image `codecs::jpeg::JpegDecoder::new` + `read_image` (zune-jpeg inside)",
+          "buffer": "caller-owned, reused (image copies the input stream into a Vec first)",
+          "path": "buffer-reuse",
+          "output": "L8 1920x1080",
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 1,
+            "median_ms": 7.019776500000001,
+            "p10_ms": 7.010398,
+            "p90_ms": 7.045293,
+            "min_ms": 7.002734,
+            "max_ms": 7.281836
+          },
+          "megapixels_per_second": 295.394020023287,
+          "alloc": {
+            "count": 4,
+            "bytes": 473346,
+            "peak_live_bytes": 472850
+          },
+          "not_applicable": null
+        },
+        {
+          "backend": "zune-fresh",
+          "api": "zune-jpeg `JpegDecoder::decode`",
+          "buffer": "library-owned, new Vec per decode",
+          "path": "fresh",
+          "output": "L8 1920x1080",
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 1,
+            "median_ms": 7.0712525,
+            "p10_ms": 7.060001,
+            "p90_ms": 7.11282,
+            "min_ms": 7.058949,
+            "max_ms": 7.361355
+          },
+          "megapixels_per_second": 293.2436651074191,
+          "alloc": {
+            "count": 3,
+            "bytes": 2104816,
+            "peak_live_bytes": 2104816
+          },
+          "not_applicable": null
+        },
+        {
+          "backend": "zune-reuse",
+          "api": "zune-jpeg `JpegDecoder::decode_into`",
+          "buffer": "caller-owned, reused",
+          "path": "buffer-reuse",
+          "output": "L8 1920x1080",
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 1,
+            "median_ms": 6.986484000000001,
+            "p10_ms": 6.97404,
+            "p90_ms": 7.052928,
+            "min_ms": 6.972808,
+            "max_ms": 7.246930000000001
+          },
+          "megapixels_per_second": 296.8016530203175,
+          "alloc": {
+            "count": 2,
+            "bytes": 31216,
+            "peak_live_bytes": 31216
+          },
+          "not_applicable": null
+        }
+      ],
+      "correctness": [
+        {
+          "subject": "baseline-fresh",
+          "compared_to": "candidate-fresh",
+          "diff": {
+            "max_abs": 0,
+            "mean_abs": 0,
+            "differing_samples": 0
+          },
+          "note": null
+        },
+        {
+          "subject": "baseline-reuse",
+          "compared_to": "candidate-fresh",
+          "diff": {
+            "max_abs": 0,
+            "mean_abs": 0,
+            "differing_samples": 0
+          },
+          "note": null
+        },
+        {
+          "subject": "candidate-reuse",
+          "compared_to": "candidate-fresh",
+          "diff": {
+            "max_abs": 0,
+            "mean_abs": 0,
+            "differing_samples": 0
+          },
+          "note": null
+        },
+        {
+          "subject": "candidate-image-adapter",
+          "compared_to": "candidate-fresh",
+          "diff": {
+            "max_abs": 0,
+            "mean_abs": 0,
+            "differing_samples": 0
+          },
+          "note": null
+        },
+        {
+          "subject": "image-builtin",
+          "compared_to": "candidate-fresh",
+          "diff": {
+            "max_abs": 1,
+            "mean_abs": 0.005532889660493827,
+            "differing_samples": 11473
+          },
+          "note": null
+        },
+        {
+          "subject": "zune-fresh",
+          "compared_to": "candidate-fresh",
+          "diff": {
+            "max_abs": 1,
+            "mean_abs": 0.005532889660493827,
+            "differing_samples": 11473
+          },
+          "note": null
+        },
+        {
+          "subject": "zune-reuse",
+          "compared_to": "candidate-fresh",
+          "diff": {
+            "max_abs": 1,
+            "mean_abs": 0.005532889660493827,
+            "differing_samples": 11473
+          },
+          "note": null
+        }
+      ]
+    },
+    {
+      "id": "progressive-1920x1080-420",
+      "corpus_id": "synthetic-1920x1080-420-progressive",
+      "description": "progressive 1080p, 4:2:0",
+      "source_width": 1920,
+      "source_height": 1080,
+      "output_layout": "RGB8",
+      "scale": null,
+      "rows": [
+        {
+          "backend": "baseline-fresh",
+          "api": "libjpeg-turbo-rs 0.8.0 (crates.io) `decompress_to`",
+          "buffer": "library-owned, new Vec per decode",
+          "path": "fresh",
+          "output": "RGB8 1920x1080",
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 1,
+            "median_ms": 19.4158135,
+            "p10_ms": 19.344817,
+            "p90_ms": 19.479468,
+            "min_ms": 19.307998,
+            "max_ms": 19.678448
+          },
+          "megapixels_per_second": 106.79954254813994,
+          "alloc": {
+            "count": 55,
+            "bytes": 15725679,
+            "peak_live_bytes": 9496823
+          },
+          "not_applicable": null
+        },
+        {
+          "backend": "baseline-reuse",
+          "api": "libjpeg-turbo-rs 0.8.0 (crates.io) `decompress_into`",
+          "buffer": "caller-owned, reused",
+          "path": "buffer-reuse",
+          "output": "RGB8 1920x1080",
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 1,
+            "median_ms": 19.237455500000003,
+            "p10_ms": 19.078841,
+            "p90_ms": 19.289590999999998,
+            "min_ms": 19.060994,
+            "max_ms": 19.301246000000003
+          },
+          "megapixels_per_second": 107.78972302236122,
+          "alloc": {
+            "count": 54,
+            "bytes": 9504879,
+            "peak_live_bytes": 9496823
+          },
+          "not_applicable": null
+        },
+        {
+          "backend": "candidate-fresh",
+          "api": "candidate `decompress_to`",
+          "buffer": "library-owned, new Vec per decode",
+          "path": "fresh",
+          "output": "RGB8 1920x1080",
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 1,
+            "median_ms": 19.4630165,
+            "p10_ms": 19.388556,
+            "p90_ms": 19.577689999999997,
+            "min_ms": 19.368067999999997,
+            "max_ms": 19.655704999999998
+          },
+          "megapixels_per_second": 106.54052520584361,
+          "alloc": {
+            "count": 55,
+            "bytes": 15725751,
+            "peak_live_bytes": 9496895
+          },
+          "not_applicable": null
+        },
+        {
+          "backend": "candidate-reuse",
+          "api": "candidate `decompress_into`",
+          "buffer": "caller-owned, reused",
+          "path": "buffer-reuse",
+          "output": "RGB8 1920x1080",
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 1,
+            "median_ms": 19.283226,
+            "p10_ms": 19.139835,
+            "p90_ms": 19.324777,
+            "min_ms": 19.129505,
+            "max_ms": 19.398328
+          },
+          "megapixels_per_second": 107.53387425942111,
+          "alloc": {
+            "count": 54,
+            "bytes": 9504951,
+            "peak_live_bytes": 9496895
+          },
+          "not_applicable": null
+        },
+        {
+          "backend": "candidate-image-adapter",
+          "api": "candidate libjpeg-turbo-rs-image `JpegDecoder::new` + `read_image`",
+          "buffer": "caller-owned output; adapter-internal staging is reported in the allocation columns",
+          "path": "buffer-reuse",
+          "output": "RGB8 1920x1080",
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 1,
+            "median_ms": 19.653496000000004,
+            "p10_ms": 19.512430000000002,
+            "p90_ms": 19.712434000000002,
+            "min_ms": 19.494137000000002,
+            "max_ms": 19.951348
+          },
+          "megapixels_per_second": 105.50794627072962,
+          "alloc": {
+            "count": 80,
+            "bytes": 10038480,
+            "peak_live_bytes": 9983289
+          },
+          "not_applicable": null
+        },
+        {
+          "backend": "image-builtin",
+          "api": "image `codecs::jpeg::JpegDecoder::new` + `read_image` (zune-jpeg inside)",
+          "buffer": "caller-owned, reused (image copies the input stream into a Vec first)",
+          "path": "buffer-reuse",
+          "output": "RGB8 1920x1080",
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 1,
+            "median_ms": 25.331850499999998,
+            "p10_ms": 25.312445,
+            "p90_ms": 25.410092,
+            "min_ms": 25.091853,
+            "max_ms": 25.466493
+          },
+          "megapixels_per_second": 81.8574229308672,
+          "alloc": {
+            "count": 22,
+            "bytes": 7051930,
+            "peak_live_bytes": 7050442
+          },
+          "not_applicable": null
+        },
+        {
+          "backend": "zune-fresh",
+          "api": "zune-jpeg `JpegDecoder::decode`",
+          "buffer": "library-owned, new Vec per decode",
+          "path": "fresh",
+          "output": "RGB8 1920x1080",
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 1,
+            "median_ms": 25.688381999999997,
+            "p10_ms": 25.565838,
+            "p90_ms": 25.814653,
+            "min_ms": 25.553579,
+            "max_ms": 25.890689000000002
+          },
+          "megapixels_per_second": 80.72131596299059,
+          "alloc": {
+            "count": 21,
+            "bytes": 12784848,
+            "peak_live_bytes": 12784848
+          },
+          "not_applicable": null
+        },
+        {
+          "backend": "zune-reuse",
+          "api": "zune-jpeg `JpegDecoder::decode_into`",
+          "buffer": "caller-owned, reused",
+          "path": "buffer-reuse",
+          "output": "RGB8 1920x1080",
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 1,
+            "median_ms": 25.421295,
+            "p10_ms": 25.334005,
+            "p90_ms": 25.528739,
+            "min_ms": 25.279503,
+            "max_ms": 26.377057
+          },
+          "megapixels_per_second": 81.56940863948905,
+          "alloc": {
+            "count": 20,
+            "bytes": 6564048,
+            "peak_live_bytes": 6564048
+          },
+          "not_applicable": null
+        }
+      ],
+      "correctness": [
+        {
+          "subject": "baseline-fresh",
+          "compared_to": "candidate-fresh",
+          "diff": {
+            "max_abs": 0,
+            "mean_abs": 0,
+            "differing_samples": 0
+          },
+          "note": null
+        },
+        {
+          "subject": "baseline-reuse",
+          "compared_to": "candidate-fresh",
+          "diff": {
+            "max_abs": 0,
+            "mean_abs": 0,
+            "differing_samples": 0
+          },
+          "note": null
+        },
+        {
+          "subject": "candidate-reuse",
+          "compared_to": "candidate-fresh",
+          "diff": {
+            "max_abs": 0,
+            "mean_abs": 0,
+            "differing_samples": 0
+          },
+          "note": null
+        },
+        {
+          "subject": "candidate-image-adapter",
+          "compared_to": "candidate-fresh",
+          "diff": {
+            "max_abs": 0,
+            "mean_abs": 0,
+            "differing_samples": 0
+          },
+          "note": null
+        },
+        {
+          "subject": "image-builtin",
+          "compared_to": "candidate-fresh",
+          "diff": {
+            "max_abs": 5,
+            "mean_abs": 0.3437437307098765,
+            "differing_samples": 1541434
+          },
+          "note": null
+        },
+        {
+          "subject": "zune-fresh",
+          "compared_to": "candidate-fresh",
+          "diff": {
+            "max_abs": 5,
+            "mean_abs": 0.3437437307098765,
+            "differing_samples": 1541434
+          },
+          "note": null
+        },
+        {
+          "subject": "zune-reuse",
+          "compared_to": "candidate-fresh",
+          "diff": {
+            "max_abs": 5,
+            "mean_abs": 0.3437437307098765,
+            "differing_samples": 1541434
+          },
+          "note": null
+        }
+      ]
+    },
+    {
+      "id": "large-7680x4320-420",
+      "corpus_id": "synthetic-7680x4320-420",
+      "description": "33 MP (8K UHD) image, 4:2:0",
+      "source_width": 7680,
+      "source_height": 4320,
+      "output_layout": "RGB8",
+      "scale": null,
+      "rows": [
+        {
+          "backend": "baseline-fresh",
+          "api": "libjpeg-turbo-rs 0.8.0 (crates.io) `decompress_to`",
+          "buffer": "library-owned, new Vec per decode",
+          "path": "fresh",
+          "output": "RGB8 7680x4320",
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 1,
+            "median_ms": 136.8566545,
+            "p10_ms": 136.52355999999997,
+            "p90_ms": 137.56359500000002,
+            "min_ms": 136.478477,
+            "max_ms": 138.29951200000002
+          },
+          "megapixels_per_second": 242.4259172578269,
+          "alloc": {
+            "count": 19,
+            "bytes": 149348774,
+            "peak_live_bytes": 149348582
+          },
+          "not_applicable": null
+        },
+        {
+          "backend": "baseline-reuse",
+          "api": "libjpeg-turbo-rs 0.8.0 (crates.io) `decompress_into`",
+          "buffer": "caller-owned, reused",
+          "path": "buffer-reuse",
+          "output": "RGB8 7680x4320",
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 1,
+            "median_ms": 129.99041999999997,
+            "p10_ms": 129.814119,
+            "p90_ms": 130.411772,
+            "min_ms": 129.730809,
+            "max_ms": 132.695231
+          },
+          "megapixels_per_second": 255.23111626226,
+          "alloc": {
+            "count": 18,
+            "bytes": 49815974,
+            "peak_live_bytes": 49815782
+          },
+          "not_applicable": null
+        },
+        {
+          "backend": "candidate-fresh",
+          "api": "candidate `decompress_to`",
+          "buffer": "library-owned, new Vec per decode",
+          "path": "fresh",
+          "output": "RGB8 7680x4320",
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 1,
+            "median_ms": 140.1556445,
+            "p10_ms": 139.70242,
+            "p90_ms": 141.039825,
+            "min_ms": 139.626697,
+            "max_ms": 154.70466499999998
+          },
+          "megapixels_per_second": 236.7196848786208,
+          "alloc": {
+            "count": 19,
+            "bytes": 149348798,
+            "peak_live_bytes": 149348606
+          },
+          "not_applicable": null
+        },
+        {
+          "backend": "candidate-reuse",
+          "api": "candidate `decompress_into`",
+          "buffer": "caller-owned, reused",
+          "path": "buffer-reuse",
+          "output": "RGB8 7680x4320",
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 1,
+            "median_ms": 128.7438365,
+            "p10_ms": 127.909677,
+            "p90_ms": 129.28476999999998,
+            "min_ms": 127.67158400000001,
+            "max_ms": 137.501859
+          },
+          "megapixels_per_second": 257.70243377825705,
+          "alloc": {
+            "count": 18,
+            "bytes": 49815998,
+            "peak_live_bytes": 49815806
+          },
+          "not_applicable": null
+        },
+        {
+          "backend": "candidate-image-adapter",
+          "api": "candidate libjpeg-turbo-rs-image `JpegDecoder::new` + `read_image`",
+          "buffer": "caller-owned output; adapter-internal staging is reported in the allocation columns",
+          "path": "buffer-reuse",
+          "output": "RGB8 7680x4320",
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 1,
+            "median_ms": 128.67123800000002,
+            "p10_ms": 128.160097,
+            "p90_ms": 129.711242,
+            "min_ms": 128.057011,
+            "max_ms": 130.726
+          },
+          "megapixels_per_second": 257.84783387255504,
+          "alloc": {
+            "count": 27,
+            "bytes": 58262457,
+            "peak_live_bytes": 58243675
+          },
+          "not_applicable": null
+        },
+        {
+          "backend": "image-builtin",
+          "api": "image `codecs::jpeg::JpegDecoder::new` + `read_image` (zune-jpeg inside)",
+          "buffer": "caller-owned, reused (image copies the input stream into a Vec first)",
+          "path": "buffer-reuse",
+          "output": "RGB8 7680x4320",
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 1,
+            "median_ms": 160.9411055,
+            "p10_ms": 160.580285,
+            "p90_ms": 161.566819,
+            "min_ms": 160.366205,
+            "max_ms": 173.94369400000002
+          },
+          "megapixels_per_second": 206.1474593263559,
+          "alloc": {
+            "count": 19,
+            "bytes": 9721085,
+            "peak_live_bytes": 9719597
+          },
+          "not_applicable": null
+        },
+        {
+          "backend": "zune-fresh",
+          "api": "zune-jpeg `JpegDecoder::decode`",
+          "buffer": "library-owned, new Vec per decode",
+          "path": "fresh",
+          "output": "RGB8 7680x4320",
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 1,
+            "median_ms": 167.7136795,
+            "p10_ms": 167.163751,
+            "p90_ms": 168.075684,
+            "min_ms": 166.780242,
+            "max_ms": 168.474243
+          },
+          "megapixels_per_second": 197.8228615513739,
+          "alloc": {
+            "count": 18,
+            "bytes": 100824528,
+            "peak_live_bytes": 100824528
+          },
+          "not_applicable": null
+        },
+        {
+          "backend": "zune-reuse",
+          "api": "zune-jpeg `JpegDecoder::decode_into`",
+          "buffer": "caller-owned, reused",
+          "path": "buffer-reuse",
+          "output": "RGB8 7680x4320",
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 1,
+            "median_ms": 159.896519,
+            "p10_ms": 159.548558,
+            "p90_ms": 160.18275200000002,
+            "min_ms": 159.310025,
+            "max_ms": 160.479907
+          },
+          "megapixels_per_second": 207.49419816950484,
+          "alloc": {
+            "count": 17,
+            "bytes": 1291728,
+            "peak_live_bytes": 1291728
+          },
+          "not_applicable": null
+        }
+      ],
+      "correctness": [
+        {
+          "subject": "baseline-fresh",
+          "compared_to": "candidate-fresh",
+          "diff": {
+            "max_abs": 0,
+            "mean_abs": 0,
+            "differing_samples": 0
+          },
+          "note": null
+        },
+        {
+          "subject": "baseline-reuse",
+          "compared_to": "candidate-fresh",
+          "diff": {
+            "max_abs": 0,
+            "mean_abs": 0,
+            "differing_samples": 0
+          },
+          "note": null
+        },
+        {
+          "subject": "candidate-reuse",
+          "compared_to": "candidate-fresh",
+          "diff": {
+            "max_abs": 0,
+            "mean_abs": 0,
+            "differing_samples": 0
+          },
+          "note": null
+        },
+        {
+          "subject": "candidate-image-adapter",
+          "compared_to": "candidate-fresh",
+          "diff": {
+            "max_abs": 0,
+            "mean_abs": 0,
+            "differing_samples": 0
+          },
+          "note": null
+        },
+        {
+          "subject": "image-builtin",
+          "compared_to": "candidate-fresh",
+          "diff": {
+            "max_abs": 5,
+            "mean_abs": 0.3402671079282407,
+            "differing_samples": 24423695
+          },
+          "note": null
+        },
+        {
+          "subject": "zune-fresh",
+          "compared_to": "candidate-fresh",
+          "diff": {
+            "max_abs": 5,
+            "mean_abs": 0.3402671079282407,
+            "differing_samples": 24423695
+          },
+          "note": null
+        },
+        {
+          "subject": "zune-reuse",
+          "compared_to": "candidate-fresh",
+          "diff": {
+            "max_abs": 5,
+            "mean_abs": 0.3402671079282407,
+            "differing_samples": 24423695
+          },
+          "note": null
+        }
+      ]
+    },
+    {
+      "id": "testorig",
+      "corpus_id": "testorig",
+      "description": "upstream testorig.jpg",
+      "source_width": 227,
+      "source_height": 149,
+      "output_layout": "RGB8",
+      "scale": null,
+      "rows": [
+        {
+          "backend": "baseline-fresh",
+          "api": "libjpeg-turbo-rs 0.8.0 (crates.io) `decompress_to`",
+          "buffer": "library-owned, new Vec per decode",
+          "path": "fresh",
+          "output": "RGB8 227x149",
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 10,
+            "median_ms": 0.112315,
+            "p10_ms": 0.11173,
+            "p90_ms": 0.11396300000000001,
+            "min_ms": 0.111235,
+            "max_ms": 0.117958
+          },
+          "megapixels_per_second": 301.1441036370921,
+          "alloc": {
+            "count": 19,
+            "bytes": 178883,
+            "peak_live_bytes": 178691
+          },
+          "not_applicable": null
+        },
+        {
+          "backend": "baseline-reuse",
+          "api": "libjpeg-turbo-rs 0.8.0 (crates.io) `decompress_into`",
+          "buffer": "caller-owned, reused",
+          "path": "buffer-reuse",
+          "output": "RGB8 227x149",
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 10,
+            "median_ms": 0.10526350000000001,
+            "p10_ms": 0.104896,
+            "p90_ms": 0.110477,
+            "min_ms": 0.10478,
+            "max_ms": 0.112378
+          },
+          "megapixels_per_second": 321.3174557182689,
+          "alloc": {
+            "count": 18,
+            "bytes": 77414,
+            "peak_live_bytes": 77222
+          },
+          "not_applicable": null
+        },
+        {
+          "backend": "candidate-fresh",
+          "api": "candidate `decompress_to`",
+          "buffer": "library-owned, new Vec per decode",
+          "path": "fresh",
+          "output": "RGB8 227x149",
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 9,
+            "median_ms": 0.11483550000000001,
+            "p10_ms": 0.113565,
+            "p90_ms": 0.116761,
+            "min_ms": 0.113453,
+            "max_ms": 0.117831
+          },
+          "megapixels_per_second": 294.5343556652777,
+          "alloc": {
+            "count": 19,
+            "bytes": 178907,
+            "peak_live_bytes": 178715
+          },
+          "not_applicable": null
+        },
+        {
+          "backend": "candidate-reuse",
+          "api": "candidate `decompress_into`",
+          "buffer": "caller-owned, reused",
+          "path": "buffer-reuse",
+          "output": "RGB8 227x149",
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 10,
+            "median_ms": 0.10385249999999999,
+            "p10_ms": 0.10340600000000001,
+            "p90_ms": 0.109484,
+            "min_ms": 0.103199,
+            "max_ms": 0.11147299999999999
+          },
+          "megapixels_per_second": 325.68306010928967,
+          "alloc": {
+            "count": 18,
+            "bytes": 77438,
+            "peak_live_bytes": 77246
+          },
+          "not_applicable": null
+        },
+        {
+          "backend": "candidate-image-adapter",
+          "api": "candidate libjpeg-turbo-rs-image `JpegDecoder::new` + `read_image`",
+          "buffer": "caller-owned output; adapter-internal staging is reported in the allocation columns",
+          "path": "buffer-reuse",
+          "output": "RGB8 227x149",
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 10,
+            "median_ms": 0.11246350000000001,
+            "p10_ms": 0.11202200000000001,
+            "p90_ms": 0.11474899999999999,
+            "min_ms": 0.111929,
+            "max_ms": 0.116521
+          },
+          "megapixels_per_second": 300.7464644084525,
+          "alloc": {
+            "count": 27,
+            "bytes": 101798,
+            "peak_live_bytes": 83016
+          },
+          "not_applicable": null
+        },
+        {
+          "backend": "image-builtin",
+          "api": "image `codecs::jpeg::JpegDecoder::new` + `read_image` (zune-jpeg inside)",
+          "buffer": "caller-owned, reused (image copies the input stream into a Vec first)",
+          "path": "buffer-reuse",
+          "output": "RGB8 227x149",
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 8,
+            "median_ms": 0.138317,
+            "p10_ms": 0.137237,
+            "p90_ms": 0.140703,
+            "min_ms": 0.136895,
+            "max_ms": 0.145204
+          },
+          "megapixels_per_second": 244.53248696834083,
+          "alloc": {
+            "count": 19,
+            "bytes": 49066,
+            "peak_live_bytes": 47578
+          },
+          "not_applicable": null
+        },
+        {
+          "backend": "zune-fresh",
+          "api": "zune-jpeg `JpegDecoder::decode`",
+          "buffer": "library-owned, new Vec per decode",
+          "path": "fresh",
+          "output": "RGB8 227x149",
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 8,
+            "median_ms": 0.12762849999999998,
+            "p10_ms": 0.127208,
+            "p90_ms": 0.13418,
+            "min_ms": 0.126971,
+            "max_ms": 0.141246
+          },
+          "megapixels_per_second": 265.0113415107128,
+          "alloc": {
+            "count": 18,
+            "bytes": 143277,
+            "peak_live_bytes": 143277
+          },
+          "not_applicable": null
+        },
+        {
+          "backend": "zune-reuse",
+          "api": "zune-jpeg `JpegDecoder::decode_into`",
+          "buffer": "caller-owned, reused",
+          "path": "buffer-reuse",
+          "output": "RGB8 227x149",
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 9,
+            "median_ms": 0.1231315,
+            "p10_ms": 0.12272,
+            "p90_ms": 0.12431099999999999,
+            "min_ms": 0.122428,
+            "max_ms": 0.128141
+          },
+          "megapixels_per_second": 274.69006712336,
+          "alloc": {
+            "count": 17,
+            "bytes": 41808,
+            "peak_live_bytes": 41808
+          },
+          "not_applicable": null
+        }
+      ],
+      "correctness": [
+        {
+          "subject": "baseline-fresh",
+          "compared_to": "candidate-fresh",
+          "diff": {
+            "max_abs": 0,
+            "mean_abs": 0,
+            "differing_samples": 0
+          },
+          "note": null
+        },
+        {
+          "subject": "baseline-reuse",
+          "compared_to": "candidate-fresh",
+          "diff": {
+            "max_abs": 0,
+            "mean_abs": 0,
+            "differing_samples": 0
+          },
+          "note": null
+        },
+        {
+          "subject": "candidate-reuse",
+          "compared_to": "candidate-fresh",
+          "diff": {
+            "max_abs": 0,
+            "mean_abs": 0,
+            "differing_samples": 0
+          },
+          "note": null
+        },
+        {
+          "subject": "candidate-image-adapter",
+          "compared_to": "candidate-fresh",
+          "diff": {
+            "max_abs": 0,
+            "mean_abs": 0,
+            "differing_samples": 0
+          },
+          "note": null
+        },
+        {
+          "subject": "image-builtin",
+          "compared_to": "candidate-fresh",
+          "diff": {
+            "max_abs": 4,
+            "mean_abs": 0.2806768569710946,
+            "differing_samples": 20749
+          },
+          "note": null
+        },
+        {
+          "subject": "zune-fresh",
+          "compared_to": "candidate-fresh",
+          "diff": {
+            "max_abs": 4,
+            "mean_abs": 0.2806768569710946,
+            "differing_samples": 20749
+          },
+          "note": null
+        },
+        {
+          "subject": "zune-reuse",
+          "compared_to": "candidate-fresh",
+          "diff": {
+            "max_abs": 4,
+            "mean_abs": 0.2806768569710946,
+            "differing_samples": 20749
+          },
+          "note": null
+        }
+      ]
+    },
+    {
+      "id": "testimgint",
+      "corpus_id": "testimgint",
+      "description": "upstream testimgint.jpg",
+      "source_width": 227,
+      "source_height": 149,
+      "output_layout": "RGB8",
+      "scale": null,
+      "rows": [
+        {
+          "backend": "baseline-fresh",
+          "api": "libjpeg-turbo-rs 0.8.0 (crates.io) `decompress_to`",
+          "buffer": "library-owned, new Vec per decode",
+          "path": "fresh",
+          "output": "RGB8 227x149",
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 10,
+            "median_ms": 0.112819,
+            "p10_ms": 0.11202999999999999,
+            "p90_ms": 0.114632,
+            "min_ms": 0.111143,
+            "max_ms": 0.116477
+          },
+          "megapixels_per_second": 299.7987927565392,
+          "alloc": {
+            "count": 19,
+            "bytes": 178883,
+            "peak_live_bytes": 178691
+          },
+          "not_applicable": null
+        },
+        {
+          "backend": "baseline-reuse",
+          "api": "libjpeg-turbo-rs 0.8.0 (crates.io) `decompress_into`",
+          "buffer": "caller-owned, reused",
+          "path": "buffer-reuse",
+          "output": "RGB8 227x149",
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 10,
+            "median_ms": 0.1056915,
+            "p10_ms": 0.105387,
+            "p90_ms": 0.109924,
+            "min_ms": 0.105336,
+            "max_ms": 0.110709
+          },
+          "megapixels_per_second": 320.01627377792914,
+          "alloc": {
+            "count": 18,
+            "bytes": 77414,
+            "peak_live_bytes": 77222
+          },
+          "not_applicable": null
+        },
+        {
+          "backend": "candidate-fresh",
+          "api": "candidate `decompress_to`",
+          "buffer": "library-owned, new Vec per decode",
+          "path": "fresh",
+          "output": "RGB8 227x149",
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 10,
+            "median_ms": 0.11365349999999999,
+            "p10_ms": 0.112674,
+            "p90_ms": 0.115449,
+            "min_ms": 0.112508,
+            "max_ms": 0.12310199999999999
+          },
+          "megapixels_per_second": 297.5975222936381,
+          "alloc": {
+            "count": 19,
+            "bytes": 178907,
+            "peak_live_bytes": 178715
+          },
+          "not_applicable": null
+        },
+        {
+          "backend": "candidate-reuse",
+          "api": "candidate `decompress_into`",
+          "buffer": "caller-owned, reused",
+          "path": "buffer-reuse",
+          "output": "RGB8 227x149",
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 10,
+            "median_ms": 0.10392850000000001,
+            "p10_ms": 0.103701,
+            "p90_ms": 0.110639,
+            "min_ms": 0.103642,
+            "max_ms": 0.12296599999999999
+          },
+          "megapixels_per_second": 325.44489721298777,
+          "alloc": {
+            "count": 18,
+            "bytes": 77438,
+            "peak_live_bytes": 77246
+          },
+          "not_applicable": null
+        },
+        {
+          "backend": "candidate-image-adapter",
+          "api": "candidate libjpeg-turbo-rs-image `JpegDecoder::new` + `read_image`",
+          "buffer": "caller-owned output; adapter-internal staging is reported in the allocation columns",
+          "path": "buffer-reuse",
+          "output": "RGB8 227x149",
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 9,
+            "median_ms": 0.11267849999999999,
+            "p10_ms": 0.11238000000000001,
+            "p90_ms": 0.113144,
+            "min_ms": 0.11236600000000001,
+            "max_ms": 0.117411
+          },
+          "megapixels_per_second": 300.17261500641206,
+          "alloc": {
+            "count": 27,
+            "bytes": 101784,
+            "peak_live_bytes": 83002
+          },
+          "not_applicable": null
+        },
+        {
+          "backend": "image-builtin",
+          "api": "image `codecs::jpeg::JpegDecoder::new` + `read_image` (zune-jpeg inside)",
+          "buffer": "caller-owned, reused (image copies the input stream into a Vec first)",
+          "path": "buffer-reuse",
+          "output": "RGB8 227x149",
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 8,
+            "median_ms": 0.13936350000000003,
+            "p10_ms": 0.137978,
+            "p90_ms": 0.140904,
+            "min_ms": 0.13755399999999998,
+            "max_ms": 0.14247300000000002
+          },
+          "megapixels_per_second": 242.69625834598008,
+          "alloc": {
+            "count": 19,
+            "bytes": 49052,
+            "peak_live_bytes": 47564
+          },
+          "not_applicable": null
+        },
+        {
+          "backend": "zune-fresh",
+          "api": "zune-jpeg `JpegDecoder::decode`",
+          "buffer": "library-owned, new Vec per decode",
+          "path": "fresh",
+          "output": "RGB8 227x149",
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 9,
+            "median_ms": 0.12604949999999998,
+            "p10_ms": 0.12576500000000002,
+            "p90_ms": 0.128271,
+            "min_ms": 0.125536,
+            "max_ms": 0.131772
+          },
+          "megapixels_per_second": 268.33109215030606,
+          "alloc": {
+            "count": 18,
+            "bytes": 143277,
+            "peak_live_bytes": 143277
+          },
+          "not_applicable": null
+        },
+        {
+          "backend": "zune-reuse",
+          "api": "zune-jpeg `JpegDecoder::decode_into`",
+          "buffer": "caller-owned, reused",
+          "path": "buffer-reuse",
+          "output": "RGB8 227x149",
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 9,
+            "median_ms": 0.1232035,
+            "p10_ms": 0.12292800000000001,
+            "p90_ms": 0.123712,
+            "min_ms": 0.12280400000000001,
+            "max_ms": 0.12527
+          },
+          "megapixels_per_second": 274.52953852772043,
+          "alloc": {
+            "count": 17,
+            "bytes": 41808,
+            "peak_live_bytes": 41808
+          },
+          "not_applicable": null
+        }
+      ],
+      "correctness": [
+        {
+          "subject": "baseline-fresh",
+          "compared_to": "candidate-fresh",
+          "diff": {
+            "max_abs": 0,
+            "mean_abs": 0,
+            "differing_samples": 0
+          },
+          "note": null
+        },
+        {
+          "subject": "baseline-reuse",
+          "compared_to": "candidate-fresh",
+          "diff": {
+            "max_abs": 0,
+            "mean_abs": 0,
+            "differing_samples": 0
+          },
+          "note": null
+        },
+        {
+          "subject": "candidate-reuse",
+          "compared_to": "candidate-fresh",
+          "diff": {
+            "max_abs": 0,
+            "mean_abs": 0,
+            "differing_samples": 0
+          },
+          "note": null
+        },
+        {
+          "subject": "candidate-image-adapter",
+          "compared_to": "candidate-fresh",
+          "diff": {
+            "max_abs": 0,
+            "mean_abs": 0,
+            "differing_samples": 0
+          },
+          "note": null
+        },
+        {
+          "subject": "image-builtin",
+          "compared_to": "candidate-fresh",
+          "diff": {
+            "max_abs": 4,
+            "mean_abs": 0.2797504656594625,
+            "differing_samples": 20664
+          },
+          "note": null
+        },
+        {
+          "subject": "zune-fresh",
+          "compared_to": "candidate-fresh",
+          "diff": {
+            "max_abs": 4,
+            "mean_abs": 0.2797504656594625,
+            "differing_samples": 20664
+          },
+          "note": null
+        },
+        {
+          "subject": "zune-reuse",
+          "compared_to": "candidate-fresh",
+          "diff": {
+            "max_abs": 4,
+            "mean_abs": 0.2797504656594625,
+            "differing_samples": 20664
+          },
+          "note": null
+        }
+      ]
+    }
+  ],
+  "encode": [
+    {
+      "id": "encode-64x64",
+      "width": 64,
+      "height": 64,
+      "c_comparison": [
+        {
+          "subject": "all rows",
+          "compared_to": "C cjpeg",
+          "result": "C encode comparison: disabled (--no-c-oracle)"
+        }
+      ],
+      "rows": [
+        {
+          "backend": "baseline",
+          "api": "libjpeg-turbo-rs 0.8.0 (crates.io) `compress(q85, S420)`",
+          "output_bytes": 1594,
+          "subsampling": "4:2:0",
+          "psnr_db": 29.884168201217925,
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 56,
+            "median_ms": 0.018306000000000003,
+            "p10_ms": 0.018274000000000002,
+            "p90_ms": 0.018369999999999997,
+            "min_ms": 0.018265,
+            "max_ms": 0.01873
+          },
+          "megapixels_per_second": 223.75177537419418,
+          "alloc": {
+            "count": 14,
+            "bytes": 22330,
+            "peak_live_bytes": 20316
+          }
+        },
+        {
+          "backend": "candidate",
+          "api": "candidate `compress(q85, S420)`",
+          "output_bytes": 1594,
+          "subsampling": "4:2:0",
+          "psnr_db": 29.884168201217925,
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 56,
+            "median_ms": 0.018360500000000002,
+            "p10_ms": 0.018327,
+            "p90_ms": 0.018418,
+            "min_ms": 0.018308,
+            "max_ms": 0.019038
+          },
+          "megapixels_per_second": 223.08760654666264,
+          "alloc": {
+            "count": 14,
+            "bytes": 22330,
+            "peak_live_bytes": 20316
+          }
+        },
+        {
+          "backend": "baseline-444",
+          "api": "libjpeg-turbo-rs 0.8.0 (crates.io) `compress(q85, S444)` — like for like with image-builtin",
+          "output_bytes": 2092,
+          "subsampling": "4:4:4",
+          "psnr_db": 33.02985224774412,
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 35,
+            "median_ms": 0.028990500000000002,
+            "p10_ms": 0.028945000000000002,
+            "p90_ms": 0.029155,
+            "min_ms": 0.028940999999999998,
+            "max_ms": 0.029477
+          },
+          "megapixels_per_second": 141.28766320001378,
+          "alloc": {
+            "count": 11,
+            "bytes": 12588,
+            "peak_live_bytes": 11043
+          }
+        },
+        {
+          "backend": "candidate-444",
+          "api": "candidate `compress(q85, S444)` — like for like with image-builtin",
+          "output_bytes": 2092,
+          "subsampling": "4:4:4",
+          "psnr_db": 33.02985224774412,
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 35,
+            "median_ms": 0.029475,
+            "p10_ms": 0.029411,
+            "p90_ms": 0.029644,
+            "min_ms": 0.029376000000000003,
+            "max_ms": 0.030083
+          },
+          "megapixels_per_second": 138.96522476675148,
+          "alloc": {
+            "count": 11,
+            "bytes": 12588,
+            "peak_live_bytes": 11043
+          }
+        },
+        {
+          "backend": "candidate-image-adapter",
+          "api": "candidate libjpeg-turbo-rs-image `JpegEncoder::new_with_quality(85)` (4:2:0 default)",
+          "output_bytes": 1594,
+          "subsampling": "4:2:0",
+          "psnr_db": 29.884168201217925,
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 55,
+            "median_ms": 0.0184365,
+            "p10_ms": 0.018397,
+            "p90_ms": 0.018462,
+            "min_ms": 0.018366999999999998,
+            "max_ms": 0.018547
+          },
+          "megapixels_per_second": 222.16798199224363,
+          "alloc": {
+            "count": 15,
+            "bytes": 23924,
+            "peak_live_bytes": 20316
+          }
+        },
+        {
+          "backend": "image-builtin",
+          "api": "image `codecs::jpeg::JpegEncoder::new_with_quality(85)` (subsampling is image's choice)",
+          "output_bytes": 2061,
+          "subsampling": "4:4:4",
+          "psnr_db": 33.047468534259025,
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 11,
+            "median_ms": 0.093752,
+            "p10_ms": 0.09335,
+            "p90_ms": 0.094722,
+            "min_ms": 0.093225,
+            "max_ms": 0.094965
+          },
+          "megapixels_per_second": 43.68973461899479,
+          "alloc": {
+            "count": 17,
+            "bytes": 2980,
+            "peak_live_bytes": 2980
+          }
+        }
+      ]
+    },
+    {
+      "id": "encode-1920x1080",
+      "width": 1920,
+      "height": 1080,
+      "c_comparison": [
+        {
+          "subject": "all rows",
+          "compared_to": "C cjpeg",
+          "result": "C encode comparison: disabled (--no-c-oracle)"
+        }
+      ],
+      "rows": [
+        {
+          "backend": "baseline",
+          "api": "libjpeg-turbo-rs 0.8.0 (crates.io) `compress(q85, S420)`",
+          "output_bytes": 388228,
+          "subsampling": "4:2:0",
+          "psnr_db": 33.313701073914125,
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 1,
+            "median_ms": 7.4478715,
+            "p10_ms": 7.432447,
+            "p90_ms": 7.474686999999999,
+            "min_ms": 7.4318159999999995,
+            "max_ms": 7.573792
+          },
+          "megapixels_per_second": 278.41511497613783,
+          "alloc": {
+            "count": 13,
+            "bytes": 4643716,
+            "peak_live_bytes": 4536187
+          }
+        },
+        {
+          "backend": "candidate",
+          "api": "candidate `compress(q85, S420)`",
+          "output_bytes": 388228,
+          "subsampling": "4:2:0",
+          "psnr_db": 33.313701073914125,
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 1,
+            "median_ms": 7.398624,
+            "p10_ms": 7.386492,
+            "p90_ms": 7.424262,
+            "min_ms": 7.383406,
+            "max_ms": 7.442967
+          },
+          "megapixels_per_second": 280.26833097613826,
+          "alloc": {
+            "count": 13,
+            "bytes": 4643716,
+            "peak_live_bytes": 4536187
+          }
+        },
+        {
+          "backend": "baseline-444",
+          "api": "libjpeg-turbo-rs 0.8.0 (crates.io) `compress(q85, S444)` — like for like with image-builtin",
+          "output_bytes": 571613,
+          "subsampling": "4:4:4",
+          "psnr_db": 34.79177604916125,
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 1,
+            "median_ms": 13.121212,
+            "p10_ms": 13.111965,
+            "p90_ms": 13.146554,
+            "min_ms": 13.107246,
+            "max_ms": 13.281236
+          },
+          "megapixels_per_second": 158.03418159846817,
+          "alloc": {
+            "count": 11,
+            "bytes": 4765661,
+            "peak_live_bytes": 4719572
+          }
+        },
+        {
+          "backend": "candidate-444",
+          "api": "candidate `compress(q85, S444)` — like for like with image-builtin",
+          "output_bytes": 571613,
+          "subsampling": "4:4:4",
+          "psnr_db": 34.79177604916125,
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 1,
+            "median_ms": 13.322879499999999,
+            "p10_ms": 13.309008,
+            "p90_ms": 13.362534,
+            "min_ms": 13.304806000000001,
+            "max_ms": 13.521207
+          },
+          "megapixels_per_second": 155.64202918745906,
+          "alloc": {
+            "count": 11,
+            "bytes": 4765661,
+            "peak_live_bytes": 4719572
+          }
+        },
+        {
+          "backend": "candidate-image-adapter",
+          "api": "candidate libjpeg-turbo-rs-image `JpegEncoder::new_with_quality(85)` (4:2:0 default)",
+          "output_bytes": 388228,
+          "subsampling": "4:2:0",
+          "psnr_db": 33.313701073914125,
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 1,
+            "median_ms": 7.4063985,
+            "p10_ms": 7.395627999999999,
+            "p90_ms": 7.4250039999999995,
+            "min_ms": 7.392082,
+            "max_ms": 7.535621
+          },
+          "megapixels_per_second": 279.97413317687403,
+          "alloc": {
+            "count": 14,
+            "bytes": 5031944,
+            "peak_live_bytes": 4536187
+          }
+        },
+        {
+          "backend": "image-builtin",
+          "api": "image `codecs::jpeg::JpegEncoder::new_with_quality(85)` (subsampling is image's choice)",
+          "output_bytes": 554154,
+          "subsampling": "4:4:4",
+          "psnr_db": 34.811498151075725,
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 1,
+            "median_ms": 51.226459,
+            "p10_ms": 51.183955000000005,
+            "p90_ms": 51.325229,
+            "min_ms": 51.169026,
+            "max_ms": 51.52386
+          },
+          "megapixels_per_second": 40.47908132787394,
+          "alloc": {
+            "count": 25,
+            "bytes": 655780,
+            "peak_live_bytes": 655780
+          }
+        }
+      ]
+    },
+    {
+      "id": "encode-4032x3024",
+      "width": 4032,
+      "height": 3024,
+      "c_comparison": [
+        {
+          "subject": "all rows",
+          "compared_to": "C cjpeg",
+          "result": "C encode comparison: disabled (--no-c-oracle)"
+        }
+      ],
+      "rows": [
+        {
+          "backend": "baseline",
+          "api": "libjpeg-turbo-rs 0.8.0 (crates.io) `compress(q85, S420)`",
+          "output_bytes": 2259909,
+          "subsampling": "4:2:0",
+          "psnr_db": 33.45184485591239,
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 1,
+            "median_ms": 43.547107999999994,
+            "p10_ms": 43.498248000000004,
+            "p90_ms": 44.53207,
+            "min_ms": 43.495906,
+            "max_ms": 44.701478
+          },
+          "megapixels_per_second": 279.99030383372417,
+          "alloc": {
+            "count": 13,
+            "bytes": 26872005,
+            "peak_live_bytes": 26646204
+          }
+        },
+        {
+          "backend": "candidate",
+          "api": "candidate `compress(q85, S420)`",
+          "output_bytes": 2259909,
+          "subsampling": "4:2:0",
+          "psnr_db": 33.45184485591239,
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 1,
+            "median_ms": 43.2839415,
+            "p10_ms": 43.224584,
+            "p90_ms": 43.354259,
+            "min_ms": 43.214548,
+            "max_ms": 44.309795
+          },
+          "megapixels_per_second": 281.69264575870477,
+          "alloc": {
+            "count": 13,
+            "bytes": 26872005,
+            "peak_live_bytes": 26646204
+          }
+        },
+        {
+          "backend": "baseline-444",
+          "api": "libjpeg-turbo-rs 0.8.0 (crates.io) `compress(q85, S444)` — like for like with image-builtin",
+          "output_bytes": 3331311,
+          "subsampling": "4:4:4",
+          "psnr_db": 34.81382153025575,
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 1,
+            "median_ms": 76.9767425,
+            "p10_ms": 76.92732600000001,
+            "p90_ms": 78.050304,
+            "min_ms": 76.911831,
+            "max_ms": 78.754476
+          },
+          "megapixels_per_second": 158.39547899808827,
+          "alloc": {
+            "count": 11,
+            "bytes": 27814383,
+            "peak_live_bytes": 27717606
+          }
+        },
+        {
+          "backend": "candidate-444",
+          "api": "candidate `compress(q85, S444)` — like for like with image-builtin",
+          "output_bytes": 3331311,
+          "subsampling": "4:4:4",
+          "psnr_db": 34.81382153025575,
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 1,
+            "median_ms": 78.236663,
+            "p10_ms": 78.15019199999999,
+            "p90_ms": 79.16578,
+            "min_ms": 78.143861,
+            "max_ms": 79.436977
+          },
+          "megapixels_per_second": 155.8446837130566,
+          "alloc": {
+            "count": 11,
+            "bytes": 27814383,
+            "peak_live_bytes": 27717606
+          }
+        },
+        {
+          "backend": "candidate-image-adapter",
+          "api": "candidate libjpeg-turbo-rs-image `JpegEncoder::new_with_quality(85)` (4:2:0 default)",
+          "output_bytes": 2259909,
+          "subsampling": "4:2:0",
+          "psnr_db": 33.45184485591239,
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 1,
+            "median_ms": 43.367063,
+            "p10_ms": 43.320325,
+            "p90_ms": 43.499618,
+            "min_ms": 43.294385,
+            "max_ms": 45.113548
+          },
+          "megapixels_per_second": 281.1527264366507,
+          "alloc": {
+            "count": 14,
+            "bytes": 29131914,
+            "peak_live_bytes": 26646204
+          }
+        },
+        {
+          "backend": "image-builtin",
+          "api": "image `codecs::jpeg::JpegEncoder::new_with_quality(85)` (subsampling is image's choice)",
+          "output_bytes": 3227206,
+          "subsampling": "4:4:4",
+          "psnr_db": 34.83449646351454,
+          "timing": {
+            "iterations": 30,
+            "calls_per_sample": 1,
+            "median_ms": 301.139679,
+            "p10_ms": 300.790028,
+            "p90_ms": 307.08656,
+            "min_ms": 300.72434599999997,
+            "max_ms": 309.24973900000003
+          },
+          "megapixels_per_second": 40.48874608782458,
+          "alloc": {
+            "count": 28,
+            "bytes": 5243300,
+            "peak_live_bytes": 5243300
+          }
+        }
+      ]
+    }
+  ],
+  "thumbnail": {
+    "corpus_id": "synthetic-4032x3024-420-exif6",
+    "source_width": 4032,
+    "source_height": 3024,
+    "expected_output": "192x256",
+    "rows": [
+      {
+        "backend": "baseline",
+        "api": "0.8.0 decode + `Image::apply_orientation` → imageops::resize → 0.8.0 `compress`",
+        "output": "192x256",
+        "output_bytes": 12088,
+        "orientation_applied": true,
+        "diff_vs_candidate": {
+          "max_abs": 0,
+          "mean_abs": 0,
+          "differing_samples": 0
+        },
+        "timing": {
+          "iterations": 30,
+          "calls_per_sample": 1,
+          "median_ms": 154.716136,
+          "p10_ms": 154.10997,
+          "p90_ms": 155.574035,
+          "min_ms": 154.08229500000002,
+          "max_ms": 156.33566900000002
+        },
+        "megapixels_per_second": 78.80734560227124,
+        "alloc": {
+          "count": 48,
+          "bytes": 104137004,
+          "peak_live_bytes": 73175250
+        },
+        "not_applicable": null
+      },
+      {
+        "backend": "candidate",
+        "api": "candidate decode + `Image::apply_orientation` → imageops::resize → candidate `compress`",
+        "output": "192x256",
+        "output_bytes": 12088,
+        "orientation_applied": true,
+        "diff_vs_candidate": {
+          "max_abs": 0,
+          "mean_abs": 0,
+          "differing_samples": 0
+        },
+        "timing": {
+          "iterations": 30,
+          "calls_per_sample": 1,
+          "median_ms": 163.9521,
+          "p10_ms": 163.481755,
+          "p90_ms": 165.122924,
+          "min_ms": 163.418056,
+          "max_ms": 181.02352499999998
+        },
+        "megapixels_per_second": 74.36786720023714,
+        "alloc": {
+          "count": 48,
+          "bytes": 104137028,
+          "peak_live_bytes": 73175250
+        },
+        "not_applicable": null
+      },
+      {
+        "backend": "candidate-scaled-decode",
+        "api": "candidate decode at the largest DCT scale ≥ thumbnail size + orient → resize → candidate `compress`",
+        "output": "192x256",
+        "output_bytes": 11868,
+        "orientation_applied": true,
+        "diff_vs_candidate": {
+          "max_abs": 14,
+          "mean_abs": 1.3172132703993056,
+          "differing_samples": 101871
+        },
+        "timing": {
+          "iterations": 30,
+          "calls_per_sample": 1,
+          "median_ms": 37.1058335,
+          "p10_ms": 37.058256,
+          "p90_ms": 37.248492,
+          "min_ms": 37.047021,
+          "max_ms": 37.714183
+        },
+        "megapixels_per_second": 328.5943704781621,
+        "alloc": {
+          "count": 38,
+          "bytes": 3551064,
+          "peak_live_bytes": 2267312
+        },
+        "not_applicable": null
+      },
+      {
+        "backend": "candidate-image-adapter",
+        "api": "adapter `JpegDecoder` → `orientation()` → DynamicImage::apply_orientation → resize → adapter `JpegEncoder`",
+        "output": "192x256",
+        "output_bytes": 12088,
+        "orientation_applied": true,
+        "diff_vs_candidate": {
+          "max_abs": 0,
+          "mean_abs": 0,
+          "differing_samples": 0
+        },
+        "timing": {
+          "iterations": 30,
+          "calls_per_sample": 1,
+          "median_ms": 128.1529655,
+          "p10_ms": 127.169526,
+          "p90_ms": 128.695141,
+          "min_ms": 126.76372799999999,
+          "max_ms": 130.04327099999998
+        },
+        "megapixels_per_second": 95.14230086232378,
+        "alloc": {
+          "count": 81,
+          "bytes": 107306943,
+          "peak_live_bytes": 73156608
+        },
+        "not_applicable": null
+      },
+      {
+        "backend": "image-builtin",
+        "api": "image `JpegDecoder` → `orientation()` → DynamicImage::apply_orientation → resize → image `JpegEncoder`",
+        "output": "192x256",
+        "output_bytes": 18048,
+        "orientation_applied": true,
+        "diff_vs_candidate": {
+          "max_abs": 45,
+          "mean_abs": 4.269402398003472,
+          "differing_samples": 132663
+        },
+        "timing": {
+          "iterations": 30,
+          "calls_per_sample": 1,
+          "median_ms": 139.900754,
+          "p10_ms": 139.340531,
+          "p90_ms": 140.615957,
+          "min_ms": 139.004965,
+          "max_ms": 144.405256
+        },
+        "megapixels_per_second": 87.15298274947108,
+        "alloc": {
+          "count": 64,
+          "bytes": 89495594,
+          "peak_live_bytes": 73156608
+        },
+        "not_applicable": null
+      },
+      {
+        "backend": "zune",
+        "api": "zune-jpeg alone",
+        "output": "—",
+        "output_bytes": 0,
+        "orientation_applied": false,
+        "diff_vs_candidate": null,
+        "timing": null,
+        "megapixels_per_second": null,
+        "alloc": null,
+        "not_applicable": "zune-jpeg is a decoder only: no orientation, resize or encode"
+      }
+    ]
+  }
+}

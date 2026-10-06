@@ -13100,7 +13100,7 @@ of the input size, and a server encoding caller-sized uploads still wants a
    inventory of the bounded remainder.
 3. `tests/miri_alloc_failure.rs` gains an encode refusal case.
 
-## P4-214. No Benchmark Measures a Default-Profile Downstream Consumer — **OPEN**
+## P4-214. No Benchmark Measures a Default-Profile Downstream Consumer — **CLOSED 2026-10-07**
 
 **GitHub:** [#640](https://github.com/developer0hye/libjpeg-turbo-rs/issues/640) — child of #635 Milestone C.
 
@@ -13197,18 +13197,37 @@ available:
 
 Against stock 3.2.0, all of these held on 2026-10-07.
 
-**Status (2026-10-07): harness landed; first measured report pending.**
-Criterion 6 needs a quiet machine and a successful dispatch of the hosted
-job. The first dispatch on `main` (run 37540052978) failed on both runners
-with E0599: P4-139 had replaced `ScalingFactor::new` with `try_new`, and the
-dispatch-only workflow was the only thing that compiled the consumer. The
+**First hosted dispatch.** It ran on `main` (run 37540052978) and failed on
+both runners with E0599: P4-139 had replaced `ScalingFactor::new` with
+`try_new`, and nothing else compiled the dispatch-only consumer. The
 consumer's `ljt_api!` now takes a per-crate constructor, and `ci.yml`'s
-`downstream-consumer` job runs `run.sh --check` on every pull request so the
-next such break fails there.
+`downstream-consumer` job runs `run.sh --check` on every pull request, so
+the next such break fails there.
+
+**Status (2026-10-07): closed.** Criterion 6 is
+`experiments/downstream/BUDGETS.md` with the reports under
+`experiments/downstream/reports/`. The first report is the x86_64 hosted
+run 37542461917, reproduced by run 37543406684; the candidate library is
+`main@80c15d2`.
+
+- BUDGETS.md applies the README's predeclared rules: same-run ratios with a
+  `max(2 × spread, 3 %)` band, zero budget for allocations, identical encode
+  bytes, and 5 % for size. `experiments/downstream/budgets.py` checks any
+  later report against them.
+- It lists every case the candidate loses. Three were filed:
+  [P4-228](#p4-228-the-candidate-is-6--slower-than-080-on-the-thumbnail-workload--open)
+  (thumbnail 1.060 vs 0.8.0, reproduced),
+  [P4-229](#p4-229-the-downstream-harness-records-machine-load-but-never-acts-on-it-and-the-hosted-macos-runner-was-saturated--open)
+  (the hosted macOS runner was saturated in both dispatches, so aarch64 sets
+  no budget yet) and
+  [P4-230](#p4-230-the-candidate-adds-1015--more-code-to-a-stock-profile-binary-than-080--open)
+  (binary size +10–15 % vs 0.8.0, unattributed).
+- The hosted runs carry no C oracle. The C contract rests on the local runs
+  above against stock 3.2.0.
 
 ## P4-218. The Buffer-Reuse Decode Still Allocates Whole-Image Component Planes — **OPEN**
 
-**Found by:** [P4-214](#p4-214-no-benchmark-measures-a-default-profile-downstream-consumer--open)'s
+**Found by:** [P4-214](#p4-214-no-benchmark-measures-a-default-profile-downstream-consumer--closed-2026-10-07)'s
 downstream-consumer harness, in its counting-allocator pass on 2026-10-07.
 Allocation counts and peaks are deterministic, so this smoke-run figure does
 not depend on machine load.
@@ -13338,3 +13357,96 @@ need for are now supported root paths — `yuv::*`, `StreamingDecoder`,
 3. capi no longer re-exports the whole crate.
 4. Done in a minor (pre-1.0) release with a CHANGELOG entry mapping every
    moved path to its replacement, and `cargo-semver-checks` recording it.
+
+## P4-228. The Candidate Is 6 % Slower Than 0.8.0 on the Thumbnail Workload — **OPEN**
+
+**GitHub:** [#659](https://github.com/developer0hye/libjpeg-turbo-rs/issues/659) — child of #635 Milestone C.
+
+**Found 2026-10-07** by P4-214's first measured report
+(`experiments/downstream/reports/2026-10-07-x86_64-linux/`), and reproduced by
+a second dispatch (`…-x86_64-linux-run2/`). Both runs built the consumer with
+Cargo's stock `release` profile against `main@80c15d2`.
+
+**What happens.** The thumbnail workload (decode a 4032x3024 4:2:0 photo with
+EXIF orientation 6 through `Decoder::decode_image`, `Image::apply_orientation`,
+`image::imageops::resize` to 192x256, `compress` at q85) takes 164.1 ms on the
+candidate and 154.8 ms on the published 0.8.0 in the same run: a ratio of
+1.060 in both runs, against a budget of 1.030
+(`experiments/downstream/BUDGETS.md`). Output bytes, allocation count (48) and
+peak live bytes (69.8 MiB) are identical between the two.
+
+What is known:
+
+- `Image::apply_orientation` / `apply_orientation_value` are byte-identical to
+  0.8.0 (`git diff v0.8.0 origin/main`), and resize is `image`'s.
+- The plain fresh decode of the same-size photo costs only about 1 % more
+  (phone case, 1.010–1.020), so most of the 9.3 ms is not the decode rows'
+  difference.
+- The fresh decode drifts with image size, within budget: 1.024–1.026 on 8K
+  in both runs, while the buffer-reuse rows are flat (0.990–0.992).
+  `try_filled_vec` (`src/common/try_alloc.rs`, P4-209) replaced
+  `vec![0; n]`, which can take zeroed pages straight from `calloc`, with
+  `try_reserve` + `resize`, which touches every page. That fits a cost that
+  grows with output size, and is the first hypothesis to test.
+
+**Acceptance criteria.**
+
+1. A profile on a quiet machine attributes the thumbnail difference
+   (`decode_image` vs 0.8.0's, orientation, compress).
+2. The thumbnail ratio is back within budget (≤ 1.030 on the x86_64 hosted
+   runner, two dispatches agreeing), or the cost is a deliberate trade-off
+   recorded in BUDGETS.md with its reason.
+3. If the zero-fill is the cause, the fallible allocation keeps its
+   `try_reserve` refusal and regains lazily zeroed pages; a test pins that a
+   refused allocation still returns `Err`.
+
+**Why deferred.** It needs a quiet-machine profile, and the local machine was
+loaded when the report was taken.
+
+## P4-229. The Downstream Harness Records Machine Load but Never Acts on It, and the Hosted macOS Runner Was Saturated — **OPEN**
+
+**GitHub:** [#660](https://github.com/developer0hye/libjpeg-turbo-rs/issues/660) — child of #635 Milestone C.
+
+**Found 2026-10-07** taking P4-214's first report. Both `downstream-bench.yml`
+dispatches (runs 37542461917 and 37543406684) put the aarch64 leg on a
+3-vCPU `macos-latest` runner whose own pre-run sample showed a load average of
+50 and 29 and, in the first run, 0.3 % idle. Its p10–p90 spreads were 15–134 %
+of the median, against 0.1–11 % on the x86_64 leg, so its report is committed
+as `experiments/downstream/reports/2026-10-07-aarch64-macos-contaminated/` and
+sets no budget. The harness captured the sample and printed it, then
+benchmarked anyway and wrote a report that reads like any other.
+
+**Acceptance criteria.**
+
+1. The harness turns the pre-run sample into a verdict (load average per
+   logical CPU, idle percentage) and marks the report `contaminated` in
+   `report.md`'s header and `report.json` above a stated threshold, or
+   refuses to run unless `--allow-loaded` is given.
+2. `experiments/downstream/budgets.py` refuses a contaminated report.
+3. An aarch64 budget comes from a run that passes the check: a quiet local
+   Apple-silicon run, or a hosted run on a runner that does.
+
+## P4-230. The Candidate Adds 10–15 % More Code to a Stock-Profile Binary Than 0.8.0 — **OPEN**
+
+**GitHub:** [#661](https://github.com/developer0hye/libjpeg-turbo-rs/issues/661) — child of #635 Milestone C.
+
+**Found 2026-10-07** by P4-214's size probes. Each probe binary links one
+backend into an otherwise empty consumer built with Cargo's stock `release`
+profile; the contribution is its size over the empty probe (unstripped).
+
+| runner | 0.8.0 | candidate (`main@80c15d2`) | growth |
+|---|---:|---:|---:|
+| x86_64-linux | 625,472 B | 717,344 B | +14.7 % |
+| aarch64-macos | 467,104 B | 514,368 B | +10.1 % |
+
+Nothing records what the extra 92 KB (x86_64) is. Since 0.8.0 the crate
+gained validation, fallible allocation, metadata accessors and new API, so
+some growth is expected; how much of it each change accounts for is not
+known. BUDGETS.md takes these figures as the reference from now on, and
+growth beyond 5 % needs a stated reason.
+
+**Acceptance criteria.** (1) Attribute the growth (`cargo bloat --crates` /
+`--filter libjpeg_turbo_rs` on the probe, both versions). (2) Record the
+attribution in BUDGETS.md, and file or fix anything that is accidental (for
+example monomorphised copies or panic paths that a stock profile no longer
+folds).
