@@ -520,7 +520,7 @@ impl<'a> Decoder<'a> {
 
     /// The header of the first scan — the SOS `jpeg_read_header` stops at,
     /// whose `Ss` / `Al` TurboJPEG publishes as `TJPARAM_LOSSLESSPSV` /
-    /// `TJPARAM_LOSSLESSPT` (`turbojpeg.c:532-533`).
+    /// `TJPARAM_LOSSLESSPT` (`turbojpeg.c:531-532`).
     pub(crate) fn first_scan_header(&self) -> &crate::common::types::ScanHeader {
         &self.metadata.scan
     }

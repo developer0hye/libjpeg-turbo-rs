@@ -1497,9 +1497,11 @@ fn legacy_tj_transform_fills_a_zero_dst_size_from_geometry() {
 /// compressor.
 ///
 /// **Which parameter to watch was measured, not assumed.** The obvious guess —
-/// that `TJPARAM_SUBSAMP` would be overwritten with the source's — is wrong in
-/// this port: a header parse leaves it alone. What it *does* move, measured on
-/// a 32x32 4:4:4 source with the handle pre-set, is `TJPARAM_JPEGHEIGHT`
+/// that `TJPARAM_SUBSAMP` would be overwritten with the source's — did not
+/// hold when this was measured: the parse left it unchanged (since P4-199
+/// every header parse writes it, through `publish_decomp_parameters`). What it
+/// *does* move, measured on a 32x32 4:4:4 source with the handle pre-set, is
+/// `TJPARAM_JPEGHEIGHT`
 /// (-1 -> 32) and `TJPARAM_COLORSPACE` (-1 -> 1). An earlier version of this
 /// test asserted `TJPARAM_SUBSAMP` and passed with the rejected approach
 /// injected, which is how the mistake surfaced.

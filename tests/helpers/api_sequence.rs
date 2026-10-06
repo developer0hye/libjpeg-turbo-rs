@@ -41,7 +41,7 @@
 //! density `0 / 1 / 1`, which are also what `TjHandle::new()` initialises —
 //! so four of P4's eight comparisons were a number against itself *and*
 //! against the fresh-handle default. [`BUILTIN_INPUTS`] therefore carries
-//! four images chosen so every published parameter can take at least two
+//! five images chosen so every published parameter can take at least two
 //! values across them, and
 //! `the_builtin_inputs_can_move_every_published_parameter` in
 //! `tests/api_sequence_state.rs` fails if that stops being true. The fourth is
@@ -51,7 +51,7 @@
 //!
 //! # The oracle
 //!
-//! Four properties, each stated in terms of the documented contract rather
+//! Five properties, each stated in terms of the documented contract rather
 //! than of the current implementation:
 //!
 //! * **P1, decode purity.** For every decode-family operation, the result on a
@@ -62,7 +62,8 @@
 //!   limits — all writable parameters — so a fresh handle carrying the same
 //!   writes must produce the same bytes. Anything else it reads is state that
 //!   leaked from an earlier call. `Decompress12` / `Decompress16` read the
-//!   resource limits and the cropping region (which they refuse) — since
+//!   resource limits, the cropping region (which they refuse) and
+//!   `SAVEMARKERS` (for the handle's ICC profile) — since
 //!   [P4-199](https://github.com/developer0hye/libjpeg-turbo-rs/issues/620)
 //!   closed, nothing else.
 //! * **P2, compress depends on the configuration and the most recent
@@ -74,8 +75,8 @@
 //!   `turbojpeg.c:376-378` and the sampling factors at `:418-427` (`:418-422`
 //!   is the horizontal half only). So the
 //!   reference for a compress is a fresh handle replaying the configuration
-//!   *plus the last publishing operation that succeeded*, on the image it ran
-//!   on. Skipping the compress comparison after any write-back — the first
+//!   *plus the last publishing operation that got past its header parse*, on
+//!   the image it ran on — a decode refused after that point has published. Skipping the compress comparison after any write-back — the first
 //!   draft — removed every sequence in which it could have differed, which is
 //!   the same compare-nothing defect the multi-input section describes. A
 //!   compress also reads the published `PROGRESSIVE`, `ARITHMETIC`,
@@ -88,7 +89,7 @@
 //!   n-th decode is compared against a fresh handle's first — and it is the
 //!   one property here with no committed can-fail proof, because the only
 //!   defects it can see are ones the language mostly prevents. Read it as a
-//!   cheap smoke check next to the other three.
+//!   cheap smoke check next to the other four.
 //! * **P5, the published frame dimensions are the SOF's.** After a successful
 //!   decode-family operation that publishes, `JPEGWIDTH` / `JPEGHEIGHT` equal
 //!   the frame header's, read independently through `Decoder::new(jpeg)` —
@@ -121,7 +122,7 @@
 //!
 //! # The blind spot, stated rather than discovered later
 //!
-//! Every property here is a **mirror** comparison: the live handle against a
+//! Every property but P5 is a **mirror** comparison: the live handle against a
 //! second handle built from the same configuration. That structure can see a
 //! value that *differs* between two paths, and cannot see a value that is
 //! *wrong on both*. It therefore says nothing about whether a published
@@ -309,8 +310,8 @@ const COMPRESS_FORMATS: &[PixelFormat] = &[
 /// `-density` switch, and every committed fixture carries the JFIF default
 /// `0 / 1 / 1`, which is also `TjHandle::new()`'s initial value — so with
 /// those alone the three density comparisons could not fail. The third is
-/// `cjpeg -precision 16 -lossless 1`, and it is the only way `PRECISION` ever
-/// holds anything but 8 before an 8-bit decode publishes over it.
+/// `cjpeg -precision 16 -lossless 1`, and it is the only input on which
+/// `PRECISION` holds 16.
 ///
 /// The fourth exists because without it **`Op::Decompress12`'s write-back
 /// comparison never runs**. `decompress_12bit` refuses an 8-bit source
@@ -425,14 +426,14 @@ impl Op {
     ///
     /// **P2's freedom from a merged-ICC false positive rests on an open
     /// item.** `compress` reads `self.icc_profile` and every publisher
-    /// overwrites it on success — that is
+    /// overwrites it once it has read the header — that is
     /// [P4-198](https://github.com/developer0hye/libjpeg-turbo-rs/issues/619) —
     /// so `SetIcc(v), Decompress, Decompress16, Compress` would leave the live
     /// handle carrying whatever the *first* decode wrote if the second left the
     /// field alone, against a reference that replays only the *last*
     /// publisher. It does not fire because all four publishers write the field
-    /// the same way (`TjHandle::capture_icc_profile`, and `decompress`'s own
-    /// copy of the rule); `every_publishing_operation_leaves_the_same_icc_profile`
+    /// through one function (`TjHandle::publish_header`);
+    /// `every_publishing_operation_leaves_the_same_icc_profile`
     /// in `tests/api_sequence_state.rs` fails the moment one of them stops, so
     /// the trap surfaces as a named test rather than as a mystery P2 crash.
     pub fn publishes_for_compress(&self) -> bool {
@@ -495,7 +496,7 @@ pub struct Limits {
     /// asserting around a path it cannot run. Turning it off makes
     /// `TJPARAM_MAXPIXELS` the only ceiling, which is how
     /// `a_handle_built_by_reset_carries_the_same_ceiling_as_the_references`
-    /// and `the_handle_ceiling_alone_refuses_an_oversize_16_bit_frame` can
+    /// and `the_handle_ceiling_alone_refuses_an_oversize_precision_frame` can
     /// fail when an entry point forgets it.
     pub prefilter_headers: bool,
 }
@@ -810,7 +811,7 @@ pub fn run_program_with(
                 // entry point publishes right after the header parse, before
                 // its limit and crop checks, as upstream's
                 // `setDecompParameters` call precedes its `TJPARAM_MAXPIXELS`
-                // refusal (`turbojpeg-mp.c:190`, `:195-199`) — so a refused
+                // refusal (`turbojpeg-mp.c:190`, `:195-198`) — so a refused
                 // decode has written all thirteen, in C as here.
                 compare_untouched(index, op, ops, jpeg, &live, &before, published);
                 // A publisher is one that got past its header parse, not one

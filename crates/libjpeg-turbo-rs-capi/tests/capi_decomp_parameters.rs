@@ -4,7 +4,7 @@
 //! `setDecompParameters` (`references/libjpeg-turbo/src/turbojpeg.c:514-536`)
 //! writes thirteen parameters from the frame header, and the shared body of
 //! `tj3Decompress{8,12,16}` calls it before the `TJPARAM_MAXPIXELS` refusal
-//! (`turbojpeg-mp.c:190`, `:195-199`). The port published eight from the
+//! (`turbojpeg-mp.c:190`, `:195-198`). The port published eight from the
 //! 8-bit path — the *output's* dimensions and precision among them — and three
 //! from the 12/16-bit paths, which also ignored the handle's limits.
 //!

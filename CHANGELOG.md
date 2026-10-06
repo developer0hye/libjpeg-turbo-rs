@@ -17,9 +17,10 @@ and `git log` between tags.
   path's own planes and output before the first is allocated. Until now a
   Rust caller had no way to give a 12- or 16-bit decode a budget.
   `decompress_12bit` / `decompress_16bit` keep `DecodeLimits::default()`.
-- **README "Resource limits"** documents every limit and exactly which
-  allocations the `max_memory` / `TJPARAM_MAXMEMORY` estimate counts on each
-  decode path and which it does not (#635).
+- **`docs/STABILITY.md` "Limits and how they are applied" / "What the memory
+  budget covers"** document every limit and exactly which allocations the
+  `max_memory` / `TJPARAM_MAXMEMORY` estimate counts on each decode path and
+  which it does not; README "Resource limits" points there (#635).
 
 - **`Decoder::icc_profile`, `exif_data`, `xmp_data` and `iptc_data`** read
   metadata from the parsed header without decoding pixels, returning the same
@@ -205,7 +206,8 @@ and `git log` between tags.
   `TjHandle::decompress` / `tj3Decompress8` published eight parameters and the
   12/16-bit entry points three; all of them, and `decompress_header` /
   `tj3DecompressHeader`, now publish the thirteen upstream writes
-  (`turbojpeg.c:514-536`) with the frame's values, cross-validated against
+  (`turbojpeg.c:514-536`) with the frame's values (the YUV decompressors
+  still publish nothing, P4-225), cross-validated against
   stock TurboJPEG 3.2.0 (`crates/libjpeg-turbo-rs-capi/tests/capi_decomp_parameters.rs`).
   Callers see: `TJPARAM_PROGRESSIVE`, `ARITHMETIC`, `LOSSLESS`, `LOSSLESSPSV`
   and `LOSSLESSPT` set from the stream — `LOSSLESSPT` is the first scan's

@@ -51,8 +51,8 @@
 | `XDENSITY` | Horizontal pixel density | `Encoder::density()` + `TjHandle` compress/decompress wiring | ✅ |
 | `YDENSITY` | Vertical pixel density | `Encoder::density()` + `TjHandle` compress/decompress wiring | ✅ |
 | `DENSITYUNITS` | 0=unknown, 1=ppi, 2=ppcm | `Encoder::density()` + `TjHandle` compress/decompress wiring | ✅ |
-| `MAXMEMORY` | Memory limit | `DecodeLimits::max_memory` / `Decoder::set_max_memory()`; every `TjHandle` decompress entry point (P4-199, #620). A header-time *estimate* that counts the output buffer — upstream's bounds only its whole-image arrays — so the two refuse different frames; what each path counts is in docs/STABILITY.md "What the memory budget covers" | 🔶 |
-| `MAXPIXELS` | Image size limit | `DecodeLimits::max_pixels` / `Decoder::set_max_pixels()`; every `TjHandle` decompress entry point, against the SOF, after publishing, as `turbojpeg-mp.c:195-199` (P4-199, #620) | ✅ |
+| `MAXMEMORY` | Memory limit | `DecodeLimits::max_memory` / `Decoder::set_max_memory()`; `TjHandle::decompress` / `decompress_12bit` / `decompress_16bit` (P4-199, #620), not the YUV decompress entry points, which decode through the handle-free `decompress_to_yuv_planes`. A header-time *estimate* that counts the output buffer — upstream's bounds only its whole-image arrays — so the two refuse different frames; what each path counts is in docs/STABILITY.md "What the memory budget covers" | 🔶 |
+| `MAXPIXELS` | Image size limit | `DecodeLimits::max_pixels` / `Decoder::set_max_pixels()`; every `TjHandle` decompress entry point, against the SOF, after publishing, as `turbojpeg-mp.c:195-198` (P4-199, #620) | ✅ |
 | `SAVEMARKERS` | Marker preservation level 0-4 | `TjHandle` `TJPARAM_SAVEMARKERS` wired through `decompress()` → `Decoder::save_markers()` | ✅ |
 
 ### Memory
@@ -121,7 +121,7 @@
 |---|---|---|---|
 | `tj3Decompress8(handle, jpeg, size, dst, pitch, pf)` | Decompress JPEG to 8-bit pixels | `decompress()`, `decompress_to()`, `decompress_into()` (caller buffer, #354); `TjHandle::decompress()` publishes the 13 parameters `setDecompParameters` writes (P4-199, #620); decodes a 12-bit frame that stock refuses with `JERR_BAD_PRECISION` (P4-226) | 🔶 |
 | `tj3Decompress12(handle, jpeg, size, dst, pitch, pf)` | Decompress to 12-bit | `TjHandle::decompress_12bit()` / `decompress_12bit()` — **12-bit sources only**: upstream 3.2 also decompresses an 8-bit lossy JPEG to 12-bit output, which we refuse (P4-171); decodes only the first scan of a progressive or multi-scan frame (P4-223); refuses a stored cropping region instead of applying it (P4-219). Publishes the 13 parameters and applies the handle's limits (P4-199, #620) | 🔶 |
-| `tj3Decompress16(handle, jpeg, size, dst, pitch, pf)` | Decompress to 16-bit | `TjHandle::decompress_16bit()` / `decompress_16bit()` / `decompress_16bit_with_limits()` — publishes the 13 parameters and applies the handle's limits (P4-199, #620) | ✅ |
+| `tj3Decompress16(handle, jpeg, size, dst, pitch, pf)` | Decompress to 16-bit | `TjHandle::decompress_16bit()` / `decompress_16bit()` / `decompress_16bit_with_limits()` — publishes the 13 parameters and applies the handle's limits (P4-199, #620) |; whether a stored cropping region is refused (ours) or ignored (upstream) is P4-219, and its staging allocations are P4-216 | 🔶 |
 
 ### Decompression to YUV
 

@@ -503,8 +503,9 @@ fn lifecycle_contract() {
 /// `tj3InitVersion` seeds explicitly hold the seeded values rather than the
 /// zeroes a `Default` would give — which is where a port that forgot to seed
 /// one shows up. Ten of its eleven assignments name a `TJPARAM`; eight of those
-/// are asserted here, and the other two — `JPEGWIDTH` / `JPEGHEIGHT` — are a
-/// known divergence the oracle comparison owns.
+/// are asserted here, and the other two — `JPEGWIDTH` / `JPEGHEIGHT` — are left
+/// to the oracle comparison, which since P4-200 (#621) holds them to
+/// upstream's -1 with no known-divergence exemption.
 #[test]
 fn handle_defaults_are_readable() {
     let outcome = run_ours("handle_defaults");
@@ -857,8 +858,9 @@ fn allocator_ownership_crosses_the_boundary() {
 /// boundary under a sanitizer before this case existed — the other half of the
 /// C-boundary gap P4-141 criterion 2 records.
 ///
-/// `precision` is a known divergence (see [`KNOWN_DIVERGENCES`]) and is
-/// asserted by the oracle comparison rather than here.
+/// `precision` is asserted by the oracle comparison rather than here, which
+/// since P4-203 (#625) holds it to upstream's 12 with no
+/// [`KNOWN_DIVERGENCES`] exemption.
 #[test]
 fn twelve_bit_round_trip_crosses_the_boundary() {
     let outcome = run_ours("precision12");

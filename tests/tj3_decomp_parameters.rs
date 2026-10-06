@@ -184,7 +184,7 @@ fn a_fresh_handle_reports_no_frame_dimensions() {
 /// Issue #620: `decompress_16bit` and `decompress_12bit` refuse a frame over
 /// the handle's `TJPARAM_MAXPIXELS`, having published first — upstream's
 /// shared body calls `setDecompParameters` at `turbojpeg-mp.c:190` and refuses
-/// at `:195-199`. Before the fix both read nothing from the handle and decoded.
+/// at `:195-198`. Before the fix both read nothing from the handle and decoded.
 #[test]
 fn the_12_and_16_bit_entry_points_refuse_a_frame_over_maxpixels() {
     let mut handle16: TjHandle = TjHandle::new();

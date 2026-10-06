@@ -1110,7 +1110,7 @@ impl TjHandle {
     /// Called, through [`Self::publish_header`], by every decompress entry
     /// point right after the header parse and before any limit or crop
     /// check, as upstream's shared body calls it before its
-    /// `TJPARAM_MAXPIXELS` refusal (`turbojpeg-mp.c:190`, `:195-199`) — so a
+    /// `TJPARAM_MAXPIXELS` refusal (`turbojpeg-mp.c:190`, `:195-198`) — so a
     /// refused decode has still published.
     fn publish_decomp_parameters(&mut self, decoder: &Decoder<'_>) {
         let geometry: CroppingGeometry = CroppingGeometry::of(decoder);
@@ -1211,7 +1211,7 @@ impl TjHandle {
         self.read_header(data)?;
         let limits: crate::common::types::DecodeLimits = self.decode_limits();
         // Upstream's maxPixels test sits right after setDecompParameters and
-        // before scaling or cropping is consulted (`turbojpeg-mp.c:195-199`).
+        // before scaling or cropping is consulted (`turbojpeg-mp.c:195-198`).
         limits.check_frame(self.width as usize, self.height as usize)?;
         // The full walk, which the decode needs and the header read skipped.
         let mut decoder = Decoder::new_with_limits(data, limits)?;
@@ -1375,7 +1375,7 @@ impl TjHandle {
 
     /// The shared head of the 12/16-bit paths, in upstream's order: read the
     /// header and publish, then apply `TJPARAM_MAXPIXELS`
-    /// (`turbojpeg-mp.c:190`, `:195-199`). Returns the limits the decode
+    /// (`turbojpeg-mp.c:190`, `:195-198`). Returns the limits the decode
     /// itself must honour, `TJPARAM_SCANLIMIT` among them.
     fn prepare_precision_decode(
         &mut self,

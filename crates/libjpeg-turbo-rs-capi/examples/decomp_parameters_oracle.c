@@ -7,7 +7,7 @@
  * COLORSPACE, PROGRESSIVE, ARITHMETIC, LOSSLESS, LOSSLESSPSV, LOSSLESSPT,
  * XDENSITY, YDENSITY and DENSITYUNITS -- and it is called from the body
  * `turbojpeg-mp.c` compiles once per precision, *before* the
- * `TJPARAM_MAXPIXELS` refusal five lines later (`:190`, `:195-199`). So:
+ * `TJPARAM_MAXPIXELS` refusal five lines later (`:190`, `:195-198`). So:
  *
  *   - all three of tj3Decompress8/12/16 publish the same thirteen;
  *   - the values are the SOF's, unaffected by scaling or cropping;

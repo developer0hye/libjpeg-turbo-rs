@@ -5596,7 +5596,7 @@ was filed with:
 | --- | --- | --- |
 | beta1-2 | Per-instance SIMD dispatch replaces thread-local storage | **Closed 2026-09-08 — [P4-132](#p4-132-classic-c-abi-per-cinfo-state-is-thread-affine-p4-16-option-a--closed-2026-09-08).** Upstream removing TLS from its libjpeg API is that item's central evidence. |
 | beta1-6 | RISC-V Vector (RVV) SIMD | **Tracked — [P4-134](#p4-134-no-risc-v-rvv-simd-backend--upstream-32-ships-one--partial-measured-under-emulation-only-hardware-measurement-outstanding)**, and it expires [P4-60](#p4-60-scalar-kernels-are-25x-slower-than-cs-scalar-kernels--open)'s premise that riscv64 was scalar-vs-scalar. |
-| beta1-8 | 8-bit lossy JPEG decompressed to 12-bit output | **New — [P4-171](#p4-171-8-bit-lossy-jpeg-cannot-be-decompressed-to-12-bit-output-32-beta1-note-8--open).** Measured: `src/api/precision.rs:865` refuses any stream whose precision is not 12, so we reject where 3.2 decodes. |
+| beta1-8 | 8-bit lossy JPEG decompressed to 12-bit output | **New — [P4-171](#p4-171-8-bit-lossy-jpeg-cannot-be-decompressed-to-12-bit-output-32-beta1-note-8--open).** Measured: `src/api/precision.rs:917` refuses any stream whose precision is not 12, so we reject where 3.2 decodes. |
 | beta1-10 | TurboJPEG: `TJCS_DEFAULT`, repeated `tj3GetICCProfile`, ICC from a compression instance, 4:1:0 and 2:4 subsampling | **Split.** 4:1:0 and 2:4 are implemented (`TJSAMP_410`/`TJSAMP_24`) and covered by the subsampling matrices; the ICC and `TJCS_DEFAULT` additions are **new — [P4-172](#p4-172-turbojpeg-32-icc-and-tjcs_default-additions-are-unimplemented-32-beta1-note-10--open)**. |
 | beta1-4, beta1-12, 3.2.0-4 | jpegtran `-crop` expansion honouring `-trim`/`-perfect`; new `-roll`; the `-crop`/`-trim` overflow fix and its flatten/reflect error | **New — [P4-173](#p4-173-jpegtran-32-crop-expansion--roll-and-the-flattenreflect-refusal-are-unported--open).** These are `transupp.c` semantics our transform API mirrors, so "it is app code" does not exempt us. |
 | beta1-9, 3.2.0-2 | 8/16-bit PNG in cjpeg/djpeg and `tj3LoadImage*`/`tj3SaveImage*`, ICC transfer, PNG-writer hardening | **New — [P4-174](#p4-174-png-interchange-parity-for-tj3loadimagetj3saveimage-is-narrower-than-32--open).** PNG exists here behind a cargo feature; the 3.2 additions (16-bit, ICC transfer under `TJPARAM_SAVEMARKERS`, reversible upscaling of non-standard precisions) are not implemented. |
@@ -8436,7 +8436,8 @@ the harness first would only pin current behaviour.
   not carry a second copy of the wire format; and `program_from_bytes`
   re-anchors the image on SOI, so a libFuzzer insertion before it cannot turn
   a good corpus entry into a garbage body.
-  **The oracle is four properties**, each stated against the documented
+  **The oracle is four properties** (five since P4-200 closed on 2026-10-07
+  and added P5), each stated against the documented
   contract rather than against current behaviour. *P1, decode purity* — every
   decode-family result on a used handle must equal the same call on a handle
   built fresh from the configuration alone, which is sound because
@@ -8502,9 +8503,9 @@ the harness first would only pin current behaviour.
   every reference now — a parameter no program can write, so every comparison
   stays exact — and the pre-parse *blanks* an input whose header it refuses
   **for a limit** rather than forwarding it, because `decompress_12bit` /
-  `decompress_16bit` read nothing from the handle at all
-  ([P4-199](#p4-199-setdecompparameters-publishes-thirteen-handle-parameters-our-8-bit-decode-publishes-eight-and-the-1216-bit-ones-publish-three-and-ignore-the-handles-limits--closed-2026-10-07),
-  #620), so `TJPARAM_MAXPIXELS` never reaches them; every *other* parse failure
+  `decompress_16bit` read nothing from the handle at all until
+  [P4-199](#p4-199-setdecompparameters-publishes-thirteen-handle-parameters-our-8-bit-decode-publishes-eight-and-the-1216-bit-ones-publish-three-and-ignore-the-handles-limits--closed-2026-10-07)
+  (#620) closed, so `TJPARAM_MAXPIXELS` never reached them; every *other* parse failure
   is still forwarded on purpose, since those error paths are most of what a
   program of decode operations exercises.
   `a_header_the_prefilter_cannot_read_because_of_a_limit_is_kept_out` pins the
@@ -8564,7 +8565,8 @@ the harness first would only pin current behaviour.
   `WRITE_BACK_PRECISION`, `Op::publishes_for_compress` and
   `Limits::prefilter_headers` encode the *port's* write sets and carry a
   pointer to #620, and P1's comparison on `Decompress12` / `Decompress16` is a
-  forward guard rather than a live check until it closes.
+  forward guard rather than a live check until it closes. (It closed
+  2026-10-07: one 13-entry `WRITE_BACK` replaced both lists.)
   A fourth `rust-code-reviewer` round produced the third, and named the
   harness's own limit. **`Op::Decompress12` could not succeed on any input the
   engine could reach**: `decompress_12bit` refuses an 8-bit source (P4-171)
@@ -8975,7 +8977,7 @@ validation order.
 
 **Status (2026-10-07): closed.** Landed with P4-199 (#620), whose shared
 publishing step made a header-only read the natural shape:
-`TjHandle::decompress_header` is now `Decoder::new_with_limits` plus
+`TjHandle::decompress_header` is now `Decoder::new_header_only` plus
 `publish_header` — markers up to the first SOS, no entropy data.
 
 1. `tests/tj3_decomp_parameters.rs::the_header_is_read_without_decoding_the_entropy_data`
@@ -10417,7 +10419,7 @@ Upstream exposes it two ways — `cinfo->data_precision = 12` after
 `jpeg_read_header()` in the libjpeg API, and `tj3Decompress12()` after
 `tj3DecompressHeader()` in TurboJPEG.
 
-Neither works here. `src/api/precision.rs:865-870` refuses any stream whose SOF
+Neither works here. `src/api/precision.rs:917-922` refuses any stream whose SOF
 precision is not 12:
 
 ```rust
@@ -11922,10 +11924,11 @@ field; its one mention there is a read, in `tj3SaveImage*`'s PNG branch at
 (`:1993-2011`). In C a decode therefore cannot change the profile a later
 compress embeds.
 
-`TjHandle` has one field (`src/api/tj3.rs:336`, `icc_profile: Option<Vec<u8>>`).
-`set_icc_profile` writes it (`:554`), `configure_encoder` reads it (`:798`) and
-`decompress` **overwrites** it from the decoded image on every
-`TJPARAM_SAVEMARKERS` arm (`:1234-1248`). So
+`TjHandle` has one field (`src/api/tj3.rs:344`, `icc_profile: Option<Vec<u8>>`).
+`set_icc_profile` writes it (`:565-566`), `configure_encoder` reads it (`:792`)
+and every header read — `decompress_header` and all three `decompress*`
+entry points — **overwrites** it with the frame's profile, or `None`, at every
+`TJPARAM_SAVEMARKERS` level (`publish_header`, `:1089-1096`, since P4-199). So
 
 ```
 set_icc_profile(P) → decompress(imageA) → compress(...)
@@ -12052,7 +12055,7 @@ refuse, as upstream's call precedes its refusals. Per criterion:
    `tests/tj3_decomp_parameters.rs::every_decompress_entry_point_publishes_the_thirteen_set_decomp_parameters_writes`).
 3. Both apply the handle's limits, as upstream's shared body applies
    `maxMemory` (`turbojpeg-mp.c:182`), the scan monitor (`:174-180`) and
-   `maxPixels` (`:195-199`): `TJPARAM_MAXPIXELS` after publishing,
+   `maxPixels` (`:195-198`): `TJPARAM_MAXPIXELS` after publishing,
    `TJPARAM_SCANLIMIT` in the header walk, `TJPARAM_MAXMEMORY` against an
    estimate of each path's own buffers. The Rust-native spelling is the new
    `precision::decompress_{12,16}bit_with_limits`. Regressions, each with
@@ -13045,8 +13048,9 @@ silently not applied.
 `decode_12bit_as_8bit` before the horizontal crop is computed, and only the
 post-decode vertical slice in `decode_image_with_sink` sees the region —
 `output_buffer_size` says so ("apply neither scaled decode nor horizontal
-crop"). `TjHandle::decompress_12bit` / `decompress_16bit` call the handle-free
-`precision::decompress_12bit` / `decompress_16bit`, which take no region.
+crop"). `TjHandle::decompress_12bit` / `decompress_16bit` call
+`precision::decompress_12bit_with_limits` / `decompress_16bit_with_limits`,
+which take no region.
 (Until P4-199 closed on 2026-10-07 they also recorded no frame header, so the
 C ABI's `tj3SetCroppingRegion` after only a `tj3Decompress12` reported "JPEG
 header has not yet been read"; they now publish it like every decompress.) The P4-197 bounds check does
@@ -13168,7 +13172,7 @@ Both are wrong pixels reported as success — the worst failure shape. The
 second stream is committed as
 `tests/inputs/p4199_noninterleaved12_16x16_444.jpg`, outside `tests/fixtures/`
 because the C-parity corpus would compare it through `decompress()` and
-report this item as a crash (P4-201). Lossless 16-bit is not affected:
+report this item as a `fail` (P4-201). Lossless 16-bit is not affected:
 `lossless_dc_tables` refuses a scan that does not list every component.
 
 **Acceptance criteria.**
@@ -13231,6 +13235,9 @@ parse and before their `TJPARAM_MAXPIXELS` refusal (`turbojpeg.c:2228-2231`).
 (2) `crates/libjpeg-turbo-rs-capi/examples/decomp_parameters_oracle.c` gains
 YUV cases and the trace still matches stock verbatim. (3) The P4-141
 API-sequence harness either gains a YUV opcode or records why it has none.
+(4) Both apply the handle's `TJPARAM_MAXMEMORY` too, as upstream does
+(`turbojpeg.c:2219`, `:2288`); today they apply `MAXPIXELS` and `SCANLIMIT`
+only (found by the P4-199 docs audit).
 
 **Why deferred.** It needs a publishing twin of `inspect_header` and a C
 oracle extension; P4-199's scope was the pixel decompress entry points its
@@ -13266,3 +13273,22 @@ deliberate divergence.
 **Why deferred.** Refusing what decodes today is a behaviour change for C
 callers that rely on it, and needs its own decision; P4-199 was about what a
 decompress publishes, not which frames it accepts.
+
+## P4-227. `tj3Transform` Ignores the Handle's MAXPIXELS/SCANLIMIT/MAXMEMORY and Its PROGRESSIVE/ARITHMETIC Parameters — **OPEN**
+
+**GitHub:** [#655](https://github.com/developer0hye/libjpeg-turbo-rs/issues/655) — found 2026-10-07 by the docs-drift audit of the P4-199 fix.
+
+Upstream's `tj3Transform` applies the handle's `maxPixels`
+(`turbojpeg.c:2995-2998`) and `scanLimit` / `maxMemory` (`:2943-2951`) to the
+source, and the handle's `progressive` / `arithmetic` to the output
+(`:3029-3035`). `crates/libjpeg-turbo-rs-capi/src/transform.rs` reads none of
+them. Since P4-199 a decompress on the same handle publishes `PROGRESSIVE` /
+`ARITHMETIC` from the frame, so a decompress-then-transform sequence carries
+values upstream would apply and this port ignores.
+
+**Acceptance criteria.** (1) `tj3Transform` refuses a source over the
+handle's `TJPARAM_MAXPIXELS`, `TJPARAM_SCANLIMIT` and `TJPARAM_MAXMEMORY` the
+way upstream does, with upstream's messages. (2) It honours
+`TJPARAM_PROGRESSIVE` and `TJPARAM_ARITHMETIC` for the output as upstream
+does. (3) Cross-validated against stock 3.2.0 `tj3Transform` with an oracle
+trace in the shape of `capi_decomp_parameters`.
