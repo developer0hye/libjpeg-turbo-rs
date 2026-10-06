@@ -1,0 +1,56 @@
+# P4-209 (#632) criterion 3 — enforcement inventory for infallible allocations
+# under src/decode/.
+#
+# `vec![…]`, `Vec::with_capacity(…)` and `.to_vec()` abort the process when the
+# allocator refuses: there is no Result to return. For a size that comes out of
+# a JPEG stream that turns a hostile — or merely large — file into an
+# uncatchable denial of service, so every such size goes through
+# `common::try_alloc` (`try_filled_vec`, `try_reserved_vec`, `try_with_capacity`,
+# `try_copy_of`) and surfaces refusal as `JpegError::AllocationFailed`. This file
+# pins the infallible allocations that REMAIN, each with the reason its size is
+# bounded by something other than the input's geometry.
+#
+# `tests/decode_alloc_gate.rs` fails if this file and the sources disagree, so a
+# new infallible allocation under src/decode/ cannot land without a human either
+# converting it or classifying it here.
+#
+# SCOPE: non-test library code under src/decode/ — `//` comment lines,
+# `#[cfg(test)] mod … { … }` blocks and `*_tests.rs` files are skipped. The
+# three patterns are textual, so an input-sized allocation spelled another way
+# (`.clone()` of a Vec, `.collect()` into a Vec, `String::from`) is NOT seen.
+#
+# Classifications:
+#   fixed-size                   a literal or constant length, independent of the input
+#   component-count              a per-component list; SOF/SOS parsing caps the count at MAX_COMPONENTS (4)
+#   row-scratch                  one row of samples, capped by the SOF's 16-bit width (x2 max scale, x4 bpp: <= 512 KiB)
+#   infallible-public-signature  inside a public fn whose signature cannot carry an error; size is a buffer the caller already holds
+#
+# Columns: path	count	classification	justification	source line (trimmed)
+src/decode/entropy.rs	1	component-count	one plan entry per SOS component (<= 4, read_sos)	let mut plan = Vec::with_capacity(scan.components.len());
+src/decode/marker.rs	2	component-count	SOF and SOS component lists; read_sof and read_sos each reject num_components outside 1..=MAX_COMPONENTS just above	let mut components = Vec::with_capacity(num_components);
+src/decode/pipeline_impl/api.rs	1	fixed-size	a one-element marker list	reader.set_marker_save_config(MarkerSaveConfig::Specific(vec![marker_type]));
+src/decode/pipeline_impl/api.rs	1	infallible-public-signature	Image::apply_orientation_value returns Self; the copy is the size of self.data, which the caller already holds	let mut out: Vec<u8> = vec![0u8; self.data.len()];
+src/decode/pipeline_impl/color.rs	1	component-count	required_components is 1 or 3 (decode_grayscale_override match)	let mut full_planes: Vec<Cow<'_, [u8]>> = Vec::with_capacity(required_components);
+src/decode/pipeline_impl/color.rs	1	component-count	required_components is 1 or 3 (decode_grayscale_override match)	let mut strides: Vec<usize> = Vec::with_capacity(required_components);
+src/decode/pipeline_impl/colorspace.rs	5	row-scratch	one YCCK->CMYK row (width * 4) per output row	let mut cmyk_buf = vec![0u8; width * 4];
+src/decode/pipeline_impl/lossless.rs	1	component-count	one DC table per scan component (<= 4)	let mut dc_tables: Vec<&HuffmanTable> = Vec::with_capacity(num_components);
+src/decode/pipeline_impl/lossless.rs	2	row-scratch	one row of i16 differences (lossless width <= 65535: < 128 KiB)	let mut diffs = Vec::with_capacity(width);
+src/decode/pipeline_impl/lossless.rs	2	row-scratch	copy of the previous reconstructed u16 row (< 128 KiB)	prev_row = Some(output[row_start..row_start + width].to_vec());
+src/decode/pipeline_impl/lossless.rs	2	fixed-size	three optional previous rows, one per colour component	let mut prev_rows: Vec<Option<Vec<u16>>> = vec![None; 3];
+src/decode/pipeline_impl/lossless.rs	2	row-scratch	three rows of i16 differences, one per colour component (< 128 KiB each)	(0..3).map(|_| Vec::with_capacity(width)).collect();
+src/decode/pipeline_impl/lossless.rs	2	row-scratch	copy of the previous reconstructed u16 row of one component (< 128 KiB)	prev_rows[c] = Some(comp_planes[c][row_start..row_start + width].to_vec());
+src/decode/pipeline_impl/output.rs	1	row-scratch	one 8-bit row for the 12-bit dithered RGB565 path	let mut row8: Vec<u8> = vec![0u8; width];
+src/decode/pipeline_impl/output.rs	1	fixed-size	three direct-RGB planes	let mut rgb_full: Vec<Cow<'_, [u8]>> = Vec::with_capacity(3);
+src/decode/pipeline_impl/output.rs	1	row-scratch	streamed H2V2 upsample row (full_width)	let mut cb_row_top = vec![0u8; full_width];
+src/decode/pipeline_impl/output.rs	1	row-scratch	streamed H2V2 upsample row (full_width)	let mut cb_row_bot = vec![0u8; full_width];
+src/decode/pipeline_impl/output.rs	1	row-scratch	streamed H2V2 upsample row (full_width)	let mut cr_row_top = vec![0u8; full_width];
+src/decode/pipeline_impl/output.rs	1	row-scratch	streamed H2V2 upsample row (full_width)	let mut cr_row_bot = vec![0u8; full_width];
+src/decode/pipeline_impl/output.rs	3	row-scratch	streamed H2V1 / H1V2 / nearest upsample row (full_width)	let mut cb_row: Vec<u8> = vec![0u8; full_width];
+src/decode/pipeline_impl/output.rs	3	row-scratch	streamed H2V1 / H1V2 / nearest upsample row (full_width)	let mut cr_row: Vec<u8> = vec![0u8; full_width];
+src/decode/pipeline_impl/progressive.rs	1	component-count	one optional DC table per scan component (<= 4)	vec![None; scan.components.len()]
+src/decode/pipeline_impl/raw.rs	1	component-count	one block size per frame component (<= 4)	let comp_block_sizes: Vec<usize> = vec![block_size; num_components];
+src/decode/pipeline_impl/raw.rs	1	component-count	one width per frame component (<= 4)	let mut plane_widths: Vec<usize> = Vec::with_capacity(num_components);
+src/decode/pipeline_impl/raw.rs	1	component-count	one height per frame component (<= 4)	let mut plane_heights: Vec<usize> = Vec::with_capacity(num_components);
+src/decode/toggles.rs	1	component-count	one 64-entry coef_bits row per frame component (<= 4)	let mut coef_bits: Vec<[i32; 64]> = vec![[-1i32; 64]; num_components];
+src/decode/toggles.rs	1	component-count	one SAVED_COEFS row per frame component (<= 4)	let mut result: Vec<[i32; SAVED_COEFS]> = Vec::with_capacity(num_components);
+src/decode/toggles.rs	1	infallible-public-signature	pub apply_block_smoothing_coeffs returns (); the pipeline uses try_apply_block_smoothing_coeffs	Vec::with_capacity(dc_snapshot_len(coeff_buf.len(), row_stride, blocks_x));
