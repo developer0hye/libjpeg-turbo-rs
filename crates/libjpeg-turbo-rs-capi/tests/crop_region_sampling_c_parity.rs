@@ -139,7 +139,15 @@ fn transcript(library: &Path, jpeg: &[u8], region: TjRegion) -> Vec<String> {
                 region.h as usize
             };
             let region_bytes: usize = width * height * 3;
-            let mut dst: Vec<u8> = vec![0xA5; region_bytes * 2];
+            // The tail holds a whole uncropped frame at the widest output
+            // pixel size, so even a decode that dropped the crop entirely —
+            // full width, full height, and at the pitch of the cropped width
+            // or wider — stays inside the allocation and is reported by the
+            // sentinel check rather than corrupting the heap (codex review).
+            let frame_bytes: usize = get(handle, TJPARAM_JPEGWIDTH) as usize
+                * get(handle, TJPARAM_JPEGHEIGHT) as usize
+                * 4;
+            let mut dst: Vec<u8> = vec![0xA5; region_bytes + frame_bytes];
             let rc: c_int = decompress(
                 handle,
                 jpeg.as_ptr(),
