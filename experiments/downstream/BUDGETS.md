@@ -40,7 +40,9 @@ run that passes a load check:
 
 These are the rules `README.md` "Regression budget" fixed before any data
 existed, plus the *lead pairs* below, which that section does not name.
-`budgets.py` applies the timing rules to any `report.json`:
+`budgets.py` applies the timing rules to a `report.json` from a full run (no
+`--smoke`, no `--only`) whose runtime CPU features and build variant match
+the first report's, and refuses any other pair:
 
 ```sh
 python3 experiments/downstream/budgets.py <new report.json> \

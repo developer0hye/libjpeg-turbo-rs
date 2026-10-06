@@ -10,8 +10,8 @@ for why only same-run ratios are budgeted.
 
 `--first` names the report the bands and lead budgets were set from (the
 committed first report); without it the report under test is its own first.
-Both reports must be full runs (not `--smoke`) of the same architecture and
-build variant. Exit status is 0 when every budgeted row is within budget, 1
+Both reports must be full runs (not `--smoke`, not `--only`) with the same
+runtime CPU features and build variant. Exit status is 0 when every budgeted row is within budget, 1
 when one is over, 2 on a usage error or an unusable pair. Standard library
 only.
 """
@@ -83,13 +83,14 @@ def all_ratios(report):
 
 
 def runner_key(report):
-    """The architecture and build variant a report's ratios belong to.
+    """The runtime ISA and build variant a report's ratios belong to.
 
-    Ratios move with the ISA (the SIMD paths differ) and with the build
-    variant, so a band set on one does not apply to another.
+    Ratios move with the SIMD kernels runtime dispatch picks (the whole
+    feature line, not just the architecture: x86_64 with and without AVX2
+    run different code) and with the build variant, so a band set on one
+    does not apply to another.
     """
-    architecture = report["environment"]["runtime_cpu_features"].split()[0]
-    return architecture, report["build"]["variant"]
+    return report["environment"]["runtime_cpu_features"], report["build"]["variant"]
 
 
 def unusable(report, first_report):
@@ -98,10 +99,13 @@ def unusable(report, first_report):
         # A smoke run times two iterations and says it is not a measurement.
         if candidate.get("smoke"):
             return f"the {name} is a --smoke run, not a measurement"
+        # An --only run leaves cases out, so a pass would cover only them.
+        if candidate.get("only") is not None:
+            return f"the {name} is filtered with --only {candidate['only']!r}"
     if runner_key(report) != runner_key(first_report):
         return (
             f"the report is {runner_key(report)} but the first report is "
-            f"{runner_key(first_report)}; budgets are per architecture and variant"
+            f"{runner_key(first_report)}; budgets are per runtime ISA and variant"
         )
     return None
 
