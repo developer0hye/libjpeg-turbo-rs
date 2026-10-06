@@ -2,7 +2,6 @@ use super::output::pad_alpha_offset;
 use super::{Decoder, Image};
 use crate::common::error::{JpegError, Result};
 use crate::common::huffman_table::HuffmanTable;
-use crate::common::icc;
 use crate::common::try_alloc::{try_clone_opt, try_clone_opt_string, try_clone_saved_markers};
 use crate::common::types::{FrameHeader, PixelFormat};
 use crate::decode::bitstream::BitReader;
@@ -10,14 +9,6 @@ use crate::decode::{huffman, lossless as lossless_codec};
 use alloc::{format, string::ToString, vec, vec::Vec};
 
 impl<'a> Decoder<'a> {
-    /// Reassemble ICC profile from parsed APP2 chunks.
-    ///
-    /// `Err` only when the allocator refuses the reassembly buffer; a malformed
-    /// or absent profile is `Ok(None)` and must not fail the decode (P4-144).
-    pub(super) fn icc_profile(&self) -> crate::common::error::Result<Option<Vec<u8>>> {
-        icc::try_reassemble_icc_profile(&self.metadata.icc_chunks)
-    }
-
     /// Decode a lossless JPEG (SOF3).
     ///
     /// Lossless JPEG uses Huffman-coded differences + prediction instead of DCT.
