@@ -161,8 +161,9 @@ and `git log` between tags.
   `TjHandle::set_scaling_factor` now returns `try_new`'s
   `JpegError::Unsupported` instead of `JpegError::CorruptData`.
 - **C ABI, error text:** `tj3SetScalingFactor` refuses every unsupported
-  factor — non-positive values included — with upstream's message,
-  `tj3SetScalingFactor: Unsupported scaling factor` (P4-139, #478). It used to
+  factor — non-positive values included — with upstream's message under
+  this crate's `function:` prefix, `tj3SetScalingFactor: Unsupported scaling
+  factor` (upstream prints `tj3SetScalingFactor(): …`) (P4-139, #478). It used to
   report `... corrupt data: unsupported scaling factor N/D`, or a
   `non-positive ratio` message upstream has no equivalent of. The accepted set
   is unchanged and is now checked against real TurboJPEG

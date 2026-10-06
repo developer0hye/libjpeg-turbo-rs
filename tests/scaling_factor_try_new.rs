@@ -272,3 +272,37 @@ fn calc_output_dimensions_never_panics() {
     }
     assert_eq!(calc_output_dimensions(usize::MAX, 8, 2, 1), (0, 16));
 }
+
+/// Issue #478: `calc_output_dimensions` reports 0 only when the scaled size
+/// itself does not fit. Near `usize::MAX`, multiplying first overflowed for
+/// shrinking factors whose answer is representable; it must agree with
+/// `ScalingFactor::scale_dim` for every supported factor at every magnitude.
+#[test]
+fn calc_output_dimensions_agrees_with_scale_dim_near_usize_max() {
+    use libjpeg_turbo_rs::{calc_output_dimensions, ScalingFactor};
+    let dims: [usize; 6] = [
+        usize::MAX,
+        usize::MAX - 7,
+        usize::MAX / 2,
+        usize::MAX / 4,
+        usize::MAX / 16 + 3,
+        1usize << (usize::BITS - 2),
+    ];
+    for factor in ScalingFactor::SUPPORTED {
+        for dim in dims {
+            let (width, height): (usize, usize) =
+                calc_output_dimensions(dim, dim, factor.num(), factor.denom());
+            let expected: usize = factor.scale_dim(dim);
+            assert_eq!(
+                (width, height),
+                (expected, expected),
+                "{}/{} of {dim}",
+                factor.num(),
+                factor.denom()
+            );
+        }
+    }
+    // The case the old code got wrong: 1/2 of 2^(BITS-2) is 2^(BITS-3), not 0.
+    let quarter: usize = 1usize << (usize::BITS - 2);
+    assert_eq!(calc_output_dimensions(quarter, 1, 1, 2).0, quarter / 2);
+}

@@ -1447,7 +1447,7 @@ config with no kernels has no green tests claiming parity.
 
 ## P4-74. Reduced-Size and Extended IDCT Kernels Panic on `i32` Overflow Under Scaled Decode — **CLOSED 2026-07-30**
 
-**Motivation.** Four consecutive scheduled Fuzz Smoke runs failed on `fuzz_decompress`: 30420069849 (2026-07-29 03:37), 30438301770 (09:07), 30461194331 (14:30), 30485530878 (19:41). Five distinct minimized seeds, all aborting in `src/decode/idct_scaled.rs` with `attempt to {add,subtract,multiply} with overflow` at five distinct lines (116, 117, 126, 131, 136). Every failing seed satisfies `data.len() % 7 == 3` — the only `fuzz_decompress` option arm that calls `set_scale(ScalingFactor::new(1, 2))`, which is the sole dispatcher of the reduced-size IDCT.
+**Motivation.** Four consecutive scheduled Fuzz Smoke runs failed on `fuzz_decompress`: 30420069849 (2026-07-29 03:37), 30438301770 (09:07), 30461194331 (14:30), 30485530878 (19:41). Five distinct minimized seeds, all aborting in `src/decode/idct_scaled.rs` with `attempt to {add,subtract,multiply} with overflow` at five distinct lines (116, 117, 126, 131, 136). Every failing seed satisfies `data.len() % 7 == 3` — the only `fuzz_decompress` option arm that calls `set_scale` with a 1/2 `ScalingFactor`, which is the sole dispatcher of the reduced-size IDCT.
 
 **Root cause.** `idct_scaled.rs` (4x4/2x2/1x1) and `idct_extended.rs` (the twelve 3x3…16x16 kernels) were ported from `jidctred.c`/`jidctint.c` using plain `+`/`-`/`*`. C's intermediates are `JLONG`, declared `long` at `jpegint.h:62` with only a *"must hold at least signed 32-bit values"* guarantee — so on any LLP64 or 32-bit host these same expressions wrap silently, and libjpeg-turbo treats that as the contract. A *dequantized* coefficient is bounded by `i16::MAX * u16::MAX = 2_147_418_945`, which fits `i32`, but a single multiply by a `FIX_*` constant (up to 29692) does not. The 8x8 twin `src/decode/idct.rs` had already been converted to `wrapping_*` for exactly this reason; neither scaled-IDCT file ever received the same treatment.
 
@@ -7996,18 +7996,21 @@ module note assigned it to this criterion) and applied a non-table ratio
 literally; it now ports `jpeg_core_output_dimensions`'s block-size choice,
 `unsigned int` wrap included, and is cross-checked against `djpeg -scale` for
 sixteen pairs including `1/0`, `0/0`, `1/3`, a numerator whose `* 8`
-wraps and a denominator whose `* N` wraps. And `tj3SetScalingFactor` now reports upstream's single message,
-`tj3SetScalingFactor: Unsupported scaling factor`, for every refusal, where it
+wraps and a denominator whose `* N` wraps. And `tj3SetScalingFactor` now reports upstream's single message under this
+crate's `function:` prefix, `tj3SetScalingFactor: Unsupported scaling factor`
+(upstream: `tj3SetScalingFactor(): …`), for every refusal, where it
 used to report `corrupt data: unsupported scaling factor N/D` or a
 `non-positive ratio` message upstream has no equivalent of.
 
-Pinned by `tests/scaling_factor_try_new.rs` (11 tests: the table against
-upstream's, all sixteen accepted, zero denominators and upstream-refused
+Pinned by `tests/scaling_factor_try_new.rs` (12 tests: the table against
+upstream's, the 1/1 default, all sixteen accepted, zero denominators and upstream-refused
 factors refused, a `0..=20` square sweep asserting the accepted set is exactly
 the table and that `block_size`/`scale_dim` never panic up to `usize::MAX`
 against a `u128` model, `TjHandle` agreeing with `try_new`, a refused factor
 keeping the previous one, every accepted factor decoding at `scale_dim`'s
-size, and the two `calc_output_dimensions` tests) and
+size, and three `calc_output_dimensions` tests, one of them agreeing with
+`scale_dim` near `usize::MAX`, where multiplying first used to report 0 for a
+representable answer) and
 `crates/libjpeg-turbo-rs-capi/tests/capi_scaling_factor.rs` (the exact refusal
 text, and `tj3GetScalingFactors` plus `tj3SetScalingFactor` over a `-1..=20`
 square traced against real TurboJPEG 3.2.0 through
@@ -11869,7 +11872,7 @@ later (`turbojpeg-mp.c:195-198`), so the ceiling holds at every precision too.
 
 Ours diverges twice:
 
-* `TjHandle::decompress` (`src/api/tj3.rs:856-878`) publishes **eight**:
+* `TjHandle::decompress` (`src/api/tj3.rs:839-861`) publishes **eight**:
   `Width`, `Height`, `Precision`, `ColorSpace`, `Subsampling`, `XDensity`,
   `YDensity`, `DensityUnits`. `TJPARAM_PROGRESSIVE`, `TJPARAM_ARITHMETIC`,
   `TJPARAM_LOSSLESS`, `TJPARAM_LOSSLESSPSV` and `TJPARAM_LOSSLESSPT` keep
@@ -11934,7 +11937,7 @@ touches; it writes `output_width` / `output_height` instead. The call sits at
 that had already been cropped would make that check compare a region against
 itself.
 
-**What we do.** `TjHandle::decompress` (`src/api/tj3.rs:856-857`) publishes the
+**What we do.** `TjHandle::decompress` (`src/api/tj3.rs:839-840`) publishes the
 *decoded output* dimensions, `img.width` / `img.height` — post-scaling and
 post-cropping. Measured on `tests/fixtures/photo_64x64_420.jpg` (64x64):
 

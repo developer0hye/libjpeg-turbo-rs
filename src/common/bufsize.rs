@@ -246,9 +246,15 @@ pub fn calc_output_dimensions(
     let block_size: usize = (1u32..16)
         .find(|&n: &u32| requested <= scale_denom.wrapping_mul(n))
         .unwrap_or(16) as usize;
+    // ceil(dim * N / 8) = (dim / 8) * N + ceil((dim % 8) * N / 8): split so the
+    // only product that can overflow is the one whose overflow means the
+    // result itself does not fit — `dim * N` overflowed for 1/2 at
+    // `dim = 2^62` although the answer is 2^61 (docs-drift-auditor).
     let scale = |dim: usize| -> usize {
-        dim.checked_mul(block_size)
-            .map_or(0, |scaled: usize| scaled.div_ceil(8))
+        (dim / 8)
+            .checked_mul(block_size)
+            .and_then(|whole: usize| whole.checked_add(((dim % 8) * block_size).div_ceil(8)))
+            .unwrap_or(0)
     };
     (scale(width), scale(height))
 }
