@@ -171,6 +171,9 @@ pub struct ConcurrentReport {
     pub threads: usize,
     pub decodes_per_thread: usize,
     pub rows: Vec<ConcurrentRow>,
+    /// The single-threaded references against each other and C djpeg, on
+    /// the decode section's contract; or why C was not compared.
+    pub correctness: Vec<CorrectnessRecord>,
 }
 
 pub struct Report {
@@ -316,6 +319,43 @@ fn diff_json(diff: Option<&PixelDiff>) -> Json {
     })
 }
 
+/// The decode and concurrent sections share one correctness contract, so
+/// they share its rendering too.
+fn correctness_markdown(out: &mut String, records: &[CorrectnessRecord]) {
+    let _ = writeln!(
+        out,
+        "\nCorrectness (outside the timed region):\n\n| row | compared with | result |\n|---|---|---|"
+    );
+    for record in records {
+        let result: String = match (&record.diff, &record.note) {
+            (Some(diff), _) => diff_text(Some(diff)),
+            (None, Some(note)) => note.clone(),
+            (None, None) => "—".to_string(),
+        };
+        let _ = writeln!(
+            out,
+            "| {} | {} | {} |",
+            record.subject, record.compared_to, result
+        );
+    }
+}
+
+fn correctness_json(records: &[CorrectnessRecord]) -> Json {
+    Json::Array(
+        records
+            .iter()
+            .map(|record| {
+                Json::object(vec![
+                    ("subject", Json::str(&record.subject)),
+                    ("compared_to", Json::str(&record.compared_to)),
+                    ("diff", diff_json(record.diff.as_ref())),
+                    ("note", Json::opt(record.note.as_deref(), Json::str)),
+                ])
+            })
+            .collect(),
+    )
+}
+
 fn concurrent_json(section: &ConcurrentReport) -> Json {
     Json::object(vec![
         ("id", Json::str(&section.id)),
@@ -361,6 +401,7 @@ fn concurrent_json(section: &ConcurrentReport) -> Json {
                     .collect(),
             ),
         ),
+        ("correctness", correctness_json(&section.correctness)),
     ])
 }
 
@@ -381,7 +422,8 @@ fn concurrent_markdown(out: &mut String, section: &ConcurrentReport) {
              `caller buffers` is the reuse rows' T output buffers, allocated before that \
              window — an application holds them too, so compare `peak live heap + caller \
              buffers` across rows. Every output of the correctness batch is compared with the \
-             same backend's single-threaded output; a difference aborts the run.\n",
+             same backend's single-threaded output, and those references are held to the \
+             decode section's contract (table below); a difference aborts the run.\n",
         section.id,
         section.threads,
         section.corpus_id,
@@ -422,6 +464,7 @@ fn concurrent_markdown(out: &mut String, section: &ConcurrentReport) {
             }
         }
     }
+    correctness_markdown(out, &section.correctness);
 }
 
 fn frame_text(frame: Option<&FrameFacts>) -> String {
@@ -599,22 +642,7 @@ impl Report {
                     }
                 }
             }
-            let _ = writeln!(
-                out,
-                "\nCorrectness (outside the timed region):\n\n| row | compared with | result |\n|---|---|---|"
-            );
-            for record in &case.correctness {
-                let result: String = match (&record.diff, &record.note) {
-                    (Some(diff), _) => diff_text(Some(diff)),
-                    (None, Some(note)) => note.clone(),
-                    (None, None) => "—".to_string(),
-                };
-                let _ = writeln!(
-                    out,
-                    "| {} | {} | {} |",
-                    record.subject, record.compared_to, result
-                );
-            }
+            correctness_markdown(&mut out, &case.correctness);
         }
 
         let _ = writeln!(out, "\n## Encode\n\nBackends:\n\n| row | API |\n|---|---|");
@@ -762,22 +790,7 @@ impl Report {
                                 .collect(),
                         ),
                     ),
-                    (
-                        "correctness",
-                        Json::Array(
-                            case.correctness
-                                .iter()
-                                .map(|record| {
-                                    Json::object(vec![
-                                        ("subject", Json::str(&record.subject)),
-                                        ("compared_to", Json::str(&record.compared_to)),
-                                        ("diff", diff_json(record.diff.as_ref())),
-                                        ("note", Json::opt(record.note.as_deref(), Json::str)),
-                                    ])
-                                })
-                                .collect(),
-                        ),
-                    ),
+                    ("correctness", correctness_json(&case.correctness)),
                 ])
             })
             .collect();
@@ -1020,6 +1033,11 @@ mod tests {
                     not_applicable: Some("no API".to_string()),
                 },
             ],
+            correctness: vec![CorrectnessRecord::note(
+                "all rows",
+                "C djpeg",
+                "C decode comparison: disabled (--no-c-oracle)".to_string(),
+            )],
         }
     }
 
@@ -1069,6 +1087,14 @@ mod tests {
         ));
         assert!(matches!(field(&rows[1], "batch_timing"), Json::Null));
         assert!(matches!(field(&rows[1], "not_applicable"), Json::String(_)));
+        let correctness: &Vec<Json> = match field(&json, "correctness") {
+            Json::Array(records) => records,
+            other => panic!("correctness: {other:?}"),
+        };
+        assert!(matches!(
+            field(&correctness[0], "note"),
+            Json::String(text) if text.contains("disabled (--no-c-oracle)")
+        ));
     }
 
     #[test]
@@ -1095,5 +1121,8 @@ mod tests {
             assert_eq!(row.matches('|').count(), header_columns, "{row}");
         }
         assert!(out.contains("| 139.5 MiB | 16 identical (asserted) |"));
+        assert!(
+            out.contains("| all rows | C djpeg | C decode comparison: disabled (--no-c-oracle) |")
+        );
     }
 }

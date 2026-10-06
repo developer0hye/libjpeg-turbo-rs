@@ -271,6 +271,104 @@ fn c_reference(
     Ok((width, height, pixels))
 }
 
+/// Same library and settings, different buffer ownership: these must be
+/// byte-identical, or one of the two paths is wrong.
+const EXACT_DECODE_PAIRS: [(DecodeBackend, DecodeBackend); 4] = [
+    (DecodeBackend::CandidateReuse, DecodeBackend::CandidateFresh),
+    (
+        DecodeBackend::CandidateImageAdapter,
+        DecodeBackend::CandidateFresh,
+    ),
+    (DecodeBackend::BaselineReuse, DecodeBackend::BaselineFresh),
+    (DecodeBackend::ZuneReuse, DecodeBackend::ZuneFresh),
+];
+
+type Fingerprint = (usize, u64);
+
+fn fingerprint_of(
+    fingerprints: &[(DecodeBackend, Fingerprint)],
+    wanted: DecodeBackend,
+) -> Option<Fingerprint> {
+    fingerprints
+        .iter()
+        .find(|(backend, _)| *backend == wanted)
+        .map(|(_, print)| *print)
+}
+
+/// Panics on the first pair in [`EXACT_DECODE_PAIRS`] whose outputs differ.
+/// A pair with a backend missing (N/A for the case) is skipped.
+fn assert_exact_pairs(fingerprints: &[(DecodeBackend, Fingerprint)], case_id: &str) {
+    for (left, right) in EXACT_DECODE_PAIRS {
+        if let (Some(a), Some(b)) = (
+            fingerprint_of(fingerprints, left),
+            fingerprint_of(fingerprints, right),
+        ) {
+            assert_eq!(
+                a,
+                b,
+                "{} and {} must be byte-identical on {}",
+                left.id(),
+                right.id(),
+                case_id
+            );
+        }
+    }
+}
+
+/// C is the contract: the project's goal is output byte-identical to
+/// `djpeg` with default settings, and every decode case here — baseline,
+/// progressive, grayscale, 1/4 DCT scaling (`djpeg -scale 1/4`) — is inside
+/// it. So with a C decoder present, a candidate difference fails the run. The
+/// published baseline is held to it too: on 2026-10-07 it matched stock
+/// 3.2.0 and Homebrew 3.1.4.1 on all eight cases. With the exact pairs above,
+/// this pins every libjpeg-turbo-rs row to C; the others are reported against
+/// `candidate-fresh`, hence against C.
+fn assert_c_decode_contract(
+    case_id: &str,
+    c_output: (usize, usize, &[u8]),
+    candidate_output: (usize, usize, &[u8]),
+    fingerprints: &[(DecodeBackend, Fingerprint)],
+) -> Vec<CorrectnessRecord> {
+    let (c_width, c_height, c_pixels) = c_output;
+    let (candidate_width, candidate_height, candidate_pixels) = candidate_output;
+    assert_eq!(
+        (c_width, c_height),
+        (candidate_width, candidate_height),
+        "C djpeg and the candidate disagree on dimensions for {case_id}"
+    );
+    let diff: PixelDiff = measure::pixel_diff(c_pixels, candidate_pixels);
+    assert_eq!(
+        diff.max_abs, 0,
+        "candidate differs from C djpeg on {case_id} ({diff:?}); byte-identical output is the contract"
+    );
+    assert_eq!(
+        fingerprint_of(fingerprints, DecodeBackend::BaselineFresh),
+        Some(fingerprint(c_pixels)),
+        "baseline 0.8.0 differs from C djpeg on {case_id}"
+    );
+    vec![
+        CorrectnessRecord::note(
+            "candidate-fresh",
+            "C djpeg",
+            "identical (asserted)".to_string(),
+        ),
+        CorrectnessRecord::note(
+            "baseline-fresh",
+            "C djpeg",
+            "identical (asserted)".to_string(),
+        ),
+    ]
+}
+
+/// Why a section has no C comparison, in the words every section uses.
+fn c_oracle_absent_note(comparison: &str, tool: &str, use_c_oracle: bool) -> String {
+    if use_c_oracle {
+        format!("C {comparison} comparison: skipped (no {tool})")
+    } else {
+        format!("C {comparison} comparison: disabled (--no-c-oracle)")
+    }
+}
+
 fn run_decode_case(
     case: &DecodeCase,
     options: &Options,
@@ -338,71 +436,16 @@ fn run_decode_case(
             ));
         }
     }
-    // Same library and settings, different buffer ownership: these must be
-    // byte-identical, or one of the two paths is wrong.
-    let exact_pairs: [(DecodeBackend, DecodeBackend); 4] = [
-        (DecodeBackend::CandidateReuse, DecodeBackend::CandidateFresh),
-        (
-            DecodeBackend::CandidateImageAdapter,
-            DecodeBackend::CandidateFresh,
-        ),
-        (DecodeBackend::BaselineReuse, DecodeBackend::BaselineFresh),
-        (DecodeBackend::ZuneReuse, DecodeBackend::ZuneFresh),
-    ];
-    let fingerprint_of = |wanted: DecodeBackend| -> Option<(usize, u64)> {
-        fingerprints
-            .iter()
-            .find(|(backend, _)| *backend == wanted)
-            .map(|(_, print)| *print)
-    };
-    for (left, right) in exact_pairs {
-        if let (Some(a), Some(b)) = (fingerprint_of(left), fingerprint_of(right)) {
-            assert_eq!(
-                a,
-                b,
-                "{} and {} must be byte-identical on {}",
-                left.id(),
-                right.id(),
-                case.id
-            );
-        }
-    }
-    // C is the contract: the project's goal is output byte-identical to
-    // `djpeg` with default settings, and every case here — baseline,
-    // progressive, grayscale, 1/4 DCT scaling (`djpeg -scale 1/4`) — is inside
-    // it. So with a C decoder present, a difference fails the run. The
-    // published baseline is held to it too: on 2026-10-07 it matched stock
-    // 3.2.0 and Homebrew 3.1.4.1 on all eight cases.
+    assert_exact_pairs(&fingerprints, &case.id);
     if let Some(djpeg) = djpeg {
-        let (width, height, c_pixels) = c_reference(djpeg, jpeg_path, case, &options.out_dir)
-            .unwrap_or_else(|reason| panic!("C djpeg could not decode {}: {reason}", case.id));
-        assert_eq!(
-            (width, height),
-            (reference_width, reference_height),
-            "C djpeg and the candidate disagree on dimensions for {}",
-            case.id
-        );
-        let diff: PixelDiff = measure::pixel_diff(&c_pixels, &reference_pixels);
-        assert_eq!(
-            diff.max_abs, 0,
-            "candidate differs from C djpeg on {} ({diff:?}); byte-identical output is the contract",
-            case.id
-        );
-        correctness.push(CorrectnessRecord::note(
-            "candidate-fresh",
-            "C djpeg",
-            "identical (asserted)".to_string(),
-        ));
-        assert_eq!(
-            fingerprint_of(DecodeBackend::BaselineFresh),
-            Some(fingerprint(&c_pixels)),
-            "baseline 0.8.0 differs from C djpeg on {}",
-            case.id
-        );
-        correctness.push(CorrectnessRecord::note(
-            "baseline-fresh",
-            "C djpeg",
-            "identical (asserted)".to_string(),
+        let c_output: (usize, usize, Vec<u8>) =
+            c_reference(djpeg, jpeg_path, case, &options.out_dir)
+                .unwrap_or_else(|reason| panic!("C djpeg could not decode {}: {reason}", case.id));
+        correctness.extend(assert_c_decode_contract(
+            &case.id,
+            (c_output.0, c_output.1, &c_output.2),
+            (reference_width, reference_height, &reference_pixels),
+            &fingerprints,
         ));
     }
     drop(reference_pixels);
@@ -590,11 +633,7 @@ fn run_encode_case(source: &SourcePixels, options: &Options) -> EncodeCaseReport
         None => c_comparison.push(CorrectnessRecord::note(
             "all rows",
             "C cjpeg",
-            if options.use_c_oracle {
-                "C encode comparison: skipped (no cjpeg)".to_string()
-            } else {
-                "C encode comparison: disabled (--no-c-oracle)".to_string()
-            },
+            c_oracle_absent_note("encode", "cjpeg", options.use_c_oracle),
         )),
         Some(cjpeg) => {
             let ppm: PathBuf = options.out_dir.join(format!("{}.ppm", source.id));
@@ -793,7 +832,12 @@ fn run_thumbnail(
 }
 
 /// T threads × K decodes of the 12 MP photo per backend; see `concurrent.rs`.
-fn run_concurrent_decode(case: &DecodeCase, options: &Options) -> ConcurrentReport {
+fn run_concurrent_decode(
+    case: &DecodeCase,
+    options: &Options,
+    jpeg_path: &Path,
+    djpeg: Option<&Path>,
+) -> ConcurrentReport {
     let threads: usize = concurrent::worker_count(
         std::thread::available_parallelism()
             .map(|count| count.get())
@@ -833,7 +877,21 @@ fn run_concurrent_decode(case: &DecodeCase, options: &Options) -> ConcurrentRepo
     }
 
     // 1. Correctness: the single-threaded output of the same backend is the
-    //    reference for every output of one concurrent batch.
+    //    reference for every output of one concurrent batch. Those references
+    //    are held to the decode section's contract here too, because
+    //    `--only concurrent` runs no decode case: without it a backend that
+    //    is consistently wrong would match itself and pass.
+    let candidate_index: usize = pools
+        .iter()
+        .position(|pool| pool[0].backend == DecodeBackend::CandidateFresh)
+        .expect("the candidate supports every case");
+    let (candidate_width, candidate_height, candidate_pixels) = {
+        let decoded = pools[candidate_index][0].decode();
+        let pixels: Vec<u8> = pools[candidate_index][0].pixels(&decoded).to_vec();
+        (decoded.width, decoded.height, pixels)
+    };
+    let mut correctness: Vec<CorrectnessRecord> = Vec::new();
+    let mut fingerprints: Vec<(DecodeBackend, Fingerprint)> = Vec::with_capacity(pools.len());
     let mut outputs_compared: Vec<usize> = Vec::with_capacity(pools.len());
     for pool in pools.iter_mut() {
         let backend: DecodeBackend = pool[0].backend;
@@ -842,6 +900,21 @@ fn run_concurrent_decode(case: &DecodeCase, options: &Options) -> ConcurrentRepo
             let pixels: Vec<u8> = pool[0].pixels(&decoded).to_vec();
             (decoded.width, decoded.height, pixels)
         };
+        assert_eq!(
+            (width, height, reference.len()),
+            (candidate_width, candidate_height, candidate_pixels.len()),
+            "{} produced a different size on {}",
+            backend.id(),
+            case.id
+        );
+        fingerprints.push((backend, fingerprint(&reference)));
+        if backend != DecodeBackend::CandidateFresh {
+            correctness.push(CorrectnessRecord::measured(
+                backend.id(),
+                "candidate-fresh",
+                measure::pixel_diff(&candidate_pixels, &reference),
+            ));
+        }
         let compared: usize = concurrent::check_batch(pool, decodes, (width, height, &reference))
             .unwrap_or_else(|difference| {
                 panic!(
@@ -852,6 +925,27 @@ fn run_concurrent_decode(case: &DecodeCase, options: &Options) -> ConcurrentRepo
             });
         outputs_compared.push(compared);
     }
+    assert_exact_pairs(&fingerprints, &case.id);
+    match djpeg {
+        Some(djpeg) => {
+            let c_output: (usize, usize, Vec<u8>) =
+                c_reference(djpeg, jpeg_path, case, &options.out_dir).unwrap_or_else(|reason| {
+                    panic!("C djpeg could not decode {}: {reason}", case.id)
+                });
+            correctness.extend(assert_c_decode_contract(
+                &case.id,
+                (c_output.0, c_output.1, &c_output.2),
+                (candidate_width, candidate_height, &candidate_pixels),
+                &fingerprints,
+            ));
+        }
+        None => correctness.push(CorrectnessRecord::note(
+            "all rows",
+            "C djpeg",
+            c_oracle_absent_note("decode", "djpeg", options.use_c_oracle),
+        )),
+    }
+    drop(candidate_pixels);
 
     // 2. Allocation pass: one batch, all threads in one window. run_batch
     //    joins every thread before returning, so the counts are exact.
@@ -912,6 +1006,7 @@ fn run_concurrent_decode(case: &DecodeCase, options: &Options) -> ConcurrentRepo
         threads,
         decodes_per_thread: decodes,
         rows,
+        correctness,
     }
 }
 
@@ -1100,7 +1195,7 @@ fn main() {
         // Regenerated rather than kept from the decode loop, whose one-entry
         // cache holds at most one file; `store.add` records it once.
         let file: CorpusFile = corpus_file(concurrent::CORPUS_ID, &options.repo);
-        store.add(&file);
+        let jpeg_path: PathBuf = store.add(&file);
         let facts: FrameFacts =
             measure::inspect_frame(&file.jpeg).expect("corpus files have a frame header");
         let case: DecodeCase = DecodeCase {
@@ -1113,7 +1208,12 @@ fn main() {
             source_width: facts.width as usize,
             source_height: facts.height as usize,
         };
-        concurrent_report = Some(run_concurrent_decode(&case, &options));
+        concurrent_report = Some(run_concurrent_decode(
+            &case,
+            &options,
+            &jpeg_path,
+            djpeg.as_deref(),
+        ));
     }
 
     let report: Report = Report {
@@ -1155,6 +1255,79 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fingerprints(baseline: &[u8]) -> Vec<(DecodeBackend, Fingerprint)> {
+        vec![(DecodeBackend::BaselineFresh, fingerprint(baseline))]
+    }
+
+    #[test]
+    fn c_contract_records_both_libjpeg_turbo_rs_rows_when_they_match() {
+        let pixels: [u8; 6] = [10, 20, 30, 40, 50, 60];
+        let records: Vec<CorrectnessRecord> = assert_c_decode_contract(
+            "case",
+            (2, 1, &pixels),
+            (2, 1, &pixels),
+            &fingerprints(&pixels),
+        );
+        let subjects: Vec<&str> = records.iter().map(|r| r.subject.as_str()).collect();
+        assert_eq!(subjects, ["candidate-fresh", "baseline-fresh"]);
+        assert!(records.iter().all(
+            |r| r.compared_to == "C djpeg" && r.note.as_deref() == Some("identical (asserted)")
+        ));
+    }
+
+    #[test]
+    #[should_panic(expected = "candidate differs from C djpeg")]
+    fn c_contract_fails_a_candidate_one_sample_off() {
+        let c: [u8; 3] = [1, 2, 3];
+        assert_c_decode_contract("case", (1, 1, &c), (1, 1, &[1, 2, 4]), &fingerprints(&c));
+    }
+
+    #[test]
+    #[should_panic(expected = "baseline 0.8.0 differs from C djpeg")]
+    fn c_contract_fails_a_differing_baseline() {
+        let c: [u8; 3] = [1, 2, 3];
+        assert_c_decode_contract("case", (1, 1, &c), (1, 1, &c), &fingerprints(&[1, 2, 4]));
+    }
+
+    #[test]
+    #[should_panic(expected = "disagree on dimensions")]
+    fn c_contract_fails_a_transposed_output() {
+        let c: [u8; 6] = [1, 2, 3, 4, 5, 6];
+        assert_c_decode_contract("case", (2, 1, &c), (1, 2, &c), &fingerprints(&c));
+    }
+
+    #[test]
+    fn exact_pairs_skip_absent_rows_and_fail_differing_ones() {
+        let fresh: Fingerprint = fingerprint(&[1, 2, 3]);
+        // zune-reuse absent (N/A): nothing to compare, no failure.
+        assert_exact_pairs(&[(DecodeBackend::ZuneFresh, fresh)], "case");
+        let differing: std::thread::Result<()> = std::panic::catch_unwind(|| {
+            assert_exact_pairs(
+                &[
+                    (DecodeBackend::CandidateFresh, fresh),
+                    (DecodeBackend::CandidateReuse, fingerprint(&[1, 2, 4])),
+                ],
+                "case",
+            )
+        });
+        assert!(
+            differing.is_err(),
+            "candidate-reuse != candidate-fresh must fail"
+        );
+    }
+
+    #[test]
+    fn absent_oracle_note_says_whether_it_was_disabled_or_missing() {
+        assert_eq!(
+            c_oracle_absent_note("decode", "djpeg", false),
+            "C decode comparison: disabled (--no-c-oracle)"
+        );
+        assert_eq!(
+            c_oracle_absent_note("encode", "cjpeg", true),
+            "C encode comparison: skipped (no cjpeg)"
+        );
+    }
 
     #[test]
     fn a_jfif_header_only_difference_is_named_as_such() {

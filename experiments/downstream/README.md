@@ -120,6 +120,13 @@ These run outside every timed region.
   compared with the same backend's single-threaded output, dimensions
   included. Any difference fails the run. Each reuse thread decodes K times
   into the same buffer, so stale state left in a reused buffer also fails it.
+  The single-threaded references are held to the decode cases' contract as
+  well: the same exact pairs, every row's difference from `candidate-fresh`,
+  and, with a C decoder, `candidate-fresh` and `baseline-fresh` asserted
+  pixel-identical to `djpeg`. `--only concurrent` runs no decode case, so
+  without this a backend that was consistently wrong would only be compared
+  with itself. Without a C decoder the section's correctness table says so
+  ("C decode comparison: disabled (--no-c-oracle)" or "skipped (no djpeg)").
 - **Encode PSNR.** PSNR is measured against the source pixels. The published
   baseline decodes every row's output. Each output's real subsampling is read
   back from its SOF marker. `image`'s encoder writes **4:4:4** at q85 even
@@ -271,6 +278,13 @@ typosquat) before you copy the lock back.
     are not in it. Peak RSS is not reported, because no std-only API resets
     a process's high-water mark portably, and the earlier 8K case would
     otherwise set it.
+  - Unlike the single-threaded columns, this peak is **not deterministic**.
+    It depends on how far the threads' working sets overlap in time, and its
+    ceiling is T × one decode's peak. On two 2026-10-07 smoke runs on the
+    same machine, `baseline-fresh` measured 209.4 MiB and 174.5 MiB, and
+    `candidate-fresh` 209.4 MiB both times. Allocation count and cumulative
+    bytes stay deterministic. The zero-tolerance allocation budget below
+    therefore cannot apply to this peak as it stands.
   - `caller buffers` is the T output buffers the reuse rows own. They are
     allocated before the window, as in the single-threaded rows, so
     `peak live heap + caller buffers` is the like-for-like total between
