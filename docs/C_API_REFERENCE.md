@@ -113,14 +113,14 @@
 |---|---|---|---|
 | `tj3GetScalingFactors(&count)` | Get list of supported scaling factors | `TjHandle::scaling_factors()` / `ScalingFactor` | ✅ |
 | `tj3SetScalingFactor(handle, sf)` | Set output scaling | `Decoder::set_scale()` / `TjHandle::set_scaling_factor()` | ✅ |
-| `tj3SetCroppingRegion(handle, region)` | Set crop region | `TjHandle::set_cropping_region()` + `TjHandle::resolve_cropping_region()` (upstream's set-time checks and messages, cross-validated against stock 3.2.0 by `cabi_misuse_harness`'s `cropping_region` case); `Decoder::set_crop_region()` refuses a region past the scaled output and aligns `x` down like `jpeg_crop_scanline` (P4-197, #618). The 12-bit decode paths do not yet honour the region (P4-219) | ✅ |
+| `tj3SetCroppingRegion(handle, region)` | Set crop region | `TjHandle::set_cropping_region()` + `TjHandle::resolve_cropping_region()` (upstream's set-time checks and messages except the "not initialized for decompression" guard, `turbojpeg.c:2074-2075` — P4-220 —, cross-validated against stock 3.2.0 by `cabi_misuse_harness`'s `cropping_region` case); `Decoder::set_crop_region()` refuses a region past the scaled output and aligns `x` down like `jpeg_crop_scanline` (P4-197, #618). The 12-bit decode paths do not yet honour the region (P4-219) | 🔶 |
 
 ### Decompression (8-bit)
 
 | C Function | Description | Rust | Status |
 |---|---|---|---|
 | `tj3Decompress8(handle, jpeg, size, dst, pitch, pf)` | Decompress JPEG to 8-bit pixels | `decompress()`, `decompress_to()`, `decompress_into()` (caller buffer, #354) — publishes 8 of the 13 parameters `setDecompParameters` writes (P4-199, #620) | 🔶 |
-| `tj3Decompress12(handle, jpeg, size, dst, pitch, pf)` | Decompress to 12-bit | `TjHandle::decompress_12bit()` / `decompress_12bit()` — **12-bit sources only**: upstream 3.2 also decompresses an 8-bit lossy JPEG to 12-bit output, which we refuse (P4-171); publishes 3 of 13 parameters and applies none of the handle's resource limits (P4-199, #620); ignores the cropping region (P4-219) | 🔶 |
+| `tj3Decompress12(handle, jpeg, size, dst, pitch, pf)` | Decompress to 12-bit | `TjHandle::decompress_12bit()` / `decompress_12bit()` — **12-bit sources only**: upstream 3.2 also decompresses an 8-bit lossy JPEG to 12-bit output, which we refuse (P4-171); publishes 3 of 13 parameters and applies none of the handle's resource limits (P4-199, #620); refuses a stored cropping region instead of applying it (P4-219) | 🔶 |
 | `tj3Decompress16(handle, jpeg, size, dst, pitch, pf)` | Decompress to 16-bit | `TjHandle::decompress_16bit()` / `decompress_16bit()` — publishes 3 of 13 parameters and applies none of the handle's resource limits (P4-199, #620) | 🔶 |
 
 ### Decompression to YUV

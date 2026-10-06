@@ -596,7 +596,7 @@ impl TjHandle {
         self.cropping_region = region.filter(|region| *region != Self::UNCROPPED);
     }
 
-    /// `tj3SetCroppingRegion`'s set-time validation (`turbojpeg.c:2083-2111`),
+    /// `tj3SetCroppingRegion`'s set-time validation (`turbojpeg.c:2086-2111`),
     /// against the frame header this handle last read — through
     /// [`Self::decompress_header`] or [`Self::decompress`] — at the current
     /// scaling factor. Returns the region upstream would store: a `width` or
@@ -1009,15 +1009,16 @@ impl TjHandle {
     /// - Ignores `scaling_factor` (`JPEGWIDTH`/`JPEGHEIGHT` must reflect the
     ///   ORIGINAL JPEG dimensions per the libjpeg-turbo spec, not the
     ///   scaled output).
+    /// - Ignores the cropping region, as `tj3DecompressHeader` does.
     /// - Populates `width`, `height`, `precision`, `color_space`,
     ///   `subsampling`, density, and ICC exactly as `decompress()` would,
     ///   but without producing pixel data.
     ///
-    /// Implementation: temporarily reset the scaling factor to 1:1, call
-    /// `decompress()`, then restore. The scaled output from a subsequent
-    /// `decompress()` call is still governed by the original scaling
-    /// factor — this method does NOT clobber user-visible state beyond the
-    /// read-only header params.
+    /// Implementation: temporarily reset the scaling factor to 1:1 and clear
+    /// the cropping region, call `decompress()`, then restore both. The
+    /// output from a subsequent `decompress()` call is still governed by the
+    /// original scaling factor and region — this method does NOT clobber
+    /// user-visible state beyond the read-only header params.
     pub fn decompress_header(&mut self, data: &[u8]) -> Result<()> {
         // The cropping region is suspended for the same reason, and for one
         // more: upstream's tj3DecompressHeader never consults it, so a region

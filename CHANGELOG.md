@@ -144,8 +144,9 @@ and `git log` between tags.
   runs system/Rust bidirectional cross-decodes.
 
 ### Fixed
-- **A cropping region past the scaled output decoded to a degenerate image**
-  (P4-197, #618). `Decoder::set_crop_region(10, 1, 16, 2)` on an 8x8 image
+- **Breaking (behaviour): a cropping region past the scaled output decoded to a
+  degenerate image** (P4-197, #618). A region that used to decode (to zero or
+  clamped columns) now returns `JpegError::InvalidCropRegion`. `Decoder::set_crop_region(10, 1, 16, 2)` on an 8x8 image
   tripped a `debug_assert!` in debug builds and in release returned `Ok` with
   zero columns and the requested crop height silently dropped; any region
   ending past the right or bottom edge was clamped. `Decoder::decode_image`,
@@ -157,8 +158,11 @@ and `git log` between tags.
   `jpeg_crop_scanline` does; a zero width is now refused as it refuses it
   (it used to widen into the columns left of `x`), while a zero height stays
   accepted; `decompress_cropped` still clamps, as documented.
-- **`TjHandle` and `tj3SetCroppingRegion` follow TurboJPEG's cropping rules**
-  (P4-197, #618). `TjHandle::decompress` refuses a left boundary not divisible
+- **Breaking (behaviour): `TjHandle` and `tj3SetCroppingRegion` follow
+  TurboJPEG's cropping rules** (P4-197, #618). C callers see three return-code
+  changes: setting a region before a header is read now fails (-1), `w`/`h` = 0
+  now means "to the edge" (0, was -1), and `tj3Decompress12` with a stored
+  region now fails instead of ignoring it. `TjHandle::decompress` refuses a left boundary not divisible
   by the scaled iMCU width (it was aligned down) and a region past the scaled
   image (it was clamped), and a `width`/`height` of 0 now means "to the edge"
   instead of an empty crop, and the subsampling a crop is checked against is

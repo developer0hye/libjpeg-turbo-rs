@@ -415,7 +415,7 @@ impl Op {
     /// live handle carrying the image's profile and a reference that replays
     /// only the *last* publisher carrying `v`. It does not fire today solely
     /// because `decompress_header` is literally `self.decompress(data)`
-    /// (`src/api/tj3.rs:747-753`) and therefore writes `icc_profile`
+    /// (`src/api/tj3.rs:1022-1034`) and therefore writes `icc_profile`
     /// identically — and making it header-only is the whole point of P4-142
     /// (`docs/last_mile/phase4.md`, OPEN, no issue of its own).
     /// `the_two_publishing_operations_agree_on_the_icc_profile` in

@@ -160,8 +160,9 @@ pub unsafe extern "C" fn tj3SetScalingFactor(
 /// carry upstream's `"tj3SetCroppingRegion(): "` prefix, so `tj3GetErrorStr`
 /// reads the same on both libraries (P4-197, #618). One upstream guard is
 /// not mirrored: "Instance has not been initialized for decompression"
-/// (`turbojpeg.c:2074-2075`) — this shim does not track a handle's init type
-/// for any setter, so a compress-only handle reaches the header check instead.
+/// (`turbojpeg.c:2074-2075`) — this shim records a handle's init type but
+/// consults it in no setter, so a compress-only handle reaches the header
+/// check instead.
 ///
 /// # Safety
 ///

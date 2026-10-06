@@ -53,10 +53,11 @@ impl<'a> StreamingDecoder<'a> {
     /// (`jdapistd.c: JERR_WIDTH_OVERFLOW`), so does an origin exactly *at* the
     /// width and a zero width. Narrowing to C's rule would change what
     /// existing callers get back and belongs to P4-103, which owns
-    /// `jpeg_crop_scanline` semantics. The one window this can return with
-    /// zero width — an origin at the width that is also an iMCU boundary — is
-    /// accepted here and refused by `decode()`, which refuses a zero-width
-    /// crop as `jpeg_crop_scanline` does (P4-197, #618).
+    /// `jpeg_crop_scanline` semantics. The windows this can return with zero
+    /// width — a zero `width` at an iMCU-aligned origin, or an origin at the
+    /// width when the width is itself an iMCU boundary — are accepted here
+    /// and refused by `decode()`, which refuses a zero-width crop as
+    /// `jpeg_crop_scanline` does (P4-197, #618).
     ///
     /// Both bounds are in **output** (post-scale) space, which is what
     /// `set_crop` consumes — call `set_scale` first. The unscaled
