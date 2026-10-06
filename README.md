@@ -28,6 +28,9 @@ The crate-level doctests mirror these snippets and are compile-checked
 (`cargo test --doc`); the doctest decode calls `decompress`, the
 format-defaulting sibling of `decompress_to`. Runnable examples live in
 [`examples/`](examples/README.md).
+Choosing an integration path and evaluating it on your own images:
+[`docs/ADOPTION_GUIDE.md`](docs/ADOPTION_GUIDE.md); every other document:
+[`docs/README.md`](docs/README.md).
 
 ## How it compares
 
@@ -204,7 +207,10 @@ per kernel on the real device, and keep it off if you cannot.
 **MSRV: 1.87** for the root and capi crates, CI-enforced (`cargo +1.87
 check` job). The `image`-bridge crate is 1.88 (inherited from
 `image@0.25`). MSRV bumps are considered minor, never patch, changes and
-are called out in `CHANGELOG.md`.
+are called out in `CHANGELOG.md`. The full versioning, MSRV, feature,
+deprecation, error and thread-safety policy — and which modules are public
+API — is [`docs/STABILITY.md`](docs/STABILITY.md); to report a vulnerability,
+see [`SECURITY.md`](SECURITY.md).
 
 | Target | SIMD | Notes |
 | --- | --- | --- |
@@ -459,5 +465,7 @@ at your option.
 ## Acknowledgments
 
 This software is based in part on the work of the Independent JPEG Group.
+`libjpeg-turbo-rs` is an independent project; it is not affiliated with or
+endorsed by the libjpeg-turbo project or the IJG.
 
 Algorithms and implementation techniques referenced from [libjpeg-turbo](https://github.com/libjpeg-turbo/libjpeg-turbo) (IJG License / Modified BSD License) and [zune-jpeg](https://github.com/etemesi254/zune-image).
