@@ -1278,7 +1278,7 @@ The one non-obvious piece was the **scan script**. `jpeg_simple_progression` tak
 
 **Acceptance criteria.** Peak RSS for a streaming baseline decode of the 8K fixture bounded by intermediates + a fixed input window (measured); slice-path throughput unchanged on the full matrix (recorded in `experiments/`); design reviewed against P4-26 before implementation.
 
-**Status (2026-07-28): closed.** `decompress_from_reader_incremental` (src/api/incremental.rs) decodes interleaved single-scan Huffman baseline streams from a sliding window: per-MCU-row checkpoints on a window-aware `BitReader` (additive `is_final`/`starved` fields; the slice path constructs with `is_final=true` where starvation cannot fire), retry-on-starvation, front-compaction of committed bytes, and plane injection into `decode_baseline_planes` so the whole existing output pipeline is reused. Peak input storage measured at 195,985 bytes of allocation capacity (entropy window + header prefix + the fixed 64 KiB read-staging buffer; the instrumented metric counts capacities, not live bytes) on the 1.25 MB 1080p fixture fed in ≥ 64 KiB reads — 129,203 at the 8 KiB feed the test drives — asserted ≤ 256 KiB in `tests/regression_issue_357_incremental_reader.rs`, and size-independent in the strongest sense: the full-chunk-feed peak is exactly 195,985 bytes on the 1.25 MB 1080p, 5.0 MB 4K, and 8K corpus fixtures alike (all three asserted, closing the criterion's 8K clause as written). Slice-path throughput unchanged on the full decode matrix (`experiments/pipeline.tsv`: 27 benchmarks compared branch-vs-main sequentially on a quiet host — zero criterion regression verdicts, every change midpoint within [-1.13%, +0.30%]; spot figures 416.20 µs branch vs 416.99 µs main on decode_640x480). P4-26 co-design: the P4-13 marker-boundary scanner was lifted to `src/decode/boundary.rs` and the capi shim re-imports it — one scanner drives both mechanisms. Scope note (corrects the original filing's baseline/progressive split): the windowable set is *interleaved* baseline only. Multi-component non-interleaved baseline and progressive walk the full entropy stream during header parse (`marker.rs` `skip_entropy_data`, reached only when the scan carries fewer components than the frame) and take the documented buffering fallback. Single-component/grayscale streams stop at the first SOS like interleaved baseline, but decode through P4-27's one-block raster (`pipeline_impl/baseline.rs:55-56` routes `scan.components.len() == 1` to `decode_non_interleaved_baseline_planes`), which the row loop does not model — so they fall back as well, as do arithmetic/lossless/12-bit.
+**Status (2026-07-28): closed.** `decompress_from_reader_incremental` (src/api/incremental.rs) decodes interleaved single-scan Huffman baseline streams from a sliding window: per-MCU-row checkpoints on a window-aware `BitReader` (additive `is_final`/`starved` fields; the slice path constructs with `is_final=true` where starvation cannot fire), retry-on-starvation, front-compaction of committed bytes, and plane injection into `decode_baseline_planes` so the whole existing output pipeline is reused. Peak input storage measured at 195,985 bytes of allocation capacity (entropy window + header prefix + the fixed 64 KiB read-staging buffer; the instrumented metric counts capacities, not live bytes) on the 1.25 MB 1080p fixture fed in ≥ 64 KiB reads — 129,203 at the 8 KiB feed the test drives — asserted ≤ 256 KiB in `tests/regression_issue_357_incremental_reader.rs`, and size-independent in the strongest sense: the full-chunk-feed peak is exactly 195,985 bytes on the 1.25 MB 1080p, 5.0 MB 4K, and 8K corpus fixtures alike (all three asserted, closing the criterion's 8K clause as written). Slice-path throughput unchanged on the full decode matrix (`experiments/pipeline.tsv`: 27 benchmarks compared branch-vs-main sequentially on a quiet host — zero criterion regression verdicts, every change midpoint within [-1.13%, +0.30%]; spot figures 416.20 µs branch vs 416.99 µs main on decode_640x480). P4-26 co-design: the P4-13 marker-boundary scanner was lifted to `src/decode/boundary.rs` and the capi shim re-imports it — one scanner drives both mechanisms. Scope note (corrects the original filing's baseline/progressive split): the windowable set is *interleaved* baseline only. Multi-component non-interleaved baseline and progressive walk the full entropy stream during header parse (`marker.rs` `skip_entropy_data`, reached only when the scan carries fewer components than the frame) and take the documented buffering fallback. Single-component/grayscale streams stop at the first SOS like interleaved baseline, but decode through P4-27's one-block raster (`pipeline_impl/baseline.rs:56-57` routes `scan.components.len() == 1` to `decode_non_interleaved_baseline_planes`), which the row loop does not model — so they fall back as well, as do arithmetic/lossless/12-bit.
 
 ## P4-60. Scalar Kernels Are ~2.5x Slower Than C's Scalar Kernels — **OPEN**
 
@@ -8804,7 +8804,8 @@ the harness first would only pin current behaviour.
     This is also the one suite of the four without a wasm guard, so
     `wasm.yml`'s `cargo test --target wasm32-wasip1` runs its four
     interpreter-independent tests under `wasmtime` as well (verified).
-  - `tests/miri_alloc_failure.rs` (4 tests, 35 s under Miri) injects the refusal from a
+  - `tests/miri_alloc_failure.rs` (4 tests and 35 s under Miri when landed; 7
+    tests since P4-209, not re-timed) injects the refusal from a
     `#[global_allocator]` that fails an allocation of an **exact size**, armed
     on the calling thread, so one test cannot reach another's, the harness's own
     allocations are never refused, and a `>=` rule cannot catch an *infallible*
@@ -8816,6 +8817,9 @@ the harness first would only pin current behaviour.
     `AllocationFailed` **naming the buffer and its size** (a bare `matches!` on
     the variant would have accepted a refusal from any other call site), and
     the *same decoder* then produces bytes identical to an unrefused decode.
+    The fourth, the mainline contract, was `#[ignore]`d until P4-209
+    (2026-10-07), which un-ignored it and added three more converted decode
+    sites in the same shape.
   - `tests/miri_once_init.rs` (2 tests, one of them runnable under Miri, ~11 s
     per seed) races `std_huffman_tables`'s `AtomicPtr` once-cell in a process that
     has not touched it — which is why it is its own binary:
@@ -8899,8 +8903,8 @@ the harness first would only pin current behaviour.
   Miri-ignored — see P4-209). Verified by patching that one
   site to `try_filled_vec`, after which the contract test passes unchanged; it was
   committed `#[ignore]`d citing the issue, and P4-209 closed 2026-10-07 by
-  deleting the attribute, converting the other geometry-sized decode
-  allocations, and gating the rest with `tests/decode_alloc_gate.rs`.
+  deleting the attribute, converting the other geometry-sized allocations
+  under `src/decode/`, and gating the rest with `tests/decode_alloc_gate.rs`.
   **What remains in this criterion** is the pre-existing integration suites.
   They are not one edit away: `cargo miri test --test decode_limits` interprets
   the first handful of its tests and then stops with "can't call foreign
@@ -12473,7 +12477,7 @@ size; un-ignored on the unfixed tree it died with
 triage measured **78** infallible-allocation lines (`vec![…]`,
 `Vec::with_capacity(…)`, `.to_vec()`) in non-test `src/decode/` code — the
 issue's 59 was a narrower grep, and counting inline `#[cfg(test)]` modules
-gives 115 — and **36 were converted** to `common::try_alloc`: every
+gives 113 — and **36 were converted** to `common::try_alloc`: every
 component plane not already fallible (baseline ×2, the arithmetic multi-scan
 twin, the windowed-streaming planes, lossless ×4), every destination
 (`take_out_buf`, the 12-bit downscale ×5, the grayscale exact-copy, the lenient
