@@ -12522,3 +12522,43 @@ buffers trade `vec![0; n]`'s `alloc_zeroed` for `try_reserve_exact` plus an
 explicit fill. `experiments/progressive.tsv` measured that exact swap neutral on
 an 8K progressive decode (P4-136 criterion 4); the baseline mainline has no row
 of its own yet.
+
+## P4-215. Lenient Decodes Collect One Warning String per Corrupt MCU Without a Cap, and Clone the List Infallibly Into Every `Image` — **OPEN**
+
+**GitHub:** [#641](https://github.com/developer0hye/libjpeg-turbo-rs/issues/641) — found 2026-10-07 by the P4-209 allocation audit.
+
+A lenient baseline decode pushes one `DecodeWarning::HuffmanError` with a heap
+`String` per corrupt MCU, unbounded, so a stream corrupt everywhere produces a
+list proportional to the MCU count (about 16.7 M entries for a 65500x65500
+frame). The list is then `warnings.clone()`d infallibly at about a dozen
+`Image` construction sites in `src/decode/pipeline_impl/output.rs`, which
+`tests/decode_alloc_gate.rs` cannot see because it matches allocation macros
+textually. C counts warnings (`num_warnings`) and keeps one message.
+
+**Acceptance criteria.** (1) The list is bounded — a cap plus a "further
+warnings suppressed" entry, or a count plus first/last messages — and the bound
+is documented on `DecodeWarning`/`Image::warnings`. (2) The list is moved into
+the `Image`, or cloned fallibly. (3) A test drives a fully corrupt lenient
+decode and asserts the bound.
+
+**Why deferred.** Found while closing P4-209, whose scope was the allocation
+macros under `src/decode/`; bounding warnings is an API-visible decision.
+
+## P4-216. The 12-/16-Bit Decode Entry Points in `src/api` Still Allocate Geometry-Sized Buffers Infallibly — **OPEN**
+
+**GitHub:** [#642](https://github.com/developer0hye/libjpeg-turbo-rs/issues/642) — found 2026-10-07 by the P4-209 allocation audit, which was scoped to `src/decode/`.
+
+`api::precision::decompress_12bit`/`decompress_16bit` and the `src/api/`
+modules that build their planes allocate geometry-derived buffers with
+`vec![…; n]`, so a 12-bit or lossless-16 decode still aborts on allocator
+refusal — the defect P4-209 removed from the 8-bit path. With P4-199 (these
+entry points ignore the handle's limits) the size is bounded only by the
+default `max_pixels`.
+
+**Acceptance criteria.** (1) Every geometry-derived allocation reachable from
+the 12/16-bit decode entry points goes through `common::try_alloc`. (2) The
+decode allocation gate, or a sibling, covers those `src/api/` modules. (3)
+`tests/miri_alloc_failure.rs` gains a 12-bit refusal case.
+
+**Why deferred.** Outside P4-209's `src/decode/` scope; the precision entry
+points are also being reworked by P4-199.
