@@ -11258,9 +11258,14 @@ leaves the block, plus canary-padded twins for legs without a sanitizer:
 lib unit test; they now also fail on a runner without AVX2 (where these tests
 compare fallbacks) and re-run `-- kernel_bounds_tests`, requiring the six
 x86_64 tests to pass. `tests/sanitizer_coverage_gate.rs` holds that step's
-count to the modules' `#[test]`s and rejects a filter, `--skip`, `--no-run`,
-`if:` or `continue-on-error:` on either job, driven over mutations of the real
-workflow. The workflow header's claim that "the lib tests already cover every
+count to the modules' `#[test]`s and rejects, each driven over a mutation of
+the real workflow: a dropped `pull_request` trigger or an added `paths`
+filter; a job's `RUSTFLAGS` dropped or overridden at step level; a filter,
+`--skip` or positional `TESTNAME` on the full `--lib` run (its cargo
+arguments are allowlisted); `--no-run`; a confirmation step without its
+`pipefail`, count comparison or `exit 1`; and `if:` or `continue-on-error:` on
+either job. `.github/CODEOWNERS` routes the gate, both test modules and the
+workflow to the maintainer. The workflow header's claim that "the lib tests already cover every
 unsafe block" is corrected.
 
 Discrimination, measured on the aarch64 host by mutating a kernel and
