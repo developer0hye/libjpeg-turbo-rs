@@ -1197,6 +1197,141 @@ static int case_alloc_ownership(const unsigned char *jpeg, size_t jpeg_len) {
     return 0;
 }
 
+/* `tj3SetCroppingRegion` (`turbojpeg.c:2068-2115`), rule by rule, in the order
+ * upstream applies them (P4-197, #618): the all-zero region clears, a negative
+ * field is "Invalid cropping region", nothing else is accepted before a header
+ * has been read, a lossless frame is refused, a left boundary off the scaled
+ * iMCU grid is refused, a zero width/height runs to the edge, and a region past
+ * the *scaled* image is refused — at 1/1 and at 1/2, so the bound is measured
+ * against the scaled size and not the SOF's. Each refusal prints its
+ * `tj3GetErrorStr`, so the two libraries must agree on the words as well as on
+ * the return code.
+ *
+ * Every accepted region is decoded into a guarded buffer of exactly the
+ * cropped size: a library that honoured the region at set time but decoded a
+ * wider or taller image would fault on the guard page. One decode follows a
+ * refusal, to show the refused call left the previous region in place
+ * (upstream's THROW skips the assignment at `:2111`).
+ *
+ * The fixture is testorig.jpg: 227x149, 4:2:0, so a 16-pixel iMCU at 1/1 and
+ * 8 at 1/2. */
+static int crop_rc(tj_handle_t handle, const char *label, int x, int y, int w,
+                   int h) {
+    tj_region_t region = { x, y, w, h };
+    int rc = api.set_cropping_region(handle, region);
+    printf("%s_rc=%d\n", label, rc);
+    if (rc != 0) {
+        /* The divisibility message spans two lines upstream; the transcript is
+         * one `key=value` per line, so the newline is printed escaped. */
+        const char *err = api.get_error_str(handle);
+        printf("%s_err=", label);
+        for (; err && *err; err++) {
+            if (*err == '\n')
+                fputs("\\n", stdout);
+            else
+                putchar(*err);
+        }
+        putchar('\n');
+    }
+    return rc;
+}
+
+/* Decode with the stored region into a destination of exactly
+ * `width x height` RGB pixels. */
+static int crop_decode(tj_handle_t handle, const char *label,
+                       const unsigned char *jpeg, size_t jpeg_len, int width,
+                       int height) {
+    guarded_buf dst;
+    if (guarded_alloc(&dst, (size_t)width * (size_t)height * 3,
+                      "cropped destination") != 0)
+        return 2;
+    int rc = api.decompress8(handle, jpeg, jpeg_len, dst.data, 0, TJPF_RGB);
+    printf("%s_decode_rc=%d\n", label, rc);
+    require(rc == 0, "a region both libraries accept decodes");
+    printf("%s_decode_canary=%s\n", label,
+           canary_intact(&dst) ? "intact" : "corrupt");
+    printf("%s_decode_pixels=%016llx\n", label,
+           (unsigned long long)fnv1a(dst.data, dst.len));
+    int intact = canary_intact(&dst);
+    require(intact, "cropped destination canary");
+    guarded_free(&dst);
+    return intact ? 0 : 2;
+}
+
+#define TJPARAM_LOSSLESS 15
+
+static int case_cropping_region(const unsigned char *jpeg, size_t jpeg_len) {
+    tj_handle_t handle = api.init(TJINIT_DECOMPRESS);
+    if (!handle) return 2;
+
+    crop_rc(handle, "preheader_clear", 0, 0, 0, 0);
+    crop_rc(handle, "preheader_negative", -1, 0, 16, 16);
+    crop_rc(handle, "preheader_region", 0, 0, 16, 16);
+
+    int width = 0, height = 0;
+    if (probe(handle, jpeg, jpeg_len, &width, &height) != 0) {
+        fprintf(stderr, "fixture header did not decode\n");
+        return 2;
+    }
+    printf("width=%d\nheight=%d\n", width, height);
+
+    /* 1/1: 16-pixel iMCU. */
+    int failed = 0;
+    if (crop_rc(handle, "fill_to_edge", 16, 8, 0, 0) == 0)
+        failed |= crop_decode(handle, "fill_to_edge", jpeg, jpeg_len,
+                              width - 16, height - 8);
+    if (crop_rc(handle, "interior", 32, 16, 64, 48) == 0)
+        failed |= crop_decode(handle, "interior", jpeg, jpeg_len, 64, 48);
+    crop_rc(handle, "unaligned_x", 8, 0, 16, 16);
+    crop_rc(handle, "x_past_width", 240, 0, 16, 16);
+    crop_rc(handle, "x_past_width_fill", 240, 0, 0, 16);
+    crop_rc(handle, "x_plus_w_past_width", 208, 0, 32, 16);
+    crop_rc(handle, "y_plus_h_past_height", 0, 140, 16, 16);
+    crop_rc(handle, "y_past_height_fill", 0, 150, 16, 0);
+    crop_rc(handle, "negative_width", 0, 0, -1, 16);
+    /* Every refusal above left `interior` in place. */
+    failed |= crop_decode(handle, "after_refusals", jpeg, jpeg_len, 64, 48);
+
+    /* 1/2: 114x75 and an 8-pixel iMCU. */
+    tj_scaling_factor_t half = { 1, 2 };
+    printf("scale_half_rc=%d\n", api.set_scaling_factor(handle, half));
+    int half_width = (width + 1) / 2, half_height = (height + 1) / 2;
+    if (crop_rc(handle, "half_interior", 8, 4, 100, 60) == 0)
+        failed |= crop_decode(handle, "half_interior", jpeg, jpeg_len, 100, 60);
+    if (crop_rc(handle, "half_fill_to_edge", 104, 0, 0, 0) == 0)
+        failed |= crop_decode(handle, "half_fill_to_edge", jpeg, jpeg_len,
+                              half_width - 104, half_height);
+    crop_rc(handle, "half_unaligned_x", 4, 0, 16, 16);
+    /* 16 + 100 fits the unscaled 227 and not the scaled 114. */
+    crop_rc(handle, "half_x_plus_w_past_width", 16, 0, 100, 16);
+    crop_rc(handle, "half_y_plus_h_past_height", 0, 70, 16, 10);
+    api.destroy(handle);
+
+    /* A lossless frame cannot be partially decompressed. */
+    const int lw = 16, lh = 16;
+    unsigned char gray[16 * 16];
+    for (int i = 0; i < lw * lh; i++) gray[i] = (unsigned char)(i * 7);
+    tj_handle_t compressor = api.init(TJINIT_COMPRESS);
+    if (!compressor) return 2;
+    require(api.set(compressor, TJPARAM_LOSSLESS, 1) == 0,
+            "TJPARAM_LOSSLESS is settable");
+    unsigned char *lossless = NULL;
+    size_t lossless_len = 0;
+    int crc = api.compress8(compressor, gray, lw, 0, lh, TJPF_GRAY, &lossless,
+                            &lossless_len);
+    printf("lossless_compress_rc=%d\n", crc);
+    api.destroy(compressor);
+    if (crc != 0 || !lossless) return 2;
+    tj_handle_t decompressor = api.init(TJINIT_DECOMPRESS);
+    if (!decompressor) { api.free(lossless); return 2; }
+    printf("lossless_header_rc=%d\n",
+           api.decompress_header(decompressor, lossless, lossless_len));
+    crop_rc(decompressor, "lossless_region", 0, 0, 8, 8);
+    api.destroy(decompressor);
+    api.free(lossless);
+    return failed ? 2 : 0;
+}
+
 /* A 12-bit round trip across the ABI.  No 12-bit entry point crossed the C
  * boundary under a sanitizer before this case existed — the other named half
  * of P4-141 criterion 2's C-boundary gap. */
@@ -1340,7 +1475,7 @@ int main(int argc, char **argv) {
     /* A deadlock is exactly the class of defect `concurrent_handles` exists to
      * find, and an unbounded one would hang this child forever: the Rust
      * runner blocks on `Command::output()` until EOF and the sanitizer job's
-     * `timeout-minutes` covers all ten cases at once, so a wedge would surface
+     * `timeout-minutes` covers all eleven cases at once, so a wedge would surface
      * as an unattributed job timeout — the opposite of one case per process.
      * Every case runs in well under a second, ASan included; a minute is two
      * orders of magnitude of headroom, and blowing it reads as `killed by
@@ -1363,7 +1498,8 @@ int main(int argc, char **argv) {
         strcmp(case_name, "pitch_boundaries") == 0 ||
         strcmp(case_name, "max_dimensions") == 0 ||
         strcmp(case_name, "concurrent_handles") == 0 ||
-        strcmp(case_name, "alloc_ownership") == 0;
+        strcmp(case_name, "alloc_ownership") == 0 ||
+        strcmp(case_name, "cropping_region") == 0;
     if (needs_fixture && !jpeg) {
         fprintf(stderr, "case %s needs a fixture path\n", case_name);
         return 3;
@@ -1388,6 +1524,8 @@ int main(int argc, char **argv) {
         rc = case_concurrent_handles(jpeg, jpeg_len);
     } else if (strcmp(case_name, "alloc_ownership") == 0) {
         rc = case_alloc_ownership(jpeg, jpeg_len);
+    } else if (strcmp(case_name, "cropping_region") == 0) {
+        rc = case_cropping_region(jpeg, jpeg_len);
     } else if (strcmp(case_name, "precision12") == 0) {
         rc = case_precision12();
     } else if (strcmp(case_name, "selftest_guard_page") == 0) {

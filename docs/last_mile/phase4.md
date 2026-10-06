@@ -1383,7 +1383,7 @@ C expands instead of ignoring: `djpeg -rgb` on a `cjpeg -precision 12` grayscale
 | Source | Result |
 |---|---|
 | 8-bit baseline YCbCr (4:2:0) | panic, now `pipeline_impl/color.rs:517` (`grayscale/cmyk handled separately`) |
-| 8-bit baseline grayscale | panic, now `pipeline_impl/output.rs:993` (grayscale expansion match) |
+| 8-bit baseline grayscale | panic, now `pipeline_impl/output.rs:1012` (grayscale expansion match) |
 | 8-bit lossless grayscale (SOF3) | panic, now `pipeline_impl/lossless.rs:376` (`lossless_output_grayscale` match) |
 | 12-bit grayscale | `Unsupported("cannot convert 12-bit JPEG to Cmyk")` — the #394 fix |
 
@@ -2426,6 +2426,14 @@ the requested right edge, and updates output/component geometry.
 subsampling/scaling/grayscale, invalid null/zero/out-of-bounds/after-read calls,
 returned x/width/output_width, component geometry, and subsequent row bytes.
 The 12-bit initialization/order portion remains in P4-98.
+
+**Noted 2026-10-07 by P4-197 (#618), which left this entry point alone.** The
+out-of-bounds half is concrete: for `xoffset + width > output_width` (and for
+`xoffset >= output_width`) the shim clamps — `x = output_width, width = 0`, or
+`width = output_width - x` — and returns, where `jdapistd.c:213-216` raises
+`JERR_WIDTH_OVERFLOW` (as it does for a zero width); a NULL pointer returns silently where `:210-211` raises
+`JERR_BAD_CROP_SPEC`. `jpeg12_crop_scanline` has the same clamp. The Rust
+`Decoder` and TurboJPEG paths now refuse such regions; this one does not.
 
 **Extended 2026-08-17 by the [P4-130](#p4-130-c-parity-oracle-is-pinned-to-3141-upstream-stable-is-320--partial-every-oracle-provisioning-job-is-pinned-checked-and-measured-and-the-submodule-is-at-320-two-jobs-still-on-one-release-and-the-four-filed-gaps-remain)
 3.2 delta triage.** 3.2.0 note 3 hardened this entry point, and the delta is
@@ -7883,14 +7891,15 @@ an infallible constructor and so needs an API decision (panic, or a fallible
 
 * **Criterion 3 — done, and it is the load-bearing one.** The rule is enforced
   by `tests/sizing_arithmetic_gate.rs` against
-  `docs/sizing_arithmetic_inventory.tsv`, which classifies all 86 remaining
-  `saturating_*` occurrences (73 distinct lines) in library sources. A new one fails the build until
+  `docs/sizing_arithmetic_inventory.tsv`, which classifies all 83 remaining
+  `saturating_*` occurrences (70 distinct lines; 86 across 73 until P4-197
+  deleted three crop clamps on 2026-10-07) in library sources. A new one fails the build until
   a human classifies it; a stale row fails until it is removed. **Naming the
   mechanism was part of the criterion, so: it is a test, not a grep or a review
   checklist** — a test runs on every CI leg and cannot be skipped by a reviewer
   in a hurry.
 
-  Scope covers `saturating_mul`/`add`/`sub` — 86 occurrences across 73 lines.
+  Scope covers `saturating_mul`/`add`/`sub` — 83 occurrences across 70 lines.
   **`wrapping_*` is deliberately excluded, which narrows the criterion's literal
   wording** ("no `saturating_*` or `wrapping_*`"), so it is recorded here rather
   than left implicit. It is the IDCT's C-parity idiom at 244 sites where
@@ -8529,13 +8538,13 @@ the harness first would only pin current behaviour.
   under the default level the raw APP segments would distinguish them even if
   the parsed fields did not.
   It produced one defect on its first run:
-  [P4-197](#p4-197-a-cropping-region-whose-left-boundary-exceeds-the-scaled-width-decodes-to-zero-columns-and-trips-a-false-debug_assert--open)
+  [P4-197](#p4-197-a-cropping-region-whose-left-boundary-exceeds-the-scaled-width-decodes-to-zero-columns-and-trips-a-false-debug_assert--closed-2026-10-07)
   (#618), a crop whose left boundary is past the scaled width decoding to
   zero columns, tripping a `debug_assert!` whose comment calls that state
   unreachable and, in release, silently dropping the requested crop height.
-  Upstream refuses the region (`turbojpeg.c:2106-2109`). The generator pins
-  crop `x` to 0 until that closes, in code and with the item's number, and
-  criterion 5 of P4-197 is to remove the pin.
+  Upstream refuses the region (`turbojpeg.c:2106-2109`). The generator pinned
+  crop `x` to 0 until that closed; P4-197 closed 2026-10-07 and removed the
+  pin, so the generator draws `x` from 0..16 again.
   Writing the oracle down produced two more, both from the same question the
   criterion-4 inventory asked of every `unsafe` site — *what is this call
   allowed to read, and what is it allowed to write?*
@@ -10435,8 +10444,8 @@ and run in the subsampling matrices — and two are not:
   repository, so a caller passing it hits our unknown-value path.
 
 `TJPARAM_SAVEMARKERS` itself is **not** part of this gap, and an earlier draft
-of this entry wrongly said it was: `src/api/tj3.rs:303` accepts levels 0-4 and
-`:841` wires 2 to all markers and 4 to ICC-only extraction from the JPEG. What
+of this entry wrongly said it was: `src/api/tj3.rs:509` accepts levels 0-4 and
+`:1164` wires 2 to all markers and 4 to ICC-only extraction from the JPEG. What
 note 9 adds on top is the *PNG* side of that transfer, which is tracked with
 the PNG work in P4-174 — a marker level with no PNG to transfer to or from has
 no observable behaviour to compare.
@@ -10954,6 +10963,12 @@ differential tests, and nothing regresses meanwhile — the paths that accepted 
 narrow pitch before the bump accept one after it, and the 3.2.0 legs never
 sent one.
 
+
+**Also noted (2026-10-07, P4-197):** every decompress error here carries the
+prefix `tj3Decompress8: …` where upstream writes `tj3Decompress8(): …`
+(`turbojpeg.c` `THROW` uses the function name with `()`); recorded in
+`crop_region_sampling_c_parity.rs`, which compares messages after that
+prefix. Same family as this item's `tj3GetErrorStr` divergence.
 ## P4-185. TurboJPEG Memory-Destination Allocation Failure Reports a Bespoke String Instead of libjpeg's `JERR_OUT_OF_MEMORY` Message — **OPEN**
 
 **GitHub:** [#592](https://github.com/developer0hye/libjpeg-turbo-rs/issues/592) — found 2026-09-07 by the
@@ -11648,7 +11663,7 @@ request, which is a documentation-and-gate change: the fix touches three call
 sites plus a CI leg, and criterion 3 of it is a workflow edit whose value is
 that it *runs*, which a documentation PR cannot demonstrate.
 
-## P4-197. A Cropping Region Whose Left Boundary Exceeds the Scaled Width Decodes to Zero Columns and Trips a False `debug_assert!` — **OPEN**
+## P4-197. A Cropping Region Whose Left Boundary Exceeds the Scaled Width Decodes to Zero Columns and Trips a False `debug_assert!` — **CLOSED 2026-10-07**
 
 **GitHub:** [#618](https://github.com/developer0hye/libjpeg-turbo-rs/issues/618) — found 2026-09-09 by the P4-141 criterion-3 API-sequence harness on its first run; under the [#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481) umbrella.
 
@@ -11734,6 +11749,124 @@ crop-plus-scale cross-check suites — so it needs its own C cross-validation
 pass, and folding it into a harness PR would put a decode-pipeline change
 behind a test-infrastructure review.
 
+**Status (2026-10-07): closed.** Per criterion:
+
+1. `Decoder::check_crop_region` (`src/decode/pipeline_impl/output.rs`)
+   refuses `x + width > output_width()` or `y + height > output_height()` —
+   `djpeg -crop`'s bound (`djpeg.c:854-858`) — with the new
+   `JpegError::InvalidCropRegion { reason }`, whose `reason` is upstream's
+   "The cropping region exceeds the scaled image dimensions". It runs in
+   `decode_image_inner` (so `decode_image` and `decode_image_into`) after the
+   `JERR_CONVERSION_NOTIMPL` refusal and before any decoding, and in
+   `output_buffer_size`, so size → allocate → decode cannot size a region the
+   decode refuses. A zero width is refused too, as `jpeg_crop_scanline`
+   refuses it (`jdapistd.c:213-216`) — aligned down, it used to widen into
+   columns nobody asked for (`set_crop(5, 0)` decoded five); a zero height
+   stays accepted, since `StreamingDecoder::skip_scanlines` skips to the
+   bottom with `y = output_height, height = 0` (cross-checked against
+   `djpeg -skip 0,7`). `TjHandle::decompress` resolves the stored region
+   against the image it decodes with `tj3SetCroppingRegion`'s full rule set
+   and message text (below), then holds the decoder to it as upstream's
+   `turbojpeg-mp.c:217-225` does: an `x` the decoder's own iMCU would move is
+   refused with "Unexplained mismatch … left boundary" (a `cjpeg -sample
+   2x1,2x1,2x1` frame is TJSAMP_444 to TurboJPEG but decodes in 16-pixel
+   columns; stock 3.2.0 refuses `x = 8` with the same text, measured with a C
+   probe; `crates/libjpeg-turbo-rs-capi/tests/crop_region_sampling_c_parity.rs`
+   drives stock 3.2.0 and our cdylib, one library per child process, through
+   header → set → decode on four committed `cjpeg -sample` layouts
+   (`tests/fixtures/crop_sampling_*.jpg`) and three regions each, and requires
+   identical return codes, messages and pixels — 12 of 12 match; `tests/
+   tj3_handle.rs::handle_cropping_region_follows_turbojpeg_on_nonstandard_sampling`
+   pins the Rust API to the same outcomes), and a decode whose
+   size differs from the region is refused rather
+   than returned — before this, both reached the C ABI as an image wider than
+   the caller's buffer. `decompress_12bit` / `decompress_16bit` take no region
+   yet, so they refuse a stored one ([P4-219](#p4-219-12-bit-decodes-ignore-the-horizontal-crop-and-tjhandles-1216-bit-decompress-ignores-the-cropping-region-entirely--open),
+   filed here). `tests/crop_region_bounds.rs::
+   crop_bounds_agree_with_djpeg` drives nine regions around the scaled edges
+   of a grayscale, a 4:4:4 and a 4:2:0 frame at 1/1 and 1/2 and requires
+   accept/refuse to match `djpeg -crop` on all 54 (18 accepted, 36 refused),
+   with djpeg's dimensions on every accepted one and djpeg's pixels where the
+   cropped decode is pixel-exact (grayscale, 4:4:4). Other entry points:
+   `decompress_cropped` clamps by documented contract, so the check it reaches
+   through `decode_image` never fires; `ScanlineDecoder::set_crop_x` already
+   refused (`Unsupported`); `StreamingDecoder::crop_scanline` hands the
+   decoder an in-bounds region, zero-width for a zero `width` at an
+   iMCU-aligned origin or an origin at an iMCU-aligned width, which `decode()`
+   then refuses;
+   the classic `jpeg_crop_scanline` / `jpeg12_crop_scanline` still clamp where
+   upstream raises `JERR_WIDTH_OVERFLOW` — recorded under
+   [P4-103](#p4-103-jpeg_crop_scanline-does-not-implement-imcu-aligned-c-semantics--open),
+   which owns that entry point.
+2. Upstream validates at set time because its handle has read a header; ours
+   now records the same facts. `TjHandle::decompress` stores a private
+   `CroppingGeometry` (SOF width/height, `TJSAMP_*`, precision, lossless —
+   what `setDecompParameters` records, `turbojpeg.c:514-536`; the `TJSAMP_*`
+   comes from a line-for-line port of `getSubsamp`, `:431-510`, because
+   `Decoder::jpeg_subsampling` compares luma with the first chroma component
+   only and read `2x2,1x1,2x2` as 4:2:0 where upstream refuses to crop it —
+   codex review) and the new
+   `TjHandle::resolve_cropping_region` applies `tj3SetCroppingRegion`'s checks
+   in upstream's order (`:2086-2111`). The C ABI's `tj3SetCroppingRegion`
+   keeps the all-zero and negative checks and calls it, so it refuses before
+   any header ("JPEG header has not yet been read"), for a lossless frame, off
+   the iMCU grid and past the scaled image, fills a zero width/height to the
+   edge (it used to refuse it), keeps the previous region on a refusal, and
+   reports `"tj3SetCroppingRegion(): <upstream message>"`. `TjHandle::
+   set_cropping_region` itself stays infallible and validation-free: making
+   it fail on "no header" would make a decode's outcome depend on which image
+   an earlier call read, which the P4-141 API-sequence oracle's P1 ("a
+   decode depends only on configuration and input") correctly flags.
+   `decompress_header` now suspends the region, as `tj3DecompressHeader`
+   ignores it — which also moved one row of
+   [P4-200](#p4-200-jpegwidth--jpegheight-publish-the-scaled-and-cropped-output-dimensions-where-upstream-publishes-the-sofs--open)'s
+   table. Cross-validation: the new `cropping_region` case of
+   `crates/libjpeg-turbo-rs-capi/examples/cabi_misuse_harness.c` (in `CASES`
+   and in `sanitizers.yml`'s ASan loop) walks before-header, `x` past the
+   width, `x + w` past the width, `y + h` past the height, zero-fill past the
+   edge, unaligned `x`, negative `w`, accepted regions and a lossless frame,
+   at 1/1 and 1/2, decoding each accepted region into a guard-page buffer of
+   exactly the cropped size. Against stock libjpeg-turbo 3.2.0 the 51-line
+   transcript is byte-identical — return codes, every `tj3GetErrorStr` and
+   the pixel hashes of the five cropped decodes, 4:2:0 included.
+3. **The iMCU rule, decided per API.** TurboJPEG (`TjHandle`, `tj3*`) refuses
+   an `x` not divisible by the scaled iMCU width, with upstream's message
+   (`turbojpeg.c:2096-2101`): its callers size their destination from the
+   region they passed, so aligning down would hand back a wider image than
+   they allocated for. `Decoder::set_crop` / `set_crop_region` keep aligning
+   down and widening by the same amount — the libjpeg contract
+   `jpeg_crop_scanline` implements and `djpeg -crop` exposes, already
+   documented as "auto-aligned" and pinned by `tests/crop_c_compat.rs`,
+   `crop_skip.rs`, `cross_check_crop_scale.rs` and `c_croptest.rs`. The
+   alignment never changes the bounds check: the right edge stays
+   `x + width`. Recorded in both APIs' docs.
+4. The `debug_assert!` and the `if !image.data.is_empty()` guard it
+   protected are deleted; the vertical-crop slice now relies on
+   `check_crop_region` and says why the data is full-length (a vertical crop
+   keeps `decode_image_into` off the sink path). `tests/crop_region_bounds.rs::
+   issue_618_left_boundary_past_scaled_width_is_refused` pins the reproducer
+   on `tests/fixtures/gray_8x8.jpg` — `decode_image`, `decode_image_into` and
+   `output_buffer_size` each return `InvalidCropRegion`, and `djpeg -crop
+   16x2+10+1` refuses too — and passes in debug and `--release`; before the fix
+   it panicked at the assertion.
+5. `op_from_record` draws crop `x` from `b % 16` again, `encode_op` packs it
+   into the same byte (`width * 16 + x`), and
+   `program_round_trips_through_its_wire_format` round-trips a non-zero `x`.
+   `tests/api_sequence_state.rs` passes unchanged in its properties.
+
+Verification (2026-10-07, aarch64-darwin): `cargo test --locked
+--no-fail-fast` for the root crate, 2487 passed / 0 failed / 5 ignored across
+233 binaries; `cargo test --locked -p libjpeg-turbo-rs-capi --tests` with
+`LIBJPEG_TURBO_PREFIX` on a stock 3.2.0 install, 363 passed / 0 failed,
+`transcripts_match_stock_turbojpeg` included; the #618 regression and the
+`TjHandle` suite also in `--release`; workspace and `--lib` clippy clean. The
+first full run failed four tests that had asserted the old clamping —
+`cross_product_decompress`'s two crop matrices (a 64x64 port of
+tjdecomptest.in, whose regions upstream runs on the 227x149 `testorig`, where
+they fit at 1/2; they now require the refusal from both us and `djpeg`),
+`decompress_into`'s vertical-crop config (now a region that fits) and
+`sizing_arithmetic_gate`'s inventory (three deleted clamps).
+
 ## P4-198. `TjHandle` Merges Upstream's Two ICC Buffers, So a Decode Changes the Profile a Later Compress Embeds — **OPEN**
 
 **GitHub:** [#619](https://github.com/developer0hye/libjpeg-turbo-rs/issues/619) — found 2026-09-09 while designing the P4-141 criterion-3 API-sequence oracle; under the [#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481) umbrella.
@@ -11756,10 +11889,10 @@ field; its one mention there is a read, in `tj3SaveImage*`'s PNG branch at
 (`:1993-2011`). In C a decode therefore cannot change the profile a later
 compress embeds.
 
-`TjHandle` has one field (`src/api/tj3.rs:134`, `icc_profile: Option<Vec<u8>>`).
-`set_icc_profile` writes it (`:348`), `configure_encoder` reads it (`:524`) and
+`TjHandle` has one field (`src/api/tj3.rs:336`, `icc_profile: Option<Vec<u8>>`).
+`set_icc_profile` writes it (`:554`), `configure_encoder` reads it (`:798`) and
 `decompress` **overwrites** it from the decoded image on every
-`TJPARAM_SAVEMARKERS` arm (`:884-898`). So
+`TJPARAM_SAVEMARKERS` arm (`:1234-1248`). So
 
 ```
 set_icc_profile(P) → decompress(imageA) → compress(...)
@@ -11815,7 +11948,7 @@ later (`turbojpeg-mp.c:195-198`), so the ceiling holds at every precision too.
 
 Ours diverges twice:
 
-* `TjHandle::decompress` (`src/api/tj3.rs:856-878`) publishes **eight**:
+* `TjHandle::decompress` (`src/api/tj3.rs:1206-1228`) publishes **eight**:
   `Width`, `Height`, `Precision`, `ColorSpace`, `Subsampling`, `XDensity`,
   `YDensity`, `DensityUnits`. `TJPARAM_PROGRESSIVE`, `TJPARAM_ARITHMETIC`,
   `TJPARAM_LOSSLESS`, `TJPARAM_LOSSLESSPSV` and `TJPARAM_LOSSLESSPT` keep
@@ -11823,7 +11956,7 @@ Ours diverges twice:
   it was progressive, arithmetic or lossless — and a compress that follows
   inherits the caller's old values where upstream would have replaced them with
   the frame's.
-* `TjHandle::decompress_12bit` / `decompress_16bit` (`:920-938`) publish
+* `TjHandle::decompress_12bit` / `decompress_16bit` (`:1270-1290`) publish
   **three** (`Width`, `Height`, `Precision`) and read *nothing* from the
   handle: they delegate to `crate::api::precision::decompress_12bit` /
   `_16bit`, which build their own decoder with `DecodeLimits::default()`.
@@ -11880,7 +12013,7 @@ touches; it writes `output_width` / `output_height` instead. The call sits at
 that had already been cropped would make that check compare a region against
 itself.
 
-**What we do.** `TjHandle::decompress` (`src/api/tj3.rs:856-857`) publishes the
+**What we do.** `TjHandle::decompress` (`src/api/tj3.rs:1206-1207`) publishes the
 *decoded output* dimensions, `img.width` / `img.height` — post-scaling and
 post-cropping. Measured on `tests/fixtures/photo_64x64_420.jpg` (64x64):
 
@@ -11889,14 +12022,18 @@ post-cropping. Measured on `tests/fixtures/photo_64x64_420.jpg` (64x64):
 | `decompress` | scaling 1/2 | **32** | 64 |
 | `decompress_header` | scaling 1/2 | 64 ✅ | 64 |
 | `decompress` | crop 8x8 | **8** | 64 |
-| `decompress_header` | crop 8x8 | **8** | 64 |
+| `decompress_header` | crop 8x8 | 64 ✅ (since P4-197, 2026-10-07) | 64 |
 
-The port already knows the rule and applies it in one of the four cases.
-`decompress_header`'s doc says it outright (`:735-737`) — "`JPEGWIDTH`/
+The port already knows the rule and applies it in two of the four cases;
+the `decompress_header`-under-crop row was **8** until P4-197 (#618) made
+`decompress_header` suspend the cropping region as well as the scaling factor,
+because upstream's `tj3DecompressHeader` never consults the region.
+`decompress_header`'s doc says it outright (`:1009-1011`) — "`JPEGWIDTH`/
 `JPEGHEIGHT` must reflect the ORIGINAL JPEG dimensions per the libjpeg-turbo
 spec, not the scaled output" — and implements it by saving the scaling factor,
-setting it to 1:1 and calling `decompress` (`:747-753`), a route that
-neutralises scaling and can say nothing about cropping.
+setting it to 1:1 and calling `decompress` (`:1022-1034`), a route that
+neutralises scaling and, until P4-197 also suspended the region there, could
+say nothing about cropping.
 
 Distinct from the two items filed beside it:
 [P4-199](#p4-199-setdecompparameters-publishes-thirteen-handle-parameters-our-8-bit-decode-publishes-eight-and-the-1216-bit-ones-publish-three-and-ignore-the-handles-limits--open)
@@ -12772,3 +12909,59 @@ decode allocation gate, or a sibling, covers those `src/api/` modules. (3)
 
 **Why deferred.** Outside P4-209's `src/decode/` scope; the precision entry
 points are also being reworked by P4-199.
+
+## P4-219. 12-Bit Decodes Ignore the Horizontal Crop, and `TjHandle`'s 12/16-Bit Decompress Ignores the Cropping Region Entirely — **OPEN**
+
+**Found 2026-10-07** while closing
+[P4-197](#p4-197-a-cropping-region-whose-left-boundary-exceeds-the-scaled-width-decodes-to-zero-columns-and-trips-a-false-debug_assert--closed-2026-10-07)
+(#618), checking every crop entry point. Measured on a 32x32 single-component
+12-bit baseline JPEG (`precision::compress_12bit`, quality 90) with the region
+`16x8+8+4`:
+
+| entry point | output | C |
+|---|---|---|
+| `Decoder::set_crop_region` + `decode_image` | **32x8** — the vertical crop applies, the horizontal one is dropped | `djpeg -crop 16x8+8+4` (3.2.0): 16x8 |
+| `TjHandle::set_cropping_region` + `decompress_12bit` | **32x32** — no crop at all | `tj3Decompress12` crops (`turbojpeg-mp.c:211-227` and `:234-279` are compiled for every `BITS_IN_JSAMPLE != 16`) |
+
+The `TjHandle` row was measured before P4-197 landed; P4-197 made
+`decompress_12bit` / `decompress_16bit` refuse a stored region
+(`Unsupported`, naming this item) and `TjHandle::decompress` refuse a decode
+whose size differs from the region, so neither hands a C caller more pixels
+than its buffer holds. The `Decoder` row is unchanged: it is still a crop
+silently not applied.
+
+**Root cause.** `decode_image_inner` dispatches a 12-bit frame to
+`decode_12bit_as_8bit` before the horizontal crop is computed, and only the
+post-decode vertical slice in `decode_image_with_sink` sees the region —
+`output_buffer_size` says so ("apply neither scaled decode nor horizontal
+crop"). `TjHandle::decompress_12bit` / `decompress_16bit` call the handle-free
+`precision::decompress_12bit` / `decompress_16bit`, which take no region, and
+they record no frame header, so the C ABI's `tj3SetCroppingRegion` after only
+a `tj3Decompress12` reports "JPEG header has not yet been read" where upstream
+validates against the header that decode read. The P4-197 bounds check does
+run on these paths, so nothing degenerates; the region is simply not honoured.
+Upstream refuses a crop on a lossless frame (`jpeg_crop_scanline` raises
+`JERR_NOTIMPL`, `tj3SetCroppingRegion` "Cannot partially decompress lossless
+JPEG images"), so the 16-bit half is a refusal to add, not a crop to apply.
+
+**Acceptance criteria.**
+
+1. A 12-bit `Decoder` decode honours the horizontal crop with
+   `jpeg12_crop_scanline`'s alignment, cross-validated against `djpeg -crop`
+   pixel for pixel.
+2. `TjHandle::decompress_12bit` applies the cropping region with the same
+   rules `decompress` applies, and records the frame header for
+   `resolve_cropping_region`; `decompress_16bit` and a lossless 12-bit frame
+   refuse a stored region. That is a deliberate divergence: upstream's
+   `tj3Decompress16` compiles every crop reference out (`#if
+   BITS_IN_JSAMPLE != 16`) and so ignores a stored region and decodes the
+   full frame; refusing tells the caller the region was not applied, which
+   ignoring does not. Keep or match upstream — decide and record it. Cross-validated against
+   `tj3Decompress12` / `tj3Decompress16` in the `cabi_misuse_harness`
+   `cropping_region` case or a sibling case.
+3. A lossless `Decoder` decode with a crop matches djpeg's refusal.
+
+**Why deferred.** P4-197 is about regions that exceed the image; this is a
+missing feature on a different decode path, overlapping
+[P4-199](#p4-199-setdecompparameters-publishes-thirteen-handle-parameters-our-8-bit-decode-publishes-eight-and-the-1216-bit-ones-publish-three-and-ignore-the-handles-limits--open)'s
+work on what the 12/16-bit entry points read from the handle.
