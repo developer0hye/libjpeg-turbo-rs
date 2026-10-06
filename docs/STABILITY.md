@@ -11,13 +11,14 @@ applies it to `0.x` versions:
 - **`0.MINOR.PATCH`**: a *minor* bump (`0.8` → `0.9`) may change the public API
   in incompatible ways; a *patch* bump (`0.8.0` → `0.8.1`) may not. Cargo's
   default `^0.8` requirement therefore picks up patches and never a new minor.
-- A breaking change is listed under `CHANGELOG.md` → **Breaking** with the
-  migration, in the release that makes it.
-- Each release is checked by `cargo-semver-checks` against the previous
-  crates.io release of the same crate before anything is published
+- A breaking change is marked **Breaking** in its `CHANGELOG.md` entry, with
+  the migration, in the release that makes it.
+- Each crates.io crate is checked by `cargo-semver-checks` against the same
+  crate at the previous release tag before anything is published
   (`.github/workflows/release.yml`), so a breaking change under a patch number
-  fails before upload. The check covers type signatures, not behaviour; a
-  behaviour change that breaks callers is also called out as **Breaking**.
+  fails before upload. The check covers type signatures of a default-feature
+  build, not behaviour and not `png`-gated items; a behaviour change that
+  breaks callers is also marked **Breaking**. The npm package is not checked.
 
 The crates version independently: `libjpeg-turbo-rs` (root), `libjpeg-turbo-rs-image`
 (the `image` adapter), `libjpeg-turbo-rs-capi` (C ABI) and the npm
@@ -29,7 +30,7 @@ was tested with.
 - **Covered:** the items re-exported at the crate root (`Decoder`, `Encoder`,
   `decompress*`, `compress*`, `probe`, `TransformOp`, `JpegError`, the types in
   `common::types`, ...) and the named re-export modules `tj3`, `precision`,
-  `quantize` and `raw_data_12`.
+  `quantize`, `raw_data_12` and `stream` (with `std`).
 - **Not covered yet:** the low-level modules `api`, `common`, `decode`,
   `encode`, `simd` and `transform` are `pub` for historical reasons and expose
   pipeline and kernel internals. Until the pre-1.0 surface review decides
@@ -49,15 +50,22 @@ was tested with.
 | `libjpeg-turbo-rs-capi` | 1.87 | |
 | `libjpeg-turbo-rs-image` | 1.88 | `image 0.25` requires it |
 
-CI builds each crate with exactly its MSRV toolchain. Raising an MSRV is a
-**minor** change, never a patch, and is listed in `CHANGELOG.md`.
+CI checks (`cargo check`) each crate with exactly its MSRV toolchain.
+Raising an MSRV is a **minor** change, never a patch, and is listed in
+`CHANGELOG.md`.
 
 ## Cargo features
 
 `std` and `simd` (both default) and `png` are stable: removing one, or
 changing what a default build includes, is a breaking change. `simd` selects
-the hand-written NEON/SSE2/AVX2/SIMD128 kernels; without it the scalar
-kernels run. The integer paths are cross-validated against C either way.
+the hand-written NEON/SSE2/AVX2/SIMD128 kernels (AVX2 also needs `std` for
+runtime detection; SIMD128 needs the `simd128` target feature); without it the
+scalar kernels run. `full-c-parity` is internal and test-only: it gates no
+library code and is not covered. The C cross-validation suites run on
+`simd`-enabled builds only; there the scalar kernels are held to the SIMD
+output by `tests/no_std_dispatch.rs` (scalar path forced with
+`JSIMD_FORCENONE`) and `src/simd/simd_parity_tests.rs` (scalar and SIMD
+kernels called side by side).
 
 ## Deprecation
 
@@ -82,15 +90,27 @@ interact. Use one decoder or encoder per thread.
 
 ## Resource limits
 
-`DecodeLimits::default()` accepts every frame C libjpeg-turbo's `djpeg`
-accepts: dimensions up to 65,500, about 2.1 gigapixels, 8,192 scans, and no
-memory ceiling. This is deliberate. A default that refused what `djpeg`
-accepts would break drop-in use, and the project decided against shipping
-separate "untrusted" and "compatible" default profiles (PR #516).
+`DecodeLimits::default()` allows dimensions up to 65,500, up to 2³¹−1 pixels
+(about 2.1 gigapixels), 8,192 scans, and no memory ceiling. That accepts
+every file `djpeg` accepts in the corpus gates; it refuses only the
+pathological corner `djpeg` does not cap by default (`djpeg.c` sets
+`max_scans = 0`): frames above 2³¹−1 pixels such as 65,500×65,500, and
+streams of more than 8,192 scans. This is deliberate. A default that
+refused what `djpeg` accepts would break drop-in use, and the project
+decided against shipping separate "untrusted" and "compatible" default
+profiles (PR #516).
 An application that decodes untrusted uploads should set its own budget —
 `Decoder::set_max_pixels`, `set_max_memory` and `set_scan_limit`, or
-`DecodeLimits` — before decoding. Allocations whose size comes from the input
-report `JpegError::AllocationFailed` instead of aborting the process.
+`DecodeLimits` — before decoding. The 12-/16-bit `precision::decompress_*`
+functions take no limits and apply only the default width, height and pixel
+checks.
+
+On the `decompress` / `Decoder` paths under `src/decode/`, geometry-sized
+allocations report `JpegError::AllocationFailed` instead of aborting the
+process (P4-209, held by `tests/decode_alloc_gate.rs`). Not yet: the 12-/16-bit
+entry points in `src/api`, which a 12-bit source also reaches through
+`Decoder` (P4-216), the lenient-decode warning list (P4-215), and the
+encoder's allocations; an allocator refusal there still aborts.
 
 Changing these defaults would be a new policy decision, made in a minor
 release and called out as **Breaking**.

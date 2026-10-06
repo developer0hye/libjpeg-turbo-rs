@@ -267,6 +267,8 @@ The companion C-boundary sanitizer harness is implemented as part of this closur
 
 The single remaining follow-up is the actual upstream PR to `google/oss-fuzz`, which is a maintainer action requiring a `google/oss-fuzz` fork + write access (not an in-repo engineering change). Tracked under **P2-H** in `/Users/yhkwon/.claude/plans/dreamy-moseying-swing.md`.
 
+**Re-checked 2026-10-07 ([P4-217](#p4-217-no-written-release-semver-msrv-or-security-policy-no-private-reporting-route-and-no-api-check-before-publish--partial-policy-api-gate-and-affected-version-record-landed-private-reporting-route-not-enabled-oss-fuzz-not-submitted)):** "ready" did not hold. OSS-Fuzz supports only `address` for Rust, so `undefined`/`memory` were removed, and the `cargo install … || true` step was dropped; the files have never been built with `helper.py`. Submission is tracked under P4-217.
+
 ## P4-12. Encoder / Decoder Hard-Case Parity Corpus — **CLOSED 2026-05-17**
 
 **Status (2026-05-17): closed.** New test `tests/hard_case_high_quality_parity.rs` covers the highest-risk class flagged by both static-analysis reviews — q ∈ {98, 99, 100} encode where upstream C `cjpeg` disables the fast-integer FDCT SIMD path and falls back to the slow integer FDCT. The test runs five cases (q=98/99/100 at 4:4:4, plus q=100 at 4:2:2 and 4:2:0) against a 64×64 RGB checker pattern, asserts both encoders produce valid JPEGs, that the size ratio stays inside reasonable bounds (Huffman-optimization differences can legitimately diverge 2-3×), and that decoded PSNR is ≥ 45 dB (4:4:4) or ≥ 30 dB (subsampled) — the high-quality target. Verified: `cargo test --test hard_case_high_quality_parity --release` → 5 passed.
@@ -12796,7 +12798,8 @@ previous one, while `main` already carries breaking changes since 0.8.0.
    `#[non_exhaustive]` errors, threads, resource limits per #516) and
    `docs/RELEASE.md` (procedure), linked from README and CONTRIBUTING.
 3. `scripts/semver_check_release.sh` + the `semver-check` job in `release.yml`,
-   which every crates.io publish job now needs. Both sides are documented with
+   which gates every crates.io publish job (`publish` and `publish-capi`
+   directly, `publish-image` through `publish-capi`). Both sides are documented with
    `cargo rustdoc --locked` because `cargo semver-checks`' own mode resolves
    dependencies unlocked. Verified locally three ways: unchanged versions skip;
    `v0.7.0 → HEAD` (a 0.x minor) passes; a throwaway `0.8.1` commit over `main`
@@ -12816,3 +12819,28 @@ previous one, while `main` already carries breaking changes since 0.8.0.
    claims readiness. **Remaining (maintainer):** confirm the contact address in
    `project.yaml` (it names a work address), run `helper.py build_fuzzers`, and
    submit to `google/oss-fuzz` — or run an equivalent sustained campaign.
+
+## P4-221. Encode-Path Allocations Are All Infallible and No Gate Tracks Them — **OPEN**
+
+**Found 2026-10-07** by the `docs-drift-auditor` pass on P4-217, while checking
+`docs/STABILITY.md`'s allocation sentence: `src/encode/` has 87
+`vec![x; n]` / `Vec::with_capacity(n)` sites (131 `vec!` uses of any shape)
+and no `common::try_alloc` call, so an
+allocator refusal during an encode aborts the process. P4-209 and its gate
+(`tests/decode_alloc_gate.rs`) cover `src/decode/` only; P4-216 covers the
+12/16-bit decode entry points in `src/api/`.
+
+**Why it is lower priority than P4-209.** An encode's buffers are sized from
+the caller's own pixel buffer and options, not from an untrusted stream, so
+the amplification a hostile file gets on decode does not exist here — but the
+coefficient buffers of the progressive and optimised encoders are a multiple
+of the input size, and a server encoding caller-sized uploads still wants a
+`Result`, not an abort.
+
+**Acceptance criteria.**
+
+1. Every allocation sized from the frame geometry on the encode paths goes
+   through `common::try_alloc` and reports `JpegError::AllocationFailed`.
+2. The decode allocation gate (or a sibling) covers `src/encode/` with an
+   inventory of the bounded remainder.
+3. `tests/miri_alloc_failure.rs` gains an encode refusal case.

@@ -24,6 +24,11 @@ ships only in the next minor, and the advisory says so.
 
 Report it privately through GitHub's private vulnerability reporting:
 **[Security → Report a vulnerability](https://github.com/developer0hye/libjpeg-turbo-rs/security/advisories/new)**.
+
+If that page says private reporting is not enabled for this repository, open
+a public issue titled **"Security contact request"** that contains *no*
+details of the problem — no crate, API, file or reproducer — and the
+maintainer will open a private advisory and invite you to it.
 Include the crate and version, the target (for example `x86_64` with the
 default `simd` feature), a reproducer (a JPEG, or the API calls), and what you
 observed (crash, sanitizer report, wrong output, unbounded allocation).
@@ -46,7 +51,8 @@ unbounded allocation from crafted input that the documented limits
 should have bounded.
 
 Out of scope: denial of service bounded only by limits the caller chose not
-to set (the defaults intentionally accept everything `djpeg` accepts — see
+to set (the defaults intentionally set no memory ceiling and allow frames up
+to 2³¹−1 pixels — see
 [`docs/STABILITY.md`](docs/STABILITY.md#resource-limits)); bugs that need the
 caller to break a documented `unsafe` contract or a C-ABI precondition; output
 differences from C libjpeg-turbo with no safety impact (report those as

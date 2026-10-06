@@ -60,6 +60,18 @@ and `git log` between tags.
 
 ### Changed
 
+- **Breaking (Rust API): low-level modules and two exhaustively constructible
+  structs changed since 0.8.0** — the evidence for the next root release being
+  0.9.0 (`cargo-semver-checks` on `cargo rustdoc --locked` output,
+  `docs/RELEASE.md`). Covered API: `JpegCoefficients` (re-exported at the root)
+  gained the public field `saw_jfif_marker`, so a struct literal needs it.
+  Outside the covered API (`docs/STABILITY.md#what-is-public-api`): about
+  forty `simd::aarch64::*` / `simd::scalar::*` kernel entry points and
+  `encode::huffman_encode::BitWriter` are no longer public, `SimdRoutines` and
+  `EncoderSimdRoutines` lost or gained function-pointer fields, and
+  `decode::marker::JpegMetadata` gained fields. Use the root-level `Decoder`,
+  `Encoder` and `decompress*`/`compress*` APIs instead of these internals.
+
 - **`libjpeg-turbo-rs-image`: the `image` adapter decodes lazily, honours
   `image::Limits`, and reports metadata** (P4-212, #637, under #635).
   `JpegDecoder::new` now parses headers only and `read_image` decodes into
@@ -207,7 +219,6 @@ and `git log` between tags.
   instead of the component's own block grid, and every DC scan wrote both DC
   table slots even when one was unused. Output from such a script now matches
   `cjpeg -scans` byte for byte; the built-in scripts are unaffected.
-
 - **Packaging:** `libjpeg-turbo-rs-capi` and `libjpeg-turbo-rs-image` now
   ship their licence files and IJG attribution; the root crate no longer ships
   repository tooling or the reference submodule's READMEs (P4-217).

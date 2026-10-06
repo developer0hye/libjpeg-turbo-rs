@@ -17,7 +17,7 @@ public API with the previous tag and fails if the bump does not allow what
 changed (a breaking change under a 0.x patch number). `release.yml` runs the
 same script before any upload, so a wrong choice stops the release rather
 than shipping. A breaking *behaviour* change the tool cannot see is still
-listed under **Breaking** in the changelog and still needs a minor bump.
+marked **Breaking** in the changelog and still needs a minor bump.
 
 Each crate has its own version. Bump only the crates that changed; a crate
 whose version did not move is skipped by both the check and the publish job.
@@ -41,10 +41,13 @@ against the latest release tag; it publishes nothing.
 
 ## 4. Tag
 
-Push `vX.Y.Z` from a commit on `main` whose CI is green. The tag publishes,
-in order: the root crate, the C-ABI crate, the `image` adapter, the npm
-package, then the GitHub Release with the native bundles. `capi-vX.Y.Z` ships
-only the C-ABI crate, `wasm-vX.Y.Z` only the npm package.
+Push `vX.Y.Z` from a commit on `main` whose CI is green. The tag first runs
+`changelog-check`, `semver-check` and the native bundle builds; then it
+publishes the root crate, then the C-ABI crate followed by the `image`
+adapter, with the npm package publishing alongside them once the root crate
+is up; the GitHub Release with the native bundles comes last, after all
+four. `capi-vX.Y.Z` ships only the C-ABI crate, `wasm-vX.Y.Z` only the npm
+package.
 
 ## 5. Verify what was published
 
@@ -66,9 +69,11 @@ The published crate is what users get, not the tree that was tagged:
 
 `libjpeg-turbo-rs`, compared with `cargo rustdoc --locked` output on both
 sides: **7 breaking checks fail**, so the next root release is **0.9.0**, not
-0.8.1. All seven are in the low-level modules
-[`STABILITY.md`](STABILITY.md#what-is-public-api) does not yet cover, plus
-public fields added to exhaustively constructible structs:
+0.8.1. Every item but one is in the low-level modules
+[`STABILITY.md`](STABILITY.md#what-is-public-api) does not yet cover. The
+exception is `JpegCoefficients::saw_jfif_marker`: `JpegCoefficients` is
+re-exported at the crate root, so a public field added to it breaks covered
+API for any caller that builds it with a struct literal:
 
 | Check | Items |
 |---|---|
