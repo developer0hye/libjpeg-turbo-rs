@@ -8215,7 +8215,16 @@ misuse of a public SIMD entry point; none injects allocation failure; none runs
    wrappers' `fits == false` fallback arms have no executing coverage
    anywhere (wasip1 parity uses exact-fit slices, and the panic arm cannot
    be asserted under `panic = "abort"`) — the "pinned by the checks' code,
-   not by a gate" shape this item exists to retire.
+   not by a gate" shape this item exists to retire. **Short-stride and canary
+   buffers for the SIMD kernels, 2026-10-07** (P4-191's sanitizer-coverage
+   landing): the `kernel_bounds_tests` modules write the strided IDCTs, the
+   merged H2V2 kernel and the fdct helpers' AVX2 arms into exact-size and
+   canary-padded allocations, and `sanitizers.yml`'s ASan/UBSan jobs now
+   require AVX2 and confirm those tests ran (`tests/sanitizer_coverage_gate.rs`)
+   — so `sse2_idct_islow_strided` and the two fdct AVX2 arms execute under a
+   sanitizer for the first time. The non-AVX2 sanitizer leg, `i686`,
+   AArch64 NEON under a sanitizer in CI and guard pages around Rust-side
+   destinations remain.
 3. **An API-sequence fuzzer** exists alongside the byte fuzzers — driving
    `new → configure → probe → decode → reset → decode → transform → destroy`
    orderings — plus a process-isolated C-ABI harness covering
@@ -8330,7 +8339,7 @@ the harness first would only pin current behaviour.
   thirty since the criterion-1 landing gave the two `OnceBox` rows a test — and they are the
   criterion's product rather than a defect in it: a raw count could not
   have named one of them. They are filed together as
-  [P4-191](#p4-191-sixty-nine-inventoried-unsafe-items-have-no-regression-test--open)
+  [P4-191](#p4-191-sixty-nine-inventoried-unsafe-items-have-no-regression-test--partial-criteria-4-and-5-delivered)
   (#609), which includes three uncalled functions holding `unsafe`. Writing
   one of those cells also produced the criterion's first *defect*:
   [P4-192](#p4-192-a-custom-scan-script-with-se--63-writes-past-two-stack-arrays-from-safe-rust-on-x86_64--closed-2026-10-07)
@@ -8360,7 +8369,7 @@ the harness first would only pin current behaviour.
   What the C-ABI rows produced, beyond the inventory itself: twenty-five
   answer `**none**`, four of them entry points no leg executes at all
   (`tj3LoadImage12/16`, `tj3SaveImage12/16`), added to
-  [P4-191](#p4-191-sixty-nine-inventoried-unsafe-items-have-no-regression-test--open)
+  [P4-191](#p4-191-sixty-nine-inventoried-unsafe-items-have-no-regression-test--partial-criteria-4-and-5-delivered)
   (#609) as criteria 6 and 7 rather than filed as a sibling; and one
   two defects: [P4-193](#p4-193-the-c-abi-destination-spans-do-not-use-imagelayoutstrided-so-a-decode-forms-a-slice-over-one-rows-padding--open),
   where a destination span is wider than the extent upstream touches, and
@@ -8392,7 +8401,7 @@ the harness first would only pin current behaviour.
   (`noop_init_source`, `stdio_init_source`, `noop_skip_input_data`,
   `default_resync_to_restart`), five named sub-cases, and the 32-bit
   dispatch below. All of them went to
-  [P4-191](#p4-191-sixty-nine-inventoried-unsafe-items-have-no-regression-test--open)
+  [P4-191](#p4-191-sixty-nine-inventoried-unsafe-items-have-no-regression-test--partial-criteria-4-and-5-delivered)
   (#609), which is renamed from fifty-seven to seventy-one (and to
   sixty-nine on 2026-09-09).
   **Two defects**, both found by writing an *Invariant* cell and neither
@@ -11191,7 +11200,7 @@ PR is a behaviour-preserving refactor plus a gate, and a new C-oracle fixture
 is its own TDD cycle; the fixture must be built and proven discriminating,
 not just committed.
 
-## P4-191. Sixty-Nine Inventoried `unsafe` Items Have No Regression Test — **OPEN**
+## P4-191. Sixty-Nine Inventoried `unsafe` Items Have No Regression Test — **PARTIAL: criteria 4 and 5 delivered**
 
 **GitHub:** [#609](https://github.com/developer0hye/libjpeg-turbo-rs/issues/609) — filed 2026-09-08 by the P4-141 criterion-4 landing.
 
@@ -11215,6 +11224,60 @@ by `tests/scan_script_validation.rs`. `docs/UNSAFE_INVENTORY.md` now has
 twenty-six `**none**` rows, sixty-five in all. Criterion 3 is not met as
 written: no test compares the SSE2 and scalar arms at the smallest and largest
 legal `(Ss, Se)`.
+
+**Progress (2026-10-07, sanitizer coverage — #635 Milestone A).** Native
+sanitizer coverage for kernels Miri never interprets. Six root-crate rows
+leave `**none**` — `idct_1x1_strided`, `sse2_idct_islow_strided`,
+`avx2_merged_h2v2_ycbcr_to_rgb`, `avx2_merged_h2v2_inner`,
+`fdct_quantize_block` (its AVX2 arm) and `fdct_quantize_chroma_h2v1` (its
+site 1) — so `docs/UNSAFE_INVENTORY.md` has **twenty** `**none**` rows of 227
+and the two inventories **fifty-nine** in all (thirty-nine C-ABI, unchanged).
+The mechanism is two test modules named `kernel_bounds_tests`
+(`src/simd/`, `src/encode/pipeline_impl/`) whose destinations and planes are
+heap allocations of *exactly* the documented footprint, so a one-byte overrun
+leaves the block, plus canary-padded twins for legs without a sanitizer:
+
+- `strided_islow_idct_writes_exactly_its_footprint` drives
+  `neon_` / `sse2_` / `avx2_idct_islow_strided` at strides 8 to 641, random
+  and DC-only blocks, against `scalar_idct_islow`;
+  `idct_1x1_strided_writes_one_byte_and_ignores_stride`
+  (`src/decode/idct_scaled.rs`, outside `simd::`, so Miri runs it too) does
+  the same for the 1/8-scale store.
+- `avx2_merged_h2v2_ycbcr_to_rgb` checked only row 0 of each row pair while
+  its kernel reads and writes row 1 by raw pointer — a safe in-crate caller
+  with a short second row reached out-of-bounds access, the P4-135 shape. The
+  wrapper now checks all six slices; two `#[should_panic]` tests pin the
+  refusal and `avx2_merged_h2v2_exact_rows_match_scalar` adds the odd widths
+  `parity_merged_upsample_h2v2` never fed.
+- The AVX2 arms of `fdct_quantize_block` and `fdct_quantize_chroma_h2v1` were
+  executed by **no** CI leg (padded strips make the encoder skip them); direct
+  tests now walk exactly sized planes to the last interior block and one
+  column or row past it, against an independent scalar reference.
+
+`.github/workflows/sanitizers.yml`'s `asan` and `ubsan` jobs already ran every
+lib unit test; they now also fail on a runner without AVX2 (where these tests
+compare fallbacks) and re-run `-- kernel_bounds_tests`, requiring the six
+x86_64 tests to pass. `tests/sanitizer_coverage_gate.rs` holds that step's
+count to the modules' `#[test]`s and rejects a filter, `--skip`, `--no-run`,
+`if:` or `continue-on-error:` on either job, driven over mutations of the real
+workflow. The workflow header's claim that "the lib tests already cover every
+unsafe block" is corrected.
+
+Discrimination, measured on the aarch64 host by mutating a kernel and
+restoring it: `neon_idct_islow_strided` ignoring `stride` fails at
+`stride=9`; a 16-byte DC-fill row store is, under native aarch64
+`-Z sanitizer=address`, "heap-buffer-overflow … WRITE of size 16 … 0 bytes
+after 64-byte region" on the exact allocation, and without ASan a
+trailing-canary failure; a second store in `idct_1x1_strided` fails at "write
+at 0: byte 1". **Not run locally:** every x86_64 arm — on 2026-10-07 even a
+trivial x86_64 probe binary hung at launch under this host's Rosetta — so the SSE2/AVX2 kernels, the merged
+pre-fix failure (derived from the kernel's loop bounds) and the fdct helpers'
+AVX2 arms are evidenced by the CI x86_64 sanitizer jobs only.
+
+**Status (2026-10-07): partial.** Criteria 4 and 5 are met. Criteria 1, 2, 3
+and 6–11 are open, as are `encode_mcu_420_x86_64` sites 2–4 (no criterion
+names them; reaching them needs a `BitWriter` harness) and `local_drain_bits`
+(`--lib` has no test; Miri reaches it through `miri_public_api`).
 
 Eight clusters are actionable; the rest are qualified `**none**`s (a named
 sub-invariant or a CI leg, not an untested site) and are context.
@@ -11251,11 +11314,15 @@ sub-invariant or a CI leg, not an untested site) and are context.
    only by the emulated Nehalem leg today) and `idct_1x1_strided`
    (`src/decode/idct_scaled.rs`, 2 sites, no unit-level test —
    `idct_1x1_dc_only` covers the safe inner function, not the wrapper).
+   **Delivered 2026-10-07** by `strided_islow_idct_writes_exactly_its_footprint`
+   and `idct_1x1_strided_writes_one_byte_and_ignores_stride` (see *Progress*).
 5. **`avx2_merged_h2v2_ycbcr_to_rgb` / `avx2_merged_h2v2_inner`**
    (`src/simd/x86_64/avx2_merged.rs`, 2 sites) are exercised with an
    under-sized second luma row — the odd-height case their SAFETY contract
    permits and `parity_merged_upsample_h2v2`, which feeds equal-length rows
    only, never produces.
+   **Delivered 2026-10-07**, with the wrapper fixed rather than the gap only
+   exercised: `avx2_merged_h2v2_short_second_{luma,output}_row_is_refused`.
 6. **Four C-ABI entry points have no test at all** and are executed by no
    leg: `tj3LoadImage12`, `tj3LoadImage16`, `tj3SaveImage12` and
    `tj3SaveImage16` (`crates/libjpeg-turbo-rs-capi/src/imageio.rs`). Each
