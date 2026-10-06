@@ -289,7 +289,7 @@ underneath it, and takes every option at once — on every pixel format, CMYK
 included.
 
 ```rust
-use libjpeg_turbo_rs::encode::pipeline::{compress_with_params, CompressParams};
+use libjpeg_turbo_rs::{compress_with_params, CompressParams};
 
 let jpeg = compress_with_params(
     &CompressParams::new(&rgb_pixels, width, height, PixelFormat::Rgb, 85, Subsampling::S420)

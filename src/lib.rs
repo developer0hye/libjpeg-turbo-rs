@@ -263,6 +263,25 @@ pub mod precision {
         write_scanlines_12, write_scanlines_16, Image12, Image16,
     };
 }
+/// Planar and packed YUV encode/decode — the Rust equivalents of
+/// `tj3EncodeYUV8`, `tj3CompressFromYUV8`, `tj3DecompressToYUV8` and
+/// `tj3DecodeYUV8` (and their `*Planes8` forms).
+///
+/// Re-exported here so callers do not reach into `api::yuv`, which, like the
+/// other low-level modules, is outside the supported public API
+/// (`docs/STABILITY.md`, P4-222).
+pub mod yuv {
+    pub use crate::api::yuv::{
+        compress_from_yuv, compress_from_yuv_planes, decode_yuv, decode_yuv_planes,
+        decompress_to_yuv, decompress_to_yuv_planes, encode_yuv, encode_yuv_planes,
+    };
+}
+/// The row-streaming decoder with `skip_scanlines` (`jpeg_skip_scanlines`)
+/// and DCT-domain scaling, re-exported from `api::streaming` (P4-222).
+pub use api::streaming::StreamingDecoder;
+/// The baseline encode core that takes every option at once, re-exported
+/// from `encode::pipeline` (P4-222); `Encoder` covers the common cases.
+pub use encode::pipeline::{compress_with_params, CompressParams};
 /// TJ3-compatible handle/parameter API.
 pub mod tj3 {
     pub use crate::api::tj3::{FrameInfo, TjHandle, TjParam};
