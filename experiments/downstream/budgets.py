@@ -12,10 +12,10 @@ same-run ratios are budgeted.
 
 Each `--first` names one reference report (the committed reference set);
 without any, the report under test is its own single reference. Every report
-must be a full run (not `--smoke`, not `--only`) with the same architecture,
-build variant, recorded runtime CPU features and consumer sources. Exit
-status is 0 when every budgeted row is within budget, 1 when one is over, 2
-on a usage error or an unusable set. Standard library only.
+must be a full run (not `--smoke`, not `--only`) with the same CPU model,
+architecture, build variant, recorded runtime CPU features and consumer
+sources. Exit status is 0 when every budgeted row is within budget, 1 when
+one is over, 2 on a usage error or an unusable set. Standard library only.
 """
 
 import json
@@ -31,9 +31,9 @@ MIN_BAND = 0.03
 # scored, until a quiet machine measures them.
 MAX_RESOLVABLE_RANGE = 0.10
 
-# Same-run pairs. `parity` pairs hold the candidate to the published release;
-# `lead` pairs hold it to the lead it had over another codec in the
-# reference runs.
+# Same-run pairs. Every pair is held to the reference set (its median times
+# 1 + band). `parity` pairs compare with the published release and also say
+# whether the reference is behind it; `lead` pairs compare with another codec.
 DECODE_PAIRS = [
     ("candidate-fresh", "baseline-fresh", "parity"),
     ("candidate-reuse", "baseline-reuse", "parity"),
@@ -104,12 +104,15 @@ def runtime_features(report):
 def comparability(report):
     """Everything that must match for two reports' ratios to be comparable.
 
-    Ratios move with the SIMD kernels runtime dispatch picks, with the build
-    variant, and with the harness binary itself (BUDGETS.md: one library, two
+    Ratios move with the CPU model, with the SIMD kernels runtime dispatch
+    picks, with the build variant, and with the harness binary itself (BUDGETS.md: one library, two
     consumer builds, 5 % apart on a parity row).
     """
     architecture, features = runtime_features(report)
     return {
+        # The same features on another microarchitecture still move ratios:
+        # hosted x86_64 runners alternate between Zen 3 and Zen 4 parts.
+        "CPU": report["environment"]["cpu"],
         "architecture": architecture,
         "runtime features": features,
         "VARIANT": report["build"]["variant"],
@@ -180,10 +183,16 @@ def budgets(reference_reports):
             "range": cross_run,
             "band": band,
             "resolvable": cross_run <= MAX_RESOLVABLE_RANGE,
-            # Parity: the release's speed plus the band. Lead: the reference
-            # lead times (1 + band), so a lead may shrink only by what the
-            # reference runs could not resolve.
-            "limit": 1.0 + band if kind == "parity" else median * (1.0 + band),
+            # The regression limit is the reference itself plus its noise:
+            # a later report may not be slower than the reference set by
+            # more than the reference runs disagreed. Holding parity rows to
+            # 1.0 instead would flag every known gap on every run and bury a
+            # new regression among them; the gaps are reported separately.
+            "limit": median * (1.0 + band),
+            # Parity rows only: the reference is behind the published
+            # release by more than its band. These are the losing cases
+            # BUDGETS.md lists; they do not fail the check.
+            "behind_release": kind == "parity" and median > 1.0 + band,
         }
     return out
 
@@ -206,15 +215,18 @@ def main(argv):
     if as_markdown:
         print(
             "| case | pair | kind | ratio | reference median | cross-run range "
-            "| band | budget | verdict |"
+            "| band | budget | verdict | reference vs 0.8.0 |"
         )
-        print("|---|---|---|---:|---:|---:|---:|---:|---|")
+        print("|---|---|---|---:|---:|---:|---:|---:|---|---|")
     for entry in all_ratios(reports[0]):
         budget = limits.get(entry["key"])
+        release_text = "-"
         if budget is None:
             verdict = "no reference row"
             median_text = range_text = band_text = limit_text = "-"
         else:
+            if entry["kind"] == "parity":
+                release_text = "behind" if budget["behind_release"] else "within band"
             median_text = f"{budget['median']:.3f}"
             range_text = f"{100 * budget['range']:.1f}%"
             band_text = f"{100 * budget['band']:.1f}%"
@@ -230,12 +242,13 @@ def main(argv):
         if as_markdown:
             print(
                 f"| {case} | {pair} | {entry['kind']} | {entry['ratio']:.3f} | "
-                f"{median_text} | {range_text} | {band_text} | {limit_text} | {verdict} |"
+                f"{median_text} | {range_text} | {band_text} | {limit_text} | {verdict} | "
+                f"{release_text} |"
             )
         else:
             print(
                 f"{case:32} {pair:44} {entry['ratio']:6.3f} {median_text:>6} "
-                f"{range_text:>6} {band_text:>6} {limit_text:>6} {verdict}"
+                f"{range_text:>6} {band_text:>6} {limit_text:>6} {verdict:8} {release_text}"
             )
     return 1 if over else 0
 

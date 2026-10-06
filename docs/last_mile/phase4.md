@@ -13282,24 +13282,40 @@ consumer's `ljt_api!` now takes a per-crate constructor, and `ci.yml`'s
 the next such break fails there.
 
 **Status (2026-10-07): closed.** Criterion 6 is
-`experiments/downstream/BUDGETS.md` with the reports under
-`experiments/downstream/reports/`. The first report is the x86_64 hosted
-run 37542461917, reproduced by run 37543406684; the candidate library is
-`main@80c15d2`.
+`experiments/downstream/BUDGETS.md`, with the reports under
+`experiments/downstream/reports/`. The reference is three x86_64 hosted runs
+of one consumer build on one CPU model, AMD EPYC 7763: runs 37548314633,
+37548320600 and 37548332954. The candidate library is `main@80c15d2`.
 
-- BUDGETS.md applies the README's predeclared rules: same-run ratios with a
-  `max(2 × spread, 3 %)` band, zero budget for allocations, identical encode
-  bytes, and 5 % for size. `experiments/downstream/budgets.py` checks any
-  later report's timing ratios against them; the allocation, encode-byte
-  and size rules are checked by reading the report.
-- It lists every case the candidate loses. Three were filed:
-  [P4-228](#p4-228-fresh-decode-of-large-images-is-24--slower-than-080--open)
-  (8K fresh decode 1.024–1.038 vs 0.8.0 in four runs),
-  [P4-229](#p4-229-the-downstream-harness-records-machine-load-but-never-acts-on-it-and-the-hosted-macos-runner-was-saturated--open)
-  (the hosted macOS runner was saturated in both dispatches, so aarch64 sets
-  no budget yet) and
-  [P4-230](#p4-230-the-candidate-adds-1015--more-code-to-a-stock-profile-binary-than-080--open)
-  (binary size +10–15 % vs 0.8.0, unattributed).
+- **Budgets.** BUDGETS.md uses same-run ratios against the reference median
+  with a band of `max(3 %, cross-run range, 2 × within-run spread)`, plus a
+  zero allocation budget, identical encode bytes and 5 % for size.
+  `experiments/downstream/budgets.py` checks a later report's timing ratios.
+  It refuses a report from a different CPU model, runtime feature line,
+  variant or consumer source hash (`consumer_source_sha256`).
+- **Why it took four extra runs.** The first two dispatches (37542461917,
+  37543406684) agreed with each other. A second consumer build of the same
+  library then moved two parity ratios by 5 % and 30 %, so one run's spread
+  was not the noise floor. Those reports are kept and BUDGETS.md says why
+  they are not the reference.
+- **The concurrent decode section**
+  (`experiments/downstream/consumer/src/concurrent.rs`) measures peak live
+  heap across four threads, the "representative concurrent application
+  memory" #635 asks for.
+- **Losing cases.** BUDGETS.md lists every case the candidate loses. Three
+  were filed:
+  - [P4-228](#p4-228-fresh-decode-of-large-images-is-24--slower-than-080--open):
+    8K fresh decode at 1.024–1.050× 0.8.0 in eight runs, and concurrent
+    fresh decode at 1.02–1.06×.
+  - [P4-229](#p4-229-the-downstream-harness-records-machine-load-but-never-acts-on-it-and-the-hosted-macos-runner-was-saturated--open):
+    all eight hosted macOS legs were saturated, so aarch64 sets no budget
+    yet.
+  - [P4-230](#p4-230-the-candidate-adds-1015--more-code-to-a-stock-profile-binary-than-080--open):
+    binary size +10–15 % vs 0.8.0, unattributed.
+
+  [P4-218](#p4-218-the-buffer-reuse-decode-still-allocates-whole-image-component-planes--open)
+  also covers memory under concurrency: four 12 MP decodes hold 209 MiB,
+  against zune-jpeg's 142 MiB.
 - The hosted runs carry no C oracle. The C contract rests on the local runs
   above against stock 3.2.0.
 - Only the `default` variant has a committed report. Criterion 1's thin-LTO,
@@ -13454,9 +13470,16 @@ built a stock-profile consumer against `main@80c15d2`, and the same-run ratio
 | 37543406684 | A | 1.024 | 0.990 |
 | 37546927211 | B | 1.029 | 0.990 |
 | 37547005682 | B | 1.038 | 1.042 |
+| 37548314633 | C (reference) | 1.028 | 0.987 |
+| 37548320600 | C (reference) | 1.028 | 0.988 |
+| 37548332954 | C (reference) | 1.032 | 1.033 |
+| 37548326976 | C, Zen 4 | 1.050 | 1.033 |
 
-The fresh path is slower in all four runs, by 2.4–3.8 %. The buffer-reuse
-path is at parity in three of them. A gap that grows with output size and
+The fresh path is slower in all eight runs, by 2.4–5.0 %. The buffer-reuse
+path is at parity in five of them. The concurrent section (four threads,
+16 decodes of the 12 MP photo) shows the same shape: fresh at 1.057, 1.059
+and 1.023 in the reference runs, and reuse at 0.98. On Zen 3 the 8K median
+(1.028) sits just under BUDGETS.md's 3 % floor, but its sign never changed. A gap that grows with output size and
 appears only when the library allocates the output fits one extra pass over
 the output buffer: about 3.6 ms on a 99 MB RGB buffer. 0.8.0 allocated it with
 `vec![0u8; size]`, which can take already-zeroed pages from `calloc`. `main`
@@ -13480,7 +13503,8 @@ noise.
    `try_reserve_exact` plus `alloc_zeroed`, or a fallible equivalent of
    `vec![0; n]`. `AllocationFailed` is kept on refusal, and the P4-209
    refusal tests still pass.
-3. The 8K fresh parity row is within its BUDGETS.md limit in two dispatches.
+3. In two reference-comparable dispatches, the 8K fresh and concurrent fresh
+   parity rows are back to "within band" of 0.8.0 in BUDGETS.md's terms.
 
 **Why deferred.** It needs a quiet-machine measurement. The local machine was
 loaded, and hosted runners cannot resolve a 3 % gap on their own.
@@ -13489,10 +13513,11 @@ loaded, and hosted runners cannot resolve a 3 % gap on their own.
 
 **GitHub:** [#660](https://github.com/developer0hye/libjpeg-turbo-rs/issues/660) — child of #635 Milestone C.
 
-**Found 2026-10-07** taking P4-214's first report. Both `downstream-bench.yml`
-dispatches (runs 37542461917 and 37543406684) put the aarch64 leg on a
-3-vCPU `macos-latest` runner whose own pre-run sample showed a load average of
-50 and 29 and, in the first run, 0.3 % idle. Its p10–p90 spreads were 13–80 %
+**Found 2026-10-07** taking P4-214's first report. All eight
+`downstream-bench.yml` dispatches that day put the aarch64 leg on a 3-vCPU
+`macos-latest` runner whose own pre-run sample showed it saturated: load
+averages of 28–50 and, in the first run, 0.3 % idle. The figures below are
+from the first two. Its p10–p90 spreads were 13–80 %
 and 6–159 % of the median, against 0.1–6 % and 0.3–8 % on the x86_64 leg, so
 both reports are committed as
 `experiments/downstream/reports/2026-10-07-aarch64-macos-contaminated/` and

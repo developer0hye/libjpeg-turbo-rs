@@ -1,0 +1,27 @@
+variant=default
+profile=release; consumer manifest has no [profile] section (checked)
+CARGO_PROFILE_RELEASE_LTO=<unset: Cargo default lto=false>
+RUSTFLAGS=<unset>
+CARGO_BUILD_JOBS=<unset: one job per CPU>
+scrubbed_env=CARGO_INCREMENTAL
+cargo=cargo 1.99.0 (5f94df478 2026-08-27)
+cargo_home_config=<none>
+env_CARGO_TERM_COLOR=always
+candidate_sha=dd8afb1c965866822a55587c4f6642c364f6d90a
+candidate_tracked_changes=0
+consumer_source_sha256=aac5b6b303e71722534f60df8e03607fa9c1597a7031e8b432ca74e189d45253
+work_dir=/home/runner/work/_temp/downstream-work
+clean_build_seconds=38.4 (all dependencies, fresh target dir, downloads excluded)
+binary_bytes=3769816 (downstream-consumer, unstripped)
+probe_none_bytes=455928 (contribution over probe-none: 0)
+probe_none_clean_build_seconds=0.1
+probe_baseline_bytes=1081400 (contribution over probe-none: 625472)
+probe_baseline_clean_build_seconds=11.9
+probe_candidate_bytes=1173272 (contribution over probe-none: 717344)
+probe_candidate_clean_build_seconds=13.1
+probe_adapter_bytes=1280520 (contribution over probe-none: 824592)
+probe_adapter_clean_build_seconds=28.1
+probe_image_bytes=816600 (contribution over probe-none: 360672)
+probe_image_clean_build_seconds=18.8
+probe_zune_bytes=673392 (contribution over probe-none: 217464)
+probe_zune_clean_build_seconds=1.8
