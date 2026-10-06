@@ -18,6 +18,12 @@ tests/miri_alloc_failure.rs     @developer0hye
 tests/miri_once_init.rs         @developer0hye
 tests/miri_coverage_gate.rs     @developer0hye
 .github/workflows/ci.yml        @developer0hye
+# P4-209: `tests/decode_alloc_gate.rs` makes classifying a new infallible
+# allocation under `src/decode/` mandatory; whether a classification is honest —
+# that the size really is bounded by something other than the input — is the
+# review question the gate cannot ask.
+docs/decode_alloc_inventory.tsv @developer0hye
+tests/decode_alloc_gate.rs      @developer0hye
 # The rules above are only worth as much as their own review: without this
 # line a pull request deleting them would not be routed anywhere.
 .github/CODEOWNERS              @developer0hye

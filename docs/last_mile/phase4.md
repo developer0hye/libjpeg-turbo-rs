@@ -1278,7 +1278,7 @@ The one non-obvious piece was the **scan script**. `jpeg_simple_progression` tak
 
 **Acceptance criteria.** Peak RSS for a streaming baseline decode of the 8K fixture bounded by intermediates + a fixed input window (measured); slice-path throughput unchanged on the full matrix (recorded in `experiments/`); design reviewed against P4-26 before implementation.
 
-**Status (2026-07-28): closed.** `decompress_from_reader_incremental` (src/api/incremental.rs) decodes interleaved single-scan Huffman baseline streams from a sliding window: per-MCU-row checkpoints on a window-aware `BitReader` (additive `is_final`/`starved` fields; the slice path constructs with `is_final=true` where starvation cannot fire), retry-on-starvation, front-compaction of committed bytes, and plane injection into `decode_baseline_planes` so the whole existing output pipeline is reused. Peak input storage measured at 195,985 bytes of allocation capacity (entropy window + header prefix + the fixed 64 KiB read-staging buffer; the instrumented metric counts capacities, not live bytes) on the 1.25 MB 1080p fixture fed in ≥ 64 KiB reads — 129,203 at the 8 KiB feed the test drives — asserted ≤ 256 KiB in `tests/regression_issue_357_incremental_reader.rs`, and size-independent in the strongest sense: the full-chunk-feed peak is exactly 195,985 bytes on the 1.25 MB 1080p, 5.0 MB 4K, and 8K corpus fixtures alike (all three asserted, closing the criterion's 8K clause as written). Slice-path throughput unchanged on the full decode matrix (`experiments/pipeline.tsv`: 27 benchmarks compared branch-vs-main sequentially on a quiet host — zero criterion regression verdicts, every change midpoint within [-1.13%, +0.30%]; spot figures 416.20 µs branch vs 416.99 µs main on decode_640x480). P4-26 co-design: the P4-13 marker-boundary scanner was lifted to `src/decode/boundary.rs` and the capi shim re-imports it — one scanner drives both mechanisms. Scope note (corrects the original filing's baseline/progressive split): the windowable set is *interleaved* baseline only. Multi-component non-interleaved baseline and progressive walk the full entropy stream during header parse (`marker.rs` `skip_entropy_data`, reached only when the scan carries fewer components than the frame) and take the documented buffering fallback. Single-component/grayscale streams stop at the first SOS like interleaved baseline, but decode through P4-27's one-block raster (`pipeline_impl/baseline.rs:55-56` routes `scan.components.len() == 1` to `decode_non_interleaved_baseline_planes`), which the row loop does not model — so they fall back as well, as do arithmetic/lossless/12-bit.
+**Status (2026-07-28): closed.** `decompress_from_reader_incremental` (src/api/incremental.rs) decodes interleaved single-scan Huffman baseline streams from a sliding window: per-MCU-row checkpoints on a window-aware `BitReader` (additive `is_final`/`starved` fields; the slice path constructs with `is_final=true` where starvation cannot fire), retry-on-starvation, front-compaction of committed bytes, and plane injection into `decode_baseline_planes` so the whole existing output pipeline is reused. Peak input storage measured at 195,985 bytes of allocation capacity (entropy window + header prefix + the fixed 64 KiB read-staging buffer; the instrumented metric counts capacities, not live bytes) on the 1.25 MB 1080p fixture fed in ≥ 64 KiB reads — 129,203 at the 8 KiB feed the test drives — asserted ≤ 256 KiB in `tests/regression_issue_357_incremental_reader.rs`, and size-independent in the strongest sense: the full-chunk-feed peak is exactly 195,985 bytes on the 1.25 MB 1080p, 5.0 MB 4K, and 8K corpus fixtures alike (all three asserted, closing the criterion's 8K clause as written). Slice-path throughput unchanged on the full decode matrix (`experiments/pipeline.tsv`: 27 benchmarks compared branch-vs-main sequentially on a quiet host — zero criterion regression verdicts, every change midpoint within [-1.13%, +0.30%]; spot figures 416.20 µs branch vs 416.99 µs main on decode_640x480). P4-26 co-design: the P4-13 marker-boundary scanner was lifted to `src/decode/boundary.rs` and the capi shim re-imports it — one scanner drives both mechanisms. Scope note (corrects the original filing's baseline/progressive split): the windowable set is *interleaved* baseline only. Multi-component non-interleaved baseline and progressive walk the full entropy stream during header parse (`marker.rs` `skip_entropy_data`, reached only when the scan carries fewer components than the frame) and take the documented buffering fallback. Single-component/grayscale streams stop at the first SOS like interleaved baseline, but decode through P4-27's one-block raster (`pipeline_impl/baseline.rs:56-57` routes `scan.components.len() == 1` to `decode_non_interleaved_baseline_planes`), which the row loop does not model — so they fall back as well, as do arithmetic/lossless/12-bit.
 
 ## P4-60. Scalar Kernels Are ~2.5x Slower Than C's Scalar Kernels — **OPEN**
 
@@ -8171,8 +8171,8 @@ misuse of a public SIMD entry point; none injects allocation failure; none runs
    `tests/miri_alloc_failure.rs`, `tests/miri_once_init.rs`) and the doctests are
    in the Miri job, `tests/miri_coverage_gate.rs` fails when a step stops naming
    one of them, and the allocation-failure injection produced
-   [P4-209](#p4-209-the-mainline-decode-destination-is-allocated-infallibly-so-an-allocator-refusal-aborts-the-process--open)
-   (#632) on its first run. What remains is the *existing* 224 integration
+   [P4-209](#p4-209-the-mainline-decode-destination-is-allocated-infallibly-so-an-allocator-refusal-aborts-the-process--closed-2026-10-07)
+   (#632, closed 2026-10-07) on its first run. What remains is the *existing* 224 integration
    suites: most spawn `djpeg`/`cjpeg`, which Miri cannot support — measured, not
    assumed (`cargo miri test --test decode_limits` interprets its first few tests
    and then stops with "can't call foreign function `posix_spawnattr_init`"; how
@@ -8804,7 +8804,8 @@ the harness first would only pin current behaviour.
     This is also the one suite of the four without a wasm guard, so
     `wasm.yml`'s `cargo test --target wasm32-wasip1` runs its four
     interpreter-independent tests under `wasmtime` as well (verified).
-  - `tests/miri_alloc_failure.rs` (4 tests, 35 s under Miri) injects the refusal from a
+  - `tests/miri_alloc_failure.rs` (4 tests and 35 s under Miri when landed; 7
+    tests since P4-209, not re-timed) injects the refusal from a
     `#[global_allocator]` that fails an allocation of an **exact size**, armed
     on the calling thread, so one test cannot reach another's, the harness's own
     allocations are never refused, and a `>=` rule cannot catch an *infallible*
@@ -8816,6 +8817,9 @@ the harness first would only pin current behaviour.
     `AllocationFailed` **naming the buffer and its size** (a bare `matches!` on
     the variant would have accepted a refusal from any other call site), and
     the *same decoder* then produces bytes identical to an unrefused decode.
+    The fourth, the mainline contract, was `#[ignore]`d until P4-209
+    (2026-10-07), which un-ignored it and added three more converted decode
+    sites in the same shape.
   - `tests/miri_once_init.rs` (2 tests, one of them runnable under Miri, ~11 s
     per seed) races `std_huffman_tables`'s `AtomicPtr` once-cell in a process that
     has not touched it — which is why it is its own binary:
@@ -8888,8 +8892,8 @@ the harness first would only pin current behaviour.
   so the rules cannot rot
   into always-true.
   **What the injection produced:**
-  [P4-209](#p4-209-the-mainline-decode-destination-is-allocated-infallibly-so-an-allocator-refusal-aborts-the-process--open)
-  (#632) — `decompress` allocates its destination with `vec![0u8; size]`
+  [P4-209](#p4-209-the-mainline-decode-destination-is-allocated-infallibly-so-an-allocator-refusal-aborts-the-process--closed-2026-10-07)
+  (#632, closed 2026-10-07) — `decompress` allocated its destination with `vec![0u8; size]`
   (`decode/pipeline_impl/output.rs`, `take_out_buf`) where `size` comes from the
   SOF, so a refused allocation **aborts the process** instead of returning
   `AllocationFailed`. This is the class P4-136 criterion 4 and P4-144 closed
@@ -8897,9 +8901,10 @@ the harness first would only pin current behaviour.
   that because none had ever refused an allocation a decode actually makes (the
   two pre-existing probes ask `try_alloc` for an unservable `isize::MAX` and are
   Miri-ignored — see P4-209). Verified by patching that one
-  site to `try_filled_vec`, after which the contract test passes unchanged; it is
-  committed `#[ignore]`d citing the issue, so closing P4-209 means deleting the
-  attribute rather than writing a test.
+  site to `try_filled_vec`, after which the contract test passes unchanged; it was
+  committed `#[ignore]`d citing the issue, and P4-209 closed 2026-10-07 by
+  deleting the attribute, converting the other geometry-sized allocations
+  under `src/decode/`, and gating the rest with `tests/decode_alloc_gate.rs`.
   **What remains in this criterion** is the pre-existing integration suites.
   They are not one edit away: `cargo miri test --test decode_limits` interprets
   the first handful of its tests and then stops with "can't call foreign
@@ -12438,7 +12443,7 @@ it: choosing between the two readings is a decision about what the sanitizer
 leg is for, and the pull request that surfaced it lands test infrastructure for
 P4-141.
 
-## P4-209. The Mainline Decode Destination Is Allocated Infallibly, So an Allocator Refusal Aborts the Process — **OPEN**
+## P4-209. The Mainline Decode Destination Is Allocated Infallibly, So an Allocator Refusal Aborts the Process — **CLOSED 2026-10-07**
 
 **GitHub:** [#632](https://github.com/developer0hye/libjpeg-turbo-rs/issues/632) — found by [P4-141](#p4-141-soundness-verification-program-mirisanitizerfuzz-coverage-gaps-and-an-unsafe-inventory-gate--partial-criteria-3-4-and-5-landed-and-gated-except-criterion-3s-callback-reentry-scenario-criterion-1-landed-except-the-pre-existing-integration-suites-criteria-2-6-and-7-open) criterion 1.
 
@@ -12505,6 +12510,66 @@ is one line at the site that aborts and an audit of the fifty-eight others, and
 bundling an audit of the decode pipeline's allocation discipline into the pull
 request that built the injection harness would put the harness's own review
 behind it.
+
+**Status (2026-10-07): closed.** Criterion 1:
+`take_out_buf` (`decode/pipeline_impl/output.rs`) allocates through
+`try_filled_vec(size, 0u8, "decode output buffer")`, and
+`tests/miri_alloc_failure.rs::the_mainline_decode_reports_refusal_instead_of_aborting`
+runs without its `#[ignore]`, now also pinning the refused buffer's name and
+size; un-ignored on the unfixed tree it died with
+`memory allocation of 12288 bytes failed` / `SIGABRT`. Criterion 2: the
+triage measured **78** infallible-allocation lines (`vec![…]`,
+`Vec::with_capacity(…)`, `.to_vec()`) in non-test `src/decode/` code — the
+issue's 59 was a narrower grep, and counting inline `#[cfg(test)]` modules
+gives 113 — and **36 were converted** to `common::try_alloc`: every
+component plane not already fallible (baseline ×2, the arithmetic multi-scan
+twin, the windowed-streaming planes, lossless ×4), every destination
+(`take_out_buf`, the 12-bit downscale ×5, the grayscale exact-copy, the lenient
+neutral raster, the merged-upsample RGB and RGB565 buffers, the 4-component
+output, the lossless outputs ×3, the grayscale and legacy colourspace
+overrides ×3), the full-plane upsample buffers (`cb_full`/`cr_full`, the YCCK
+chroma planes, `upsample_component_plane`'s `active`/`full`), the crop copies
+(three `cropped` chroma planes, the crop-shifted planes, the vertical-crop
+`.to_vec()`), plus two input-sized allocations the patterns do not match on the
+same paths (the 12-bit grayscale `collect()` and the crop-shift
+`plane.clone()`). Block smoothing's DC snapshot is fallible on the decode path
+through a new `try_apply_block_smoothing_coeffs`; the public
+`apply_block_smoothing_coeffs` keeps its `()` signature. A new
+`try_alloc::try_with_capacity::<T>` covers non-byte element types, with unit
+tests for the reservation and the inexpressible-byte-count limit. The **42**
+remaining lines are classified in `docs/decode_alloc_inventory.tsv` as
+`fixed-size`, `component-count` (≤ `MAX_COMPONENTS`), `row-scratch` (one row,
+≤ 512 KiB by the SOF's 16-bit width) or `infallible-public-signature` (two:
+`Image::apply_orientation_value` and the public smoothing wrapper). Criterion 3:
+`tests/decode_alloc_gate.rs` diffs that inventory against the sources on every
+native leg — unlisted, stale and miscounted rows fail with the rows to add or
+delete — skipping comment lines, `*_tests.rs` and inline `#[cfg(test)] mod`
+blocks (brace-counted outside literals, pinned by
+`the_test_module_skip_resumes_after_the_module`, and
+`every_scanned_file_ends_with_balanced_braces` fails if the scanner ends any
+file with a brace, string or skip open), with
+`the_gate_actually_scans_the_library_sources` as the non-vacuity check; adding a
+`vec![0u8; n]` to `pipeline_impl/raw.rs` was reported as an unlisted row.
+Beyond the mainline, three more converted sites are pinned through distinct
+public configurations, each red with `SIGABRT` on the unfixed tree at the
+predicted size and green after:
+`a_refused_merged_upsample_buffer_reports_instead_of_aborting` (6720 bytes,
+`set_merged_upsample`),
+`a_refused_lossless_sample_plane_reports_instead_of_aborting` (3000 bytes, SOF3)
+and `a_refused_vertical_crop_copy_reports_instead_of_aborting` (3840 bytes,
+`set_crop_y`), each requiring exactly one refusal and identical bytes from the
+same `Decoder` afterwards; `tests/miri_coverage_gate.rs` lists all four. The
+gate sees only the three textual patterns, so an input-sized `.clone()` or
+`.collect()` elsewhere in the decoder remains possible by construction; the
+gate's module documentation says so rather than claiming the class closed.
+Out of scope by the item's own wording (`src/decode/`): the sample decode of a
+12-bit source, which `decode_12bit_as_8bit` delegates to
+`api::precision::decompress_12bit`, still allocates its planes with `vec![]`,
+as do other `src/api/` modules. Not measured here: the converted zero-filled
+buffers trade `vec![0; n]`'s `alloc_zeroed` for `try_reserve_exact` plus an
+explicit fill. `experiments/progressive.tsv` measured that exact swap neutral on
+an 8K progressive decode (P4-136 criterion 4); the baseline mainline has no row
+of its own yet.
 
 ## P4-210. `Encoder::scan_script` Is Silently Ignored Outside the Huffman YCbCr/Grayscale Progressive Path — **OPEN**
 
@@ -12667,3 +12732,43 @@ nor the upsample planes, so the limit is non-strict there.
 
 **Why deferred.** A decode-pipeline change across three output paths with
 their own C parity, found while reviewing an adapter pull request.
+
+## P4-215. Lenient Decodes Collect One Warning String per Corrupt MCU Without a Cap, and Clone the List Infallibly Into Every `Image` — **OPEN**
+
+**GitHub:** [#641](https://github.com/developer0hye/libjpeg-turbo-rs/issues/641) — found 2026-10-07 by the P4-209 allocation audit.
+
+A lenient baseline decode pushes one `DecodeWarning::HuffmanError` with a heap
+`String` per corrupt MCU, unbounded, so a stream corrupt everywhere produces a
+list proportional to the MCU count (about 16.7 M entries for a 65500x65500
+frame). The list is then `warnings.clone()`d infallibly at about a dozen
+`Image` construction sites in `src/decode/pipeline_impl/output.rs`, which
+`tests/decode_alloc_gate.rs` cannot see because it matches allocation macros
+textually. C counts warnings (`num_warnings`) and keeps one message.
+
+**Acceptance criteria.** (1) The list is bounded — a cap plus a "further
+warnings suppressed" entry, or a count plus first/last messages — and the bound
+is documented on `DecodeWarning`/`Image::warnings`. (2) The list is moved into
+the `Image`, or cloned fallibly. (3) A test drives a fully corrupt lenient
+decode and asserts the bound.
+
+**Why deferred.** Found while closing P4-209, whose scope was the allocation
+macros under `src/decode/`; bounding warnings is an API-visible decision.
+
+## P4-216. The 12-/16-Bit Decode Entry Points in `src/api` Still Allocate Geometry-Sized Buffers Infallibly — **OPEN**
+
+**GitHub:** [#642](https://github.com/developer0hye/libjpeg-turbo-rs/issues/642) — found 2026-10-07 by the P4-209 allocation audit, which was scoped to `src/decode/`.
+
+`api::precision::decompress_12bit`/`decompress_16bit` and the `src/api/`
+modules that build their planes allocate geometry-derived buffers with
+`vec![…; n]`, so a 12-bit or lossless-16 decode still aborts on allocator
+refusal — the defect P4-209 removed from the 8-bit path. With P4-199 (these
+entry points ignore the handle's limits) the size is bounded only by the
+default `max_pixels`.
+
+**Acceptance criteria.** (1) Every geometry-derived allocation reachable from
+the 12/16-bit decode entry points goes through `common::try_alloc`. (2) The
+decode allocation gate, or a sibling, covers those `src/api/` modules. (3)
+`tests/miri_alloc_failure.rs` gains a 12-bit refusal case.
+
+**Why deferred.** Outside P4-209's `src/decode/` scope; the precision entry
+points are also being reworked by P4-199.
