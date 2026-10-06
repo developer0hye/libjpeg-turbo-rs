@@ -28,9 +28,17 @@ fn fixture_path(name: &str) -> PathBuf {
         .join(name)
 }
 
+/// The fixtures embedded at compile time: `wasm32-wasip1` under wasmtime
+/// cannot read `tests/fixtures/` at run time, and the Rust-side assertions
+/// must run there too. `fixture_path` still names the files for `djpeg`.
 fn read_fixture(name: &str) -> Vec<u8> {
-    let path: PathBuf = fixture_path(name);
-    std::fs::read(&path).unwrap_or_else(|e| panic!("read {path:?}: {e}"))
+    let bytes: &[u8] = match name {
+        "gray_8x8.jpg" => include_bytes!("fixtures/gray_8x8.jpg"),
+        "cjpeg_33x31_444.jpg" => include_bytes!("fixtures/cjpeg_33x31_444.jpg"),
+        "cjpeg_33x31_420.jpg" => include_bytes!("fixtures/cjpeg_33x31_420.jpg"),
+        other => panic!("no embedded fixture named {other}"),
+    };
+    bytes.to_vec()
 }
 
 /// The crop error's reason, or a panic naming what came back instead.

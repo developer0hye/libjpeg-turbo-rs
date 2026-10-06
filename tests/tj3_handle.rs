@@ -242,9 +242,11 @@ fn handle_cropping_region() {
         "The left boundary of the cropping region (4) is not\ndivisible by the scaled iMCU width (8)";
 
     // 33x31, 4:4:4: an 8-pixel iMCU at 1/1, 4 at 1/2.
+    // Embedded: wasm32-wasip1 under wasmtime cannot read tests/fixtures/.
+    // The path is kept for the djpeg cross-check below.
     let fixture: std::path::PathBuf = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/cjpeg_33x31_444.jpg");
-    let jpeg: Vec<u8> = std::fs::read(&fixture).expect("read fixture");
+    let jpeg: Vec<u8> = include_bytes!("fixtures/cjpeg_33x31_444.jpg").to_vec();
     let mut handle: TjHandle = TjHandle::new();
 
     // Set-time validation needs a header.
@@ -382,10 +384,24 @@ fn handle_cropping_region_follows_turbojpeg_on_nonstandard_sampling() {
     use libjpeg_turbo_rs::{CropRegion, JpegError};
 
     let fixture = |sampling: &str| -> Vec<u8> {
-        let path: std::path::PathBuf = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures")
-            .join(format!("crop_sampling_{}.jpg", sampling.replace(',', "_")));
-        std::fs::read(&path).unwrap_or_else(|e| panic!("read {path:?}: {e}"))
+        // Embedded: wasm32-wasip1 under wasmtime cannot read tests/fixtures/.
+        let name: String = format!("crop_sampling_{}.jpg", sampling.replace(',', "_"));
+        let bytes: &[u8] = match name.as_str() {
+            "crop_sampling_2x1_2x1_2x1.jpg" => {
+                include_bytes!("fixtures/crop_sampling_2x1_2x1_2x1.jpg")
+            }
+            "crop_sampling_2x2_1x1_2x2.jpg" => {
+                include_bytes!("fixtures/crop_sampling_2x2_1x1_2x2.jpg")
+            }
+            "crop_sampling_2x2_1x2_1x2.jpg" => {
+                include_bytes!("fixtures/crop_sampling_2x2_1x2_1x2.jpg")
+            }
+            "crop_sampling_2x2_2x1_2x1.jpg" => {
+                include_bytes!("fixtures/crop_sampling_2x2_2x1_2x1.jpg")
+            }
+            other => panic!("no embedded fixture named {other}"),
+        };
+        bytes.to_vec()
     };
     let region: CropRegion = CropRegion {
         x: 8,
