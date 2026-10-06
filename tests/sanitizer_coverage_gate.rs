@@ -10,10 +10,12 @@
 //! compare a fallback.
 //!
 //! None of that is visible in the test sources, so the ways it can silently
-//! stop holding all live in the workflow: the unfiltered `--lib` run narrowed
-//! by a filter or `--skip`, the AVX2 requirement dropped, the confirmation
-//! step's expected count left behind when a test is added or removed, or a job
-//! switched off by `if:` or forgiven by `continue-on-error:`. This gate reads
+//! stop holding all live in the workflow: the job's instrumentation flags
+//! dropped, the unfiltered `--lib` run narrowed by a filter or `--skip`, the
+//! AVX2 requirement dropped, the confirmation step's count no longer asserted
+//! (`cargo test` exits 0 when a filter selects nothing) or left behind when a
+//! test is added or removed, or a job switched off by `if:` or forgiven by
+//! `continue-on-error:`. This gate reads
 //! the workflow and the test modules and fails on each of those, the same
 //! shape as `tests/miri_coverage_gate.rs` for the Miri job.
 //!
@@ -25,6 +27,21 @@ use std::path::{Path, PathBuf};
 
 const WORKFLOW: &str = ".github/workflows/sanitizers.yml";
 const JOBS: [&str; 2] = ["asan", "ubsan"];
+/// The instrumentation each job exists for, as its `env:` line spells it.
+/// Without it the job runs ordinary tests and every other rule still holds.
+const INSTRUMENTATION: [(&str, &str); 2] = [
+    ("asan", "RUSTFLAGS: \"-Z sanitizer=address\""),
+    ("ubsan", "RUSTFLAGS: \"-Z ub-checks=yes\""),
+];
+/// The lines that turn the confirmation run into an assertion. `cargo test`
+/// exits 0 when a filter selects nothing, so the run alone proves nothing;
+/// `pipefail` keeps a failing test from hiding behind `tee`.
+const COUNT_ENFORCEMENT: [&str; 4] = [
+    "set -o pipefail",
+    "| tee kernel_bounds.log",
+    "passed=$(grep -E '^test result: ok\\.' kernel_bounds.log | awk '{s += $4} END {print s + 0}')",
+    "if [ \"$passed\" -ne \"$EXPECTED_KERNEL_BOUNDS_TESTS\" ]; then",
+];
 const MODULE: &str = "kernel_bounds_tests";
 const EXPECTED_KEY: &str = "EXPECTED_KERNEL_BOUNDS_TESTS:";
 const AVX2_REQUIREMENT: &str = "grep -qw avx2 /proc/cpuinfo";
@@ -152,6 +169,28 @@ fn problems(workflow: &str, declared: usize) -> Vec<String> {
                 ));
             }
         }
+        for (instrumented_job, flags) in INSTRUMENTATION {
+            if instrumented_job == job && !block.contains(flags) {
+                found.push(format!(
+                    "{job}: `{flags}` is missing, so its tests run uninstrumented"
+                ));
+            }
+        }
+        for line in COUNT_ENFORCEMENT {
+            if !block.contains(line) {
+                found.push(format!(
+                    "{job}: the confirmation step no longer asserts the count (`{line}` missing)"
+                ));
+            }
+        }
+        let exits_on_mismatch: bool = block
+            .split(COUNT_ENFORCEMENT[3])
+            .nth(1)
+            .and_then(|after| after.split("fi").next())
+            .is_some_and(|branch| branch.contains("exit 1"));
+        if !exits_on_mismatch {
+            found.push(format!("{job}: a count mismatch does not `exit 1`"));
+        }
         if !block.contains(AVX2_REQUIREMENT) {
             found.push(format!(
                 "{job}: no `{AVX2_REQUIREMENT}` step, so a runner without AVX2 \
@@ -266,7 +305,27 @@ fn each_way_the_jobs_can_go_stale_is_reported() {
         "real workflow must pass"
     );
 
-    let mutations: [(&str, String); 6] = [
+    let mutations: [(&str, String); 10] = [
+        (
+            "ASan instrumentation dropped",
+            workflow.replacen("RUSTFLAGS: \"-Z sanitizer=address\"", "RUSTFLAGS: \"\"", 1),
+        ),
+        (
+            "ub-checks dropped",
+            workflow.replace("RUSTFLAGS: \"-Z ub-checks=yes\"", "RUSTFLAGS: \"\""),
+        ),
+        (
+            "count comparison removed",
+            workflow.replacen(COUNT_ENFORCEMENT[3], "if false; then", 1),
+        ),
+        (
+            "mismatch no longer fails",
+            workflow.replacen(
+                "expected $EXPECTED_KERNEL_BOUNDS_TESTS\" >&2\n            exit 1",
+                "expected $EXPECTED_KERNEL_BOUNDS_TESTS\" >&2\n            true",
+                1,
+            ),
+        ),
         (
             "AVX2 requirement dropped",
             workflow.replace(AVX2_REQUIREMENT, "true"),
