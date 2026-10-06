@@ -134,8 +134,10 @@ it is mounted, e.g.
 `DOWNSTREAM_WORK_DIR=/Volumes/T7/scratch/downstream-<variant>`. The seven
 clean builds (main plus six probes) use several hundred MB of target
 directories while they run. `run.sh` deletes them once it has the binary and
-the sizes, so a finished work dir holds only the copied consumer, the binary,
-`build-info.txt` and the report (about 15 MB, mostly `report/corpus/`).
+the sizes, so a finished work dir holds only the copied consumer,
+`Cargo.lock.committed`, the binary, `build-info.txt` and the report (about
+18 MB on the 2026-10-07 aarch64 smoke run: 15 MB of report, almost all of
+it `report/corpus/`, plus a 2.7 MB binary).
 
 `run.sh` does the following:
 
@@ -145,15 +147,17 @@ the sizes, so a finished work dir holds only the copied consumer, the binary,
    and refuses a path containing `|`, `&`, `\` or `"`. It also refuses if the
    manifest has gained a `[profile]` section.
 3. Refuses to continue if the copied consumer directory or any of its
-   ancestors has a `.cargo/config.toml`. `CARGO_HOME`'s config is the one
+   ancestors has a `.cargo/config.toml` (or legacy `.cargo/config`).
+   `CARGO_HOME`'s config is the one
    exception, because it applies to every build on the machine, downstream
    builds included. `run.sh` refuses it too if it sets a profile, rustflags,
    a rustc wrapper or `[target]` options.
 4. Unsets every `CARGO_PROFILE_*`, `CARGO_BUILD_*` (except `CARGO_BUILD_JOBS`),
    `CARGO_TARGET_*`, `CARGO_INCREMENTAL`, `RUSTC_WRAPPER`,
-   `RUSTC_WORKSPACE_WRAPPER`, `RUSTFLAGS` and `CARGO_ENCODED_RUSTFLAGS`, and
-   records which ones it cleared. It also records the remaining `CARGO_*` /
-   `RUST*` environment, dropping credential-named variables and any value
+   `RUSTC_WORKSPACE_WRAPPER`, `RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS`,
+   `RUSTDOCFLAGS` and `CARGO_ENCODED_RUSTDOCFLAGS`, and records which ones
+   it cleared. It also records the remaining `CARGO_*` / `RUST*` environment
+   except `CARGO_HOME`, dropping credential-named variables and any value
    that is a URL with userinfo. Only the *shape* of `CARGO_HOME`'s config
    goes into `build-info.txt`: table and key names, with every value redacted
    except `[build] jobs` and `[net] offline`.
@@ -163,12 +167,13 @@ the sizes, so a finished work dir holds only the copied consumer, the binary,
 6. Builds the six size probes (`probe-none`, `-baseline`, `-candidate`,
    `-adapter`, `-image`, `-zune`), each in its own fresh target directory. A
    probe's size minus `probe-none`'s is that backend's contribution to a stock
-   binary. `probe-adapter` includes the candidate and `image`'s core traits.
+   binary. `probe-adapter` includes the candidate and the adapter, and — because the harness's `adapter` feature also enables `image-builtin` — `image`'s own JPEG codec, so its build time and size overstate what an adapter-only application builds; subtract the `image` probe for an estimate.
    Set `SKIP_PROBES=1` to skip this step.
 7. Deletes the target directories, then runs the harness from the consumer
    directory, so its `rustc -Vv` resolves the same toolchain the build used.
-   The harness writes `report.md`, `report.json`, `build-info.txt` and
-   `corpus/` to `DOWNSTREAM_OUT_DIR`, which defaults to `$WORK/report`.
+   The harness writes `report.md`, `report.json` and `corpus/` to
+   `DOWNSTREAM_OUT_DIR`, which defaults to `$WORK/report`; `run.sh` then
+   copies `build-info.txt` next to them.
 
 `run.sh --check` stops after step 4. Instead of benchmarking, it runs
 `cargo fmt --check`, `cargo clippy --locked --release --all-targets -- -D

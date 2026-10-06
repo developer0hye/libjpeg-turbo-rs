@@ -586,7 +586,11 @@ fn run_encode_case(source: &SourcePixels, options: &Options) -> EncodeCaseReport
         None => c_comparison.push(CorrectnessRecord::note(
             "all rows",
             "C cjpeg",
-            "C encode comparison: skipped (no cjpeg)".to_string(),
+            if options.use_c_oracle {
+                "C encode comparison: skipped (no cjpeg)".to_string()
+            } else {
+                "C encode comparison: disabled (--no-c-oracle)".to_string()
+            },
         )),
         Some(cjpeg) => {
             let ppm: PathBuf = options.out_dir.join(format!("{}.ppm", source.id));

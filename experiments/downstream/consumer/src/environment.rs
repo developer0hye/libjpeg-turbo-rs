@@ -204,8 +204,9 @@ pub fn read_build_info(path: Option<&Path>) -> Vec<(String, String)> {
 /// A C reference tool (`djpeg` or `cjpeg`), if one is available. C
 /// libjpeg-turbo is the contract for the libjpeg-turbo-rs rows, so where the
 /// tool is present the report adds — and asserts — candidate-vs-C. Absence is
-/// reported, not fatal: hosted runners do not ship these tools and this
-/// harness installs nothing.
+/// reported, not fatal: this harness installs nothing. (The hosted workflow
+/// passes `--no-c-oracle`, because any tool a runner image happens to carry
+/// is an unpinned release.)
 ///
 /// Selection: the explicit `--djpeg`/`--cjpeg` path, else the `DJPEG`/`CJPEG`
 /// environment variable, else the first of `/opt/homebrew/bin`,

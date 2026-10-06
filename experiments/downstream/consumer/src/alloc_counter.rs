@@ -17,8 +17,8 @@
 //!
 //! The counters are atomics with `Relaxed` ordering. The harness is
 //! single-threaded and none of the measured backends spawn threads in the
-//! configuration built here (image without `rayon`, zune-jpeg without its
-//! threading feature, libjpeg-turbo-rs is single-threaded), so the counts are
+//! configuration built here (image without `rayon`; zune-jpeg 0.5 has no
+//! threading feature; libjpeg-turbo-rs is single-threaded), so the counts are
 //! exact. Atomics are used only because `GlobalAlloc` must be `Sync`; if a
 //! backend ever did allocate from another thread the totals would still be
 //! correct, but "peak live" would be an approximation.

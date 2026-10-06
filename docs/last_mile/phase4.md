@@ -12526,13 +12526,16 @@ the output geometry and the SOF markers, all deterministic, so machine load
 does not affect them. Unlike the timings, they hold even though they come
 from a smoke run.
 
-- The candidate image adapter on `main` decodes eagerly and does not report
-  EXIF orientation (`ImageDecoder::orientation()` falls back to
-  `NoTransforms`). The thumbnail workload therefore produces 256x192 where
-  every other row produces the oriented 192x256. P4-212 (PR #643, open as
-  of 2026-10-07) addresses both the eager decode and the missing metadata.
+- The candidate image adapter measured here (this branch, forked from `main`
+  before PR #643) decodes eagerly and does not report EXIF orientation
+  (`ImageDecoder::orientation()` falls back to `NoTransforms`). The
+  thumbnail workload therefore produces 256x192 where every other row
+  produces the oriented 192x256. P4-212 fixed both the eager decode and the
+  missing metadata (PR #643, merged and CLOSED 2026-10-07), so on a
+  candidate that includes it the adapter's thumbnail row should become
+  192x256; not yet re-run.
 - `decompress_into` still allocates whole-image component planes: a 17.5 MiB
-  peak on 12 MP 4:2:0 RGB (zune `decode_into`: 0.66 MiB) and 2.0 MiB on
+  peak on 12 MP 4:2:0 RGB (zune `decode_into`: 0.65 MiB) and 2.0 MiB on
   grayscale 1080p. Filed as
   [P4-218](#p4-218-the-buffer-reuse-decode-still-allocates-whole-image-component-planes--open).
 - `image`'s built-in encoder writes 4:4:4 at q85, so its encode bytes and
@@ -12577,7 +12580,7 @@ release profile, aarch64-darwin):
 
 | Case | candidate `decompress_into` | candidate `decompress_to` | zune-jpeg `decode_into` |
 |---|---:|---:|---:|
-| 4032x3024 4:2:0 baseline, RGB8 | 17.5 MiB | 52.4 MiB | 0.66 MiB |
+| 4032x3024 4:2:0 baseline, RGB8 | 17.5 MiB | 52.4 MiB | 0.65 MiB |
 | 7680x4320 4:2:0 baseline, RGB8 | 47.5 MiB | 142.4 MiB | 1.2 MiB |
 | 1920x1080 grayscale, L8 | 2.0 MiB | 2.0 MiB | 30.5 KiB |
 | 1920x1080 4:2:0 progressive, RGB8 | 9.1 MiB | 9.1 MiB | 6.3 MiB |
@@ -12597,7 +12600,9 @@ does, so its row is not part of this item.
 
 **Why it matters.** The buffer-reuse API exists for frame loops and
 memory-bounded services, and its documentation promises no output-sized
-allocation. A caller that sized its memory budget from that promise will
+allocation (`src/api/high_level.rs:38-40`; `src/decode/pipeline_impl/output.rs:267-270`
+names grayscale and "every streamed subsampling mode" as writing directly
+into `out` — the grayscale row above allocates the output's size anyway). A caller that sized its memory budget from that promise will
 find the decoder's working set grows with the image instead: 47.5 MiB extra
 for an 8K frame, against about 1 MiB for zune-jpeg on the same call.
 
@@ -12613,6 +12618,11 @@ for an 8K frame, against about 1 MiB for zune-jpeg on the same call.
    be in terms of width x strip height, not width x height.
 3. Output stays byte-identical to `decompress_to` and to C `djpeg`.
 4. The downstream report's allocation columns show the drop.
+5. The `decompress_into` / `Decoder::decode_image_into` docs
+   (`src/api/high_level.rs:38-40`, `src/decode/pipeline_impl/output.rs:267-270`)
+   describe the allocations that remain, rather than promising none for
+   grayscale. P4-213 covers the CMYK/12-bit/lossless staging paths; this item
+   is the standard sequential path.
 
 **Why deferred.** It was found by the benchmark harness, which only
 measures; changing the decode pipeline's buffering is a pipeline change with

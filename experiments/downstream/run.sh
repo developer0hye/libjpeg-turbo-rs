@@ -26,7 +26,7 @@
 # Footprint: the main build and the six probe builds each use their own
 # target directory (several hundred MB together). They are deleted once the
 # binary and the sizes are recorded; the work dir keeps the copied consumer,
-# the binary, build-info.txt and the report.
+# Cargo.lock.committed, the binary, build-info.txt and the report.
 #
 # Only bash 3.2 features are used: it is what macOS ships, locally and on the
 # hosted macos runner.
@@ -121,7 +121,8 @@ cp "$consumer/Cargo.lock" "$work_dir/Cargo.lock.committed"
 # ancestor (https://doc.rust-lang.org/cargo/reference/config.html). One there
 # would silently change the build, so refuse. CARGO_HOME's config applies to
 # every build on the machine, downstream ones included: refuse it if it
-# changes code generation, otherwise record it verbatim.
+# changes code generation, otherwise record its shape (table and key names,
+# values redacted; see build-info below).
 cargo_home="${CARGO_HOME:-$HOME/.cargo}"
 cargo_home_real=$(cd "$cargo_home" 2>/dev/null && pwd -P || echo "$cargo_home")
 parent_configs=""
