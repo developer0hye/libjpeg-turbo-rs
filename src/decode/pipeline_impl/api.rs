@@ -257,7 +257,8 @@ impl<'a> Decoder<'a> {
     /// because the per-slot fill below only writes `None` slots).
     ///
     /// The four Annex K tables are process-global (`std_huffman_tables`,
-    /// built once behind a `OnceLock`) and shared by `Arc` clone — filling
+    /// built once behind the hand-rolled `OnceBox` that replaced `OnceLock`
+    /// for `no_std` in #356) and shared by `Arc` clone — filling
     /// a slot is a refcount bump, not a 4 KB table build (issue #351).
     pub(super) fn fill_default_huffman_tables(metadata: &mut JpegMetadata) {
         use crate::common::huffman_table::std_huffman_tables;
