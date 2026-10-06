@@ -302,7 +302,7 @@ jobs:
       # Quoted: a plain YAML scalar may not end in `:`; GitHub's parser
       # tolerates it but strict YAML tooling (PyYAML, actionlint) rejects
       # the whole file.
-      - run: "cargo miri test --no-default-features --features std --lib -- --skip simd::"
+      - run: "cargo miri test --locked --no-default-features --features std --lib -- --skip simd::"
         env:
           MIRIFLAGS: -Zmiri-disable-isolation
         timeout-minutes: 25
@@ -327,7 +327,7 @@ jobs:
       # above them in YAML, so appending a bare `run` here would have silently
       # taken both from the library run.
       - run: >
-          cargo miri test -p libjpeg-turbo-rs-capi
+          cargo miri test --locked -p libjpeg-turbo-rs-capi
           --test capi_create_abi_guards
           --test capi_thread_affinity
         env:
@@ -350,7 +350,7 @@ jobs:
       # "post-allocation-failure state" the criterion names and which nothing
       # could aim at a chosen site before.
       - run: >
-          cargo miri test --no-default-features --features std
+          cargo miri test --locked --no-default-features --features std
           --test miri_public_api
           --test miri_alloc_failure
         env:
@@ -368,7 +368,7 @@ jobs:
       # eight; the exact figures are scheduler-dependent, the point is that
       # the branch is reached).
       - run: >
-          cargo miri test --no-default-features --features std
+          cargo miri test --locked --no-default-features --features std
           --test miri_once_init
         env:
           MIRIFLAGS: -Zmiri-disable-isolation -Zmiri-many-seeds=0..8
@@ -376,7 +376,7 @@ jobs:
       # The doctests, which `cargo miri test --lib` does not build. All seven
       # of this crate's doctests compile under `--no-default-features
       # --features std`, so this is the whole set rather than a subset.
-      - run: "cargo miri test --no-default-features --features std --doc"
+      - run: "cargo miri test --locked --no-default-features --features std --doc"
         env:
           MIRIFLAGS: -Zmiri-disable-isolation
         timeout-minutes: 25
