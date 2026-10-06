@@ -237,6 +237,12 @@ and `git log` between tags.
   runs system/Rust bidirectional cross-decodes.
 
 ### Fixed
+- The crate-private AVX2 merged H2V2 colour-conversion wrapper now checks
+  both rows of each pair (it checked only the first) and falls back to the
+  scalar path otherwise (P4-191). Its only caller passes valid rows, it was
+  never public API, and the gap never shipped: published 0.8.0 exposed the
+  unchecked kernel more broadly, which the P4-135 row of
+  `docs/security/AFFECTED_VERSIONS.md` already covers.
 - An allocator refusal during a decode is reported as
   `JpegError::AllocationFailed` instead of aborting the process (P4-209,
   #632). `decompress` / `Decoder::decode_image` allocated their destination

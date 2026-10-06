@@ -79,15 +79,24 @@ pub fn avx2_merged_h2v2_ycbcr_to_rgb(
     // upsamples: one chroma sample feeds two luma pixels, so `width` luma and
     // `width.div_ceil(2)` chroma are needed, not `width` of each. The odd-width
     // tail indexes chroma at `(width - 1) / 2`, which div_ceil covers.
+    //
+    // Both rows of each pair are checked: the kernel reads 32 luma bytes per
+    // step from `y_row1` and stores 96 into `rgb_out1` by raw pointer exactly
+    // as it does for row 0. This check once covered row 0 only, so a safe
+    // in-crate caller (the module is `pub(crate)`) passing a short second
+    // row reached past it (P4-191 criterion 5;
+    // `avx2_merged_h2v2_short_second_*_is_refused` in
+    // src/simd/kernel_bounds_tests.rs pin it).
     let chroma_needed: usize = width.div_ceil(2);
     let rgb_needed: Option<usize> = width.checked_mul(3);
     let fits: bool = y_row0.len() >= width
+        && y_row1.len() >= width
         && cb_row.len() >= chroma_needed
         && cr_row.len() >= chroma_needed
-        && rgb_needed.is_some_and(|n| rgb_out0.len() >= n);
+        && rgb_needed.is_some_and(|n| rgb_out0.len() >= n && rgb_out1.len() >= n);
 
     if fits && crate::cpu_has!("avx2") {
-        // SAFETY: AVX2 confirmed above; every slice satisfies the bounds
+        // SAFETY: AVX2 confirmed above; all six slices satisfy the bounds
         // computed for this kernel's 2:1 horizontal upsample ratio.
         unsafe {
             avx2_merged_h2v2_inner(y_row0, y_row1, cb_row, cr_row, rgb_out0, rgb_out1, width);

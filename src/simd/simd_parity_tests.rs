@@ -188,7 +188,7 @@ pub(super) fn build_quant_divisors(natural_quant: [u16; 64]) -> QuantDivisors {
     }
 }
 
-fn random_plane_u8(rng: &mut Mulberry32, len: usize) -> Vec<u8> {
+pub(super) fn random_plane_u8(rng: &mut Mulberry32, len: usize) -> Vec<u8> {
     (0..len).map(|_| rng.next_u8()).collect()
 }
 

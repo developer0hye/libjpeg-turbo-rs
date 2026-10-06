@@ -30,6 +30,8 @@ mod baseline;
 mod custom_sampling;
 mod dispatch;
 mod huffman_tables;
+#[cfg(all(test, target_arch = "x86_64", feature = "simd"))]
+mod kernel_bounds_tests;
 mod lossless;
 mod mcu;
 mod metadata;

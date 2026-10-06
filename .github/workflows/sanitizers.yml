@@ -41,20 +41,34 @@
 #   reproducing the job below.  See the `ASAN_OPTIONS` entry in the asan
 #   job's `env:` for why it does not weaken the check.
 #
-#   # UndefinedBehaviorSanitizer
-#   RUSTFLAGS="-Z sanitizer=undefined" \
-#   RUSTDOCFLAGS="-Z sanitizer=undefined" \
-#   cargo +nightly test --workspace --target x86_64-unknown-linux-gnu \
-#     --lib --no-fail-fast -- --test-threads=1
+#   # UndefinedBehaviorSanitizer (the ubsan job's flag; see WHY NIGHTLY)
+#   RUSTFLAGS="-Z ub-checks=yes" \
+#   cargo +nightly test --workspace --lib --no-fail-fast -- --test-threads=1
+#
+#   # Only the kernel-bounds tests (P4-191), under either flag set above
+#   cargo +nightly test --workspace --lib [--target ...] \
+#     -- kernel_bounds_tests --test-threads=1
 #
 # NOTE ON EXCLUDED TESTS:
 #   Integration tests (`--tests`) are excluded from the sanitizer matrix
 #   because they invoke external C binaries (djpeg / cjpeg / jpegtran) that
 #   are not built with sanitizer instrumentation.  Un-instrumented C code
 #   calling back into instrumented Rust triggers guaranteed false-positive
-#   leak/shadow-map reports from the ASAN runtime.  The lib tests already
-#   cover every unsafe block in the FFI shim, SIMD kernels, and buffer logic.
-#   If a future PR adds a pure-Rust integration test, add it here explicitly.
+#   leak/shadow-map reports from the ASAN runtime.  If a future PR adds a
+#   pure-Rust integration test, add it here explicitly.
+#
+#   The lib tests do NOT cover every unsafe block. A site is sanitized only
+#   if some lib unit test executes it on this x86_64 AVX2 runner, and many
+#   do not: NEON and wasm kernels never compile here, SSE2 arms lose to the
+#   AVX2 dispatch, and several AVX2 arms are unreachable from the encoder's
+#   padded strips. `docs/UNSAFE_INVENTORY.md`'s *Tool coverage* column says,
+#   per item, whether this workflow executes it. Some SIMD kernels Miri never
+#   interprets — the strided islow IDCTs, the AVX2 merged H2V2 wrapper and
+#   the encoder fdct helpers' AVX2 arms — get direct tests in modules named
+#   `kernel_bounds_tests` (P4-191, #609), which put each footprint flush
+#   against the end of an exact-size allocation so a one-byte overrun is an
+#   ASan report; the `kernel_bounds_tests` steps below check that those tests
+#   really ran.
 #
 # NOTE ON LSAN:
 #   LeakSanitizer runs automatically as part of ASan on Linux.  False
@@ -114,6 +128,14 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Require AVX2 on the runner
+        # The x86_64 `kernel_bounds_tests` reach the AVX2 kernels only when
+        # the CPU reports AVX2, and on a host without it they print a NOTE and
+        # compare the fallback instead. That fallback comparison is not what
+        # this job is for, so a runner without AVX2 fails here rather than
+        # passing the step below without sanitizing an AVX2 store.
+        run: grep -qw avx2 /proc/cpuinfo
+
       - name: Run lib tests under AddressSanitizer
         # --lib: only unit tests compiled into the library — no external C
         #        tool invocations that would produce ASAN false positives.
@@ -128,6 +150,28 @@ jobs:
             --no-fail-fast \
             -- --test-threads=1
         timeout-minutes: 20
+
+      - name: Confirm the kernel_bounds_tests ran under AddressSanitizer
+        # The step above already ran these; this re-run (same flags, so no
+        # rebuild) exists to fail if they stop being selected — renamed out
+        # of the `kernel_bounds_tests` modules, cfg'd away, or deleted — which
+        # the step above would not notice. `tests/sanitizer_coverage_gate.rs`
+        # holds EXPECTED to the number of tests those modules declare.
+        env:
+          EXPECTED_KERNEL_BOUNDS_TESTS: "6"
+        run: |
+          set -o pipefail
+          cargo +nightly test --locked \
+            --workspace \
+            --lib \
+            --target x86_64-unknown-linux-gnu \
+            -- kernel_bounds_tests --test-threads=1 2>&1 | tee kernel_bounds.log
+          passed=$(grep -E '^test result: ok\.' kernel_bounds.log | awk '{s += $4} END {print s + 0}')
+          if [ "$passed" -ne "$EXPECTED_KERNEL_BOUNDS_TESTS" ]; then
+            echo "kernel_bounds_tests: $passed passed, expected $EXPECTED_KERNEL_BOUNDS_TESTS" >&2
+            exit 1
+          fi
+        timeout-minutes: 10
 
   ubsan:
     name: UndefinedBehaviorSanitizer
@@ -151,6 +195,11 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Require AVX2 on the runner
+        # Same reason as the ASan job: without AVX2 the x86_64
+        # `kernel_bounds_tests` compare a fallback, not the AVX2 kernels.
+        run: grep -qw avx2 /proc/cpuinfo
+
       - name: Run lib tests under ub-checks
         # --lib: same rationale as ASan job — avoids un-instrumented C tools.
         # No explicit --target needed since ub-checks does not require the
@@ -162,6 +211,23 @@ jobs:
             --no-fail-fast \
             -- --test-threads=1
         timeout-minutes: 20
+
+      - name: Confirm the kernel_bounds_tests ran under ub-checks
+        # Same check as the ASan job's twin step, against this job's build.
+        env:
+          EXPECTED_KERNEL_BOUNDS_TESTS: "6"
+        run: |
+          set -o pipefail
+          cargo +nightly test --locked \
+            --workspace \
+            --lib \
+            -- kernel_bounds_tests --test-threads=1 2>&1 | tee kernel_bounds.log
+          passed=$(grep -E '^test result: ok\.' kernel_bounds.log | awk '{s += $4} END {print s + 0}')
+          if [ "$passed" -ne "$EXPECTED_KERNEL_BOUNDS_TESTS" ]; then
+            echo "kernel_bounds_tests: $passed passed, expected $EXPECTED_KERNEL_BOUNDS_TESTS" >&2
+            exit 1
+          fi
+        timeout-minutes: 10
 
   # P4-11 C-boundary sanitizer harness.
   #
