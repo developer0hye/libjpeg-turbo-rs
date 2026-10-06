@@ -156,6 +156,24 @@ jobs:
       # would put an unmeasured claim back.
       - run: python3 -m unittest discover -s scripts/tests -p 'test_perf_ab_summary.py'
 
+  # downstream-bench.yml is dispatch-only, so nothing else compiles its
+  # consumer against a PR's crate: P4-139 removed `ScalingFactor::new` and the
+  # first dispatch after it failed with E0599 on both runners. This runs the
+  # consumer's fmt, clippy -D warnings and unit tests against this checkout,
+  # without benchmarking.
+  downstream-consumer:
+    name: Downstream consumer check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # run.sh refuses to start without the testimages corpus.
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: bash experiments/downstream/run.sh --check
+
   # Proves each declared `rust-version` actually compiles (issue #390).
   # A single workspace-wide 1.87 check is impossible: the image-bridge
   # crate inherits image@0.25's rustc 1.88 floor, so it declares
