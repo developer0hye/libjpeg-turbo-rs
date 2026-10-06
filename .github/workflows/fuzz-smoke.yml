@@ -33,6 +33,9 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+permissions:
+  contents: read
+
 jobs:
   fuzz:
     name: Fuzz ${{ matrix.target }}
@@ -124,7 +127,7 @@ jobs:
             fuzz-corpus-v1-${{ matrix.target }}-
 
       - name: Regenerate seed corpus
-        run: cargo test --test generate_fuzz_seeds
+        run: cargo test --locked --test generate_fuzz_seeds
 
       - name: Run fuzzer
         # `--target x86_64-unknown-linux-gnu` is mandatory: the prebuilt
@@ -192,7 +195,7 @@ jobs:
             echo "max_total_time: ${EFFECTIVE_TIME:-${MAX_TOTAL_TIME}} (requested ${MAX_TOTAL_TIME})"
             echo
             echo "Rebuild the seed corpus first:"
-            echo "  cargo test --test generate_fuzz_seeds"
+            echo "  cargo test --locked --test generate_fuzz_seeds"
             echo
             echo "Re-run the same smoke budget:"
             echo "  cargo +nightly fuzz run --target x86_64-unknown-linux-gnu ${FUZZ_TARGET} -- -max_total_time=${EFFECTIVE_TIME:-${MAX_TOTAL_TIME}} -fork=4 -timeout=30 -dict=fuzz/jpeg.dict -print_final_stats=1"

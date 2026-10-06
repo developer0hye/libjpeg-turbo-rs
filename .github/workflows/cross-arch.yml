@@ -27,6 +27,9 @@ env:
 # `cargo test` command on the same runner under the same job-level
 # environment — RUSTFLAGS included, since a pair that disagrees on it compares
 # two backends and blames the difference on an upstream release.
+permissions:
+  contents: read
+
 jobs:
   # Linux aarch64 native runner — exercises the NEON backend without
   # emulation. macOS arm64 is already covered by the default CI matrix,
@@ -59,7 +62,7 @@ jobs:
       - name: Run full test suite with NEON SIMD
         # Use default features only — `--all-features` enables `full-c-parity`
         # which gates aspirational Rust-vs-C byte-exact encoder tests (opt-in).
-        run: cargo test --tests
+        run: cargo test --locked --tests
         timeout-minutes: 45
 
   # The NEON backend against current upstream stable. Identical to the leg
@@ -105,7 +108,7 @@ jobs:
           ls /opt/libjpeg-turbo/lib64/libturbojpeg.* /opt/libjpeg-turbo/lib/libturbojpeg.* \
              2>/dev/null | grep -q .
       - name: Run full test suite with NEON SIMD
-        run: cargo test --tests
+        run: cargo test --locked --tests
         timeout-minutes: 45
 
 
@@ -142,7 +145,7 @@ jobs:
       - name: Run full test suite with AVX2 enabled
         # Use default features only — `--all-features` enables `full-c-parity`
         # which gates aspirational Rust-vs-C byte-exact encoder tests (opt-in).
-        run: cargo test --tests
+        run: cargo test --locked --tests
         timeout-minutes: 45
 
   # AVX2-enabled codegen against current upstream stable. The RUSTFLAGS below
@@ -183,7 +186,7 @@ jobs:
           ls /opt/libjpeg-turbo/lib64/libturbojpeg.* /opt/libjpeg-turbo/lib/libturbojpeg.* \
              2>/dev/null | grep -q .
       - name: Run full test suite with AVX2 enabled
-        run: cargo test --tests
+        run: cargo test --locked --tests
         timeout-minutes: 45
 
   # Builds with AVX2 and SSE4.2 disabled at compile time.
@@ -225,7 +228,7 @@ jobs:
       - name: Run full test suite with AVX2 disabled at compile time
         # Use default features only — `--all-features` enables `full-c-parity`
         # which gates aspirational Rust-vs-C byte-exact encoder tests (opt-in).
-        run: cargo test --tests
+        run: cargo test --locked --tests
         timeout-minutes: 45
 
   # The same compile-time-disabled codegen against current upstream stable.
@@ -270,7 +273,7 @@ jobs:
           ls /opt/libjpeg-turbo/lib64/libturbojpeg.* /opt/libjpeg-turbo/lib/libturbojpeg.* \
              2>/dev/null | grep -q .
       - name: Run full test suite with AVX2 disabled at compile time
-        run: cargo test --tests
+        run: cargo test --locked --tests
         timeout-minutes: 45
 
   # Runs the SIMD-sensitive tests under an emulated pre-AVX2 CPU, so
@@ -306,7 +309,7 @@ jobs:
       # the feature; no other CI leg runs the lib tests without AVX2.
       - name: Build test binaries
         run: |
-          cargo test --release --no-run --lib \
+          cargo test --locked --release --no-run --lib \
             --test simd_dispatch_capability \
             --test encode_pipeline_golden \
             --test encode_option_matrix \
@@ -318,7 +321,7 @@ jobs:
           set -euo pipefail
           # -cpu Nehalem predates AVX entirely, so CPUID reports no AVX2 and
           # the runtime dispatch takes the fallback.
-          cargo test --release --no-run --lib --message-format=json \
+          cargo test --locked --release --no-run --lib --message-format=json \
             --test simd_dispatch_capability \
             --test encode_pipeline_golden \
             --test encode_option_matrix \

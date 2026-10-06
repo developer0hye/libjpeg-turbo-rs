@@ -53,6 +53,9 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+permissions:
+  contents: read
+
 jobs:
   perf-encode-x86_64:
     name: Encode A/B (x86_64, oracle 3.2.0)
@@ -146,10 +149,10 @@ jobs:
             echo "::group::build $NAME (RUSTFLAGS='$FLAGS')"
             if [ -z "$FLAGS" ]; then
               env -u RUSTFLAGS CARGO_TARGET_DIR="/tmp/ab/$NAME" \
-                cargo build --release --example bench_encode_matrix < /dev/null
+                cargo build --locked --release --example bench_encode_matrix < /dev/null
             else
               RUSTFLAGS="$FLAGS" CARGO_TARGET_DIR="/tmp/ab/$NAME" \
-                cargo build --release --example bench_encode_matrix < /dev/null
+                cargo build --locked --release --example bench_encode_matrix < /dev/null
             fi
             cp "/tmp/ab/$NAME/release/examples/bench_encode_matrix" "out/bin/$NAME"
             echo "::endgroup::"
@@ -167,7 +170,7 @@ jobs:
           # from --manifest-path, so build main from inside its own tree.
           echo "::group::build main-portable (main tree, no RUSTFLAGS)"
           ( cd /tmp/ab-main && env -u RUSTFLAGS CARGO_TARGET_DIR=/tmp/ab/main-portable \
-              cargo build --release --example bench_encode_matrix < /dev/null )
+              cargo build --locked --release --example bench_encode_matrix < /dev/null )
           cp /tmp/ab/main-portable/release/examples/bench_encode_matrix out/bin/main-portable
           echo "::endgroup::"
       # Sequential on purpose: two benchmarks at once share cache and memory

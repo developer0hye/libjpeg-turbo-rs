@@ -87,7 +87,7 @@ jobs:
         with:
           submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo publish --dry-run --allow-dirty
+      - run: cargo publish --locked --dry-run --allow-dirty
       - name: Publish to crates.io (skip if already published)
         # Codex P2: a blanket `|| echo` swallowed real upload failures
         # (bad token, permissions, network) and reported a green release
@@ -101,7 +101,7 @@ jobs:
           # only for the publish itself; restore immediately so any
           # subsequent shell error still fails the step.
           set +e
-          output=$(cargo publish --allow-dirty 2>&1)
+          output=$(cargo publish --locked --allow-dirty 2>&1)
           status=$?
           set -e
           echo "$output"
@@ -154,7 +154,7 @@ jobs:
       - name: Wait for crates.io to index the root crate
         if: ${{ startsWith(github.ref, 'refs/tags/v') }}
         run: sleep 90
-      - run: cargo publish -p libjpeg-turbo-rs-capi --dry-run --allow-dirty
+      - run: cargo publish --locked -p libjpeg-turbo-rs-capi --dry-run --allow-dirty
       - name: Publish to crates.io (skip if already published)
         # Codex P2: same precise-failure handling as the root publish step
         # — only swallow "already uploaded" responses; surface every other
@@ -165,7 +165,7 @@ jobs:
           # captures cargo's exit status instead of failing the step
           # immediately on a non-zero return (GHA's default `set -e`).
           set +e
-          output=$(cargo publish -p libjpeg-turbo-rs-capi --allow-dirty 2>&1)
+          output=$(cargo publish --locked -p libjpeg-turbo-rs-capi --allow-dirty 2>&1)
           status=$?
           set -e
           echo "$output"
@@ -199,12 +199,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Wait for crates.io to index the root crate
         run: sleep 90
-      - run: cargo publish -p libjpeg-turbo-rs-image --dry-run --allow-dirty
+      - run: cargo publish --locked -p libjpeg-turbo-rs-image --dry-run --allow-dirty
       - name: Publish to crates.io (skip if already published)
         # Same precise-failure handling as the other publish steps.
         run: |
           set +e
-          output=$(cargo publish -p libjpeg-turbo-rs-image --allow-dirty 2>&1)
+          output=$(cargo publish --locked -p libjpeg-turbo-rs-image --allow-dirty 2>&1)
           status=$?
           set -e
           echo "$output"
@@ -249,13 +249,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Install wasmtime
-        run: curl https://wasmtime.dev/install.sh -sSf | bash && echo "$HOME/.wasmtime/bin" >> $GITHUB_PATH
+        uses: bytecodealliance/actions/wasmtime/setup@9152e710e9f7182e4c29ad218e4f335a7b203613 # v1.1.3
 
       - name: Run WASM test suite (wasm32-wasip1)
-        run: cargo test --target wasm32-wasip1
+        run: cargo test --locked --target wasm32-wasip1
 
       - name: Install wasm-pack
-        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+        run: cargo install wasm-pack --locked --version 0.15.0
 
       - name: Run wasm-bindgen tests
         run: cd crates/libjpeg-turbo-rs-wasm && wasm-pack test --node

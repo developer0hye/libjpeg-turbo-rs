@@ -75,6 +75,9 @@ concurrency:
   group: sanitizers-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   asan:
     name: AddressSanitizer
@@ -118,7 +121,7 @@ jobs:
         #        cause false positives on SIMD intrinsic paths.
         # --no-fail-fast: collect all failures in one run.
         run: |
-          cargo +nightly test \
+          cargo +nightly test --locked \
             --workspace \
             --lib \
             --target x86_64-unknown-linux-gnu \
@@ -153,7 +156,7 @@ jobs:
         # No explicit --target needed since ub-checks does not require the
         # sanitizer runtime linking that -Z sanitizer=address requires.
         run: |
-          cargo +nightly test \
+          cargo +nightly test --locked \
             --workspace \
             --lib \
             --no-fail-fast \
@@ -217,7 +220,7 @@ jobs:
 
       - name: Build ASan-instrumented cdylib
         run: |
-          cargo +nightly build \
+          cargo +nightly build --locked \
             -p libjpeg-turbo-rs-capi \
             --release \
             --target x86_64-unknown-linux-gnu
