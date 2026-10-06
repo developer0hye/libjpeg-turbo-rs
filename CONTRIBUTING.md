@@ -8,7 +8,7 @@ documentation lives in [README.md](README.md) and on
 
 - All changes go through pull requests; CI must be green (the workspace
   gate cross-validates against C libjpeg-turbo byte-for-byte).
-- `cargo fmt --all` and `cargo clippy --lib -- -D warnings` before each
+- `cargo fmt --all` and `cargo clippy --locked --lib -- -D warnings` before each
   commit (`git config core.hooksPath .githooks` installs the pre-commit
   hook).
 - Tests follow TDD and must cross-validate against C `djpeg`/`cjpeg`/
