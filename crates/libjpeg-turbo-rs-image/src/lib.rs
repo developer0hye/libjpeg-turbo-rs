@@ -288,14 +288,17 @@ impl JpegDecoder {
     fn last_segment_payload(&self, marker: u8, signature: &[u8]) -> ImageResult<Option<Vec<u8>>> {
         let mut decoder: Decoder<'_> = Decoder::new(&self.input).map_err(decode_error)?;
         decoder.save_markers(MarkerSaveConfig::Specific(vec![marker]));
-        Ok(decoder
+        // The copy out is fallible like every other input-sized allocation
+        // here (codex P2). The core's own marker save is not yet — P4-153.
+        decoder
             .saved_markers()
             .iter()
             .rev()
             .filter(|saved: &&SavedMarker| saved.code == marker)
             .filter_map(|saved: &SavedMarker| saved.data.strip_prefix(signature))
             .find(|payload: &&[u8]| !payload.is_empty())
-            .map(<[u8]>::to_vec))
+            .map(copy_input)
+            .transpose()
     }
 
     /// The EXIF payload (TIFF header onward).
