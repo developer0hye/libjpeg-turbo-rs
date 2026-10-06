@@ -424,10 +424,11 @@ jobs:
           /opt/libjpeg-turbo/bin/jpegtran -version 2>&1 | grep -q "version 3.1.4.1"
       - run: cargo test --locked --tests
         timeout-minutes: 30
-      # The `image` bridge's whole suite — unit tests, doctests, examples and
-      # the trait tests that compare with `djpeg` (#637) — isolated with `-p`
-      # for the same feature-unification reason as the publish check, and
-      # here because this job is the one with the pinned oracle installed.
+      # The `image` bridge's whole suite — unit tests, doctests, example
+      # builds and the trait tests that compare with `djpeg` (#637) —
+      # isolated with `-p` for the same feature-unification reason as the
+      # publish check, and here because this job is the one with the pinned
+      # oracle installed.
       - name: image bridge (traits, metadata, limits, djpeg)
         run: cargo test --locked -p libjpeg-turbo-rs-image
       # P4-82/P4-83 live in the non-default C-ABI workspace member, so the

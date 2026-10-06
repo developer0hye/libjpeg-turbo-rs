@@ -12533,7 +12533,10 @@ call `take_out_buf`. Four-component streams go through `decode_4_component` →
 `convert_4comp_output`, which allocates `width * height * bpp` and is copied
 out (`src/decode/pipeline_impl/colorspace.rs`, `output.rs`); YCCK with
 subsampled chroma also allocates two full planes. 12-bit-as-8-bit and
-lossless decodes build an owned image the same way. A caller — the `image`
+lossless decodes build an owned image the same way, and so does the
+merged-upsample branch (`set_merged_upsample(true)` allocates a full-size
+`merged_rgb`), which `decode_image_into`'s own doc comment omits from its list
+of staged paths. A caller — the `image`
 adapter included — therefore holds two decoded images for these inputs, and
 the memory estimate `max_memory` enforces counts neither the staging buffer
 nor the upsample planes, so the limit is non-strict there.

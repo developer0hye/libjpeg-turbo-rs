@@ -10,7 +10,7 @@ libjpeg-turbo-rs-image = "0.1"
 # default-features = false keeps image's other format codecs (and the
 # AVIF encoder's advisory-carrying rav1e chain) out of your build graph.
 # Add the formats you actually use, e.g. features = ["png"].
-image = { version = "0.25", default-features = false }
+image = { version = "0.25.9", default-features = false }
 ```
 
 ### Which `image` entry points use this backend
@@ -62,7 +62,7 @@ JpegEncoder::new_with_quality(&mut output, 85)
 | Construction | `JpegDecoder::new` copies the compressed stream once and parses headers; `from_vec` takes ownership and copies nothing. No pixel is decoded until `read_image`. |
 | `read_image` | Decodes into your buffer, which must be exactly `total_bytes()` long. For 8-bit grayscale and YCbCr/RGB streams no second decoded image exists; CMYK/YCCK, 12-bit and lossless streams are still staged in a full-size buffer and copied. Working memory remains either way (component planes, and coefficients for progressive streams). |
 | `set_limits` | `max_image_width`, `max_image_height` and `max_alloc` are checked against the header before any pixel allocation. `max_alloc` bounds the core's decode-memory *estimate*, which counts the output buffer; it is non-strict for the staged paths above. Refusals are `ImageError::Limits`. |
-| Metadata | `icc_profile`, `exif_metadata`, `xmp_metadata`, `iptc_metadata` and `orientation` return what `image 0.25`'s built-in JPEG decoder returns for the same file — the *last* segment when one repeats, the standard XMP packet without Extended XMP, IPTC as the Photoshop resource block. `original_color_type()` reports `Cmyk8` for four-component streams, where the built-in decoder reports `Rgb8`. |
+| Metadata | `icc_profile`, `exif_metadata`, `xmp_metadata`, `iptc_metadata` and `orientation` return what `image 0.25.10`'s built-in JPEG decoder returns for the same file — the *last* segment when one repeats, the standard XMP packet without Extended XMP, IPTC as the Photoshop resource block. `original_color_type()` reports `Cmyk8` for four-component streams, where the built-in decoder reports `Rgb8`. |
 | Errors | Limit and allocation refusals → `Limits`; unsupported features → `Unsupported`; wrong buffer sizes → `Parameter`; I/O → `IoError`; everything else → `Decoding` / `Encoding`. |
 | Corrupt data | An error by default (as C libjpeg-turbo with `-strict`), where `image`'s built-in decoder fills what it cannot decode. `JpegDecoder::set_lenient(true)` opts into filling. |
 

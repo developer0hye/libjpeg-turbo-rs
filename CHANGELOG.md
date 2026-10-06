@@ -56,7 +56,7 @@ and `git log` between tags.
   `image::Limits`, and reports metadata** (P4-212, #637, under #635).
   `JpegDecoder::new` now parses headers only and `read_image` decodes into
   the caller's buffer; for 8-bit grayscale and YCbCr/RGB streams no second
-  decoded image exists (measured at 2048x1536 4:2:0: construction 36 KB, read
+  decoded image exists (measured at 2048x1536 4:2:0: construction 37 KB, read
   working set 4.7 MB against a 9.4 MB image — CMYK, 12-bit and lossless are
   still staged, P4-213). `set_limits` applies `max_image_width`,
   `max_image_height` and `max_alloc` before any pixel allocation.
@@ -68,8 +68,9 @@ and `git log` between tags.
   longer validate entropy data, so a corrupt stream constructs and fails in
   `read_image`; `read_image` and `JpegEncoder::write_image` require buffers of
   exactly the image's size (both accepted longer ones); error categories moved
-  from `Decoding` to `Limits` (limits, allocation refusal), `Unsupported`,
-  `Parameter` (buffer sizes) and `IoError`, and the format hint is now
+  from `Decoding` (`Encoding` for the encoder) to `Limits` (limits,
+  allocation refusal), `Unsupported`, `Parameter` (buffer sizes) and
+  `IoError`, and the format hint is now
   `ImageFormatHint::Exact(ImageFormat::Jpeg)`; asking `new_with_format` for
   `Grayscale` from a CMYK/YCCK stream is refused at construction.
 - **Portable x86_64 builds reach the BMI2 Huffman tier and the FMA float
