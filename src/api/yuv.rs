@@ -1,7 +1,9 @@
 // libjpeg-turbo-rs: alloc prelude (no_std support, issue #356)
 /// YUV planar encode/decode API.
 ///
-/// Provides functions matching libjpeg-turbo's TurboJPEG YUV API:
+/// The Rust counterparts of TurboJPEG's YUV functions (`docs/C_API_REFERENCE.md`
+/// maps each C call; the packed forms take no `align` and are not drop-in
+/// replacements for every packed C call):
 ///
 /// - `encode_yuv` / `encode_yuv_planes` — RGB → YUV color conversion (no JPEG)
 /// - `compress_from_yuv` / `compress_from_yuv_planes` — YUV → JPEG compression
