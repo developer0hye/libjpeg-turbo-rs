@@ -214,8 +214,22 @@ impl<'a> Decoder<'a> {
     /// ScanInfo buffering during the header walk itself, not just at
     /// decode time (issue #355).
     pub fn new_with_limits(data: &'a [u8], limits: DecodeLimits) -> Result<Self> {
+        Self::parse(data, limits, false)
+    }
+
+    /// The frame as `jpeg_read_header` sees it: markers up to the first SOS
+    /// and no further, whatever the frame type (P4-142). For describing a
+    /// frame — `TjHandle`'s header read publishes from it — never for
+    /// decoding: a progressive or multi-scan frame's later scans are not
+    /// located, so `max_scans` cannot fire either.
+    pub(crate) fn new_header_only(data: &'a [u8], limits: DecodeLimits) -> Result<Self> {
+        Self::parse(data, limits, true)
+    }
+
+    fn parse(data: &'a [u8], limits: DecodeLimits, stop_at_first_sos: bool) -> Result<Self> {
         let mut reader = MarkerReader::new(data);
         reader.set_scan_cap(limits.max_scans);
+        reader.set_stop_at_first_sos(stop_at_first_sos);
         let mut metadata = reader.read_markers()?;
         // MJPEG frames may omit Huffman tables; provide standard defaults
         // (JPEG spec section K.3), matching C libjpeg-turbo's std_huff_tables().

@@ -7,8 +7,8 @@
 // libjpeg-turbo-rs: alloc prelude (no_std support, issue #356)
 use crate::common::error::{JpegError, Result};
 use crate::common::types::{
-    ColorSpace, CropRegion, DctMethod, DensityUnit, MarkerSaveConfig, PixelFormat, ScalingFactor,
-    Subsampling,
+    ColorSpace, CropRegion, DctMethod, DensityUnit, FrameHeader, MarkerSaveConfig, PixelFormat,
+    ScalingFactor, Subsampling,
 };
 use crate::decode::pipeline::{Decoder, Image};
 #[allow(unused_imports)]
@@ -993,13 +993,13 @@ impl TjHandle {
 
     /// Header-only read (matches `tj3DecompressHeader`, `turbojpeg.c:1872-1927`).
     ///
-    /// Parses the markers up to the first SOS — no entropy data is decoded
-    /// (P4-142) — and publishes the thirteen parameters
+    /// Parses the markers up to the first SOS and no further, as
+    /// `jpeg_read_header` does — no entropy data is decoded and no later scan
+    /// is located (P4-142) — and publishes the thirteen parameters
     /// `setDecompParameters` writes, exactly as [`Self::decompress`] does.
     /// Like upstream, it consults neither the scaling factor nor the cropping
-    /// region, and applies no `TJPARAM_MAXPIXELS` test: that belongs to the
-    /// decompress that follows. `TJPARAM_SCANLIMIT` still bounds the marker
-    /// walk, as it does for every parse here.
+    /// region, and applies neither `TJPARAM_MAXPIXELS` nor
+    /// `TJPARAM_SCANLIMIT`: those belong to the decompress that follows.
     ///
     /// With `TJPARAM_SAVEMARKERS` 2 or 4 the ICC profile is captured, as by a
     /// decompress; at 0, 1 or 3 the handle's profile is cleared, also as by a
@@ -1008,11 +1008,67 @@ impl TjHandle {
     /// Refuses, after publishing, a frame whose colour space TurboJPEG cannot
     /// name ("Could not determine colorspace of JPEG image", `:1919-1920`).
     pub fn decompress_header(&mut self, data: &[u8]) -> Result<()> {
-        let decoder: Decoder<'_> = Decoder::new_with_limits(data, self.decode_limits())?;
-        self.publish_header(&decoder)?;
+        self.read_header(data)?;
         if self.color_space == TJCS_DEFAULT {
             return Err(JpegError::Unsupported(alloc::string::String::from(
                 "Could not determine colorspace of JPEG image",
+            )));
+        }
+        Ok(())
+    }
+
+    /// `jpeg_read_header` and the `setDecompParameters` call after it, shared
+    /// by all four decompress entry points (`turbojpeg.c:1904-1907`,
+    /// `turbojpeg-mp.c:187-190`): parse up to the first SOS, refuse what
+    /// libjpeg's `get_sof` / `initial_setup` refuse at that point — so such a
+    /// frame publishes nothing, as upstream's never reaches
+    /// `setDecompParameters` — then publish.
+    ///
+    /// Only the first SOS is read, so a stream whose later scans are
+    /// truncated, or exceed `TJPARAM_SCANLIMIT`, still publishes before the
+    /// decode that follows refuses it — upstream's order too.
+    fn read_header(&mut self, data: &[u8]) -> Result<()> {
+        let header: Decoder<'_> = Decoder::new_header_only(data, self.decode_limits())?;
+        Self::check_frame_like_initial_setup(header.header())?;
+        self.publish_header(&header)
+    }
+
+    /// The frame checks libjpeg makes while `jpeg_read_header` runs, before
+    /// TurboJPEG can publish anything: an empty frame (`get_sof`,
+    /// `JERR_EMPTY_IMAGE`), a dimension above `JPEG_MAX_DIMENSION` and an
+    /// illegal sample precision (`initial_setup`, `jdinput.c:54-70`). The
+    /// component count and sampling factors are refused by the marker parser
+    /// already. A dimension refusal keeps the `LimitExceeded` shape the
+    /// decode-time check (`DecodeLimits::check_frame`) gives the same frame.
+    fn check_frame_like_initial_setup(frame: &FrameHeader) -> Result<()> {
+        // jmorecfg.h JPEG_MAX_DIMENSION.
+        const JPEG_MAX_DIMENSION: u64 = 65_500;
+        if frame.height == 0 {
+            return Err(JpegError::CorruptData(alloc::string::String::from(
+                "Empty JPEG image (DNL not supported)",
+            )));
+        }
+        for (what, actual) in [
+            ("image width", u64::from(frame.width)),
+            ("image height", u64::from(frame.height)),
+        ] {
+            if actual > JPEG_MAX_DIMENSION {
+                return Err(JpegError::LimitExceeded {
+                    what,
+                    actual,
+                    limit: JPEG_MAX_DIMENSION,
+                });
+            }
+        }
+        let legal_precision: bool = if frame.is_lossless {
+            (2..=16).contains(&frame.precision)
+        } else {
+            matches!(frame.precision, 8 | 12)
+        };
+        if !legal_precision {
+            return Err(JpegError::Unsupported(format!(
+                "Unsupported JPEG data precision {}",
+                frame.precision
             )));
         }
         Ok(())
@@ -1149,15 +1205,16 @@ impl TjHandle {
     ///
     /// Publishes the thirteen header parameters first — see
     /// [`Self::decompress_header`] — then applies `TJPARAM_MAXPIXELS` to the
-    /// frame, then the scaling factor and cropping region, then decodes.
+    /// frame, then locates every scan under `TJPARAM_SCANLIMIT`, then applies
+    /// the scaling factor and cropping region, then decodes.
     pub fn decompress(&mut self, data: &[u8]) -> Result<Image> {
-        let mut decoder = Decoder::new_with_limits(data, self.decode_limits())?;
-        self.publish_header(&decoder)?;
+        self.read_header(data)?;
+        let limits: crate::common::types::DecodeLimits = self.decode_limits();
         // Upstream's maxPixels test sits right after setDecompParameters and
         // before scaling or cropping is consulted (`turbojpeg-mp.c:195-199`).
-        let (frame_width, frame_height): (usize, usize) =
-            (decoder.header().width(), decoder.header().height());
-        decoder.limits().check_frame(frame_width, frame_height)?;
+        limits.check_frame(self.width as usize, self.height as usize)?;
+        // The full walk, which the decode needs and the header read skipped.
+        let mut decoder = Decoder::new_with_limits(data, limits)?;
 
         // Apply scaling
         if self.scaling_factor != ScalingFactor::default() {
@@ -1317,17 +1374,16 @@ impl TjHandle {
     }
 
     /// The shared head of the 12/16-bit paths, in upstream's order: read the
-    /// header under the handle's scan limit, publish, then apply
-    /// `TJPARAM_MAXPIXELS` (`turbojpeg-mp.c:190`, `:195-199`). Returns the
-    /// limits the decode itself must honour.
+    /// header and publish, then apply `TJPARAM_MAXPIXELS`
+    /// (`turbojpeg-mp.c:190`, `:195-199`). Returns the limits the decode
+    /// itself must honour, `TJPARAM_SCANLIMIT` among them.
     fn prepare_precision_decode(
         &mut self,
         data: &[u8],
     ) -> Result<crate::common::types::DecodeLimits> {
+        self.read_header(data)?;
         let limits: crate::common::types::DecodeLimits = self.decode_limits();
-        let decoder: Decoder<'_> = Decoder::new_with_limits(data, limits)?;
-        self.publish_header(&decoder)?;
-        limits.check_frame(decoder.header().width(), decoder.header().height())?;
+        limits.check_frame(self.width as usize, self.height as usize)?;
         Ok(limits)
     }
 }

@@ -8992,10 +8992,14 @@ publishing step made a header-only read the natural shape:
    oracle's `maxpixels_header` lines), and a frame whose colour space maps to
    `TJCS_DEFAULT` is refused after publishing (`turbojpeg.c:1919-1920`).
 
-One divergence is kept and documented in README.md "Resource limits":
-`TJPARAM_SCANLIMIT` bounds the marker walk, so a header with more scans than
-the limit is refused here, where stock's header read (which installs no
-progress monitor) succeeds. A 16-bit lossless header, which the old
+The read stops at the first SOS (`MarkerReader::set_stop_at_first_sos`,
+`Decoder::new_header_only`), so a stream truncated after its first scan has a
+header — the oracle's `headeronly_truncprog` line — and `TJPARAM_SCANLIMIT`,
+which stock's header read never consults, cannot refuse it. Frames that
+libjpeg's `get_sof` / `initial_setup` refuse inside `jpeg_read_header` (a
+dimension above 65,500, a lossy precision other than 8 or 12, an empty frame)
+are refused before anything is published (`headeronly_toowide`,
+`headeronly_precision9`). A 16-bit lossless header, which the old
 decode-everything implementation could not read at all, now reads.
 
 ## P4-143. `.cargo/config.toml` Forces `+simd128`, Hiding wasm Target-Feature Regressions From the Whole Matrix — **CLOSED 2026-08-13**

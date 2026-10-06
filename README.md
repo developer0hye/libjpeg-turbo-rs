@@ -421,10 +421,11 @@ whole-image arrays (`jmemmgr.c` `realize_virt_arrays`, which raises
 `JERR_NO_BACKING_STORE`) — never the caller's destination — so a baseline
 decode stock TurboJPEG accepts can be refused here. A TurboJPEG handle
 refuses an over-budget frame before it decodes, where stock TurboJPEG does so
-during the decode; both have published the frame's parameters first. The
-scan limit is the exception: it bounds the header walk, so a stream over
-`TJPARAM_SCANLIMIT` is refused before publishing, where stock refuses it
-during the decode.
+during the decode; both have published the frame's parameters first. The same
+holds for `TJPARAM_SCANLIMIT`: the handle reads the header up to the first
+SOS and publishes, then refuses while locating the remaining scans, where
+stock refuses from its progress monitor mid-decode. `tj3DecompressHeader`
+applies neither limit, as upstream's does not.
 
 ## Features
 

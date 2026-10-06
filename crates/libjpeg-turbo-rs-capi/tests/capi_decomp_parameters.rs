@@ -33,6 +33,7 @@ const TJPARAM_JPEGHEIGHT: c_int = 6;
 const TJPARAM_PRECISION: c_int = 7;
 const TJPARAM_COLORSPACE: c_int = 8;
 const TJPARAM_PROGRESSIVE: c_int = 12;
+const TJPARAM_SCANLIMIT: c_int = 13;
 const TJPARAM_ARITHMETIC: c_int = 14;
 const TJPARAM_LOSSLESS: c_int = 15;
 const TJPARAM_LOSSLESSPSV: c_int = 16;
@@ -236,6 +237,13 @@ fn trace_label(label: &str, jpeg: &[u8], sequence: *mut c_void) -> String {
     trace.push_str(&emit(label, "maxpixels", rc, handle));
     destroy(handle);
 
+    let handle: *mut c_void = instance();
+    // SAFETY: live handle, valid parameter.
+    unsafe { tj3Set(handle, TJPARAM_SCANLIMIT, 2) };
+    let rc: c_int = routed_decompress(handle, jpeg, &mut buffer, precision, pixel_format);
+    trace.push_str(&emit(label, "scanlimit", rc, handle));
+    destroy(handle);
+
     let rc: c_int = routed_decompress(sequence, jpeg, &mut buffer, precision, pixel_format);
     trace.push_str(&emit(label, "sequence", rc, sequence));
 
@@ -312,19 +320,55 @@ fn corrupt_entropy(jpeg: &[u8]) -> Vec<u8> {
     stream
 }
 
-/// Every traced stream: the embedded fixtures, then a baseline stream whose
-/// entropy data is garbage behind an intact header (P4-142), traced through
-/// `tj3DecompressHeader` alone.
+/// `jpeg` with its SOF0 fields patched: `precision` and `width`.
+fn patched_sof(jpeg: &[u8], precision: u8, width: u16) -> Vec<u8> {
+    let sof: usize = jpeg
+        .windows(2)
+        .position(|pair| pair == [0xFF, 0xC0])
+        .expect("an SOF0 marker");
+    let mut stream: Vec<u8> = jpeg.to_vec();
+    // FF C0, Lf (2), P, Y (2), X (2).
+    stream[sof + 4] = precision;
+    stream[sof + 7..sof + 9].copy_from_slice(&width.to_be_bytes());
+    stream
+}
+
+/// `jpeg` cut just after its first scan's SOS header and a few entropy bytes:
+/// every later scan, and EOI, is gone.
+fn truncated_after_first_sos(jpeg: &[u8]) -> Vec<u8> {
+    let first_sos: usize = jpeg
+        .windows(2)
+        .position(|pair| pair == [0xFF, 0xDA])
+        .expect("an SOS marker");
+    let segment_length: usize =
+        (usize::from(jpeg[first_sos + 2]) << 8) | usize::from(jpeg[first_sos + 3]);
+    jpeg[..first_sos + 2 + segment_length + 8].to_vec()
+}
+
+/// Every traced stream: the embedded fixtures, then header-only cases
+/// (P4-142) traced through `tj3DecompressHeader` alone — garbage entropy data
+/// behind an intact header, a progressive stream cut after its first SOS
+/// (both read), and frames `get_sof` / `initial_setup` refuse before anything
+/// is published: 65,501 pixels wide, and a lossy precision of 9.
 fn inputs() -> Vec<(String, Vec<u8>)> {
     let mut inputs: Vec<(String, Vec<u8>)> = FIXTURES
         .iter()
         .map(|(label, jpeg)| (label.to_string(), jpeg.to_vec()))
         .collect();
+    let baseline: &[u8] = include_bytes!("../../../tests/fixtures/photo_64x64_420.jpg");
+    let progressive: &[u8] = include_bytes!("../../../tests/fixtures/photo_64x64_420_prog.jpg");
+    inputs.push(("headeronly_corrupt".to_string(), corrupt_entropy(baseline)));
     inputs.push((
-        "headeronly_corrupt".to_string(),
-        corrupt_entropy(include_bytes!(
-            "../../../tests/fixtures/photo_64x64_420.jpg"
-        )),
+        "headeronly_truncprog".to_string(),
+        truncated_after_first_sos(progressive),
+    ));
+    inputs.push((
+        "headeronly_toowide".to_string(),
+        patched_sof(baseline, 8, 65_501),
+    ));
+    inputs.push((
+        "headeronly_precision9".to_string(),
+        patched_sof(baseline, 9, 64),
     ));
     inputs
 }

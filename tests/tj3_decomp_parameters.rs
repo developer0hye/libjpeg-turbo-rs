@@ -482,3 +482,75 @@ fn corrupt_entropy(jpeg: &[u8]) -> Vec<u8> {
     stream.extend_from_slice(&[0xFF, 0xD9]);
     stream
 }
+
+/// P4-142: the header read stops at the first SOS, as `jpeg_read_header`
+/// does, so a progressive stream cut after its first scan still has a header
+/// — and a `TJPARAM_SCANLIMIT` the stream exceeds refuses the decompress
+/// *after* the parameters are published, upstream's order.
+#[test]
+fn the_header_read_stops_at_the_first_scan() {
+    let first_sos: usize = PROG
+        .windows(2)
+        .position(|pair| pair == [0xFF, 0xDA])
+        .expect("an SOS marker");
+    let segment_length: usize =
+        (usize::from(PROG[first_sos + 2]) << 8) | usize::from(PROG[first_sos + 3]);
+    let truncated: &[u8] = &PROG[..first_sos + 2 + segment_length + 8];
+    let mut handle: TjHandle = TjHandle::new();
+    handle
+        .decompress_header(truncated)
+        .expect("every later scan is gone, the header is not");
+    assert_eq!(published(&handle), EXPECTED[2].2);
+
+    let mut limited: TjHandle = TjHandle::new();
+    limited.set(TjParam::ScanLimit, 2).expect("SCANLIMIT");
+    limited
+        .decompress_header(PROG)
+        .expect("tj3DecompressHeader applies no scan limit");
+    let mut limited: TjHandle = TjHandle::new();
+    limited.set(TjParam::ScanLimit, 2).expect("SCANLIMIT");
+    let refused = limited.decompress(PROG);
+    assert!(
+        matches!(refused, Err(JpegError::LimitExceeded { limit: 2, .. })),
+        "a progressive stream over the scan limit must be refused: {refused:?}"
+    );
+    assert_eq!(
+        published(&limited),
+        EXPECTED[2].2,
+        "published before refusing"
+    );
+}
+
+/// A frame libjpeg's `get_sof` / `initial_setup` refuse inside
+/// `jpeg_read_header` never reaches `setDecompParameters`, so nothing is
+/// published: a dimension above `JPEG_MAX_DIMENSION`, a lossy precision other
+/// than 8 or 12.
+#[test]
+fn a_frame_libjpeg_refuses_in_the_header_publishes_nothing() {
+    let baseline: &[u8] = include_bytes!("fixtures/photo_64x64_420.jpg");
+    let sof: usize = baseline
+        .windows(2)
+        .position(|pair| pair == [0xFF, 0xC0])
+        .expect("an SOF0 marker");
+    let patched = |precision: u8, width: u16| -> Vec<u8> {
+        let mut stream: Vec<u8> = baseline.to_vec();
+        stream[sof + 4] = precision;
+        stream[sof + 7..sof + 9].copy_from_slice(&width.to_be_bytes());
+        stream
+    };
+    let fresh: [i32; 13] = published(&TjHandle::new());
+    for (label, stream) in [
+        ("65,501 wide", patched(8, 65_501)),
+        ("lossy precision 9", patched(9, 64)),
+    ] {
+        let mut header: TjHandle = TjHandle::new();
+        assert!(
+            header.decompress_header(&stream).is_err(),
+            "{label}: header"
+        );
+        assert_eq!(published(&header), fresh, "{label}: header published");
+        let mut decode: TjHandle = TjHandle::new();
+        assert!(decode.decompress(&stream).is_err(), "{label}: decompress");
+        assert_eq!(published(&decode), fresh, "{label}: decompress published");
+    }
+}

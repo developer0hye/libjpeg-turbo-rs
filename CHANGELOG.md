@@ -210,12 +210,17 @@ and `git log` between tags.
   `JpegError::LimitExceeded`, as upstream's shared decompress body does.
 - **Breaking (behaviour): `tj3DecompressHeader` reads only the header**
   (P4-142). `TjHandle::decompress_header` decoded the whole image and threw it
-  away. It now parses markers up to the first SOS, like `jpeg_read_header`:
-  it succeeds on a stream whose entropy data is corrupt, reads a 16-bit
-  lossless header (which the 8-bit decode it used to run refused), applies no
-  `TJPARAM_MAXPIXELS` test (upstream's has none; the decompress that follows
-  does), and refuses a frame whose colour space TurboJPEG cannot name, as
-  upstream's does.
+  away. It now parses markers up to the first SOS and no further, like
+  `jpeg_read_header`: it succeeds on a stream whose entropy data is corrupt
+  or whose later scans are missing, reads a 16-bit lossless header (which the
+  8-bit decode it used to run refused), applies neither `TJPARAM_MAXPIXELS`
+  nor `TJPARAM_SCANLIMIT` (upstream's applies neither; the decompress that
+  follows does), and refuses — publishing nothing — a frame libjpeg refuses
+  inside `jpeg_read_header` (a dimension above 65,500, a lossy precision
+  other than 8 or 12), and, after publishing, one whose colour space
+  TurboJPEG cannot name, as upstream's does. Every decompress entry point
+  reads the header the same way first, so a stream over `TJPARAM_SCANLIMIT`
+  is now refused after publishing, as upstream's is.
 - An allocator refusal during a decode is reported as
   `JpegError::AllocationFailed` instead of aborting the process (P4-209,
   #632). `decompress` / `Decoder::decode_image` allocated their destination

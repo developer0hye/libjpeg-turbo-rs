@@ -144,8 +144,8 @@
 
 use libjpeg_turbo_rs::tj3::{FrameInfo, TjHandle, TjParam};
 use libjpeg_turbo_rs::{
-    transform_jpeg_with_options, CropRegion, DecodeLimits, Decoder, JpegError, MarkerCopyMode,
-    PixelFormat, TransformOp, TransformOptions,
+    transform_jpeg_with_options, CropRegion, Decoder, JpegError, MarkerCopyMode, PixelFormat,
+    TransformOp, TransformOptions,
 };
 
 /// Upper bound on the operations one program may hold.
@@ -723,6 +723,14 @@ pub fn run_program_with(
         };
     }
     let inputs: Vec<&[u8]> = usable;
+    // Per-input facts P2 and P5 need after every decode. They depend on the
+    // bytes alone, so they are computed once here: a header parse per
+    // operation made the exhaustive sweep several times slower in debug.
+    let publishes: Vec<bool> = inputs.iter().map(|jpeg| header_parses(jpeg)).collect();
+    let frame_dimensions: Vec<Option<(i32, i32)>> = inputs
+        .iter()
+        .map(|jpeg| frame_dimensions_of(jpeg))
+        .collect();
 
     let mut live: TjHandle = new_capped_handle(limits);
     // The prefix a reference handle replays, in the order the live handle saw
@@ -787,7 +795,14 @@ pub fn run_program_with(
                     compare_params(index, op, ops, jpeg, &live, &reference, published);
                     // P5: and the dimensions it published are the frame's.
                     if !published.is_empty() {
-                        compare_frame_dimensions(index, op, ops, jpeg, &live);
+                        compare_frame_dimensions(
+                            index,
+                            op,
+                            ops,
+                            jpeg,
+                            &live,
+                            frame_dimensions[selected],
+                        );
                     }
                 }
                 // P4, second half: and nothing else. Asserted on the error
@@ -801,7 +816,7 @@ pub fn run_program_with(
                 // A publisher is one that got past its header parse, not one
                 // that succeeded: a decode refused by a limit or by corrupt
                 // entropy data has already published, in C and here.
-                if op.publishes_for_compress() && header_parses(jpeg, &live) {
+                if op.publishes_for_compress() && publishes[selected] {
                     // Only the most recent publisher matters, and it takes the
                     // position it had in the live sequence — so a `set` issued
                     // after it still wins on replay, exactly as it does live.
@@ -883,29 +898,26 @@ fn exceeds_limits(jpeg: &[u8], limits: &Limits) -> bool {
     pixels > limits.max_pixels
 }
 
-/// Whether a decode-family operation on `handle` got far enough to publish.
+/// Whether a decode-family operation got far enough to publish.
 ///
 /// Every `TjHandle` decompress entry point publishes — the thirteen
-/// parameters and the ICC profile — immediately after its header parse,
-/// before any limit, crop or decode step can refuse (`publish_header` in
-/// `src/api/tj3.rs`), as upstream's `setDecompParameters` call precedes its
-/// refusals. That parse runs under the handle's `TJPARAM_SCANLIMIT` (0 means
-/// no cap) and no other limit, which is what this mirrors. A decode that fails
-/// *after* the parse must still become P2's last publisher: the live handle
-/// carries what it published, and a later compress reads it (`LOSSLESS` among
-/// them — the first version, keyed on success, saw a lossless compress on the
-/// live handle against a lossy one on the reference).
-fn header_parses(jpeg: &[u8], handle: &TjHandle) -> bool {
-    let scan_limit: i32 = handle.get(TjParam::ScanLimit);
-    let limits: DecodeLimits = DecodeLimits {
-        max_scans: if scan_limit > 0 {
-            scan_limit as usize
-        } else {
-            usize::MAX
-        },
-        ..DecodeLimits::default()
-    };
-    Decoder::new_with_limits(jpeg, limits).is_ok()
+/// parameters and the ICC profile — as soon as it has read the header up to
+/// the first SOS, before any limit, crop or decode step can refuse (`read_header`
+/// in `src/api/tj3.rs`), as upstream's `setDecompParameters` call precedes its
+/// refusals. That header read is identical in all four, takes nothing from the
+/// handle that matters here, and is exactly what `decompress_header` does, so
+/// a fresh handle's `decompress_header` answers the question: a published
+/// `JPEGWIDTH` replaces the -1 a fresh handle starts with. (Its `Err` alone
+/// would not do — it also refuses a `TJCS_DEFAULT` frame *after* publishing.)
+///
+/// A decode that fails *after* that point must still become P2's last
+/// publisher: the live handle carries what it published, and a later compress
+/// reads it (`LOSSLESS` among them — the first version, keyed on success, saw a
+/// lossless compress on the live handle against a lossy one on the reference).
+fn header_parses(jpeg: &[u8]) -> bool {
+    let mut probe: TjHandle = TjHandle::new();
+    let _ = probe.decompress_header(jpeg);
+    probe.get(TjParam::Width) != -1
 }
 
 /// One entry of the prefix a reference handle replays.
@@ -1349,18 +1361,31 @@ fn compare_params(
     }
 }
 
-/// P5: after a successful publishing operation, `JPEGWIDTH` / `JPEGHEIGHT`
-/// are the frame header's — read here through `Decoder::new`, independently of
-/// any handle, so a value wrong on the live handle *and* the reference (P4-200,
-/// #621) is still caught. A stream `Decoder::new` cannot parse under its
-/// default limits (more than 8192 scans) is skipped: there is no independent
+/// The SOF's dimensions, read through `Decoder::new` — independently of any
+/// handle — or `None` for a stream `Decoder::new` cannot parse under its
+/// default limits (more than 8192 scans), for which P5 has no independent
 /// answer to compare against.
-fn compare_frame_dimensions(index: usize, op: &Op, program: &[Op], jpeg: &[u8], live: &TjHandle) {
-    let Ok(decoder) = Decoder::new(jpeg) else {
+fn frame_dimensions_of(jpeg: &[u8]) -> Option<(i32, i32)> {
+    let decoder = Decoder::new(jpeg).ok()?;
+    let header = decoder.header();
+    Some((i32::from(header.width), i32::from(header.height)))
+}
+
+/// P5: after a successful publishing operation, `JPEGWIDTH` / `JPEGHEIGHT`
+/// are the frame header's (`expected`, from [`frame_dimensions_of`]), so a
+/// value wrong on the live handle *and* the reference (P4-200, #621) is still
+/// caught.
+fn compare_frame_dimensions(
+    index: usize,
+    op: &Op,
+    program: &[Op],
+    jpeg: &[u8],
+    live: &TjHandle,
+    expected: Option<(i32, i32)>,
+) {
+    let Some(expected) = expected else {
         return;
     };
-    let header = decoder.header();
-    let expected: (i32, i32) = (i32::from(header.width), i32::from(header.height));
     let published: (i32, i32) = (live.get(TjParam::Width), live.get(TjParam::Height));
     assert!(
         published == expected,

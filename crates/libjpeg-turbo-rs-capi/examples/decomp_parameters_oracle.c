@@ -32,9 +32,9 @@
  *     port downscales to 8 bits);
  *   - tj3Decompress12 on an 8-bit frame (stock promotes `data_precision` to
  *     12 at `turbojpeg-mp.c:191-194`; the port refuses, P4-171);
- *   - TJPARAM_SCANLIMIT and TJPARAM_MAXMEMORY refusals (stock enforces them
- *     during the decode, after publishing, through its progress monitor and
- *     virtual-array manager; the port refuses at header time, before).
+ *   - TJPARAM_MAXMEMORY refusals (stock's budget reaches only its
+ *     whole-image arrays, the port's a header-time estimate that includes the
+ *     output buffer, so the two refuse different frames by design).
  *
  * Usage: decomp_parameters_oracle <workdir> <label>...
  * reads `<workdir>/<label>.jpg` for every label; a label starting with
@@ -137,10 +137,12 @@ static int run_label(const char *workdir, const char *label,
     return 1;
   }
 
-  /* A `headeronly_` label is a stream whose header is intact and whose
-   * entropy data is not (P4-142): tj3DecompressHeader must read it without
-   * decoding. Its decode is not traced -- stock reports corrupt data as a
-   * warning, which is a different contract. */
+  /* A `headeronly_` label traces tj3DecompressHeader alone (P4-142): a
+   * stream whose header is intact and whose entropy data is not, or whose
+   * later scans are missing, must be read without decoding; one whose frame
+   * libjpeg's get_sof / initial_setup refuse must publish nothing. The decode
+   * is not traced -- stock reports corrupt data as a warning, which is a
+   * different contract. */
   if (strncmp(label, "headeronly_", 11) == 0) {
     handle = tj3Init(TJINIT_DECOMPRESS);
     rc = tj3DecompressHeader(handle, jpeg, size);
@@ -195,6 +197,16 @@ static int run_label(const char *workdir, const char *label,
   tj3Set(handle, TJPARAM_MAXPIXELS, 1);
   rc = routed_decompress(handle, jpeg, size, buffer, precision, pixel_format);
   emit(label, "maxpixels", rc, handle);
+  tj3Destroy(handle);
+
+  /* 4b. Refused by TJPARAM_SCANLIMIT on a stream with more scans -- also
+   * after publishing: stock enforces the limit from its progress monitor
+   * during the decode, and the port in the scan walk that follows the
+   * header read. A single-scan stream decodes. */
+  handle = tj3Init(TJINIT_DECOMPRESS);
+  tj3Set(handle, TJPARAM_SCANLIMIT, 2);
+  rc = routed_decompress(handle, jpeg, size, buffer, precision, pixel_format);
+  emit(label, "scanlimit", rc, handle);
   tj3Destroy(handle);
 
   /* 5. One long-lived handle across every fixture: each decode must replace

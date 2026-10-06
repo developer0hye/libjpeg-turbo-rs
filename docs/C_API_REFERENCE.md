@@ -41,7 +41,7 @@
 | `FASTDCT` | Fast DCT/IDCT algorithm | `Decoder::set_fast_dct()` | ✅ |
 | `OPTIMIZE` | Optimized Huffman tables | `compress_optimized()` | ✅ |
 | `PROGRESSIVE` | Progressive JPEG mode | `compress_progressive()` | ✅ |
-| `SCANLIMIT` | Max progressive scans | `DecodeLimits::max_scans` / `Decoder::set_scan_limit()`; every `TjHandle` decompress entry point (P4-199, #620). Bounds the header walk, so an over-limit stream is refused before the parameters are published, where upstream refuses during the decode | ✅ |
+| `SCANLIMIT` | Max progressive scans | `DecodeLimits::max_scans` / `Decoder::set_scan_limit()`; every `TjHandle` decompress entry point (P4-199, #620). Refused after the header is read and published, while the remaining scans are located, where upstream refuses from its progress monitor during the decode; `tj3DecompressHeader` applies it in neither | ✅ |
 | `ARITHMETIC` | Arithmetic entropy coding | `compress_arithmetic()`, `TransformOptions::arithmetic` | ✅ |
 | `LOSSLESS` | Lossless JPEG mode | `compress_lossless()` | ✅ |
 | `LOSSLESSPSV` | Lossless predictor 1-7 | `Encoder::lossless_predictor()` | ✅ |
