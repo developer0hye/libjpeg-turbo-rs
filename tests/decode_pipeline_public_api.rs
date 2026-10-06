@@ -88,6 +88,10 @@ fn assert_decoder_signatures<'a>(_: PhantomData<&'a ()>) {
     let _: fn(&'a [u8], &TablesOnlyState) -> Result<Decoder<'a>> = Decoder::<'a>::new_with_tables;
 
     let _: fn(&Decoder<'a>) -> Option<u8> = Decoder::<'a>::exif_orientation;
+    let _: fn(&Decoder<'a>) -> Result<Option<Vec<u8>>> = Decoder::<'a>::icc_profile;
+    let _: for<'b> fn(&'b Decoder<'a>) -> Option<&'b [u8]> = Decoder::<'a>::exif_data;
+    let _: for<'b> fn(&'b Decoder<'a>) -> Option<&'b [u8]> = Decoder::<'a>::xmp_data;
+    let _: for<'b> fn(&'b Decoder<'a>) -> Option<&'b [u8]> = Decoder::<'a>::iptc_data;
     let _: for<'b> fn(&'b Decoder<'a>) -> &'b FrameHeader = Decoder::<'a>::header;
     let _: for<'b> fn(&'b Decoder<'a>) -> &'b DensityInfo = Decoder::<'a>::density;
     let _: fn(&Decoder<'a>) -> bool = Decoder::<'a>::saw_jfif_marker;

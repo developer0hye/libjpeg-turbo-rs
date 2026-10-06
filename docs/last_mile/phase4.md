@@ -12638,6 +12638,98 @@ non-interleaved DC first and refinement scans and a Cb+Cr-only DC scan;
 measured discriminating — with the single-component geometry disabled the
 per-component case differs (325 vs 318 bytes).
 
+## P4-212. The `image` Adapter Decoded Eagerly, Ignored `image::Limits` and Dropped EXIF/XMP/IPTC/Orientation — **CLOSED 2026-10-07**
+
+**GitHub:** [#637](https://github.com/developer0hye/libjpeg-turbo-rs/issues/637) — #635 Milestone B, first execution tickets 4 and 5.
+
+**The gap.** `libjpeg-turbo-rs-image 0.1.0`'s `JpegDecoder::new` decoded the
+whole image and kept it; `read_image` copied it into the caller's buffer, so a
+read held two decoded images and every byte of work happened before a caller
+could apply limits. `set_limits` fell back to the trait default (accept,
+enforce nothing); only `icc_profile` was implemented, so `orientation()` was
+always `NoTransforms` where `image`'s built-in decoder reported the EXIF tag;
+every codec error became `ImageError::Decoding`.
+
+**Status (2026-10-07): closed.** Per #637 criterion:
+
+1. Construction parses headers only; `new` copies the compressed stream once
+   (fallibly), `from_vec` takes ownership. `tests/adapter_memory.rs` measures
+   it with a counting allocator: 36,734 bytes at 2048x1536.
+2. `read_image` calls `Decoder::decode_image_into` on the caller's buffer.
+   Same test: the read's working set peaks at 4,745,446 bytes above the
+   caller's buffer against a 9,437,184-byte decoded image (4:2:0 YCbCr),
+   asserted `<` one image; the remainder is component planes, stated in the
+   docs, not called allocation-free. **Scoped:** that holds for 8-bit
+   grayscale and three-component streams; the core still stages
+   four-component, 12-bit and lossless decodes in a full-size buffer, so those
+   reads keep two images — filed as P4-213 and stated in the adapter docs.
+3. `set_limits` maps `max_image_width`/`max_image_height` onto
+   `DecodeLimits::max_width/max_height` and `max_alloc` onto `max_memory`
+   (whose estimate counts the output), and runs the core's header-limit checks
+   through `output_buffer_size` so refusal precedes any pixel allocation;
+   previous limits stay in force on refusal. Error categories follow
+   `classify_error`. Pinned by `limits_are_enforced_at_set_limits` and
+   `default_limits_refuse_a_header_bomb_at_set_limits`. `read_image` re-runs
+   the same header checks through the core decoder; that path is structural —
+   reaching it needs a correctly sized destination, which `set_limits` has
+   already refused — and is not claimed as tested.
+4. Metadata accessors are compared with `image 0.25.10`'s built-in decoder
+   (`metadata_matches_image_builtin_decoder`: with and without metadata, two
+   EXIF segments, an Extended XMP chunk, an empty APP13). The adapter reads the
+   raw segments with zune's rule — last segment wins, standard XMP packet only,
+   IPTC as the Photoshop IRB after `Photoshop 3.0\0` — because the core's own
+   accessors differ on all three. `original_color_type()` deliberately
+   reports `Cmyk8` where the built-in decoder reports `Rgb8`; documented. `orientation_is_applied_once_by_the_application`
+   pins that orientation is reported, never applied. The core gained
+   header-time `Decoder::{icc_profile, exif_data, xmp_data, iptc_data}`.
+5. `tests/image_traits.rs` covers baseline 4:2:0/4:2:2/4:4:4, progressive,
+   arithmetic, grayscale and CMYK through the traits with pixel parity against
+   the core decode, one direct `djpeg -ppm` comparison, malformed and truncated
+   input (strict error, `set_lenient` fill), destination sizing, unsupported
+   output formats and the encoder through `write_with_encoder` (byte-identical
+   to core `compress`).
+6. `examples/thumbnail_pipeline.rs` (decode → limits → orient → resize →
+   encode, changed lines marked `// was:`) builds under the CI
+   `cargo test --locked -p libjpeg-turbo-rs-image` step; the crate docs and
+   README state that only explicitly constructed decoders/encoders use this
+   backend.
+
+Publishing the updated adapter and the clean external-consumer run against
+registry packages remain #635 Milestone B release items, not this one. The
+adapter's changes are breaking (see `CHANGELOG.md`), so it ships as **0.2.0**
+and must require the root release that adds the header accessors; both
+manifest bumps belong to that release's preparation, because a path
+dependency's `version` must match the workspace root until then.
+
+## P4-213. CMYK/YCCK, 12-Bit and Lossless Decodes Stage a Full-Size Copy Even When Given a Caller Buffer — **OPEN**
+
+**Found 2026-10-07** by the `rust-code-reviewer` pass on P4-212 (#637).
+`Decoder::decode_image_into` hands the caller's buffer only to the paths that
+call `take_out_buf`. Four-component streams go through `decode_4_component` →
+`convert_4comp_output`, which allocates `width * height * bpp` and is copied
+out (`src/decode/pipeline_impl/colorspace.rs`, `output.rs`); YCCK with
+subsampled chroma also allocates two full planes. 12-bit-as-8-bit and
+lossless decodes build an owned image the same way, and so does the
+merged-upsample branch (`set_merged_upsample(true)` allocates a full-size
+`merged_rgb`), which `decode_image_into`'s own doc comment omits from its list
+of staged paths. A caller — the `image`
+adapter included — therefore holds two decoded images for these inputs, and
+the memory estimate `max_memory` enforces counts neither the staging buffer
+nor the upsample planes, so the limit is non-strict there.
+
+**Acceptance criteria.**
+
+1. `convert_4comp_output` (and the 12-bit/lossless output steps, where the
+   format allows) write through `take_out_buf`, so `decode_image_into`
+   performs no full-size staging for them; pixels unchanged (C cross-checks).
+2. `check_header_limits`' estimate counts whatever staging remains.
+3. The adapter's `tests/adapter_memory.rs` gains a CMYK case asserting the
+   read's working set stays below one decoded image, and the adapter docs drop
+   the exception.
+
+**Why deferred.** A decode-pipeline change across three output paths with
+their own C parity, found while reviewing an adapter pull request.
+
 ## P4-220. TJ3 Entry Points Never Check the Handle's Instance Type — **OPEN**
 
 **Found 2026-10-07** in review of P4-139 criterion 4 (#478), which rewrote
