@@ -65,6 +65,7 @@ rustup component add rust-src --toolchain nightly
 
 ```bash
 RUSTFLAGS="-Z sanitizer=address" \
+ASAN_OPTIONS="allocator_may_return_null=1" \
 LSAN_OPTIONS="suppressions=$(pwd)/lsan_suppressions.txt:detect_leaks=1" \
 cargo +nightly test --workspace --lib \
   --target x86_64-unknown-linux-gnu \

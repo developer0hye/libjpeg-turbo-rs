@@ -23,6 +23,8 @@
 pub(crate) mod scalar;
 
 #[cfg(test)]
+mod kernel_bounds_tests;
+#[cfg(test)]
 mod neon_color_tests;
 #[cfg(test)]
 mod neon_idct_tests;

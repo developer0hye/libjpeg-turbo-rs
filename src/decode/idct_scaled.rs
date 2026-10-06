@@ -448,6 +448,59 @@ mod tests {
         }
     }
 
+    /// P4-191 criterion 4 (#609): `idct_1x1_strided`'s whole contract is "one
+    /// writable byte at `output`" — `stride` is accepted for the uniform
+    /// dispatch signature and must be ignored. The plane here is exactly
+    /// `stride * rows` bytes, as `Decoder::idct_scaled_strided` sizes it at 1/8
+    /// scale, and every block position is written in turn, ending on the
+    /// plane's last byte. A store that honoured `stride` (`output.add(stride)`)
+    /// or widened to a second byte would leave the written byte wrong or
+    /// clobber a canary, and on the last position would land past the
+    /// allocation, where ASan and Miri report it. Measured 2026-10-07: adding
+    /// a second store at `output.add(1)` fails at "write at 0: byte 1". Being
+    /// a scalar unit test outside `simd::`, Miri runs it as well as ASan.
+    #[test]
+    fn idct_1x1_strided_writes_one_byte_and_ignores_stride() {
+        const CANARIES: [u8; 2] = [0xA5, 0x5A];
+        let quant: [u16; 64] = [3u16; 64];
+        let stride: usize = 5;
+        let rows: usize = 3;
+        for canary in CANARIES {
+            for dc in [-1024i16, -129, -1, 0, 1, 77, 1023] {
+                let mut coeffs: [i16; 64] = [0i16; 64];
+                coeffs[0] = dc;
+                // AC terms must not leak into a DC-only reduction.
+                coeffs[1] = 300;
+                coeffs[63] = -300;
+                let expected: u8 = idct_1x1(&coeffs, &quant);
+                for offset in 0..stride * rows {
+                    let mut plane: Vec<u8> = vec![canary; stride * rows];
+                    // SAFETY: `offset < plane.len()`, so one writable byte is
+                    // available at the pointer — the callee's whole contract.
+                    unsafe {
+                        idct_1x1_strided(&coeffs, &quant, plane.as_mut_ptr().add(offset), stride);
+                    }
+                    for (index, &byte) in plane.iter().enumerate() {
+                        let want: u8 = if index == offset { expected } else { canary };
+                        // When the output equals the canary, a missed write is
+                        // invisible here; the other canary catches it.
+                        assert_eq!(
+                            byte, want,
+                            "dc={dc} canary={canary:#04x} write at {offset}: byte {index}"
+                        );
+                    }
+                }
+                // The minimum allocation the contract allows: a single byte.
+                let mut single: Vec<u8> = vec![canary; 1];
+                // SAFETY: one writable byte, as documented.
+                unsafe {
+                    idct_1x1_strided(&coeffs, &quant, single.as_mut_ptr(), usize::MAX);
+                }
+                assert_eq!(single, [expected], "dc={dc}: single-byte destination");
+            }
+        }
+    }
+
     #[test]
     fn idct_2x2_strided_writes_correctly() {
         let mut coeffs = [0i16; 64];
