@@ -2,7 +2,10 @@ use super::color::{fancy_h2v2_row_dispatch, fancy_h2v2_strided_dispatch};
 use super::{upsample_generic_nearest, Decoder, Image, ImageInfo};
 use crate::common::error::{DecodeWarning, JpegError, Result};
 use crate::common::quant_table::QuantTable;
-use crate::common::try_alloc::{try_clone_opt, try_clone_opt_string, try_clone_saved_markers};
+use crate::common::try_alloc::{
+    try_clone_opt, try_clone_opt_string, try_clone_saved_markers, try_copy_of, try_filled_vec,
+    try_reserved_vec,
+};
 use crate::common::types::{ColorSpace, ComponentInfo, PixelFormat};
 use alloc::{
     borrow::Cow,
@@ -75,7 +78,15 @@ fn take_out_buf<'a>(sink: &mut Option<&'a mut [u8]>, size: usize) -> Result<OutB
             }
             Ok(OutBuf::Borrowed(&mut buf[..size]))
         }
-        None => Ok(OutBuf::Owned(vec![0u8; size])),
+        // P4-209 (#632): `size` comes from the SOF, and `vec![]` aborts the
+        // process on refusal. This is the owned destination most
+        // `decompress` paths allocate, so it was the abort the simplest
+        // decode hit.
+        None => Ok(OutBuf::Owned(try_filled_vec(
+            size,
+            0u8,
+            "decode output buffer",
+        )?)),
     }
 }
 
@@ -409,7 +420,7 @@ impl<'a> Decoder<'a> {
                 let row_bytes: usize = image.width * bpp;
                 let start: usize = cy * row_bytes;
                 let end: usize = start + ch * row_bytes;
-                image.data = image.data[start..end].to_vec();
+                image.data = try_copy_of(&image.data[start..end], "vertically cropped output")?;
                 image.height = ch;
             }
         }
@@ -466,9 +477,17 @@ impl<'a> Decoder<'a> {
             let pad_off: Option<usize> = pad_alpha_offset(out_format);
             let bpp: usize = out_format.bytes_per_pixel();
             let data: Vec<u8> = match out_format {
-                PixelFormat::Grayscale => img12.data.iter().map(|&v| scale(v)).collect(),
+                PixelFormat::Grayscale => {
+                    // `collect()` into a `Vec` allocates infallibly too; the
+                    // gate's patterns do not see it, the allocator does.
+                    let mut out: Vec<u8> =
+                        try_reserved_vec(img12.data.len(), "12-bit downscaled output")?;
+                    out.extend(img12.data.iter().map(|&v| scale(v)));
+                    out
+                }
                 PixelFormat::Rgb | PixelFormat::Bgr => {
-                    let mut out: Vec<u8> = Vec::with_capacity(width * height * bpp);
+                    let mut out: Vec<u8> =
+                        try_reserved_vec(width * height * bpp, "12-bit downscaled output")?;
                     for &v12 in &img12.data {
                         let v: u8 = scale(v12);
                         out.extend_from_slice(&[v, v, v]);
@@ -484,7 +503,8 @@ impl<'a> Decoder<'a> {
                 | PixelFormat::Argb
                 | PixelFormat::Abgr => {
                     let pad: usize = pad_off.expect("4bpp format has a pad offset");
-                    let mut out: Vec<u8> = Vec::with_capacity(width * height * bpp);
+                    let mut out: Vec<u8> =
+                        try_reserved_vec(width * height * bpp, "12-bit downscaled output")?;
                     for &v12 in &img12.data {
                         let mut px: [u8; 4] = [scale(v12); 4];
                         px[pad] = 255;
@@ -498,7 +518,8 @@ impl<'a> Decoder<'a> {
                         // grayscale path (codex review on issue #394:
                         // set_dither_565 must not be silently ignored).
                         // One row of 8-bit scratch, not a full plane.
-                        let mut out: Vec<u8> = vec![0u8; width * height * 2];
+                        let mut out: Vec<u8> =
+                            try_filled_vec(width * height * 2, 0u8, "12-bit downscaled output")?;
                         let mut row8: Vec<u8> = vec![0u8; width];
                         for y in 0..height {
                             for (dst, &v12) in
@@ -515,7 +536,8 @@ impl<'a> Decoder<'a> {
                         }
                         out
                     } else {
-                        let mut out: Vec<u8> = Vec::with_capacity(width * height * 2);
+                        let mut out: Vec<u8> =
+                            try_reserved_vec(width * height * 2, "12-bit downscaled output")?;
                         for &v12 in &img12.data {
                             let v: u8 = scale(v12);
                             let packed: u16 = (((v as u16) >> 3) << 11)
@@ -547,7 +569,8 @@ impl<'a> Decoder<'a> {
             // Color image: img12.data is interleaved RGB (3 values per pixel).
             // Convert to the requested output format.
             let bpp: usize = out_format.bytes_per_pixel();
-            let mut data: Vec<u8> = vec![0u8; width * height * bpp];
+            let mut data: Vec<u8> =
+                try_filled_vec(width * height * bpp, 0u8, "12-bit downscaled output")?;
 
             let r_off: Option<usize> = out_format.red_offset();
             let g_off: Option<usize> = out_format.green_offset();
@@ -880,7 +903,7 @@ impl<'a> Decoder<'a> {
             let cropped_planes: Vec<Vec<u8>> = component_planes
                 .iter()
                 .enumerate()
-                .map(|(ci, plane)| {
+                .map(|(ci, plane)| -> Result<Vec<u8>> {
                     let comp_w: usize = mcus_x
                         * frame.components[ci].horizontal_sampling as usize
                         * comp_block_sizes[ci];
@@ -889,18 +912,19 @@ impl<'a> Decoder<'a> {
                         * comp_block_sizes[ci];
                     let off: usize = comp_x_offsets[ci];
                     if off == 0 {
-                        return plane.clone();
+                        return try_copy_of(plane, "crop-shifted component plane");
                     }
                     // Re-pack rows shifted by `off` pixels
-                    let mut shifted: Vec<u8> = Vec::with_capacity(plane.len());
+                    let mut shifted: Vec<u8> =
+                        try_reserved_vec(plane.len(), "crop-shifted component plane")?;
                     for row in 0..comp_h {
                         shifted.extend_from_slice(&plane[row * comp_w + off..(row + 1) * comp_w]);
                         // Pad to maintain stride
                         shifted.extend(core::iter::repeat_n(0, off));
                     }
-                    shifted
+                    Ok(shifted)
                 })
-                .collect();
+                .collect::<Result<Vec<Vec<u8>>>>()?;
             return crate::decode::toggles::decode_with_colorspace_override(
                 ColorSpace::YCbCr,
                 &cropped_planes,
@@ -965,7 +989,8 @@ impl<'a> Decoder<'a> {
                 } else if exact_geometry {
                     core::mem::take(&mut component_planes[0])
                 } else {
-                    let mut data = Vec::with_capacity(out_width * out_height);
+                    let mut data: Vec<u8> =
+                        try_reserved_vec(out_width * out_height, "decode output buffer")?;
                     for y in 0..out_height {
                         data.extend_from_slice(
                             &component_planes[0][y * comp_w + off..y * comp_w + off + out_width],
@@ -1236,7 +1261,11 @@ impl<'a> Decoder<'a> {
                 // contract holds. Pixel-correct decoding is tracked as P4-21.
                 let mut recovered_warnings: Vec<DecodeWarning> = warnings.clone();
                 recovered_warnings.push(DecodeWarning::UnsupportedRecovered { detail });
-                let data: Vec<u8> = vec![128u8; out_width * out_height * bpp];
+                let data: Vec<u8> = try_filled_vec(
+                    out_width * out_height * bpp,
+                    128u8,
+                    "lenient neutral raster",
+                )?;
                 return Ok(Image {
                     xmp_data: try_clone_opt(&xmp_data, "XMP metadata")?,
                     iptc_data: try_clone_opt(&iptc_data, "IPTC metadata")?,
@@ -1328,7 +1357,8 @@ impl<'a> Decoder<'a> {
                     // task.
                     let merged_bpp: usize = 3;
                     let merged_size: usize = out_width * out_height * merged_bpp;
-                    let mut merged_rgb: Vec<u8> = vec![0u8; merged_size];
+                    let mut merged_rgb: Vec<u8> =
+                        try_filled_vec(merged_size, 0u8, "merged upsample RGB buffer")?;
 
                     if v_factor == 1 {
                         // H2V1 (4:2:2): one chroma row per Y row
@@ -1379,7 +1409,11 @@ impl<'a> Decoder<'a> {
                     } else {
                         // RGB565 little-endian: word = (R5 << 11) | (G6 << 5) | B5,
                         // with 5-6-5 truncation matching upstream.
-                        let mut packed: Vec<u8> = vec![0u8; out_width * out_height * bpp];
+                        let mut packed: Vec<u8> = try_filled_vec(
+                            out_width * out_height * bpp,
+                            0u8,
+                            "merged RGB565 output",
+                        )?;
                         for i in 0..(out_width * out_height) {
                             let r: u16 = merged_rgb[i * 3] as u16;
                             let g: u16 = merged_rgb[i * 3 + 1] as u16;
@@ -1801,8 +1835,10 @@ impl<'a> Decoder<'a> {
 
                 // All remaining paths need full-plane cb_full/cr_full buffers.
                 let alloc_size = full_width * full_height;
-                let mut cb_full = vec![0u8; alloc_size];
-                let mut cr_full = vec![0u8; alloc_size];
+                let mut cb_full: Vec<u8> =
+                    try_filled_vec(alloc_size, 0u8, "upsampled chroma plane")?;
+                let mut cr_full: Vec<u8> =
+                    try_filled_vec(alloc_size, 0u8, "upsampled chroma plane")?;
 
                 // Upsample each chroma component independently using its own factors.
                 // This handles non-uniform chroma sampling (e.g. Cb=2x1, Cr=1x1)
@@ -1862,7 +1898,8 @@ impl<'a> Decoder<'a> {
                         }
                     } else if use_box_filter {
                         if comp_off > 0 {
-                            let mut cropped: Vec<u8> = Vec::with_capacity(actual_w * actual_h);
+                            let mut cropped: Vec<u8> =
+                                try_reserved_vec(actual_w * actual_h, "cropped chroma plane")?;
                             for row in 0..comp_h.min(actual_h) {
                                 let s: usize = row * comp_w + comp_off;
                                 cropped.extend_from_slice(&comp_plane[s..s + actual_w]);
@@ -1898,7 +1935,8 @@ impl<'a> Decoder<'a> {
                     } else if comp_hf == 1 && comp_vf == 2 {
                         // H1V2: vertical-only 2x fancy upsample.
                         if comp_off > 0 {
-                            let mut cropped: Vec<u8> = Vec::with_capacity(actual_w * actual_h);
+                            let mut cropped: Vec<u8> =
+                                try_reserved_vec(actual_w * actual_h, "cropped chroma plane")?;
                             for row in 0..actual_h {
                                 let s: usize = row * comp_w + comp_off;
                                 cropped.extend_from_slice(&comp_plane[s..s + actual_w]);
@@ -1910,7 +1948,8 @@ impl<'a> Decoder<'a> {
                     } else {
                         // Generic fallback: nearest-neighbor for any factor combination.
                         if comp_off > 0 {
-                            let mut cropped: Vec<u8> = Vec::with_capacity(actual_w * actual_h);
+                            let mut cropped: Vec<u8> =
+                                try_reserved_vec(actual_w * actual_h, "cropped chroma plane")?;
                             for row in 0..comp_h.min(actual_h) {
                                 let s: usize = row * comp_w + comp_off;
                                 cropped.extend_from_slice(&comp_plane[s..s + actual_w]);

@@ -10,6 +10,10 @@ and `git log` between tags.
 
 ### Added
 
+- **`Decoder::icc_profile`, `exif_data`, `xmp_data` and `iptc_data`** read
+  metadata from the parsed header without decoding pixels, returning the same
+  bytes a decode reports (#637).
+
 - **Prebuilt native bundles on every tagged release** (P4-131, #462).
   `libjpeg-turbo-rs-capi-<version>-<target>.tar.gz` for
   `x86_64`/`aarch64-unknown-linux-gnu` and `x86_64`/`aarch64-apple-darwin`,
@@ -48,6 +52,27 @@ and `git log` between tags.
 
 ### Changed
 
+- **`libjpeg-turbo-rs-image`: the `image` adapter decodes lazily, honours
+  `image::Limits`, and reports metadata** (P4-212, #637, under #635).
+  `JpegDecoder::new` now parses headers only and `read_image` decodes into
+  the caller's buffer; for 8-bit grayscale and YCbCr/RGB streams no second
+  decoded image exists (measured at 2048x1536 4:2:0: construction 37 KB, read
+  working set 4.7 MB against a 9.4 MB image — CMYK, 12-bit and lossless are
+  still staged, P4-213). `set_limits` applies `max_image_width`,
+  `max_image_height` and `max_alloc` before any pixel allocation.
+  `exif_metadata`, `xmp_metadata`, `iptc_metadata` and `orientation` return
+  what `image`'s built-in JPEG decoder returns for the same file. New:
+  `JpegDecoder::from_vec` (no input copy), `set_lenient`, and
+  `original_color_type()` (`Cmyk8` for four-component streams).
+  **Breaking for the adapter (next version 0.2.0):** `new`/`from_vec` no
+  longer validate entropy data, so a corrupt stream constructs and fails in
+  `read_image`; `read_image` and `JpegEncoder::write_image` require buffers of
+  exactly the image's size (both accepted longer ones); error categories moved
+  from `Decoding` (`Encoding` for the encoder) to `Limits` (limits,
+  allocation refusal), `Unsupported`, `Parameter` (buffer sizes) and
+  `IoError`, and the format hint is now
+  `ImageFormatHint::Exact(ImageFormat::Jpeg)`; asking `new_with_format` for
+  `Grayscale` from a CMYK/YCCK stream is refused at construction.
 - **Portable x86_64 builds reach the BMI2 Huffman tier and the FMA float
   FDCT by runtime detection** (P4-133, #464). The 2026-09-08 portable-vs-native
   A/B found only two wins a `target-cpu=native` build had over a stock
@@ -144,6 +169,22 @@ and `git log` between tags.
   runs system/Rust bidirectional cross-decodes.
 
 ### Fixed
+- An allocator refusal during a decode is reported as
+  `JpegError::AllocationFailed` instead of aborting the process (P4-209,
+  #632). `decompress` / `Decoder::decode_image` allocated their destination
+  with `vec![0u8; size]`, sized by the SOF, so a large or hostile file on a
+  memory-constrained host ended in an uncatchable `SIGABRT`. That buffer and
+  every other full-plane or destination allocation under `src/decode/` —
+  component planes, the merged-upsample, 12-bit, lossless, CMYK/YCCK and
+  colourspace-override outputs, full-plane chroma upsampling, crop copies and
+  the block-smoothing DC snapshot — now go through the crate's fallible
+  allocator helpers. A successful decode is byte-identical. A 12-bit source
+  still decodes its samples through `api::precision`, which this change does
+  not cover. `tests/decode_alloc_gate.rs` with
+  `docs/decode_alloc_inventory.tsv` fails CI when a new infallible allocation
+  under `src/decode/` is not classified as bounded by something other than the
+  input.
+
 - **Breaking (behaviour): a cropping region past the scaled output decoded to a
   degenerate image** (P4-197, #618). A region that used to decode (to zero or
   clamped columns) now returns `JpegError::InvalidCropRegion`. `Decoder::set_crop_region(10, 1, 16, 2)` on an 8x8 image

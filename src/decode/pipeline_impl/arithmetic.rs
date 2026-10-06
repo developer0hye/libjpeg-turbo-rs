@@ -5,7 +5,7 @@ use crate::common::layout::checked_span;
 use crate::common::quant_table::QuantTable;
 use crate::common::try_alloc::try_filled_vec;
 use crate::common::types::FrameHeader;
-use alloc::{format, vec, vec::Vec};
+use alloc::{format, vec::Vec};
 
 impl<'a> Decoder<'a> {
     /// Decode arithmetic-coded planes (SOF9 sequential).
@@ -251,9 +251,11 @@ impl<'a> Decoder<'a> {
                 let comp_w: usize =
                     mcus_x * comp.horizontal_sampling as usize * comp_block_sizes[ci];
                 let comp_h: usize = mcus_y * comp.vertical_sampling as usize * comp_block_sizes[ci];
-                vec![128u8; comp_w * comp_h]
+                // P4-209: the multi-scan twin of the planes above, which were
+                // already fallible; this one was missed.
+                try_filled_vec(comp_w * comp_h, 128u8, "arithmetic component plane")
             })
-            .collect();
+            .collect::<Result<Vec<Vec<u8>>>>()?;
 
         let max_h: usize = frame
             .components
