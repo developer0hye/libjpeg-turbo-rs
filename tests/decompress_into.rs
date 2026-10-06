@@ -224,7 +224,10 @@ fn advertised_size_is_always_sufficient_across_options() {
         ("half-scale", |d| {
             d.set_scale(libjpeg_turbo_rs::ScalingFactor::new(1, 2))
         }),
-        ("vcrop", |d| d.set_crop_region(0, 8, 64, 16)),
+        // A vertical crop that fits every input here, the 8x8 lossless frame
+        // included: one past the image is refused (P4-197, #618), by
+        // `output_buffer_size` and the decode alike.
+        ("vcrop", |d| d.set_crop_y(2, 4)),
     ];
     for (name, configure) in configs {
         for (label, jpeg) in [

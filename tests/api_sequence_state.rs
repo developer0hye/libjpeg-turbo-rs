@@ -1024,6 +1024,15 @@ fn program_round_trips_through_its_wire_format() {
                 height: 16,
             }),
         },
+        // A non-zero left boundary shares byte `b` with the width.
+        Op::SetCrop {
+            region: Some(CropRegion {
+                x: 15,
+                y: 15,
+                width: 16,
+                height: 16,
+            }),
+        },
         Op::SetScaling { index: 255 },
         Op::Set {
             param: TjParam::ScanLimit,

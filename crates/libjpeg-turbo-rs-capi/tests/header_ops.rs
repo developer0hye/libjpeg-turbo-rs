@@ -208,86 +208,82 @@ fn tj3_set_scaling_factor_halves_output() {
     }
 }
 
+/// Upstream's checks, in upstream's order (`turbojpeg.c:2068-2115`, P4-197 /
+/// #618). The stock-TurboJPEG comparison of the same rules, including the
+/// error strings, is the `cropping_region` case of
+/// `examples/cabi_misuse_harness.c`; this test pins the shim on hosts without
+/// an oracle install.
 #[test]
 fn tj3_set_cropping_region_validates_inputs() {
     let path: PathBuf = cdylib_path();
     let lib: libloading::Library =
         unsafe { libloading::Library::new(&path) }.expect("dlopen cdylib");
+    // 128x96 4:4:4: an 8-pixel iMCU.
+    let jpeg: Vec<u8> = compress_checkerboard(&lib, 128, 96);
     unsafe {
         let tj3_init: libloading::Symbol<unsafe extern "C" fn(c_int) -> TjHandle> =
             lib.get(b"tj3Init").expect("tj3Init");
         let tj3_set_crop: libloading::Symbol<unsafe extern "C" fn(TjHandle, TjRegion) -> c_int> =
             lib.get(b"tj3SetCroppingRegion")
                 .expect("tj3SetCroppingRegion");
+        let tj3_header: libloading::Symbol<
+            unsafe extern "C" fn(TjHandle, *const u8, usize) -> c_int,
+        > = lib
+            .get(b"tj3DecompressHeader")
+            .expect("tj3DecompressHeader");
+        let tj3_error_str: libloading::Symbol<
+            unsafe extern "C" fn(TjHandle) -> *const std::ffi::c_char,
+        > = lib.get(b"tj3GetErrorStr").expect("tj3GetErrorStr");
         let tj3_destroy: libloading::Symbol<unsafe extern "C" fn(TjHandle)> =
             lib.get(b"tj3Destroy").expect("tj3Destroy");
 
+        let region =
+            |x: c_int, y: c_int, w: c_int, h: c_int| -> TjRegion { TjRegion { x, y, w, h } };
+        let error_of = |handle: TjHandle| -> String {
+            std::ffi::CStr::from_ptr(tj3_error_str(handle))
+                .to_string_lossy()
+                .into_owned()
+        };
+
         let h = tj3_init(TJINIT_DECOMPRESS);
-        // Valid region.
+        // "Clear" (all zeros) needs no header.
+        assert_eq!(tj3_set_crop(h, region(0, 0, 0, 0)), 0);
+        // Negative coordinate: refused before the header check.
+        assert_eq!(tj3_set_crop(h, region(-1, 0, 32, 32)), -1);
         assert_eq!(
-            tj3_set_crop(
-                h,
-                TjRegion {
-                    x: 0,
-                    y: 0,
-                    w: 32,
-                    h: 32
-                }
-            ),
-            0
+            error_of(h),
+            "tj3SetCroppingRegion(): Invalid cropping region"
         );
-        // "Clear" region (all zeros).
+        // Any other region needs a header.
+        assert_eq!(tj3_set_crop(h, region(0, 0, 32, 32)), -1);
         assert_eq!(
-            tj3_set_crop(
-                h,
-                TjRegion {
-                    x: 0,
-                    y: 0,
-                    w: 0,
-                    h: 0
-                }
-            ),
-            0
+            error_of(h),
+            "tj3SetCroppingRegion(): JPEG header has not yet been read"
         );
-        // Negative coordinate.
+
+        assert_eq!(tj3_header(h, jpeg.as_ptr(), jpeg.len()), 0);
+        assert_eq!(tj3_set_crop(h, region(0, 0, 32, 32)), 0);
+        // Zero width/height: to the edge, not an error.
+        assert_eq!(tj3_set_crop(h, region(8, 0, 0, 32)), 0);
+        assert_eq!(tj3_set_crop(h, region(4, 0, 8, 8)), -1);
         assert_eq!(
-            tj3_set_crop(
-                h,
-                TjRegion {
-                    x: -1,
-                    y: 0,
-                    w: 32,
-                    h: 32
-                }
-            ),
-            -1
+            error_of(h),
+            "tj3SetCroppingRegion(): The left boundary of the cropping region (4) is not\n\
+             divisible by the scaled iMCU width (8)"
         );
-        // Zero dimension.
-        assert_eq!(
-            tj3_set_crop(
-                h,
-                TjRegion {
-                    x: 0,
-                    y: 0,
-                    w: 0,
-                    h: 32
-                }
-            ),
-            -1
-        );
+        for refused in [
+            region(120, 0, 16, 8),
+            region(128, 0, 0, 8),
+            region(0, 90, 8, 8),
+        ] {
+            assert_eq!(tj3_set_crop(h, refused), -1);
+            assert_eq!(
+                error_of(h),
+                "tj3SetCroppingRegion(): The cropping region exceeds the scaled image dimensions"
+            );
+        }
         // NULL handle.
-        assert_eq!(
-            tj3_set_crop(
-                std::ptr::null_mut(),
-                TjRegion {
-                    x: 0,
-                    y: 0,
-                    w: 32,
-                    h: 32
-                }
-            ),
-            -1
-        );
+        assert_eq!(tj3_set_crop(std::ptr::null_mut(), region(0, 0, 32, 32)), -1);
 
         tj3_destroy(h);
     }

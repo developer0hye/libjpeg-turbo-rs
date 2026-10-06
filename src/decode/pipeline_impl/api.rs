@@ -487,7 +487,23 @@ impl<'a> Decoder<'a> {
         self.lenient = lenient;
     }
 
-    /// Set horizontal crop region. Offsets are auto-aligned to iMCU boundaries.
+    /// Set the horizontal crop, in output (post-scale) columns.
+    ///
+    /// `x` is aligned **down** to the scaled iMCU boundary and the width grows
+    /// by the same amount, so the decode starts at or left of `x` and still
+    /// ends at `x + width` — what C's `jpeg_crop_scanline` does
+    /// (`jdapistd.c`), and what `djpeg -crop` reports. TurboJPEG's
+    /// `tj3SetCroppingRegion` refuses an unaligned `x` instead;
+    /// [`crate::tj3::TjHandle`] follows TurboJPEG, this decoder follows
+    /// libjpeg (P4-197, #618).
+    ///
+    /// The region is checked when the decode runs, once
+    /// [`Self::set_scale`] has fixed the output size: `x + width` past
+    /// [`Self::output_width`] makes `decode_image`, `decode_image_into` and
+    /// `output_buffer_size` return [`crate::JpegError::InvalidCropRegion`] —
+    /// the bound `djpeg -crop` enforces — rather than clamping the region to
+    /// what is left of the row. A width of 0 is refused the same way, as
+    /// `jpeg_crop_scanline` refuses it.
     pub fn set_crop(&mut self, x: usize, width: usize) {
         self.crop_x = Some(x);
         self.crop_width = Some(width);
@@ -496,6 +512,12 @@ impl<'a> Decoder<'a> {
     /// Set only the vertical crop range, leaving any horizontal crop
     /// untouched. MCU rows fully outside the range skip IDCT during
     /// decoding (issue #383: backs `StreamingDecoder::skip_scanlines`).
+    ///
+    /// `y + height` past [`Self::output_height`] is refused when the decode
+    /// runs, with [`crate::JpegError::InvalidCropRegion`], as
+    /// [`Self::set_crop`] describes. A height of 0 is not refused:
+    /// `skip_scanlines` uses `y = output_height, height = 0` to skip to the
+    /// bottom.
     pub fn set_crop_y(&mut self, y: usize, height: usize) {
         self.crop_y = Some(y);
         self.crop_height = Some(height);
@@ -543,7 +565,9 @@ impl<'a> Decoder<'a> {
         }
     }
 
-    /// Set full crop region (horizontal + vertical).
+    /// Set full crop region (horizontal + vertical), in output (post-scale)
+    /// pixels: [`Self::set_crop`] and [`Self::set_crop_y`] together, with
+    /// their alignment rule and their decode-time bounds check.
     /// MCU rows outside the vertical range will skip IDCT during decoding.
     pub fn set_crop_region(&mut self, x: usize, y: usize, width: usize, height: usize) {
         self.crop_x = Some(x);

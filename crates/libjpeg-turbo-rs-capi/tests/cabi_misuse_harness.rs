@@ -77,6 +77,7 @@ const CASES: &[&str] = &[
     "concurrent_handles",
     "alloc_ownership",
     "precision12",
+    "cropping_region",
 ];
 
 /// Cases that exercise the harness's own instrumentation rather than the
@@ -920,6 +921,79 @@ fn twelve_bit_round_trip_crosses_the_boundary() {
     );
 }
 
+/// `tj3SetCroppingRegion`'s checks, read off `turbojpeg.c:2068-2115` (P4-197,
+/// #618): TJUNCROPPED clears (`:2077-2081`), a negative field is "Invalid
+/// cropping region" (`:2083-2085`) and is checked before the header
+/// (`:2086-2087`), a lossless frame is refused (`:2088-2089`), a left boundary
+/// off the scaled iMCU grid is refused (`:2096-2101`), a zero width/height runs
+/// to the edge (`:2102-2105`) and anything past the *scaled* image is refused
+/// (`:2106-2109`). The error strings carry upstream's `"%s(): "` THROW prefix
+/// (`:279-291`), with the divisibility message's newline printed as `\n`.
+#[test]
+fn cropping_region_rules_cross_the_boundary() {
+    let outcome: Run = run_ours("cropping_region");
+    let invalid: &str = "tj3SetCroppingRegion(): Invalid cropping region";
+    let exceeds: &str =
+        "tj3SetCroppingRegion(): The cropping region exceeds the scaled image dimensions";
+    assert_values(
+        &outcome,
+        "cropping_region",
+        &[
+            ("preheader_clear_rc", "0"),
+            ("preheader_negative_rc", "-1"),
+            ("preheader_negative_err", invalid),
+            ("preheader_region_rc", "-1"),
+            (
+                "preheader_region_err",
+                "tj3SetCroppingRegion(): JPEG header has not yet been read",
+            ),
+            ("width", "227"),
+            ("height", "149"),
+            ("fill_to_edge_rc", "0"),
+            ("fill_to_edge_decode_rc", "0"),
+            ("fill_to_edge_decode_canary", "intact"),
+            ("interior_rc", "0"),
+            ("interior_decode_rc", "0"),
+            ("unaligned_x_rc", "-1"),
+            (
+                "unaligned_x_err",
+                "tj3SetCroppingRegion(): The left boundary of the cropping region (8) is not\\ndivisible by the scaled iMCU width (16)",
+            ),
+            ("x_past_width_err", exceeds),
+            ("x_past_width_fill_err", exceeds),
+            ("x_plus_w_past_width_err", exceeds),
+            ("y_plus_h_past_height_err", exceeds),
+            ("y_past_height_fill_err", exceeds),
+            ("negative_width_err", invalid),
+            ("after_refusals_decode_rc", "0"),
+            ("scale_half_rc", "0"),
+            ("half_interior_rc", "0"),
+            ("half_fill_to_edge_rc", "0"),
+            ("half_fill_to_edge_decode_canary", "intact"),
+            (
+                "half_unaligned_x_err",
+                "tj3SetCroppingRegion(): The left boundary of the cropping region (4) is not\\ndivisible by the scaled iMCU width (8)",
+            ),
+            ("half_x_plus_w_past_width_err", exceeds),
+            ("half_y_plus_h_past_height_err", exceeds),
+            ("lossless_compress_rc", "0"),
+            ("lossless_header_rc", "0"),
+            ("lossless_region_rc", "-1"),
+            (
+                "lossless_region_err",
+                "tj3SetCroppingRegion(): Cannot partially decompress lossless JPEG images",
+            ),
+        ],
+    );
+    // A refusal leaves the stored region alone (the THROW at `:2109` skips the
+    // assignment at `:2111`), so the decode after seven refusals is the
+    // `interior` decode again.
+    assert_eq!(
+        outcome.value("after_refusals_decode_pixels"),
+        outcome.value("interior_decode_pixels")
+    );
+}
+
 // --------------------------------------------------------- the comparison --
 
 /// P4-207 (#629): the sixteen (instance type, parameter) pairs `tj3Set`
@@ -991,7 +1065,7 @@ fn transcripts_match_stock_turbojpeg() {
         let mine = run(&ours, case);
         let theirs = run(&oracle, case);
         // A floor, without which two children that both die before printing
-        // anything compare two empty transcripts and pass. The ten contract
+        // anything compare two empty transcripts and pass. The eleven contract
         // tests above assert exit 0 per case today, but that backstop is
         // incidental — this one is structural and covers a case added later.
         assert_eq!(

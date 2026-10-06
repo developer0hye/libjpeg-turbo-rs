@@ -183,17 +183,59 @@ impl<'a> Decoder<'a> {
         Ok(())
     }
 
+    /// Refuse a cropping region that does not fit inside the output a decode
+    /// will emit (P4-197, #618).
+    ///
+    /// The bound is C's: `djpeg -crop` refuses `crop_x + crop_width >
+    /// output_width || crop_y + crop_height > output_height` once
+    /// `jpeg_start_decompress` has fixed the scaled size (`djpeg.c:854-858`),
+    /// and `tj3SetCroppingRegion` refuses the same shape
+    /// (`turbojpeg.c:2106-2109`). It is checked at decode time because
+    /// `set_crop*` may run before the `set_scale` that fixes the output size.
+    ///
+    /// The left boundary's iMCU alignment cannot change the outcome: the
+    /// output stage aligns `x` down and widens the width by the same amount,
+    /// so the right edge is `x + width` either way. A zero *width* is refused
+    /// too, as `jpeg_crop_scanline` refuses it (`jdapistd.c:213-216`,
+    /// `JERR_WIDTH_OVERFLOW`): aligning its `x` down would otherwise widen it
+    /// into columns nobody asked for. A zero *height* is not —
+    /// `StreamingDecoder::skip_scanlines` skips to the bottom with a
+    /// zero-height region at `y = output_height`, as `jpeg_skip_scanlines`
+    /// may skip every row.
+    pub(super) fn check_crop_region(&self) -> Result<()> {
+        let exceeds = |origin: usize, extent: usize, limit: usize| -> bool {
+            origin.checked_add(extent).is_none_or(|end| end > limit)
+        };
+        let horizontal_exceeds: bool = match (self.crop_x, self.crop_width) {
+            (Some(x), Some(width)) => width == 0 || exceeds(x, width, self.output_width()),
+            _ => false,
+        };
+        let vertical_exceeds: bool = match (self.crop_y, self.crop_height) {
+            (Some(y), Some(height)) => exceeds(y, height, self.output_height()),
+            _ => false,
+        };
+        if horizontal_exceeds || vertical_exceeds {
+            return Err(JpegError::InvalidCropRegion {
+                reason: "The cropping region exceeds the scaled image dimensions".to_string(),
+            });
+        }
+        Ok(())
+    }
+
     /// Bytes `decode_image_into` needs for this stream with the current
     /// decoder options. Exact for the standard paths; a safe upper
     /// bound when an output-colourspace override is active (sized at 4
-    /// bytes/pixel) or when cropping trims the image below the
-    /// MCU-aligned estimate.
+    /// bytes/pixel). A cropping region that does not fit the scaled output
+    /// is refused here exactly as the decode refuses it.
     #[must_use = "the returned size is the whole point of this query"]
     pub fn output_buffer_size(&self) -> Result<usize> {
         // Untrusted-input workflow is size -> allocate -> decode, so the
         // limits must fire here too or the caller OOMs before decode can
         // reject (codex P1 on #355).
         self.check_header_limits()?;
+        // Same reasoning for the crop: a size computed for a region the
+        // decode will refuse would only be allocated to be thrown away.
+        self.check_crop_region()?;
         let frame = &self.metadata.frame;
         let num_components: usize = frame.components.len();
         let bpp: usize = if self.output_colorspace.is_some() {
@@ -225,8 +267,9 @@ impl<'a> Decoder<'a> {
         };
 
         // Horizontal crop mirrors decode_image_inner: X aligns down to
-        // the scaled iMCU boundary and the width expands to compensate,
-        // then clamps to the image.
+        // the scaled iMCU boundary and the width expands to compensate.
+        // check_crop_region above has already refused a region that does not
+        // fit, so neither crop needs clamping here.
         let out_w: usize = if !scale_and_hcrop_apply {
             base_w
         } else if let (Some(cx), Some(cw)) = (self.crop_x, self.crop_width) {
@@ -238,15 +281,13 @@ impl<'a> Decoder<'a> {
                 .unwrap_or(1);
             let scaled_imcu_w: usize = max_h_samp * self.scale.block_size();
             let aligned_x: usize = (cx / scaled_imcu_w) * scaled_imcu_w;
-            let expanded_w: usize = cw + (cx - aligned_x);
-            expanded_w.min(base_w.saturating_sub(aligned_x))
+            cw + (cx - aligned_x)
         } else {
             base_w
         };
         // Vertical crop is applied as a post-slice in decode_image.
-        let out_h: usize = if let (Some(cy), Some(ch)) = (self.crop_y, self.crop_height) {
-            let offset: usize = cy.min(base_h);
-            ch.min(base_h.saturating_sub(offset))
+        let out_h: usize = if let (Some(_), Some(ch)) = (self.crop_y, self.crop_height) {
+            ch
         } else {
             base_h
         };
@@ -351,27 +392,25 @@ impl<'a> Decoder<'a> {
         // crop_y..crop_y+crop_height region. Horizontal crop is handled
         // during decode; vertical crop is applied here to avoid threading
         // the offset through every output path.
+        //
+        // `data` holds all `width * height` pixels of the decode here: a
+        // vertical crop keeps `decode_image_into` off the sink path, so this
+        // image was decoded into an owned buffer. `check_crop_region` has
+        // refused any region with `crop_y + crop_height` past the output, and
+        // the decode emits at least that many rows (it caps at the iMCU row
+        // after the crop's last one, never before it). A zero-height region
+        // slices to empty without special-casing (P4-197, #618: an assertion
+        // here used to claim empty data was unreachable, and an ordinary
+        // decode reached it with a region starting past the right edge).
         if let (Some(cy), Some(ch)) = (self.crop_y, self.crop_height) {
             // Crop coordinates are in the output (post-scale) space
-            let offset: usize = cy.min(image.height);
-            let height: usize = ch.min(image.height.saturating_sub(offset));
-            if offset > 0 || height < image.height {
-                // A sink-claimed decode returns empty data; vertical crop
-                // is excluded from sink mode in decode_image_into, so this
-                // is unreachable — keep it panic-free if that invariant
-                // ever breaks rather than indexing out of range.
-                debug_assert!(
-                    !image.data.is_empty(),
-                    "vertical crop cannot apply to a sink-claimed decode"
-                );
-                if !image.data.is_empty() {
-                    let bpp: usize = image.pixel_format.bytes_per_pixel();
-                    let row_bytes: usize = image.width * bpp;
-                    let start: usize = offset * row_bytes;
-                    let end: usize = start + height * row_bytes;
-                    image.data = image.data[start..end].to_vec();
-                    image.height = height;
-                }
+            if cy > 0 || ch < image.height {
+                let bpp: usize = image.pixel_format.bytes_per_pixel();
+                let row_bytes: usize = image.width * bpp;
+                let start: usize = cy * row_bytes;
+                let end: usize = start + ch * row_bytes;
+                image.data = image.data[start..end].to_vec();
+                image.height = ch;
             }
         }
         Ok(image)
@@ -603,6 +642,11 @@ impl<'a> Decoder<'a> {
             )));
         }
 
+        // After the colour-conversion refusal, as djpeg checks its crop only
+        // once `jpeg_start_decompress` (which raises
+        // JERR_CONVERSION_NOTIMPL) has returned; before any decoding work.
+        self.check_crop_region()?;
+
         // P4-144: all four are input-sized allocations that used to abort the
         // process when the allocator refused. This function already returns
         // `Result`, so making them fallible costs a helper call rather than the
@@ -738,11 +782,10 @@ impl<'a> Decoder<'a> {
         // Crop-aware output: when crop_x/crop_width are set, the output
         // narrows to the crop width. Matches C jpeg_crop_scanline behavior:
         // X is aligned down to iMCU boundary, width is expanded accordingly.
-        // Crop coordinates are in the original image space; align then scale
-        // to output space so they index correctly into scaled component planes.
         // Crop coordinates are in the output (post-scale) space, matching C
         // djpeg -crop behavior. Align X down to the scaled iMCU boundary and
-        // expand width to compensate.
+        // expand width to compensate. check_crop_region has refused a region
+        // past the output, so the clamp below never shortens a request.
         let scaled_imcu_w: usize = max_h * block_size; // iMCU width in scaled output pixels
         let (scaled_crop_x, scaled_crop_w): (Option<usize>, Option<usize>) =
             if let (Some(cx), Some(cw)) = (self.crop_x, self.crop_width) {
@@ -879,8 +922,9 @@ impl<'a> Decoder<'a> {
         // Cap output height to the extended MCU range when vertical crop is set.
         // IDCT is skipped outside this range, so component planes contain
         // uninitialized data beyond it. The upsampler needs this cap to produce
-        // correct edge behavior. decode_image() then slices relative to this
-        // capped range using crop_y offset from the MCU-range start.
+        // correct edge behavior. The cap never falls short of crop_y +
+        // crop_height, and decode_image_with_sink then slices rows
+        // crop_y..crop_y + crop_height of this (still frame-origin) image.
         let out_height: usize = if let (Some(cy), Some(ch)) = (self.crop_y, self.crop_height) {
             let mcu_h: usize = max_v * block_size;
             let mcu_end: usize = (cy + ch).div_ceil(mcu_h);
