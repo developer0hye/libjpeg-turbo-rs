@@ -117,15 +117,14 @@ def unusable(report, first_report):
     )
     if differing:
         return f"runtime features differ from the first report: {', '.join(differing)}"
-    # The 2026-10-07 first report predates recording ssse3, bmi1 and lzcnt.
-    # Say which dispatch inputs this comparison could not check rather than
-    # refusing every later report.
-    unchecked = sorted(features.keys() ^ first_features.keys())
-    if unchecked:
-        print(
-            "budgets.py: not recorded by both reports, so not compared: "
-            + ", ".join(unchecked),
-            file=sys.stderr,
+    # A dispatch input only one report recorded cannot be shown to match, and
+    # an unmatched input may mean a different kernel: refuse rather than
+    # score a pair that may not be comparable.
+    unrecorded = sorted(features.keys() ^ first_features.keys())
+    if unrecorded:
+        return (
+            "runtime features recorded by only one report, so not comparable: "
+            + ", ".join(unrecorded)
         )
     return None
 
