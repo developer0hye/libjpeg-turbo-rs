@@ -12635,7 +12635,7 @@ non-interleaved DC first and refinement scans and a Cb+Cr-only DC scan;
 measured discriminating — with the single-component geometry disabled the
 per-component case differs (325 vs 318 bytes).
 
-## P4-218. TJ3 Entry Points Never Check the Handle's Instance Type — **OPEN**
+## P4-220. TJ3 Entry Points Never Check the Handle's Instance Type — **OPEN**
 
 **Found 2026-10-07** in review of P4-139 criterion 4 (#478), which rewrote
 `tj3SetScalingFactor` and traced it against real TurboJPEG — but only on a
