@@ -320,8 +320,8 @@ fn corrupt_entropy(jpeg: &[u8]) -> Vec<u8> {
     stream
 }
 
-/// `jpeg` with its SOF0 fields patched: `precision` and `width`.
-fn patched_sof(jpeg: &[u8], precision: u8, width: u16) -> Vec<u8> {
+/// `jpeg` with its SOF0 fields patched: `precision`, `height` and `width`.
+fn patched_sof(jpeg: &[u8], precision: u8, height: u16, width: u16) -> Vec<u8> {
     let sof: usize = jpeg
         .windows(2)
         .position(|pair| pair == [0xFF, 0xC0])
@@ -329,6 +329,7 @@ fn patched_sof(jpeg: &[u8], precision: u8, width: u16) -> Vec<u8> {
     let mut stream: Vec<u8> = jpeg.to_vec();
     // FF C0, Lf (2), P, Y (2), X (2).
     stream[sof + 4] = precision;
+    stream[sof + 5..sof + 7].copy_from_slice(&height.to_be_bytes());
     stream[sof + 7..sof + 9].copy_from_slice(&width.to_be_bytes());
     stream
 }
@@ -349,7 +350,8 @@ fn truncated_after_first_sos(jpeg: &[u8]) -> Vec<u8> {
 /// (P4-142) traced through `tj3DecompressHeader` alone — garbage entropy data
 /// behind an intact header, a progressive stream cut after its first SOS
 /// (both read), and frames `get_sof` / `initial_setup` refuse before anything
-/// is published: 65,501 pixels wide, and a lossy precision of 9.
+/// is published: 65,501 pixels wide, a lossy precision of 9, and a height of
+/// 0 (`JERR_EMPTY_IMAGE`; no DNL support on either side).
 fn inputs() -> Vec<(String, Vec<u8>)> {
     let mut inputs: Vec<(String, Vec<u8>)> = FIXTURES
         .iter()
@@ -364,11 +366,15 @@ fn inputs() -> Vec<(String, Vec<u8>)> {
     ));
     inputs.push((
         "headeronly_toowide".to_string(),
-        patched_sof(baseline, 8, 65_501),
+        patched_sof(baseline, 8, 64, 65_501),
     ));
     inputs.push((
         "headeronly_precision9".to_string(),
-        patched_sof(baseline, 9, 64),
+        patched_sof(baseline, 9, 64, 64),
+    ));
+    inputs.push((
+        "headeronly_empty".to_string(),
+        patched_sof(baseline, 8, 0, 64),
     ));
     inputs
 }

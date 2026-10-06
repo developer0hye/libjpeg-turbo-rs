@@ -119,7 +119,7 @@
 
 | C Function | Description | Rust | Status |
 |---|---|---|---|
-| `tj3Decompress8(handle, jpeg, size, dst, pitch, pf)` | Decompress JPEG to 8-bit pixels | `decompress()`, `decompress_to()`, `decompress_into()` (caller buffer, #354); `TjHandle::decompress()` publishes the 13 parameters `setDecompParameters` writes (P4-199, #620) | ✅ |
+| `tj3Decompress8(handle, jpeg, size, dst, pitch, pf)` | Decompress JPEG to 8-bit pixels | `decompress()`, `decompress_to()`, `decompress_into()` (caller buffer, #354); `TjHandle::decompress()` publishes the 13 parameters `setDecompParameters` writes (P4-199, #620); decodes a 12-bit frame that stock refuses with `JERR_BAD_PRECISION` (P4-226) | 🔶 |
 | `tj3Decompress12(handle, jpeg, size, dst, pitch, pf)` | Decompress to 12-bit | `TjHandle::decompress_12bit()` / `decompress_12bit()` — **12-bit sources only**: upstream 3.2 also decompresses an 8-bit lossy JPEG to 12-bit output, which we refuse (P4-171); decodes only the first scan of a progressive or multi-scan frame (P4-223); refuses a stored cropping region instead of applying it (P4-219). Publishes the 13 parameters and applies the handle's limits (P4-199, #620) | 🔶 |
 | `tj3Decompress16(handle, jpeg, size, dst, pitch, pf)` | Decompress to 16-bit | `TjHandle::decompress_16bit()` / `decompress_16bit()` / `decompress_16bit_with_limits()` — publishes the 13 parameters and applies the handle's limits (P4-199, #620) | ✅ |
 

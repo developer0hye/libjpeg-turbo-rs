@@ -12075,8 +12075,9 @@ refuse, as upstream's call precedes its refusals. Per criterion:
 
 Filed on the way: [P4-223](#p4-223-12-bit-decodes-read-only-the-first-scan-so-progressive-and-multi-scan-12-bit-streams-decode-to-wrong-pixels-with-ok--open)
 (12-bit progressive and multi-scan streams decode wrongly),
-[P4-224](#p4-224-decoders-memory-estimate-does-not-count-the-12-bit-staging-when-it-decodes-a-12-bit-frame--open)
-and [P4-225](#p4-225-tj3decompresstoyuv8--tj3decompresstoyuvplanes8-publish-nothing-where-upstream-calls-setdecompparameters--open).
+[P4-224](#p4-224-decoders-memory-estimate-does-not-count-the-12-bit-staging-when-it-decodes-a-12-bit-frame--open),
+[P4-225](#p4-225-tj3decompresstoyuv8--tj3decompresstoyuvplanes8-publish-nothing-where-upstream-calls-setdecompparameters--open)
+and [P4-226](#p4-226-tj3decompress8-decodes-a-12-bit-frame-that-stock-turbojpeg-refuses--open).
 
 ## P4-200. `JPEGWIDTH` / `JPEGHEIGHT` Publish the Scaled and Cropped Output Dimensions Where Upstream Publishes the SOF's — **CLOSED 2026-10-07**
 
@@ -13163,3 +13164,35 @@ API-sequence harness either gains a YUV opcode or records why it has none.
 **Why deferred.** It needs a publishing twin of `inspect_header` and a C
 oracle extension; P4-199's scope was the pixel decompress entry points its
 harness drives.
+
+## P4-226. `tj3Decompress8` Decodes a 12-Bit Frame That Stock TurboJPEG Refuses — **OPEN**
+
+**Found 2026-10-07** while building P4-199's C oracle (#620), whose header
+comment lists it as one of the cases the trace leaves out. GitHub issue to be
+opened.
+
+Measured on `tests/fixtures/real_world/libjpeg_testorig12_227x149_12bit.jpg`:
+stock 3.2.0's `tj3Decompress8(…, TJPF_RGB)` returns -1 with "Unsupported JPEG
+data precision 12" (`jpeg_start_decompress` raises `JERR_BAD_PRECISION`; the
+8-bit build of `turbojpeg-mp.c` cannot decode a 12-bit frame). Ours returns 0
+and an 8-bit image: `TjHandle::decompress` reaches `Decoder::decode_image`,
+whose 12-bit branch downscales (`decode_12bit_as_8bit`). Since P4-199 both
+publish `TJPARAM_PRECISION` = 12 first, so a caller following the documented
+routing never gets here; one that calls `tj3Decompress8` regardless gets
+success where stock fails. `Decoder` / `decompress` downscaling a 12-bit frame
+is a Rust-API feature (djpeg handles 12-bit input) and is not in question —
+only the TurboJPEG entry point's contract is.
+
+To measure under the same item: whether a frame whose colour space TurboJPEG
+publishes as `TJCS_DEFAULT` (libjpeg's `JCS_UNKNOWN`) also decodes here where
+stock's `jpeg_start_decompress` refuses the colour conversion.
+
+**Acceptance criteria.** (1) `tj3Decompress8` on a 12-bit frame returns -1
+with upstream's message, after publishing; the 12-bit case joins
+`examples/decomp_parameters_oracle.c`'s trace. (2) The `JCS_UNKNOWN` question
+is measured against stock and either fixed the same way or recorded as a
+deliberate divergence.
+
+**Why deferred.** Refusing what decodes today is a behaviour change for C
+callers that rely on it, and needs its own decision; P4-199 was about what a
+decompress publishes, not which frames it accepts.

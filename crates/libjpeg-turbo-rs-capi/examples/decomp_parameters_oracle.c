@@ -28,8 +28,9 @@
  * by design or under another item, and printing them would make this gate
  * fail on something it is not about:
  *
- *   - tj3Decompress8 on a 12-bit frame (stock raises JERR_BAD_PRECISION; the
- *     port downscales to 8 bits);
+ *   - tj3Decompress8 on a 12-bit frame (stock raises JERR_BAD_PRECISION,
+ *     "Unsupported JPEG data precision 12"; the port downscales to 8 bits --
+ *     P4-226);
  *   - tj3Decompress12 on an 8-bit frame (stock promotes `data_precision` to
  *     12 at `turbojpeg-mp.c:191-194`; the port refuses, P4-171);
  *   - TJPARAM_MAXMEMORY refusals (stock's budget reaches only its

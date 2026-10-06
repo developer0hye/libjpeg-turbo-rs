@@ -524,7 +524,7 @@ fn the_header_read_stops_at_the_first_scan() {
 /// A frame libjpeg's `get_sof` / `initial_setup` refuse inside
 /// `jpeg_read_header` never reaches `setDecompParameters`, so nothing is
 /// published: a dimension above `JPEG_MAX_DIMENSION`, a lossy precision other
-/// than 8 or 12.
+/// than 8 or 12, an empty frame.
 #[test]
 fn a_frame_libjpeg_refuses_in_the_header_publishes_nothing() {
     let baseline: &[u8] = include_bytes!("fixtures/photo_64x64_420.jpg");
@@ -532,16 +532,18 @@ fn a_frame_libjpeg_refuses_in_the_header_publishes_nothing() {
         .windows(2)
         .position(|pair| pair == [0xFF, 0xC0])
         .expect("an SOF0 marker");
-    let patched = |precision: u8, width: u16| -> Vec<u8> {
+    let patched = |precision: u8, height: u16, width: u16| -> Vec<u8> {
         let mut stream: Vec<u8> = baseline.to_vec();
         stream[sof + 4] = precision;
+        stream[sof + 5..sof + 7].copy_from_slice(&height.to_be_bytes());
         stream[sof + 7..sof + 9].copy_from_slice(&width.to_be_bytes());
         stream
     };
     let fresh: [i32; 13] = published(&TjHandle::new());
     for (label, stream) in [
-        ("65,501 wide", patched(8, 65_501)),
-        ("lossy precision 9", patched(9, 64)),
+        ("65,501 wide", patched(8, 64, 65_501)),
+        ("lossy precision 9", patched(9, 64, 64)),
+        ("0 high (JERR_EMPTY_IMAGE)", patched(8, 0, 64)),
     ] {
         let mut header: TjHandle = TjHandle::new();
         assert!(
