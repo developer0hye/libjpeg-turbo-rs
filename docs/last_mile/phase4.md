@@ -8324,7 +8324,7 @@ the harness first would only pin current behaviour.
   [P4-191](#p4-191-sixty-nine-inventoried-unsafe-items-have-no-regression-test--open)
   (#609), which includes three uncalled functions holding `unsafe`. Writing
   one of those cells also produced the criterion's first *defect*:
-  [P4-192](#p4-192-a-custom-scan-script-with-se--63-writes-past-two-stack-arrays-from-safe-rust-on-x86_64--open)
+  [P4-192](#p4-192-a-custom-scan-script-with-se--63-writes-past-two-stack-arrays-from-safe-rust-on-x86_64--closed-2026-10-07)
   (#610), a stack overflow reachable from safe Rust — the answer to the
   premise of this whole item, which is that no gate had ever found one.
   The workspace's other two crates (`libjpeg-turbo-rs-image`,
@@ -11186,6 +11186,16 @@ closed on 2026-09-09 (`tests/miri_once_init.rs` races the first initialisation
 and reaches the losing `compare_exchange` arm). That answer is the criterion's product,
 not a defect in it — a raw count could not have named one of them.
 
+**Progress (2026-10-07).** The P4-192 fix (#610) rewrote the four rows of
+criterion 3 — `prepare_ac_first_coeffs`, `prepare_ac_first_sse2`,
+`prepare_ac_refine_coeffs`, `prepare_ac_refine_sse2` — to name tests: the
+bound is now asserted in both safe wrappers, pinned by `band_bound_tests`
+(`src/encode/pipeline_impl/progressive.rs`) and driven through the public API
+by `tests/scan_script_validation.rs`. `docs/UNSAFE_INVENTORY.md` now has
+twenty-six `**none**` rows, sixty-five in all. Criterion 3 is not met as
+written: no test compares the SSE2 and scalar arms at the smallest and largest
+legal `(Ss, Se)`.
+
 Eight clusters are actionable; the rest are qualified `**none**`s (a named
 sub-invariant or a CI leg, not an untested site) and are context.
 
@@ -11297,7 +11307,7 @@ across four backends and the C ABI is its own work, and deleting dead
 `unsafe` changes the compiled surface, which a documentation-and-gate change
 should not.
 
-## P4-192. A Custom Scan Script With `Se > 63` Writes Past Two Stack Arrays From Safe Rust on x86_64 — **OPEN**
+## P4-192. A Custom Scan Script With `Se > 63` Writes Past Two Stack Arrays From Safe Rust on x86_64 — **CLOSED 2026-10-07**
 
 **GitHub:** [#610](https://github.com/developer0hye/libjpeg-turbo-rs/issues/610) — found 2026-09-08 by the P4-141 criterion-4 inventory; under the [#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481) umbrella.
 
@@ -11350,6 +11360,40 @@ approximation chain. This port has no equivalent.
 **Why deferred.** Filed rather than fixed inside the P4-141 criterion-4 pull
 request, which changes no file under `src/`; the fix is a behaviour change
 with its own C-parity contract and its own TDD cycle.
+
+**Status (2026-10-07): closed.** Per criterion:
+
+1. `validate_scan_script` (`src/encode/progressive.rs`) ports
+   `validate_script`'s progressive arm — the `JERR_COMPONENT_COUNT`,
+   `JERR_BAD_SCAN_SCRIPT` and `JERR_BAD_PROG_SCRIPT` checks, the
+   `last_bitpos` successive-approximation chain and the final
+   `JERR_MISSING_DATA` DC check, with the 8-bit `Ah`/`Al` ceiling of 10 — and
+   `compress_progressive_custom_with_restart` calls it before any other work.
+   Refusal is the new `JpegError::InvalidScanScript { entry, reason }`, with
+   `entry` 1-based like C's `scanno` (0 for the whole script). The builder's
+   script always selects progressive coding, so a first entry shaped like C's
+   sequential (`Ss = 0, Se = 63`) or lossless (`Ss != 0, Se = 0`) selector is
+   refused by the same rules rather than reinterpreted; that is pinned by
+   `sequential_and_lossless_shaped_scripts_are_refused`.
+2. `tests/scan_script_validation.rs::issue_610_se_past_63_is_refused_not_written`
+   drives the reproducer. Discriminating on x86_64, measured on
+   `--target x86_64-apple-darwin --release`: with the validation call and the
+   wrapper asserts removed it fails with `se = 200: expected
+   InvalidScanScript, got Ok with 1241 bytes`; with them it passes. The CI
+   x86_64 legs run it. `refusals_match_cjpeg_entry_for_entry` runs nineteen
+   refused scripts through `cjpeg -scans` and requires C to refuse each with
+   its own message naming the same entry; `accepted_scripts_match_cjpeg`
+   requires both sides to accept seven valid ones and to write the same bytes
+   (which found P4-211).
+3. Both SSE2 kernels have a `# Safety` section; both safe wrappers assert
+   `ss <= 64 && band_len <= 64 - ss` before the call (both arms) — not
+   `ss + band_len <= 64`, which a wrapped `se - ss + 1` passes in release
+   (rust-code-reviewer) — with a SAFETY comment citing it, pinned by
+   `band_bound_tests` including the wrapped length; the four
+   `docs/UNSAFE_INVENTORY.md` rows are rewritten.
+4. Validation runs before the architecture split, so the scalar and SSE2 arms
+   see only scripts that passed it; `tests/scan_script_validation.rs` has no
+   `cfg(target_arch)` and runs on every leg.
 
 ## P4-193. The C-ABI Destination Spans Do Not Use `ImageLayout::strided`, So a Decode Forms a Slice Over One Row's Padding — **OPEN**
 
@@ -12461,6 +12505,168 @@ is one line at the site that aborts and an audit of the fifty-eight others, and
 bundling an audit of the decode pipeline's allocation discipline into the pull
 request that built the injection harness would put the harness's own review
 behind it.
+
+## P4-210. `Encoder::scan_script` Is Silently Ignored Outside the Huffman YCbCr/Grayscale Progressive Path — **OPEN**
+
+**GitHub:** [#636](https://github.com/developer0hye/libjpeg-turbo-rs/issues/636) — found 2026-10-07 while fixing P4-192 (#610); tracked under #635 Milestone A.
+
+**The defect.** `Encoder::encode` reads `self.scan_script` in one branch only
+— the Huffman progressive encode of YCbCr/grayscale output. Three branches
+dispatch ahead of it and always build C's default script, so a caller who sets
+`.progressive(true).scan_script(s)` gets `Ok` and a stream that does not follow
+`s` when any of these is also set:
+
+* `.arithmetic(true)` — `compress_arithmetic_progressive` and
+  `compress_arithmetic_progressive_rgb_direct`
+  (`simple_progression_for`, `src/encode/pipeline_impl/arithmetic.rs`);
+* `.colorspace(ColorSpace::Rgb)` (RGB-direct) — `compress_progressive_rgb_direct`;
+* custom per-component sampling factors — the `use_custom_sampling` branch.
+
+C honours `scan_info` independently of the entropy coder and the colorspace
+(`cjpeg -arithmetic -scans`, `cjpeg -rgb -scans`, `cjpeg -sample … -scans`).
+Found by the `rust-code-reviewer` pass on the P4-192 fix (RGB-direct and custom
+sampling) after the arithmetic case.
+
+**Acceptance criteria.**
+
+1. Each of the three combinations either encodes with the caller's script —
+   validated by `validate_scan_script` exactly as the Huffman path is since
+   P4-192 — or returns a typed error naming it unsupported. Silent
+   substitution is the defect.
+2. If honoured, the SOS `Ss/Se/Ah/Al` sequence is cross-validated against the
+   matching `cjpeg … -scans` invocation on the same script and the pixels
+   against `djpeg`.
+3. An invalid script on any of these paths returns `JpegError::InvalidScanScript`.
+4. The `Encoder::scan_script` doc, which names the three exceptions today, is
+   updated to match.
+
+Not a memory-safety issue: the arithmetic path never reads the caller's bands.
+
+**Why deferred.** Found while fixing P4-192, whose pull request closes a
+memory-safety defect and should not also carry an arithmetic-coder behaviour
+change with its own C cross-validation.
+
+## P4-211. Non-Interleaved Progressive DC Scans Walked the Frame's MCU Grid, and Every DC Scan Emitted Both Table Slots — **CLOSED 2026-10-07**
+
+**Found 2026-10-07** by the P4-192 fix's C oracle: once
+`tests/scan_script_validation.rs::accepted_scripts_match_cjpeg` compared the
+encoded bytes with `cjpeg -scans` instead of only decoding them, the
+per-component DC script `0: 0 0 0 0; 1: …; 2: …;` differed (363 vs 300 bytes
+at 32x32). Two independent defects, both reachable only through
+`Encoder::scan_script` — the built-in scripts send every component's DC in one
+interleaved scan, so their output is unchanged:
+
+1. **Block order.** A scan with one component is non-interleaved (T.81 A.2.2):
+   C walks that component's own `width_in_blocks x height_in_blocks` grid in
+   raster order, one block per MCU. The DC path (first and refinement) walked
+   the frame's MCU grid with the component's sampling factors, so a
+   subsampled-frame luma DC scan was coded in MCU order — and, where the frame
+   is not a multiple of the MCU, with the padding column/row C does not code.
+   The AC path already used the component grid.
+2. **Tables.** Every DC-first scan wrote both DC table slots, so a scan of Y
+   alone carried an empty chrominance table and a scan of Cb or Cr an empty
+   luminance one. `jcphuff.c` writes only the slots the scan's components use.
+
+**Status (2026-10-07): closed.** `compress_progressive_with_scans` gives a
+single-component DC scan the component's grid (`h_blocks = v_blocks = 1`,
+`comp_wib x comp_hib` MCUs) and writes only used DC slots.
+`accepted_scripts_match_cjpeg` now requires byte equality with `cjpeg -scans`
+for seven scripts at 40x40 (luma grid 5 blocks, MCU-padded 6), including
+non-interleaved DC first and refinement scans and a Cb+Cr-only DC scan;
+measured discriminating — with the single-component geometry disabled the
+per-component case differs (325 vs 318 bytes).
+
+## P4-212. The `image` Adapter Decoded Eagerly, Ignored `image::Limits` and Dropped EXIF/XMP/IPTC/Orientation — **CLOSED 2026-10-07**
+
+**GitHub:** [#637](https://github.com/developer0hye/libjpeg-turbo-rs/issues/637) — #635 Milestone B, first execution tickets 4 and 5.
+
+**The gap.** `libjpeg-turbo-rs-image 0.1.0`'s `JpegDecoder::new` decoded the
+whole image and kept it; `read_image` copied it into the caller's buffer, so a
+read held two decoded images and every byte of work happened before a caller
+could apply limits. `set_limits` fell back to the trait default (accept,
+enforce nothing); only `icc_profile` was implemented, so `orientation()` was
+always `NoTransforms` where `image`'s built-in decoder reported the EXIF tag;
+every codec error became `ImageError::Decoding`.
+
+**Status (2026-10-07): closed.** Per #637 criterion:
+
+1. Construction parses headers only; `new` copies the compressed stream once
+   (fallibly), `from_vec` takes ownership. `tests/adapter_memory.rs` measures
+   it with a counting allocator: 36,734 bytes at 2048x1536.
+2. `read_image` calls `Decoder::decode_image_into` on the caller's buffer.
+   Same test: the read's working set peaks at 4,745,446 bytes above the
+   caller's buffer against a 9,437,184-byte decoded image (4:2:0 YCbCr),
+   asserted `<` one image; the remainder is component planes, stated in the
+   docs, not called allocation-free. **Scoped:** that holds for 8-bit
+   grayscale and three-component streams; the core still stages
+   four-component, 12-bit and lossless decodes in a full-size buffer, so those
+   reads keep two images — filed as P4-213 and stated in the adapter docs.
+3. `set_limits` maps `max_image_width`/`max_image_height` onto
+   `DecodeLimits::max_width/max_height` and `max_alloc` onto `max_memory`
+   (whose estimate counts the output), and runs the core's header-limit checks
+   through `output_buffer_size` so refusal precedes any pixel allocation;
+   previous limits stay in force on refusal. Error categories follow
+   `classify_error`. Pinned by `limits_are_enforced_at_set_limits` and
+   `default_limits_refuse_a_header_bomb_at_set_limits`. `read_image` re-runs
+   the same header checks through the core decoder; that path is structural —
+   reaching it needs a correctly sized destination, which `set_limits` has
+   already refused — and is not claimed as tested.
+4. Metadata accessors are compared with `image 0.25.10`'s built-in decoder
+   (`metadata_matches_image_builtin_decoder`: with and without metadata, two
+   EXIF segments, an Extended XMP chunk, an empty APP13). The adapter reads the
+   raw segments with zune's rule — last segment wins, standard XMP packet only,
+   IPTC as the Photoshop IRB after `Photoshop 3.0\0` — because the core's own
+   accessors differ on all three. `original_color_type()` deliberately
+   reports `Cmyk8` where the built-in decoder reports `Rgb8`; documented. `orientation_is_applied_once_by_the_application`
+   pins that orientation is reported, never applied. The core gained
+   header-time `Decoder::{icc_profile, exif_data, xmp_data, iptc_data}`.
+5. `tests/image_traits.rs` covers baseline 4:2:0/4:2:2/4:4:4, progressive,
+   arithmetic, grayscale and CMYK through the traits with pixel parity against
+   the core decode, one direct `djpeg -ppm` comparison, malformed and truncated
+   input (strict error, `set_lenient` fill), destination sizing, unsupported
+   output formats and the encoder through `write_with_encoder` (byte-identical
+   to core `compress`).
+6. `examples/thumbnail_pipeline.rs` (decode → limits → orient → resize →
+   encode, changed lines marked `// was:`) builds under the CI
+   `cargo test --locked -p libjpeg-turbo-rs-image` step; the crate docs and
+   README state that only explicitly constructed decoders/encoders use this
+   backend.
+
+Publishing the updated adapter and the clean external-consumer run against
+registry packages remain #635 Milestone B release items, not this one. The
+adapter's changes are breaking (see `CHANGELOG.md`), so it ships as **0.2.0**
+and must require the root release that adds the header accessors; both
+manifest bumps belong to that release's preparation, because a path
+dependency's `version` must match the workspace root until then.
+
+## P4-213. CMYK/YCCK, 12-Bit and Lossless Decodes Stage a Full-Size Copy Even When Given a Caller Buffer — **OPEN**
+
+**Found 2026-10-07** by the `rust-code-reviewer` pass on P4-212 (#637).
+`Decoder::decode_image_into` hands the caller's buffer only to the paths that
+call `take_out_buf`. Four-component streams go through `decode_4_component` →
+`convert_4comp_output`, which allocates `width * height * bpp` and is copied
+out (`src/decode/pipeline_impl/colorspace.rs`, `output.rs`); YCCK with
+subsampled chroma also allocates two full planes. 12-bit-as-8-bit and
+lossless decodes build an owned image the same way, and so does the
+merged-upsample branch (`set_merged_upsample(true)` allocates a full-size
+`merged_rgb`), which `decode_image_into`'s own doc comment omits from its list
+of staged paths. A caller — the `image`
+adapter included — therefore holds two decoded images for these inputs, and
+the memory estimate `max_memory` enforces counts neither the staging buffer
+nor the upsample planes, so the limit is non-strict there.
+
+**Acceptance criteria.**
+
+1. `convert_4comp_output` (and the 12-bit/lossless output steps, where the
+   format allows) write through `take_out_buf`, so `decode_image_into`
+   performs no full-size staging for them; pixels unchanged (C cross-checks).
+2. `check_header_limits`' estimate counts whatever staging remains.
+3. The adapter's `tests/adapter_memory.rs` gains a CMYK case asserting the
+   read's working set stays below one decoded image, and the adapter docs drop
+   the exception.
+
+**Why deferred.** A decode-pipeline change across three output paths with
+their own C parity, found while reviewing an adapter pull request.
 
 ## P4-214. No Benchmark Measures a Default-Profile Downstream Consumer — **OPEN**
 

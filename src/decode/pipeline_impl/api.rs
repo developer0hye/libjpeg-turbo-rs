@@ -419,6 +419,38 @@ impl<'a> Decoder<'a> {
             .and_then(crate::common::exif::parse_orientation)
     }
 
+    /// The ICC profile reassembled from the header's APP2 chunks, before
+    /// any pixel decode.
+    ///
+    /// The same bytes a decode reports in [`Image::icc_profile`] /
+    /// [`ImageInfo::icc_profile`]; header-only consumers (an
+    /// `image::ImageDecoder` answering `icc_profile()` before `read_image`)
+    /// would otherwise have to decode pixels to read it. `Ok(None)` when the
+    /// stream carries no profile *or* a malformed one, which must not fail a
+    /// decode (P4-144); `Err` only when the allocator refuses the reassembly
+    /// buffer, because the profile size comes from the stream.
+    pub fn icc_profile(&self) -> Result<Option<Vec<u8>>> {
+        crate::common::icc::try_reassemble_icc_profile(&self.metadata.icc_chunks)
+    }
+
+    /// The raw EXIF TIFF payload (APP1 after `Exif\0\0`), before any pixel
+    /// decode. Same bytes as [`Image::exif_data`].
+    pub fn exif_data(&self) -> Option<&[u8]> {
+        self.metadata.exif_data.as_deref()
+    }
+
+    /// The raw XMP packet, Extended XMP reassembled, before any pixel
+    /// decode. Same bytes and reassembly rules as [`Image::xmp_data`].
+    pub fn xmp_data(&self) -> Option<&[u8]> {
+        self.metadata.xmp_data.as_deref()
+    }
+
+    /// The raw IPTC IIM payload from the APP13 Photoshop IRB, before any
+    /// pixel decode. Same bytes as [`Image::iptc_data`].
+    pub fn iptc_data(&self) -> Option<&[u8]> {
+        self.metadata.iptc_data.as_deref()
+    }
+
     /// The parsed frame header: dimensions, per-component sampling,
     /// precision, progressive/lossless flags. Available immediately
     /// after [`Decoder::new`], before any pixel decode.

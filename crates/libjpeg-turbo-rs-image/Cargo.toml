@@ -26,8 +26,11 @@ libjpeg-turbo-rs = { path = "../..", version = "0.8.0" }
 # drag the whole format-codec set — including avif→ravif→rav1e, whose
 # pinned core2/paste carry RUSTSEC advisories — into every consumer's
 # normal build graph (codex P2 on the cargo-deny gate).
-image = { version = "0.25", default-features = false }
+# 0.25.9, not 0.25: `ImageDecoder::xmp_metadata`/`iptc_metadata` first
+# appear in 0.25.9 and `Orientation::from_exif_chunk` is public only from
+# 0.25.8, so an older resolved `image` would not compile this crate.
+image = { version = "0.25.9", default-features = false }
 
 [dev-dependencies]
 # Tests/examples compare against image's own JPEG codec.
-image = { version = "0.25", default-features = false, features = ["jpeg"] }
+image = { version = "0.25.9", default-features = false, features = ["jpeg"] }
