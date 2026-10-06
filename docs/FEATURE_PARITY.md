@@ -218,7 +218,7 @@
 - [x] Custom error callbacks — `ErrorHandler` trait
 
 ### Limits
-- [x] `TJPARAM_MAXMEMORY` — Memory limit (`Decoder::set_max_memory()`, `DecodeLimits::max_memory`); every decode path, each against an estimate of its own buffers — README.md "Resource limits" lists what is and is not counted (P4-199, #620)
+- [x] `TJPARAM_MAXMEMORY` — Memory limit (`Decoder::set_max_memory()`, `DecodeLimits::max_memory`); every decode path, each against an estimate of its own buffers — docs/STABILITY.md "What the memory budget covers" lists what is and is not counted (P4-199, #620)
 - [x] `TJPARAM_MAXPIXELS` — Image size limit (`Decoder::set_max_pixels()`, `DecodeLimits::max_pixels`); every decode path, against the SOF (P4-199, #620)
 
 ### Marker Handling

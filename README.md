@@ -204,7 +204,10 @@ per kernel on the real device, and keep it off if you cannot.
 **MSRV: 1.87** for the root and capi crates, CI-enforced (`cargo +1.87
 check` job). The `image`-bridge crate is 1.88 (inherited from
 `image@0.25`). MSRV bumps are considered minor, never patch, changes and
-are called out in `CHANGELOG.md`.
+are called out in `CHANGELOG.md`. The full versioning, MSRV, feature,
+deprecation, error and thread-safety policy — and which modules are public
+API — is [`docs/STABILITY.md`](docs/STABILITY.md); to report a vulnerability,
+see [`SECURITY.md`](SECURITY.md).
 
 | Target | SIMD | Notes |
 | --- | --- | --- |
@@ -372,60 +375,14 @@ let img = decoder.finish()?;
 
 ### Resource limits
 
-Untrusted input should be decoded under an explicit budget.
-`DecodeLimits` holds it; `Decoder::new_with_limits` (or `set_limits`,
-`set_max_pixels`, `set_max_memory`, `set_scan_limit`) applies it to the 8-bit
+Decode untrusted input under an explicit budget: `Decoder::new_with_limits`
+(or `set_max_pixels`, `set_max_memory`, `set_scan_limit`) for the 8-bit
 pipeline, `precision::decompress_12bit_with_limits` /
-`decompress_16bit_with_limits` to the 12- and 16-bit decoders, and a
-`TjHandle` builds one from `TJPARAM_MAXPIXELS`, `TJPARAM_MAXMEMORY` (in
-megabytes) and `TJPARAM_SCANLIMIT` for all three of its decompress entry
-points. Every refusal is `JpegError::LimitExceeded`, raised before any
-buffer is sized from the header: `max_scans` during the header walk, the
-others when the decode starts.
-
-| limit | default | what it bounds |
-|---|---|---|
-| `max_width`, `max_height` | 65,500 (`JPEG_MAX_DIMENSION`) | the SOF's dimensions |
-| `max_pixels` | 2³¹−1 (`TJPARAM_MAXPIXELS` 0: none) | SOF width × height, before scaling or cropping |
-| `max_scans` | 8,192 (`TJPARAM_SCANLIMIT` 0: none) | SOS segments the header walk finds — the walk itself stops at the cap. An interleaved sequential stream ends the walk at its only SOS, so the cap matters for progressive and multi-scan streams |
-| `max_memory` | none (`TJPARAM_MAXMEMORY` 0: none) | an *estimate* of the geometry-sized buffers listed below |
-
-#### What the memory budget covers
-
-`max_memory` is compared with an estimate computed from the frame header, not
-with what the allocator reports. Each decode path estimates its own buffers:
-
-| path | counted |
-|---|---|
-| 8-bit `Decoder` / `decompress*` / `TjHandle::decompress` | the output buffer (width × height × output bytes per pixel, owned or caller-supplied); one byte per pixel per component for the component planes; one more full-size plane per subsampled component of an RGB-colour-space frame, or for a subsampled luma plane when YCbCr is decoded to grayscale; for a progressive frame, the coefficient buffer (two bytes per pixel per component plus one byte per 8×8 block) |
-| `decompress_12bit_with_limits`, `TjHandle::decompress_12bit` | the per-component planes at their padded iMCU size, the upsampled full-size planes and the interleaved result, two bytes a sample each |
-| `decompress_16bit_with_limits`, `TjHandle::decompress_16bit` | the output, plus for a multi-component frame the full-size planes it is interleaved from, two bytes a sample each |
-
-Not counted anywhere:
-
-- the compressed input, which the decoder borrows (a C-ABI caller owns it);
-- metadata copies: the ICC profile, EXIF, XMP, IPTC, comments and saved
-  markers on the `Image`, and the ICC copy a `TjHandle` keeps;
-- the full-size staging copy CMYK/YCCK, 12-bit and lossless decodes make even
-  when given a caller buffer (P4-213), a vertical crop's copy of the output,
-  and `TjHandle`'s `TJPARAM_BOTTOMUP` row flip;
-- the 12-bit staging when a 12-bit frame is decoded through `Decoder` /
-  `decompress`, which checks only the 8-bit estimate above (P4-224);
-- per-row and per-block scratch;
-- the warning strings a lenient decode collects (P4-215);
-- the classic `jpeg_*` API, which has its own `max_memory_to_use` (P4-14).
-
-The budget is therefore stricter than libjpeg-turbo's in one way and looser in
-another. TurboJPEG's `TJPARAM_MAXMEMORY` reaches only the memory manager's
-whole-image arrays (`jmemmgr.c` `realize_virt_arrays`, which raises
-`JERR_NO_BACKING_STORE`) — never the caller's destination — so a baseline
-decode stock TurboJPEG accepts can be refused here. A TurboJPEG handle
-refuses an over-budget frame before it decodes, where stock TurboJPEG does so
-during the decode; both have published the frame's parameters first. The same
-holds for `TJPARAM_SCANLIMIT`: the handle reads the header up to the first
-SOS and publishes, then refuses while locating the remaining scans, where
-stock refuses from its progress monitor mid-decode. `tj3DecompressHeader`
-applies neither limit, as upstream's does not.
+`decompress_16bit_with_limits` for 12- and 16-bit frames, and
+`TJPARAM_MAXPIXELS` / `TJPARAM_MAXMEMORY` / `TJPARAM_SCANLIMIT` on a
+`TjHandle`. What each limit bounds, and exactly which allocations the memory
+budget counts, is in
+[`docs/STABILITY.md`](docs/STABILITY.md#what-the-memory-budget-covers).
 
 ## Features
 
@@ -516,5 +473,7 @@ at your option.
 ## Acknowledgments
 
 This software is based in part on the work of the Independent JPEG Group.
+`libjpeg-turbo-rs` is an independent project; it is not affiliated with or
+endorsed by the libjpeg-turbo project or the IJG.
 
 Algorithms and implementation techniques referenced from [libjpeg-turbo](https://github.com/libjpeg-turbo/libjpeg-turbo) (IJG License / Modified BSD License) and [zune-jpeg](https://github.com/etemesi254/zune-image).

@@ -51,7 +51,7 @@
 | `XDENSITY` | Horizontal pixel density | `Encoder::density()` + `TjHandle` compress/decompress wiring | ✅ |
 | `YDENSITY` | Vertical pixel density | `Encoder::density()` + `TjHandle` compress/decompress wiring | ✅ |
 | `DENSITYUNITS` | 0=unknown, 1=ppi, 2=ppcm | `Encoder::density()` + `TjHandle` compress/decompress wiring | ✅ |
-| `MAXMEMORY` | Memory limit | `DecodeLimits::max_memory` / `Decoder::set_max_memory()`; every `TjHandle` decompress entry point (P4-199, #620). A header-time *estimate* that counts the output buffer — upstream's bounds only its whole-image arrays — so the two refuse different frames; what each path counts is in README.md "Resource limits" | 🔶 |
+| `MAXMEMORY` | Memory limit | `DecodeLimits::max_memory` / `Decoder::set_max_memory()`; every `TjHandle` decompress entry point (P4-199, #620). A header-time *estimate* that counts the output buffer — upstream's bounds only its whole-image arrays — so the two refuse different frames; what each path counts is in docs/STABILITY.md "What the memory budget covers" | 🔶 |
 | `MAXPIXELS` | Image size limit | `DecodeLimits::max_pixels` / `Decoder::set_max_pixels()`; every `TjHandle` decompress entry point, against the SOF, after publishing, as `turbojpeg-mp.c:195-199` (P4-199, #620) | ✅ |
 | `SAVEMARKERS` | Marker preservation level 0-4 | `TjHandle` `TJPARAM_SAVEMARKERS` wired through `decompress()` → `Decoder::save_markers()` | ✅ |
 

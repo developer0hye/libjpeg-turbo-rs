@@ -509,7 +509,7 @@ impl DecodeLimits {
 
     /// Refuse a decode whose estimated allocations exceed `max_memory`.
     /// Each entry point estimates its own geometry-sized buffers; what each
-    /// estimate counts is listed in README.md's "Resource limits".
+    /// estimate counts is listed in docs/STABILITY.md, "What the memory budget covers".
     pub(crate) fn check_memory(&self, estimated: u64) -> crate::common::error::Result<()> {
         match self.max_memory {
             Some(limit) if estimated > limit => {

@@ -258,7 +258,7 @@ stronger than upstream's field ever was: `TJPARAM_MAXMEMORY` and
 `TJPARAM_MAXPIXELS` on the TurboJPEG API, or `Decoder::set_max_memory()` /
 `DecodeLimits` on the Rust API, bound the output buffer and the decode's
 planes as well as the coefficient arrays — at every precision since P4-199 —
-though not every allocation: README.md "Resource limits" lists what the
+though not every allocation: docs/STABILITY.md "What the memory budget covers" lists what the
 estimate leaves out. `docs/FEATURE_PARITY.md`
 marks this area ✅ on the strength of those; the classic `cinfo->mem` field
 documented here now matches upstream's behaviour on the documented decode

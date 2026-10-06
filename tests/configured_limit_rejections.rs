@@ -8,7 +8,7 @@
 //! full matrix at the boundary: each limit one below what the frame needs must
 //! refuse with the documented `what`, and exactly at it must decode — so a
 //! check that fires too early, too late, or on the wrong quantity fails here.
-//! README.md "Resource limits" is the prose these numbers pin.
+//! docs/STABILITY.md "What the memory budget covers" is the prose these numbers pin.
 //!
 //! Fixtures are embedded so the `wasm32-wasip1` leg runs this file too.
 
@@ -129,7 +129,7 @@ fn dimension_and_pixel_caps_refuse_one_below_the_frame_on_every_path() {
 }
 
 /// `max_memory` against each path's own estimate, at the byte. The numbers are
-/// the formulas README.md "Resource limits" states, worked for each fixture.
+/// the formulas docs/STABILITY.md "What the memory budget covers" states, worked for each fixture.
 #[test]
 fn the_memory_budget_refuses_one_byte_below_each_paths_estimate() {
     let cases: [(&str, Path, &[u8], u64); 5] = [
