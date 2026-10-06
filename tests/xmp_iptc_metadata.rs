@@ -327,3 +327,49 @@ fn metadata_survives_every_subsampling_and_output_format() {
         assert_eq!(info.iptc_data.as_deref(), Some(&iptc[..]));
     }
 }
+
+/// Issue #637: `Decoder::{icc_profile, exif_data, xmp_data, iptc_data}` read
+/// the header without decoding pixels, and must report exactly what a decode
+/// reports — including the reassembled Extended XMP, which is where a header
+/// accessor that re-implemented the parsing would drift first.
+#[test]
+fn header_accessors_match_what_a_decode_reports() {
+    let icc: Vec<u8> = b"header-accessor-icc-profile".repeat(9);
+    let exif: Vec<u8> = {
+        let mut tiff: Vec<u8> = b"II*\0\x08\0\0\0".to_vec();
+        tiff.extend_from_slice(&[1, 0, 0x12, 0x01, 3, 0, 1, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0]);
+        tiff
+    };
+    let xmp: &[u8] = br#"<x:xmpmeta xmlns:x="adobe:ns:meta/"/>"#;
+    let iptc: [u8; 9] = [0x1C, 0x02, 0x05, 0x00, 0x04, b'h', b'e', b'a', b'd'];
+    let base: Vec<u8> = Encoder::new(&gray_8x8(), 8, 8, PixelFormat::Grayscale)
+        .quality(90)
+        .icc_profile(&icc)
+        .exif_data(&exif)
+        .xmp_data(xmp)
+        .iptc_data(&iptc)
+        .encode()
+        .expect("encode with metadata");
+    let extension_body: &[u8] = b"<extended/>";
+    let mut chunk: Vec<u8> = XMP_EXT_ID.to_vec();
+    chunk.extend_from_slice(b"A1B2C3D4E5F60718293A4B5C6D7E8F90");
+    chunk.extend_from_slice(&(extension_body.len() as u32).to_be_bytes());
+    chunk.extend_from_slice(&0u32.to_be_bytes());
+    chunk.extend_from_slice(extension_body);
+    let jpeg: Vec<u8> = splice_segment(&base, 0xE1, &chunk);
+
+    let decoder: Decoder<'_> = Decoder::new(&jpeg).expect("parse");
+    let image = decompress(&jpeg).expect("decode");
+    assert_eq!(decoder.icc_profile().expect("icc"), image.icc_profile);
+    assert_eq!(decoder.exif_data(), image.exif_data());
+    assert_eq!(decoder.xmp_data(), image.xmp_data());
+    assert_eq!(decoder.iptc_data(), image.iptc_data());
+    // Non-vacuous: every one of them is present, and XMP carries the extension.
+    assert_eq!(
+        decoder.icc_profile().expect("icc").as_deref(),
+        Some(&icc[..])
+    );
+    assert_eq!(decoder.exif_data(), Some(&exif[..]));
+    assert!(decoder.xmp_data().expect("xmp").ends_with(extension_body));
+    assert_eq!(decoder.iptc_data(), Some(&iptc[..]));
+}
