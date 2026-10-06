@@ -32,17 +32,27 @@ python infra/helper.py build_fuzzers --sanitizer address libjpeg-turbo-rs
 python infra/helper.py run_fuzzer libjpeg-turbo-rs fuzz_decompress -- -max_total_time=30
 ```
 
-## Status — ready for upstream submission (P4-11, 2026-05-17)
+## Status — not enrolled (re-checked 2026-10-07, P4-217)
 
-Pre-submission checklist (all green):
+Files in this directory are **not** evidence of enrollment: no
+`projects/libjpeg-turbo-rs` exists in `google/oss-fuzz` until a maintainer
+submits it. Re-checked against the current
+[Rust integration guide](https://google.github.io/oss-fuzz/getting-started/new-project-guide/rust-lang/):
 
-- [x] `primary_contact` / `auto_ccs` set to a stable maintainer email in
-      `project.yaml`.
-- [x] `cargo-fuzz` version pinned in `build.sh` (`0.12.0`) to match the one
-      shipped in `gcr.io/oss-fuzz-base/base-builder-rust`.
-- [x] Sanitizers enabled: `address`, `undefined`, `memory`.
+- [x] `FROM gcr.io/oss-fuzz-base/base-builder-rust`; `cargo fuzz build -O`.
+- [x] `sanitizers: [address]`, `fuzzing_engines: [libfuzzer]` — the only
+      combination OSS-Fuzz supports for Rust. (`undefined` and `memory` were
+      listed until 2026-10-07.)
+- [x] No build-time tool install: `cargo-fuzz` is preinstalled in the base
+      image. (`build.sh` used to `cargo install` a pinned copy with `|| true`.)
 - [x] Fuzz target set covers decode, encode round-trip, transform,
       progressive, and coefficient surfaces.
+- [ ] **Maintainer decision:** `primary_contact` / `auto_ccs` in
+      `project.yaml` name a work address; OSS-Fuzz sends crash reports there,
+      so it must be the address the maintainer wants for security reports.
+- [ ] Submission itself (below), and a local `helper.py build_fuzzers` run
+      against the current base image, which has not been done since the files
+      were written.
 
 Submission steps (manual — performed by a maintainer with a `google/oss-fuzz`
 clone):

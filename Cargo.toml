@@ -24,6 +24,21 @@ exclude = [
     "!README.md",
     ".github/",
     "ralph/",
+    # Development-only files that `!README.md` and the default include rules
+    # would otherwise ship: repository tooling, hooks, the OSS-Fuzz project and
+    # the reference submodule's own READMEs (libjpeg-turbo's files, which the
+    # crate does not need and should not redistribute piecemeal).
+    ".cargo/",
+    ".githooks/",
+    ".gitattributes",
+    ".gitmodules",
+    "scripts/",
+    "oss-fuzz/**",
+    "fuzz/",
+    "Makefile",
+    "deny.toml",
+    "lsan_suppressions.txt",
+    "references/**",
 ]
 
 [features]

@@ -4,7 +4,7 @@
 # Invoked by OSS-Fuzz's base-builder-rust image with the standard env vars:
 #   $SRC        — source root (populated by Dockerfile)
 #   $OUT        — directory where compiled fuzzers must be placed
-#   $SANITIZER  — address|memory|undefined|coverage
+#   $SANITIZER  — address|coverage (project.yaml lists only address)
 #
 # cargo-fuzz emits one binary per target under fuzz/target/<triple>/release.
 # We copy each binary (and its seed corpus) into $OUT with the canonical name
@@ -15,11 +15,12 @@ set -euo pipefail
 cd "${SRC}/libjpeg-turbo-rs"
 
 # Regenerate the corpus so every fuzz target starts from meaningful seeds.
-cargo test --test generate_fuzz_seeds
+# `--locked`: build only what Cargo.lock pins (supply-chain policy).
+cargo test --locked --test generate_fuzz_seeds
 
-# cargo-fuzz is preinstalled in base-builder-rust, but enforce a known version
-# for reproducibility.
-cargo install --locked cargo-fuzz --version "0.12.0" || true
+# cargo-fuzz is preinstalled in base-builder-rust and in PATH. This used to
+# `cargo install` a pinned copy with `|| true`, which fetched a tool at build
+# time and hid the failure when it did not work.
 
 TARGETS=(
     fuzz_decompress
@@ -31,8 +32,10 @@ TARGETS=(
     fuzz_encode_roundtrip
 )
 
-# Forward OSS-Fuzz's libFuzzer-compatible flags to cargo fuzz.
-FUZZ_FLAGS=(-O --release)
+# `-O` is cargo-fuzz's release build (the flag OSS-Fuzz's Rust guide uses);
+# `--release` is the same option, and cargo-fuzz rejects it given twice
+# ("the argument '--release' cannot be used multiple times").
+FUZZ_FLAGS=(-O)
 
 for target in "${TARGETS[@]}"; do
     echo "==> building ${target}"

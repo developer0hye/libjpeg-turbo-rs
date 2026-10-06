@@ -5,9 +5,10 @@ auto_ccs:
   - "yhkwon@markany.com"
 main_repo: "https://github.com/developer0hye/libjpeg-turbo-rs"
 file_github_issue: true
+# OSS-Fuzz supports only AddressSanitizer + libFuzzer for Rust projects
+# (google.github.io/oss-fuzz/getting-started/new-project-guide/rust-lang/);
+# listing `undefined` and `memory` would be rejected or never run.
 sanitizers:
   - address
-  - undefined
-  - memory
 fuzzing_engines:
   - libfuzzer
