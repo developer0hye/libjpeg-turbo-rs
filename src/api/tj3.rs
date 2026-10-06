@@ -562,15 +562,12 @@ impl TjHandle {
 
     /// Set scaling factor for decompression.
     ///
-    /// Supports all 16 JPEG IDCT scaling factors from 1/8 to 2/1.
+    /// Accepts exactly what [`ScalingFactor::try_new`] accepts — the 16 JPEG
+    /// IDCT scaling factors from 1/8 to 2/1, in upstream's form — and returns
+    /// its [`JpegError::Unsupported`] for anything else, leaving the current
+    /// factor unchanged.
     pub fn set_scaling_factor(&mut self, num: u32, denom: u32) -> Result<()> {
-        let valid = Self::scaling_factors();
-        if !valid.contains(&(num, denom)) {
-            return Err(JpegError::CorruptData(format!(
-                "unsupported scaling factor {num}/{denom}"
-            )));
-        }
-        self.scaling_factor = ScalingFactor::new(num, denom);
+        self.scaling_factor = ScalingFactor::try_new(num, denom)?;
         Ok(())
     }
 
@@ -651,24 +648,10 @@ impl TjHandle {
     ///
     /// Returns all supported (numerator, denominator) pairs for JPEG decompression scaling.
     pub fn scaling_factors() -> Vec<(u32, u32)> {
-        vec![
-            (2, 1),
-            (15, 8),
-            (7, 4),
-            (13, 8),
-            (3, 2),
-            (11, 8),
-            (5, 4),
-            (9, 8),
-            (1, 1),
-            (7, 8),
-            (3, 4),
-            (5, 8),
-            (1, 2),
-            (3, 8),
-            (1, 4),
-            (1, 8),
-        ]
+        ScalingFactor::SUPPORTED
+            .iter()
+            .map(|factor: &ScalingFactor| (factor.num(), factor.denom()))
+            .collect()
     }
 
     /// Convert `ColorSpace` enum to TJ3 integer (TJCS_* constants).

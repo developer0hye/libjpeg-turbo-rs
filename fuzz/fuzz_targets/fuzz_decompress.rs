@@ -30,7 +30,9 @@ fuzz_target!(|data: &[u8]| {
             decoder.set_output_format(libjpeg_turbo_rs::PixelFormat::Rgb565);
             decoder.set_dither_565(true);
         }
-        3 => decoder.set_scale(libjpeg_turbo_rs::ScalingFactor::new(1, 2)),
+        3 => decoder.set_scale(
+            libjpeg_turbo_rs::ScalingFactor::try_new(1, 2).expect("supported scaling factor"),
+        ),
         4 => decoder.set_crop_region(3, 0, 40, frame_h as usize),
         5 => decoder.set_output_format(libjpeg_turbo_rs::PixelFormat::Xrgb),
         // The implied gray route slices component plane 0 directly; a

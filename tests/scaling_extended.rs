@@ -22,7 +22,7 @@ use libjpeg_turbo_rs::{compress, decompress, Image, PixelFormat, ScalingFactor, 
 
 fn decode_scaled(data: &[u8], num: u32, denom: u32) -> Image {
     let mut decoder = StreamingDecoder::new(data).unwrap();
-    decoder.set_scale(ScalingFactor::new(num, denom));
+    decoder.set_scale(ScalingFactor::try_new(num, denom).expect("supported scaling factor"));
     decoder.decode().unwrap()
 }
 
@@ -312,73 +312,61 @@ fn scale_1_8_large_image() {
 }
 
 // ===========================================================================
-// Equivalent fraction forms produce same output as canonical forms
+// Equivalent fraction forms are refused, as upstream refuses them
+//
+// These used to assert that 4/8, 2/8 and 2/4 decode exactly like 1/2, 1/4 and
+// 1/2. `ScalingFactor::try_new` now applies `tj3SetScalingFactor`'s rule — a
+// field-by-field match against upstream's table (`turbojpeg.c:2053-2058`) —
+// so those forms never reach a decoder (issue #478). A caller holding one
+// resolves it by value first, as `tjdecomp -scale` does (`tjdecomp.c:235-241`).
 // ===========================================================================
 
+/// Issue #478: non-lowest-term forms of supported factors are refused.
 #[test]
-fn scale_4_8_same_as_1_2() {
-    let data = include_bytes!("fixtures/photo_320x240_420.jpg");
-    let half = decode_scaled(data, 1, 2);
-    let four_eighth = decode_scaled(data, 4, 8);
-    assert_eq!(half.width, four_eighth.width);
-    assert_eq!(half.height, four_eighth.height);
-    assert_eq!(half.data, four_eighth.data);
-}
-
-#[test]
-fn scale_2_8_same_as_1_4() {
-    let data = include_bytes!("fixtures/photo_320x240_420.jpg");
-    let quarter = decode_scaled(data, 1, 4);
-    let two_eighth = decode_scaled(data, 2, 8);
-    assert_eq!(quarter.width, two_eighth.width);
-    assert_eq!(quarter.height, two_eighth.height);
-    assert_eq!(quarter.data, two_eighth.data);
-}
-
-#[test]
-fn scale_2_4_same_as_1_2() {
-    let data = include_bytes!("fixtures/photo_320x240_420.jpg");
-    let half = decode_scaled(data, 1, 2);
-    let two_fourths = decode_scaled(data, 2, 4);
-    assert_eq!(half.width, two_fourths.width);
-    assert_eq!(half.height, two_fourths.height);
-    assert_eq!(half.data, two_fourths.data);
+fn equivalent_fraction_forms_are_refused() {
+    for (num, denom) in [(4u32, 8u32), (2, 8), (2, 4), (8, 8), (16, 8), (6, 8)] {
+        assert!(
+            ScalingFactor::try_new(num, denom).is_err(),
+            "{num}/{denom} is not upstream's form and must be refused"
+        );
+    }
 }
 
 // ===========================================================================
 // Extended scaling factor tests
 //
 // All 16 libjpeg-turbo scaling factors are now supported via dedicated IDCT
-// kernels (block sizes 1 through 16). ScalingFactor::block_size() computes
-// ceil(num * 8 / denom) clamped to [1, 16], mapping each factor to its
-// corresponding IDCT kernel size.
+// kernels (block sizes 1 through 16). ScalingFactor::block_size() is
+// num * 8 / denom — exact for every factor `try_new` accepts — mapping each
+// factor to its corresponding IDCT kernel size.
 // ===========================================================================
 
 #[test]
 fn intermediate_scale_block_size_mapping() {
-    // Verify ScalingFactor::block_size() for all 15 C test factors
+    // Verify ScalingFactor::block_size() for all 16 upstream factors, each
+    // written in the form upstream's table uses (N/8 in lowest terms).
     let cases: Vec<(u32, u32, usize)> = vec![
         // (num, denom, expected_block_size)
-        (16, 8, 16), // 2.0x -> 16x16 IDCT
+        (2, 1, 16),  // 2.0x -> 16x16 IDCT
         (15, 8, 15), // 1.875x -> 15x15 IDCT
-        (14, 8, 14), // 1.75x -> 14x14 IDCT
+        (7, 4, 14),  // 1.75x -> 14x14 IDCT
         (13, 8, 13), // 1.625x -> 13x13 IDCT
-        (12, 8, 12), // 1.5x -> 12x12 IDCT
+        (3, 2, 12),  // 1.5x -> 12x12 IDCT
         (11, 8, 11), // 1.375x -> 11x11 IDCT
-        (10, 8, 10), // 1.25x -> 10x10 IDCT
+        (5, 4, 10),  // 1.25x -> 10x10 IDCT
         (9, 8, 9),   // 1.125x -> 9x9 IDCT
-        // 8/8 = 1.0x -> full IDCT (canonical 1/1)
-        (8, 8, 8),
-        (7, 8, 7), // 0.875x -> 7x7 IDCT
-        (6, 8, 6), // 0.75x -> 6x6 IDCT
-        (5, 8, 5), // 0.625x -> 5x5 IDCT
-        (4, 8, 4), // 0.5x -> half IDCT (ratio_x8=4)
-        (3, 8, 3), // 0.375x -> 3x3 IDCT
-        (2, 8, 2), // 0.25x -> quarter IDCT (ratio_x8=2)
-        (1, 8, 1), // 0.125x -> eighth IDCT (ratio_x8=1)
+        (1, 1, 8),   // 1.0x -> full IDCT
+        (7, 8, 7),   // 0.875x -> 7x7 IDCT
+        (3, 4, 6),   // 0.75x -> 6x6 IDCT
+        (5, 8, 5),   // 0.625x -> 5x5 IDCT
+        (1, 2, 4),   // 0.5x -> half IDCT
+        (3, 8, 3),   // 0.375x -> 3x3 IDCT
+        (1, 4, 2),   // 0.25x -> quarter IDCT
+        (1, 8, 1),   // 0.125x -> eighth IDCT
     ];
     for (num, denom, expected_block) in cases {
-        let sf = ScalingFactor::new(num, denom);
+        let sf: ScalingFactor =
+            ScalingFactor::try_new(num, denom).expect("supported scaling factor");
         assert_eq!(
             sf.block_size(),
             expected_block,
@@ -397,8 +385,12 @@ fn intermediate_7_8_decodes_at_full_size() {
     // but scale_dim computes ceil(320*7/8)=280, ceil(240*7/8)=210
     let data = encode_gradient(320, 240, Subsampling::S420);
     let img = decode_scaled(&data, 7, 8);
-    let expected_w: usize = ScalingFactor::new(7, 8).scale_dim(320);
-    let expected_h: usize = ScalingFactor::new(7, 8).scale_dim(240);
+    let expected_w: usize = ScalingFactor::try_new(7, 8)
+        .expect("supported scaling factor")
+        .scale_dim(320);
+    let expected_h: usize = ScalingFactor::try_new(7, 8)
+        .expect("supported scaling factor")
+        .scale_dim(240);
     // The decode should succeed regardless; verify dimensions are reasonable
     assert!(img.width > 0, "decoded width should be positive");
     assert!(img.height > 0, "decoded height should be positive");
@@ -420,8 +412,12 @@ fn intermediate_3_8_decodes_at_half_idct() {
     // 3/8 maps to block_size 4 (same as 1/2), scale_dim gives ceil(320*3/8)=120
     let data = encode_gradient(320, 240, Subsampling::S420);
     let img = decode_scaled(&data, 3, 8);
-    let expected_w: usize = ScalingFactor::new(3, 8).scale_dim(320);
-    let expected_h: usize = ScalingFactor::new(3, 8).scale_dim(240);
+    let expected_w: usize = ScalingFactor::try_new(3, 8)
+        .expect("supported scaling factor")
+        .scale_dim(320);
+    let expected_h: usize = ScalingFactor::try_new(3, 8)
+        .expect("supported scaling factor")
+        .scale_dim(240);
     assert!(img.width > 0);
     assert!(img.height > 0);
     assert_eq!(img.width, expected_w);
@@ -485,7 +481,7 @@ fn scale_dimension_calculation_is_ceil_division() {
         (29, 1, 8, 4),  // ceil(29/8)
     ];
     for (dim, num, denom, expected) in cases {
-        let sf = ScalingFactor::new(num, denom);
+        let sf = ScalingFactor::try_new(num, denom).expect("supported scaling factor");
         assert_eq!(
             sf.scale_dim(dim),
             expected,

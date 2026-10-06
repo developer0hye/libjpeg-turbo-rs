@@ -1449,7 +1449,7 @@ config with no kernels has no green tests claiming parity.
 
 ## P4-74. Reduced-Size and Extended IDCT Kernels Panic on `i32` Overflow Under Scaled Decode — **CLOSED 2026-07-30**
 
-**Motivation.** Four consecutive scheduled Fuzz Smoke runs failed on `fuzz_decompress`: 30420069849 (2026-07-29 03:37), 30438301770 (09:07), 30461194331 (14:30), 30485530878 (19:41). Five distinct minimized seeds, all aborting in `src/decode/idct_scaled.rs` with `attempt to {add,subtract,multiply} with overflow` at five distinct lines (116, 117, 126, 131, 136). Every failing seed satisfies `data.len() % 7 == 3` — the only `fuzz_decompress` option arm that calls `set_scale(ScalingFactor::new(1, 2))`, which is the sole dispatcher of the reduced-size IDCT.
+**Motivation.** Four consecutive scheduled Fuzz Smoke runs failed on `fuzz_decompress`: 30420069849 (2026-07-29 03:37), 30438301770 (09:07), 30461194331 (14:30), 30485530878 (19:41). Five distinct minimized seeds, all aborting in `src/decode/idct_scaled.rs` with `attempt to {add,subtract,multiply} with overflow` at five distinct lines (116, 117, 126, 131, 136). Every failing seed satisfies `data.len() % 7 == 3` — the only `fuzz_decompress` option arm that calls `set_scale` with a 1/2 `ScalingFactor`, which is the sole dispatcher of the reduced-size IDCT.
 
 **Root cause.** `idct_scaled.rs` (4x4/2x2/1x1) and `idct_extended.rs` (the twelve 3x3…16x16 kernels) were ported from `jidctred.c`/`jidctint.c` using plain `+`/`-`/`*`. C's intermediates are `JLONG`, declared `long` at `jpegint.h:62` with only a *"must hold at least signed 32-bit values"* guarantee — so on any LLP64 or 32-bit host these same expressions wrap silently, and libjpeg-turbo treats that as the contract. A *dequantized* coefficient is bounded by `i16::MAX * u16::MAX = 2_147_418_945`, which fits `i32`, but a single multiply by a `FIX_*` constant (up to 29692) does not. The 8x8 twin `src/decode/idct.rs` had already been converted to `wrapping_*` for exactly this reason; neither scaled-IDCT file ever received the same treatment.
 
@@ -2284,6 +2284,14 @@ stock C; and (6) use canary-guarded C buffers sized from
 odd-size/scaled per-component downsampled dimensions and minimum DCT sizes
 exactly; repair downstream writer assumptions instead of publishing non-C
 geometry.
+
+**Note (2026-10-07, from P4-139 criterion 4).** The classic shim's
+`jpeg_calc_output_dimensions` (`crates/libjpeg-turbo-rs-capi/src/jpeglib.rs`)
+still applies `scale_num/scale_denom` literally with `.max(1)` clamps — `0/1`
+gives 1/1 where C gives 1/8, `1/3` of 320 gives 107 where C gives 120. The
+root crate's `calc_output_dimensions` is now a tested port of
+`jpeg_core_output_dimensions`'s block-size choice (`unsigned int` wrap
+included, cross-checked against `djpeg -scale`) and is the piece to reuse here.
 
 ## P4-100. Classic Codec Failures Are Reported as Suspension or Silent Success — **PARTIAL: translator + finish/start entry points landed; batch continues**
 
@@ -7248,7 +7256,7 @@ This item is no longer a soundness blocker for the [#481](https://github.com/dev
 **Status (2026-08-10): CLOSED — criteria 3–6 delivered.** The three `set_len`
 sites in `src/encode/pipeline_impl/progressive_entropy.rs` (`:65`, `:96`,
 `:145`) stay out of scope and move to
-[P4-139](#p4-139-memory-layout-arithmetic-is-decentralised-and-uses-saturatingunchecked-multiplication--partial-every-span-is-checked-and-the-rule-is-enforced-centralisation-and-scalingfactor-outstanding)
+[P4-139](#p4-139-memory-layout-arithmetic-is-decentralised-and-uses-saturatingunchecked-multiplication--partial-every-span-is-checked-and-the-rule-is-enforced-centralisation-outstanding)
 as recorded below.
 
 * **Criterion 3 — met.** `experiments/progressive.tsv` records the zero-init
@@ -7501,7 +7509,7 @@ full capi suite at 54 blocks / 0 failures and both CI clippy legs clean.
   memory-sizing `saturating_mul` at `:6697`, `:7382-7383`, `:7444`,
   `:9429/:9432` and `:10467`. Those size `Vec` allocations rather than raw
   slices, so they are outside criterion 5's wording but squarely inside
-  [P4-139](#p4-139-memory-layout-arithmetic-is-decentralised-and-uses-saturatingunchecked-multiplication--partial-every-span-is-checked-and-the-rule-is-enforced-centralisation-and-scalingfactor-outstanding)
+  [P4-139](#p4-139-memory-layout-arithmetic-is-decentralised-and-uses-saturatingunchecked-multiplication--partial-every-span-is-checked-and-the-rule-is-enforced-centralisation-outstanding)
   criterion 3, which is where they are recorded.
 
 * **Criterion 7 — done.** The crate root states the boundary plainly: invalid
@@ -7693,7 +7701,7 @@ build. A/B/A/B on the 420 case settled it: 5.4226 / 5.4438 / 5.4247 / 5.4417. A
 single A/B pair would have recorded a regression that does not exist and sent
 this item to the criterion-3 fallback design for no reason.
 
-## P4-139. Memory-Layout Arithmetic Is Decentralised and Uses Saturating/Unchecked Multiplication — **PARTIAL: every span is checked and the rule is enforced; centralisation and `ScalingFactor` outstanding**
+## P4-139. Memory-Layout Arithmetic Is Decentralised and Uses Saturating/Unchecked Multiplication — **PARTIAL: every span is checked and the rule is enforced; centralisation outstanding**
 
 **GitHub:** [#478](https://github.com/developer0hye/libjpeg-turbo-rs/issues/478) — under the [#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481) umbrella.
 
@@ -7739,7 +7747,8 @@ instance; this entry is the common cause.
   `assert!` — a panic on a public API, not a `Result`. Both then multiply
   unchecked (`self.num * 8`, `input_dim * self.num as usize`). Because the
   fields are public, a validating constructor alone cannot fix it: struct-literal
-  construction bypasses any check.
+  construction bypasses any check. **Fixed 2026-10-07** — see the criterion-4
+  status below.
 
 **Acceptance criteria.**
 
@@ -7962,6 +7971,68 @@ an infallible constructor and so needs an API decision (panic, or a fallible
   are unchanged and remain listed above; they are unchecked but not saturating,
   and no reachable path was found.
 
+**Status (2026-10-07, criterion 4): done.** `ScalingFactor`'s fields are
+private and `ScalingFactor::try_new(num, denom) -> Result<Self>` is the only
+constructor; `new` is removed, since no shim could be both infallible and
+correct. The validity rule is upstream TurboJPEG's, not the classic library's:
+`tj3SetScalingFactor` (`turbojpeg.c:2053-2058`) accepts a pair only when it is
+field-for-field one of the sixteen `sf` entries (`turbojpeg.c:199-217`), so
+`4/8`, `2/2` and `16/8` are refused although each equals a supported factor.
+Those entries are now `ScalingFactor::SUPPORTED`, the one copy of the table:
+`TjHandle::scaling_factors()` and, through it, `tj3GetScalingFactors` derive
+from it. The classic `jpeg_core_output_dimensions` (`jdmaster.c`) accepts any
+pair and rounds it up to a block size, but `ScalingFactor` was never its
+mirror — the C-ABI classic shim reads `scale_num`/`scale_denom` itself.
+
+What the old type did with a factor outside the table: a non-lowest-term form
+(`4/8`) decoded exactly like its reduced form, because `block_size` and
+`scale_dim` agree on any ratio `N/8`; anything else (`1/3`) took block size
+`ceil(8/3) = 3` but output size `ceil(dim/3)`, a pair that agrees with neither
+C nor itself; and `denom == 0` reached an `assert!`. For the sixteen accepted
+factors `block_size` is the exact `num * 8 / denom` and `scale_dim` is
+`ceil(dim * N / 8)`, both unchanged, so scaled decode output is unchanged —
+`cross_check_scaling_factors`, `cross_check_extended_scaling` and
+`scale_decode` pass with only their constructor calls migrated, and
+`scaling_extended` with the rewrites to its non-table cases listed below.
+`scale_dim` also stops wrapping: it splits the dividend so the only product
+that can overflow is one whose overflow means the result is unrepresentable,
+and reports 0 then, the `bufsize` refusal value. This entry used to record the
+overflow half as unreachable, since `input_dim` is bounded by 65535 and `num`
+by 16; that holds for every *internal* caller, not for `scale_dim(usize::MAX)`
+called directly, which the sweep now covers.
+
+Two further public panics on the same input class went with it.
+`calc_output_dimensions` carried the same `assert!(scale_denom != 0)` (its
+module note assigned it to this criterion) and applied a non-table ratio
+literally; it now ports `jpeg_core_output_dimensions`'s block-size choice,
+`unsigned int` wrap included, and is cross-checked against `djpeg -scale` for
+sixteen pairs including `1/0`, `0/0`, `1/3`, a numerator whose `* 8`
+wraps and a denominator whose `* N` wraps. And `tj3SetScalingFactor` now reports upstream's single message under this
+crate's `function:` prefix, `tj3SetScalingFactor: Unsupported scaling factor`
+(upstream: `tj3SetScalingFactor(): …`), for every refusal, where it
+used to report `corrupt data: unsupported scaling factor N/D` or a
+`non-positive ratio` message upstream has no equivalent of.
+
+Pinned by `tests/scaling_factor_try_new.rs` (12 tests: the table against
+upstream's, the 1/1 default, all sixteen accepted, zero denominators and upstream-refused
+factors refused, a `0..=20` square sweep asserting the accepted set is exactly
+the table and that `block_size`/`scale_dim` never panic up to `usize::MAX`
+against a `u128` model, `TjHandle` agreeing with `try_new`, a refused factor
+keeping the previous one, every accepted factor decoding at `scale_dim`'s
+size, and three `calc_output_dimensions` tests, one of them agreeing with
+`scale_dim` near `usize::MAX`, where multiplying first used to report 0 for a
+representable answer) and
+`crates/libjpeg-turbo-rs-capi/tests/capi_scaling_factor.rs` (the exact refusal
+text, and `tj3GetScalingFactors` plus `tj3SetScalingFactor` over a `-1..=20`
+square traced against real TurboJPEG 3.2.0 through
+`examples/scaling_factor_oracle.c`). Tests that exercised non-table forms were
+rewritten rather than the rule widened: `scaling_extended`'s `4/8`/`2/8`/`2/4`
+equivalence tests became one refusal test, its block-size map uses the table's
+own forms, and `c_tjdecomptest` resolves the script's `-scale 16/8`-style
+arguments by value, as `tjdecomp.c:235-241` does.
+
+What keeps P4-139 PARTIAL is criteria 1–2's final chunk, below.
+
 **What remains.**
 
 * **Criteria 1–2 — the `ImageLayout` abstraction and its adoption. Chunks 1
@@ -7991,22 +8062,13 @@ an infallible constructor and so needs an API decision (panic, or a fallible
   (`turbojpeg-mp.c:321-325`), and `tj3Compress12`/`tj3Compress16` bound their
   source span in *bytes*, putting the ×2 element size inside the checked chain
   where `from_raw_parts`' precondition needs it.
-* **Criterion 4 — `ScalingFactor`. Decision recorded: do it, in 0.9.0, as
-  private fields plus `try_new`.** Not the 16-variant enum: the type is
-  constructed from caller-supplied `num`/`denom` at the C ABI boundary
-  (`tj3SetScalingFactor`), so an enum would need a fallible lookup anyway and
-  would lose the ability to represent what upstream accepts. The migration is
-  `num`/`denom` → `num()`/`denom()` accessors plus `try_new(num, denom) ->
-  Result<Self>`, touching ~30 read sites (mostly `tests/cross_product_*`) and 2
-  struct-literal sites. **It is deferred, not dismissed** — it is the one
-  criterion here that cannot be done without a breaking change, and this crate
-  is 0.8.0, so it belongs in a version bump rather than smuggled into a fix.
-
-  Worth recording so the next session does not re-derive it: the *overflow* half
-  of that criterion is not reachable. `scale_dim`'s `input_dim * self.num`
-  cannot overflow — `input_dim` is bounded by a JPEG's 65535 dimension limit and
-  `num` by 16 — so what is left is the `assert!` on `denom == 0`, a panic on
-  public input. That is an API-quality defect, not a memory-safety one.
+* **Criterion 4 — `ScalingFactor`. Done 2026-10-07; see the criterion-4
+  status above.** The decision recorded here was carried out as written —
+  private fields plus `try_new`, not the 16-variant enum, because the type is
+  built from caller-supplied `num`/`denom` at the C ABI boundary
+  (`tj3SetScalingFactor`) and an enum would need a fallible lookup anyway. It
+  is a breaking change, recorded with its migration under the CHANGELOG's
+  `[Unreleased]` **Breaking (Rust API)** entries for the next version bump.
 * **Criterion 5 — a 32-bit C-ABI leg. Done 2026-08-14; kept here because the
   rest of this list is not.** The compile blocker went first: chunk 1
   gated the encode ABI-offset assertion block on `target_pointer_width = "64"`
@@ -11950,7 +12012,7 @@ later (`turbojpeg-mp.c:195-198`), so the ceiling holds at every precision too.
 
 Ours diverges twice:
 
-* `TjHandle::decompress` (`src/api/tj3.rs:1206-1228`) publishes **eight**:
+* `TjHandle::decompress` (`src/api/tj3.rs:1189-1211`) publishes **eight**:
   `Width`, `Height`, `Precision`, `ColorSpace`, `Subsampling`, `XDensity`,
   `YDensity`, `DensityUnits`. `TJPARAM_PROGRESSIVE`, `TJPARAM_ARITHMETIC`,
   `TJPARAM_LOSSLESS`, `TJPARAM_LOSSLESSPSV` and `TJPARAM_LOSSLESSPT` keep
@@ -12015,7 +12077,7 @@ touches; it writes `output_width` / `output_height` instead. The call sits at
 that had already been cropped would make that check compare a region against
 itself.
 
-**What we do.** `TjHandle::decompress` (`src/api/tj3.rs:1206-1207`) publishes the
+**What we do.** `TjHandle::decompress` (`src/api/tj3.rs:1189-1190`) publishes the
 *decoded output* dimensions, `img.width` / `img.height` — post-scaling and
 post-cropping. Measured on `tests/fixtures/photo_64x64_420.jpg` (64x64):
 
@@ -13037,3 +13099,44 @@ of the input size, and a server encoding caller-sized uploads still wants a
 2. The decode allocation gate (or a sibling) covers `src/encode/` with an
    inventory of the bounded remainder.
 3. `tests/miri_alloc_failure.rs` gains an encode refusal case.
+
+## P4-220. TJ3 Entry Points Never Check the Handle's Instance Type — **OPEN**
+
+**Found 2026-10-07** in review of P4-139 criterion 4 (#478), which rewrote
+`tj3SetScalingFactor` and traced it against real TurboJPEG — but only on a
+`TJINIT_DECOMPRESS` handle, so the trace could not see this.
+
+**What upstream does.** Before anything else, upstream refuses a call whose
+handle was not initialised for the role the function needs, with "Instance has
+not been initialized for compression", "... for decompression" or "... for
+transformation". `grep -n 'Instance has not been initialized for'
+references/libjpeg-turbo/src/turbojpeg.c references/libjpeg-turbo/src/turbojpeg-mp.c`
+lists 17 such guards, among them `tj3SetScalingFactor` (`turbojpeg.c:2050-2051`),
+`tj3SetCroppingRegion` (`:2074-2075`), `tj3DecompressHeader` (`:1883`),
+`tj3SetICCProfile` (`:1234`), `tj3Transform` (`:2937`) and the
+`tj3Compress*`/`tj3Decompress*` bodies generated from `turbojpeg-mp.c:88` and
+`:168`. A `TJINIT_TRANSFORM` handle is initialised for decompression too, so
+it passes the decompression guards.
+
+**What we do.** `TjInstance` stores `init_type`, but nothing reads it after
+`tj3InitVersion` validates the range (`git grep init_type --
+crates/libjpeg-turbo-rs-capi/src`). So, by source reading,
+`tj3SetScalingFactor(compress_handle, {1, 2})` returns 0 where upstream returns
+-1, and likewise for every guarded entry point. This is P4-207's rule — which
+covers `tj3Set` only — applied to the rest of the TJ3 surface.
+
+**Acceptance criteria.**
+
+1. Every TJ3 entry point upstream guards applies the same instance-type check,
+   first, with upstream's message under this crate's `function:` prefix.
+2. `examples/scaling_factor_oracle.c` (and its `capi_scaling_factor` trace)
+   gains a `TJINIT_COMPRESS` and a `TJINIT_TRANSFORM` handle, and a matching
+   oracle covers the other guarded families, so the rule is compared with
+   TurboJPEG rather than transcribed.
+3. Error precedence is checked against the oracle: the instance-type guard
+   precedes every argument check upstream places after it.
+
+**Why not fixed with P4-139 criterion 4.** It is a family-wide behaviour change
+across ~17 entry points with its own precedence questions, not part of the
+`ScalingFactor` type change; fixing only `tj3SetScalingFactor` would leave its
+siblings inconsistent.

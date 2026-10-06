@@ -103,7 +103,7 @@ fn rust_crop(
     let (x, y, w, h): (usize, usize, usize, usize) = region;
     let mut decoder: Decoder<'_> = Decoder::new(jpeg).expect("fixture header parses");
     if let Some((num, denom)) = scale {
-        decoder.set_scale(ScalingFactor::new(num, denom));
+        decoder.set_scale(ScalingFactor::try_new(num, denom).expect("a supported factor"));
     }
     decoder.set_crop_region(x, y, w, h);
     decoder.decode_image()
@@ -173,7 +173,7 @@ fn crop_bounds_agree_with_djpeg() {
         for scale in scales {
             let mut probe: Decoder<'_> = Decoder::new(&jpeg).expect("fixture header parses");
             if let Some((num, denom)) = scale {
-                probe.set_scale(ScalingFactor::new(num, denom));
+                probe.set_scale(ScalingFactor::try_new(num, denom).expect("a supported factor"));
             }
             let (out_w, out_h): (usize, usize) = (probe.output_width(), probe.output_height());
             let regions: [(usize, usize, usize, usize); 9] = [

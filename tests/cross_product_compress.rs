@@ -1539,7 +1539,7 @@ fn direct_rgb_scaled_crop_matches_c_djpeg() {
         .expect("direct-RGB sampled encode must succeed");
 
     let mut decoder: Decoder = Decoder::new(&jpeg).expect("Rust header parse must succeed");
-    decoder.set_scale(ScalingFactor::new(1, 2));
+    decoder.set_scale(ScalingFactor::try_new(1, 2).expect("supported scaling factor"));
     decoder.set_crop(8, 16);
     let rust_image = decoder
         .decode_image()
