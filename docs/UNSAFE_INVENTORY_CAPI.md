@@ -114,20 +114,22 @@ three things.
     `tj3Get`) over three fixtures — baseline, progressive and arithmetic —
     allocating its own buffers with `malloc` / `free`.
   - `crates/libjpeg-turbo-rs-capi/examples/cabi_misuse_harness.c` (P4-141
-    criterion 3) runs ten misuse cases, **one per child process**, with every
+    criterion 3) runs eleven misuse cases, **one per child process**, with every
     destination sized for a real decode or compress in a guard-page-and-canary
     buffer (the one exception is `alloc_ownership`'s, which has to be a
     `tj3Alloc` buffer for the case to mean anything). It is what reaches
     `tj3Alloc` / `tj3Free` across the boundary in both directions
     (`alloc_ownership`), the 12-bit entry points (`precision12`), the compress
     side (`undersized_output`, `max_dimensions`, `alloc_ownership`,
-    `precision12`), `tj3Set` — including every one of the 26 parameters on each
-    of the three instance types (`parameter_applicability`), plus
-    `null_handle`, `undersized_output`, `max_dimensions`, `alloc_ownership`,
-    `precision12` and `lifecycle` — and `tj3Get` (every case but
-    `undersized_output`),
-    `tj3SetScalingFactor` / `tj3SetCroppingRegion` (`null_handle` only, and
-    only with a NULL handle, so the guard clause and not the body) and eight
+    `precision12`, `cropping_region`), `tj3Set` — including every one of the
+    26 parameters on each of the three instance types
+    (`parameter_applicability`), plus `null_handle`, `undersized_output`,
+    `max_dimensions`, `alloc_ownership`, `precision12`, `lifecycle` and
+    `cropping_region` — and `tj3Get` (every case but `undersized_output`),
+    `tj3SetScalingFactor` / `tj3SetCroppingRegion` (`null_handle` with a NULL
+    handle, the guard clause; and since P4-197 `cropping_region`, which drives
+    both bodies on a live handle — every `tj3SetCroppingRegion` rule at 1/1
+    and 1/2, each accepted region decoded into a guarded buffer) and eight
     concurrent handles (`concurrent_handles`). Rows below that say "not the
     C-boundary harness" were written on 2026-09-08 against the first harness
     alone; a row is accurate for that harness and understates the second where
@@ -216,7 +218,7 @@ three things.
 |---|---|---|---|---|---|---|---|
 | `tj3DecompressHeader` | 3 | `pub unsafe extern "C" fn` declaration; `slice::from_raw_parts` over the caller's JPEG; `with_handle` on the caller's handle. | `jpeg_buf` non-NULL and `jpeg_size >= 2` are checked before the slice is formed; the length itself is the caller's assertion and nothing can verify it. The handle-scoped body runs inside `with_handle`, so the `&mut TjInstance` cannot escape or alias a second one. | no: C ABI. | `tj3_decompress_header_populates_dimensions` (tests/header_ops.rs); `norealloc_contract_matches_upstream_turbojpeg` (tests/norealloc_all_entry_points.rs) calls it against the C oracle; `precision_fns_reject_null_and_unsupported_tjpf` (tests/precision.rs) covers the rejection arm. | Integration Tests, both oracle legs; **C-boundary ASan**, which calls it on every fixture before decoding. Not Miri, not ARMv7, not ASan/UBSan `--lib`. | P4-141 c4 capi chunk, 2026-09-08 (source read; no independent human review yet) |
 | `tj3SetScalingFactor` | 2 | `pub unsafe extern "C" fn` declaration plus `with_handle`. `factor` is a `#[repr(C)]` struct passed **by value**, so nothing is dereferenced; the only raw pointer is the handle. | `num`/`denom` that do not convert to `u32` (negatives) are refused before `set_scaling_factor` sees them, and `ScalingFactor::try_new` refuses every pair outside upstream's table, zero included; the handle is NULL-checked by `with_handle`, which returns `None` and yields -1. | no: C ABI. | `tj3_set_scaling_factor_halves_output` (tests/header_ops.rs); `capi_scaling_factor.rs` traces a `-1..=20` square against TurboJPEG. | Integration Tests, both oracle legs. Not ASan/UBSan, not Miri, not ARMv7, not the C-boundary harness. | P4-141 c4 capi chunk, 2026-09-08 (source read; no independent human review yet) |
-| `tj3SetCroppingRegion` | 2 | `pub unsafe extern "C" fn` declaration plus `with_handle`. `region` is by value, like the scaling factor above. | `{0,0,0,0}` clears the region, per the C contract; otherwise `x`/`y` must be non-negative and `w`/`h` strictly positive before the region reaches `set_cropping_region`. Bounds against the image are the decoder's job, not this entry point's. | no: C ABI. | `tj3_set_cropping_region_validates_inputs` (tests/header_ops.rs); the geometry itself is cross-validated by the root crate's `c_croptest` suite. | Integration Tests, both oracle legs. Not ASan/UBSan, not Miri, not ARMv7, not the C-boundary harness. | P4-141 c4 capi chunk, 2026-09-08 (source read; no independent human review yet) |
+| `tj3SetCroppingRegion` | 2 | `pub unsafe extern "C" fn` declaration plus `with_handle`. `region` is by value, like the scaling factor above. | `{0,0,0,0}` clears the region, per the C contract; otherwise every field must be non-negative, and since P4-197 (#618) the region must pass `TjHandle::resolve_cropping_region` against the last header read — iMCU-divisible `x`, inside the scaled image, a zero `w`/`h` filled to the edge — before it reaches `set_cropping_region`; a refusal leaves the stored region unchanged. | no: C ABI. | `tj3_set_cropping_region_validates_inputs` (tests/header_ops.rs); `cabi_misuse_harness`'s `cropping_region` case, against stock TurboJPEG; the geometry itself is cross-validated by the root crate's `c_croptest` suite. | Integration Tests, both oracle legs; since P4-197 the C-boundary ASan job's `cropping_region` case reaches the body. Not ASan/UBSan (`--lib`), not Miri, not ARMv7. | P4-141 c4 capi chunk, 2026-09-08 (source read; no independent human review yet) |
 
 ## `crates/libjpeg-turbo-rs-capi/src/imageio.rs` — 24 sites
 

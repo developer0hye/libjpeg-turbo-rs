@@ -144,6 +144,21 @@ pub unsafe extern "C" fn tj3SetScalingFactor(
 
 /// `tj3SetCroppingRegion(handle, region) -> int`.
 ///
+/// Mirrors upstream's checks and their order (`turbojpeg.c:2068-2115`):
+/// `{0,0,0,0}` clears the region; a negative field is "Invalid cropping
+/// region"; everything after that — no header read yet, a lossless frame, an
+/// unclassifiable subsampling, a left boundary not divisible by the scaled
+/// iMCU width, a region past the scaled image — is
+/// `TjHandle::resolve_cropping_region`, validated against the header the handle
+/// last read, exactly as upstream validates against `jpegWidth`/`jpegHeight`.
+/// A zero `w`/`h` means "to the edge" and is stored filled in. Error strings
+/// carry upstream's `"tj3SetCroppingRegion(): "` prefix, so `tj3GetErrorStr`
+/// reads the same on both libraries (P4-197, #618). One upstream guard is
+/// not mirrored: "Instance has not been initialized for decompression"
+/// (`turbojpeg.c:2074-2075`) — this shim records a handle's init type but
+/// consults it in no setter, so a compress-only handle reaches the header
+/// check instead.
+///
 /// # Safety
 ///
 /// C ABI entry point. `handle` must satisfy the crate-level
@@ -156,33 +171,40 @@ pub unsafe extern "C" fn tj3SetScalingFactor(
 pub unsafe extern "C" fn tj3SetCroppingRegion(handle: *mut c_void, region: TjRegion) -> c_int {
     crate::unwind_guard!(-1, {
         let body = |inst: &mut crate::tj3::TjInstance| -> c_int {
-            // The canonical C contract treats {0,0,0,0} as "clear the region".
+            // TJUNCROPPED: clear the region (`turbojpeg.c:2077-2081`).
             if region.x == 0 && region.y == 0 && region.w == 0 && region.h == 0 {
                 inst.inner.set_cropping_region(None);
                 inst.clear_error();
                 return 0;
             }
 
-            if region.x < 0 || region.y < 0 || region.w <= 0 || region.h <= 0 {
+            if region.x < 0 || region.y < 0 || region.w < 0 || region.h < 0 {
                 inst.set_error(
-                    format!(
-                        "tj3SetCroppingRegion: invalid {{x={},y={},w={},h={}}}",
-                        region.x, region.y, region.w, region.h
-                    ),
+                    "tj3SetCroppingRegion(): Invalid cropping region",
                     TJERR_FATAL,
                 );
                 return -1;
             }
 
-            inst.inner
-                .set_cropping_region(Some(libjpeg_turbo_rs::CropRegion {
-                    x: region.x as usize,
-                    y: region.y as usize,
-                    width: region.w as usize,
-                    height: region.h as usize,
-                }));
-            inst.clear_error();
-            0
+            let requested = libjpeg_turbo_rs::CropRegion {
+                x: region.x as usize,
+                y: region.y as usize,
+                width: region.w as usize,
+                height: region.h as usize,
+            };
+            // A refusal leaves the stored region alone, as upstream's THROW
+            // skips the assignment at `turbojpeg.c:2111`.
+            match inst.inner.resolve_cropping_region(requested) {
+                Ok(resolved) => {
+                    inst.inner.set_cropping_region(Some(resolved));
+                    inst.clear_error();
+                    0
+                }
+                Err(error) => {
+                    inst.set_error(format!("tj3SetCroppingRegion(): {error}"), TJERR_FATAL);
+                    -1
+                }
+            }
         };
 
         // SAFETY: as `tj3SetScalingFactor` above.

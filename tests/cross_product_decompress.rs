@@ -181,6 +181,74 @@ fn should_skip_crop_scale(crop: &Option<CropRegion>, scale: &ScalingFactor) -> b
 // Main cross-product test
 // ---------------------------------------------------------------------------
 
+/// Whether `crop` ends past the *scaled* `width x height` image.
+///
+/// Upstream's tjdecomptest.in runs these regions on the 227x149 `testorig`
+/// image, where every one fits at every scale it tests; this port's 64x64
+/// image is too small for some of them at 1/2 (`14x14+23+23` ends at 37 of
+/// 32). C refuses such a region — `djpeg -crop` with "crop dimensions exceed
+/// image dimensions" (`djpeg.c:854-858`), `tj3SetCroppingRegion` with "The
+/// cropping region exceeds the scaled image dimensions" — and so does
+/// `Decoder` since P4-197 (#618); it used to clamp.
+fn crop_exceeds_scaled(
+    crop: &Option<CropRegion>,
+    scale: &ScalingFactor,
+    width: usize,
+    height: usize,
+) -> bool {
+    match crop {
+        None => false,
+        Some(c) => {
+            c.x + c.width > scale.scale_dim(width) || c.y + c.height > scale.scale_dim(height)
+        }
+    }
+}
+
+/// Require the refusal `crop_exceeds_scaled` predicts, from this decoder and,
+/// when a `djpeg` is available, from C as well.
+fn assert_crop_refused(
+    djpeg: Option<&std::path::Path>,
+    jpeg: &[u8],
+    scale: ScalingFactor,
+    crop: &Option<CropRegion>,
+    label: &str,
+) {
+    match try_decode(jpeg, scale, crop, false, false, None) {
+        Err(libjpeg_turbo_rs::JpegError::InvalidCropRegion { reason }) => assert_eq!(
+            reason, "The cropping region exceeds the scaled image dimensions",
+            "{label}"
+        ),
+        Err(other) => panic!("{label}: expected InvalidCropRegion, got {other:?}"),
+        Ok(img) => panic!(
+            "{label}: a crop past the scaled image decoded to {}x{}",
+            img.width, img.height
+        ),
+    }
+    let Some(djpeg) = djpeg else {
+        return;
+    };
+    let c: &CropRegion = crop.as_ref().expect("only a crop can exceed");
+    let input: helpers::TempFile = helpers::TempFile::new("xprod_crop_refused.jpg");
+    input.write_bytes(jpeg);
+    let refused_output: helpers::TempFile = helpers::TempFile::new("xprod_crop_refused.ppm");
+    let output: std::process::Output = Command::new(djpeg)
+        .arg("-scale")
+        .arg(format!("{}/{}", scale.num, scale.denom))
+        .arg("-crop")
+        .arg(format!("{}x{}+{}+{}", c.width, c.height, c.x, c.y))
+        .arg("-outfile")
+        .arg(refused_output.path())
+        .arg(input.path())
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run djpeg: {e}"));
+    let stderr: String = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(
+        !output.status.success() && stderr.contains("crop dimensions exceed image dimensions"),
+        "{label}: djpeg does not refuse the region (status {:?}, stderr {stderr:?})",
+        output.status
+    );
+}
+
 /// Decompression cross-product: subsampling x crop x scale x nosmooth x dct x output.
 ///
 /// Port of C's tjdecomptest.in main loop. Verifies that every valid parameter
@@ -205,9 +273,11 @@ fn tjdecomptest_cross_product() {
 
     let crops: Vec<Option<CropRegion>> = crop_regions();
     let scales: Vec<ScalingFactor> = scaling_factors();
+    let djpeg: Option<PathBuf> = helpers::optional_c_tool("djpeg");
 
     let mut tested: u32 = 0;
     let mut skipped: u32 = 0;
+    let mut refused: u32 = 0;
     let mut failed: u32 = 0;
     let mut failures: Vec<String> = Vec::new();
 
@@ -228,6 +298,13 @@ fn tjdecomptest_cross_product() {
                 // Skip small scale + crop (matching C)
                 if should_skip_crop_scale(crop, scale) {
                     skipped += 1;
+                    continue;
+                }
+                if crop_exceeds_scaled(crop, scale, 64, 64) {
+                    let label: String =
+                        combo_label(subsamp_name, crop, scale, false, false, "refused");
+                    assert_crop_refused(djpeg.as_deref(), jpeg, *scale, crop, &label);
+                    refused += 1;
                     continue;
                 }
 
@@ -313,6 +390,13 @@ fn tjdecomptest_cross_product() {
             for scale in &scales {
                 if should_skip_crop_scale(crop, scale) {
                     skipped += 1;
+                    continue;
+                }
+                if crop_exceeds_scaled(crop, scale, 64, 64) {
+                    let label: String =
+                        combo_label(subsamp_name, crop, scale, false, false, "refused");
+                    assert_crop_refused(djpeg.as_deref(), &gray_jpeg, *scale, crop, &label);
+                    refused += 1;
                     continue;
                 }
 
@@ -404,8 +488,13 @@ fn tjdecomptest_cross_product() {
 
     // Print summary
     eprintln!(
-        "Decompress cross-product: {} tested, {} skipped, {} failed",
-        tested, skipped, failed
+        "Decompress cross-product: {} tested, {} skipped, {} refused, {} failed",
+        tested, skipped, refused, failed
+    );
+    // Both arms must run: the decoded combinations and the refused ones.
+    assert!(
+        refused > 0 && tested > 0,
+        "refused {refused}, tested {tested}"
     );
     if !failures.is_empty() {
         for f in &failures {
@@ -560,9 +649,11 @@ fn tjdecomptest_grayscale_output_cross_product() {
     ];
     let scales: Vec<ScalingFactor> = scaling_factors();
     let crops: Vec<Option<CropRegion>> = crop_regions();
+    let djpeg: Option<PathBuf> = helpers::optional_c_tool("djpeg");
 
     let mut tested: u32 = 0;
     let mut skipped: u32 = 0;
+    let mut refused: u32 = 0;
     let mut failed: u32 = 0;
     let mut failures: Vec<String> = Vec::new();
 
@@ -574,6 +665,15 @@ fn tjdecomptest_grayscale_output_cross_product() {
                 // Apply same crop+scale skip as main test
                 if should_skip_crop_scale(crop, scale) {
                     skipped += 1;
+                    continue;
+                }
+                if crop_exceeds_scaled(crop, scale, 64, 64) {
+                    let label: String = format!(
+                        "subsamp={subsamp:?} {crop:?} scale={}/{} refused",
+                        scale.num, scale.denom
+                    );
+                    assert_crop_refused(djpeg.as_deref(), &jpeg, *scale, crop, &label);
+                    refused += 1;
                     continue;
                 }
 
@@ -634,8 +734,12 @@ fn tjdecomptest_grayscale_output_cross_product() {
     }
 
     eprintln!(
-        "Grayscale output cross-product: {} tested, {} skipped, {} failed",
-        tested, skipped, failed
+        "Grayscale output cross-product: {} tested, {} skipped, {} refused, {} failed",
+        tested, skipped, refused, failed
+    );
+    assert!(
+        refused > 0 && tested > 0,
+        "refused {refused}, tested {tested}"
     );
     if !failures.is_empty() {
         for f in &failures {

@@ -415,7 +415,7 @@ impl Op {
     /// live handle carrying the image's profile and a reference that replays
     /// only the *last* publisher carrying `v`. It does not fire today solely
     /// because `decompress_header` is literally `self.decompress(data)`
-    /// (`src/api/tj3.rs:730-736`) and therefore writes `icc_profile`
+    /// (`src/api/tj3.rs:1005-1017`) and therefore writes `icc_profile`
     /// identically — and making it header-only is the whole point of P4-142
     /// (`docs/last_mile/phase4.md`, OPEN, no issue of its own).
     /// `the_two_publishing_operations_agree_on_the_icc_profile` in
@@ -555,7 +555,7 @@ pub fn encode_op(op: &Op) -> Option<[u8; 4]> {
         Op::SetCrop {
             region: Some(region),
         } => {
-            if region.x != 0 || region.y >= 16 {
+            if region.x >= 16 || region.y >= 16 {
                 return None;
             }
             let width: usize = region.width.checked_sub(1)?;
@@ -566,7 +566,7 @@ pub fn encode_op(op: &Op) -> Option<[u8; 4]> {
             Some([
                 2,
                 1,
-                u8::try_from(width * 16).ok()?,
+                u8::try_from(width * 16 + region.x).ok()?,
                 u8::try_from(height * 16 + region.y).ok()?,
             ])
         }
@@ -627,21 +627,14 @@ fn op_from_record(record: &[u8]) -> Op {
         },
         1 => Op::SetScaling { index: a },
         2 if a % 2 == 0 => Op::SetCrop { region: None },
-        // `x` is pinned to 0 while P4-197 (#618) is open: a left boundary
-        // at or past the *scaled* output width narrows the decode to zero
-        // columns, and the vertical-crop step then trips a `debug_assert!`
-        // in `pipeline_impl/output.rs` whose comment calls the empty-data
-        // case unreachable. Upstream refuses the region instead — the general
-        // set-time bounds check at `turbojpeg.c:2106-2109` fires through its
-        // `x + w > scaledWidth` term, and `x` has already had to clear the
-        // iMCU-divisibility rule at `:2096-2101`, which this port applies by
-        // aligning down silently. Any non-zero `x` is reachable for some
-        // scale in the 1/8..2/1 range a program may also set, so the whole
-        // offset is excluded rather than bounded. Delete this pin — and
-        // `x: usize::from(b % 16)` returns — when that item closes.
+        // The whole 0..16 offset range: a left boundary past the scaled
+        // width, or one off the scaled iMCU grid, makes `decompress` refuse
+        // the region the way `tj3SetCroppingRegion` refuses it
+        // (`turbojpeg.c:2096-2109`) since P4-197 (#618) closed — it used to
+        // decode to zero columns, and `x` was pinned to 0 here until then.
         2 => Op::SetCrop {
             region: Some(CropRegion {
-                x: 0,
+                x: usize::from(b % 16),
                 y: usize::from(c % 16),
                 width: usize::from(b / 16) + 1,
                 height: usize::from(c / 16) + 1,

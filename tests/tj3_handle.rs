@@ -1,3 +1,5 @@
+mod helpers;
+
 use libjpeg_turbo_rs::tj3::{TjHandle, TjParam};
 use libjpeg_turbo_rs::{compress, decompress, PixelFormat, Subsampling};
 
@@ -208,17 +210,299 @@ fn handle_scaling_factor() {
     assert!(handle.set_scaling_factor(4, 1).is_err());
 }
 
+/// The cropping rules of `tj3SetCroppingRegion`
+/// (`references/libjpeg-turbo/src/turbojpeg.c:2068-2115`): a header must have
+/// been read, a left boundary off the scaled iMCU grid and a region past the
+/// scaled image are refused, a zero width/height runs to the edge (P4-197,
+/// #618). `resolve_cropping_region` applies them at set time, as the C ABI
+/// does; `decompress` applies them to the image it decodes. The C-ABI twin is
+/// compared against stock TurboJPEG by the `cropping_region` case of
+/// `crates/libjpeg-turbo-rs-capi/examples/cabi_misuse_harness.c`; here the
+/// decoded pixels of the accepted regions are compared against `djpeg -crop`.
 #[test]
 fn handle_cropping_region() {
-    use libjpeg_turbo_rs::CropRegion;
-    let mut handle = TjHandle::new();
-    handle.set_cropping_region(Some(CropRegion {
-        x: 10,
-        y: 20,
-        width: 100,
-        height: 200,
-    }));
-    handle.set_cropping_region(None);
+    use libjpeg_turbo_rs::{CropRegion, JpegError};
+
+    fn reason<T: std::fmt::Debug>(result: libjpeg_turbo_rs::Result<T>) -> String {
+        match result {
+            Err(JpegError::InvalidCropRegion { reason }) => reason,
+            other => panic!("expected InvalidCropRegion, got {other:?}"),
+        }
+    }
+    let region = |x: usize, y: usize, width: usize, height: usize| -> CropRegion {
+        CropRegion {
+            x,
+            y,
+            width,
+            height,
+        }
+    };
+    let exceeds: &str = "The cropping region exceeds the scaled image dimensions";
+    let off_grid: &str =
+        "The left boundary of the cropping region (4) is not\ndivisible by the scaled iMCU width (8)";
+
+    // 33x31, 4:4:4: an 8-pixel iMCU at 1/1, 4 at 1/2.
+    // Embedded: wasm32-wasip1 under wasmtime cannot read tests/fixtures/.
+    // The path is kept for the djpeg cross-check below.
+    let fixture: std::path::PathBuf = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/cjpeg_33x31_444.jpg");
+    let jpeg: Vec<u8> = include_bytes!("fixtures/cjpeg_33x31_444.jpg").to_vec();
+    let mut handle: TjHandle = TjHandle::new();
+
+    // Set-time validation needs a header.
+    assert_eq!(
+        reason(handle.resolve_cropping_region(region(8, 0, 8, 8))),
+        "JPEG header has not yet been read"
+    );
+    handle.decompress_header(&jpeg).expect("header");
+    assert_eq!(
+        reason(handle.resolve_cropping_region(region(4, 0, 8, 8))),
+        off_grid
+    );
+    assert_eq!(
+        reason(handle.resolve_cropping_region(region(32, 0, 8, 8))),
+        exceeds
+    );
+    assert_eq!(
+        reason(handle.resolve_cropping_region(region(40, 0, 0, 0))),
+        exceeds
+    );
+    assert_eq!(
+        reason(handle.resolve_cropping_region(region(0, 24, 8, 8))),
+        exceeds
+    );
+    assert_eq!(
+        handle
+            .resolve_cropping_region(region(16, 5, 0, 0))
+            .expect("fits"),
+        region(16, 5, 17, 26),
+        "a zero width/height is filled in to the edge"
+    );
+
+    // Accepted regions decode to djpeg's pixels. The second and third are
+    // stored with a zero extent, resolved by the decode.
+    let cases: [(Option<(u32, u32)>, CropRegion, (usize, usize)); 3] = [
+        (None, region(8, 3, 17, 20), (17, 20)),
+        (None, region(16, 5, 0, 0), (17, 26)),
+        (Some((1, 2)), region(4, 2, 9, 0), (9, 14)),
+    ];
+    let djpeg: Option<std::path::PathBuf> = helpers::optional_c_tool("djpeg");
+    for (scale, crop, (want_w, want_h)) in cases {
+        let (num, denom): (u32, u32) = scale.unwrap_or((1, 1));
+        handle
+            .set_scaling_factor(num, denom)
+            .expect("scaling factor");
+        handle.set_cropping_region(Some(crop));
+        let image: libjpeg_turbo_rs::Image = handle.decompress(&jpeg).expect("cropped decode");
+        assert_eq!(
+            (image.width, image.height),
+            (want_w, want_h),
+            "{scale:?} {crop:?}"
+        );
+
+        let Some(djpeg) = djpeg.as_ref() else {
+            eprintln!("SKIP: djpeg not found; pixel comparison for {crop:?}");
+            continue;
+        };
+        // djpeg is asked for the filled-in region.
+        let out: helpers::TempFile = helpers::TempFile::new("tj3_handle_crop.ppm");
+        let mut args: Vec<String> = Vec::new();
+        if let Some((num, denom)) = scale {
+            args.push("-scale".to_string());
+            args.push(format!("{num}/{denom}"));
+        }
+        args.push("-crop".to_string());
+        args.push(format!("{want_w}x{want_h}+{}+{}", crop.x, crop.y));
+        args.push("-ppm".to_string());
+        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        helpers::run_c_djpeg(djpeg, &arg_refs, &fixture, out.path());
+        let (c_w, c_h, c_pixels): (usize, usize, Vec<u8>) = helpers::parse_ppm_file(out.path());
+        assert_eq!((c_w, c_h), (want_w, want_h), "djpeg {args:?}");
+        assert_eq!(image.data.len(), c_pixels.len(), "{crop:?}");
+        assert_eq!(
+            helpers::pixel_max_diff(&image.data, &c_pixels),
+            0,
+            "{crop:?}"
+        );
+    }
+
+    // Each rule refuses at decode time too, instead of clamping.
+    let refused: [(Option<(u32, u32)>, CropRegion, &str); 4] = [
+        // Fitted at 1/2; at 1/1 it is off the 8-pixel grid.
+        (None, region(4, 2, 9, 14), off_grid),
+        (None, region(32, 0, 8, 8), exceeds),
+        (None, region(40, 0, 0, 0), exceeds),
+        (Some((1, 2)), region(0, 10, 4, 7), exceeds),
+    ];
+    for (scale, crop, want) in refused {
+        let (num, denom): (u32, u32) = scale.unwrap_or((1, 1));
+        handle
+            .set_scaling_factor(num, denom)
+            .expect("scaling factor");
+        handle.set_cropping_region(Some(crop));
+        assert_eq!(reason(handle.decompress(&jpeg)), want, "{scale:?} {crop:?}");
+    }
+
+    // Reading a header ignores the stored region, as tj3DecompressHeader does
+    // — the region stored last does not fit, and the read still succeeds.
+    handle
+        .decompress_header(&jpeg)
+        .expect("header read ignores the crop");
+    assert_eq!(handle.get(TjParam::Width), 33);
+    assert_eq!(handle.get(TjParam::Height), 31);
+
+    // TJUNCROPPED clears.
+    handle.set_cropping_region(Some(region(0, 0, 0, 0)));
+    handle.set_scaling_factor(1, 1).expect("scaling factor");
+    let image: libjpeg_turbo_rs::Image = handle.decompress(&jpeg).expect("uncropped decode");
+    assert_eq!((image.width, image.height), (33, 31));
+}
+
+/// Non-standard sampling factors, where TurboJPEG's subsampling
+/// classification (`getSubsamp`, `turbojpeg.c:431-510`), its iMCU rule and the
+/// decoder's real iMCU disagree. Each frame is a committed
+/// `tests/fixtures/crop_sampling_*.jpg`, written by stock 3.2.0's
+/// `cjpeg -sample` from `testorig.ppm`, and each expected outcome for the
+/// region `{8, 0, 32, 16}` is what stock TurboJPEG 3.2.0 does —
+/// `crates/libjpeg-turbo-rs-capi/tests/crop_region_sampling_c_parity.rs` drives
+/// both libraries through the same calls on these files and requires identical
+/// return codes, messages and pixels; this test pins the Rust API to it:
+///
+/// * `2x2,1x1,2x2` — TJSAMP_UNKNOWN; the set is refused.
+/// * `2x2,1x2,1x2` — 4:2:2 spelled with a 2x2 luma, a 16-pixel iMCU; the set
+///   is refused for divisibility.
+/// * `2x2,2x1,2x1` and `2x1,2x1,2x1` — classified 4:4:0 and 4:4:4 (8-pixel
+///   iMCUs) but decoded in 16-pixel columns; the set succeeds and the decode
+///   fails with "Unexplained mismatch" (`turbojpeg-mp.c:217-221`).
+///
+/// Before P4-197 every one of them decoded, the last two to an image 8 columns
+/// wider than the region — through the C ABI, past the end of the caller's
+/// buffer. The first used to be classified 4:2:0 from luma and the first
+/// chroma component alone (codex review).
+#[test]
+fn handle_cropping_region_follows_turbojpeg_on_nonstandard_sampling() {
+    use libjpeg_turbo_rs::{CropRegion, JpegError};
+
+    let fixture = |sampling: &str| -> Vec<u8> {
+        // Embedded: wasm32-wasip1 under wasmtime cannot read tests/fixtures/.
+        let name: String = format!("crop_sampling_{}.jpg", sampling.replace(',', "_"));
+        let bytes: &[u8] = match name.as_str() {
+            "crop_sampling_2x1_2x1_2x1.jpg" => {
+                include_bytes!("fixtures/crop_sampling_2x1_2x1_2x1.jpg")
+            }
+            "crop_sampling_2x2_1x1_2x2.jpg" => {
+                include_bytes!("fixtures/crop_sampling_2x2_1x1_2x2.jpg")
+            }
+            "crop_sampling_2x2_1x2_1x2.jpg" => {
+                include_bytes!("fixtures/crop_sampling_2x2_1x2_1x2.jpg")
+            }
+            "crop_sampling_2x2_2x1_2x1.jpg" => {
+                include_bytes!("fixtures/crop_sampling_2x2_2x1_2x1.jpg")
+            }
+            other => panic!("no embedded fixture named {other}"),
+        };
+        bytes.to_vec()
+    };
+    let region: CropRegion = CropRegion {
+        x: 8,
+        y: 0,
+        width: 32,
+        height: 16,
+    };
+    let mismatch: &str =
+        "Unexplained mismatch between specified (8) and\nactual (0) cropping region left boundary";
+    // (sampling, refusal at set time, refusal at decode time)
+    let cases: [(&str, Option<&str>, Option<&str>); 4] = [
+        (
+            "2x2,1x1,2x2",
+            Some("Could not determine subsampling level of JPEG image"),
+            None,
+        ),
+        (
+            "2x2,1x2,1x2",
+            Some("The left boundary of the cropping region (8) is not\ndivisible by the scaled iMCU width (16)"),
+            None,
+        ),
+        ("2x2,2x1,2x1", None, Some(mismatch)),
+        ("2x1,2x1,2x1", None, Some(mismatch)),
+    ];
+    for (sampling, set_refusal, decode_refusal) in cases {
+        let jpeg: Vec<u8> = fixture(sampling);
+        let mut handle: TjHandle = TjHandle::new();
+        handle.decompress_header(&jpeg).expect("header");
+
+        let resolved: libjpeg_turbo_rs::Result<CropRegion> = handle.resolve_cropping_region(region);
+        match (set_refusal, resolved) {
+            (Some(want), Err(JpegError::InvalidCropRegion { reason })) => {
+                assert_eq!(reason, want, "{sampling}");
+                continue;
+            }
+            (None, Ok(stored)) => handle.set_cropping_region(Some(stored)),
+            (want, got) => panic!("{sampling}: set-time refusal {want:?}, got {got:?}"),
+        }
+        match (decode_refusal, handle.decompress(&jpeg)) {
+            (Some(want), Err(JpegError::InvalidCropRegion { reason })) => {
+                assert_eq!(reason, want, "{sampling}")
+            }
+            (want, Ok(image)) => panic!(
+                "{sampling}: expected refusal {want:?}, decoded {}x{}",
+                image.width, image.height
+            ),
+            (want, Err(other)) => panic!("{sampling}: expected {want:?}, got {other:?}"),
+        }
+    }
+
+    // A left boundary on both grids decodes to exactly the region.
+    let jpeg: Vec<u8> = fixture("2x1,2x1,2x1");
+    let mut handle: TjHandle = TjHandle::new();
+    handle.decompress_header(&jpeg).expect("header");
+    let stored: CropRegion = handle
+        .resolve_cropping_region(CropRegion { x: 16, ..region })
+        .expect("x = 16 is on both grids");
+    handle.set_cropping_region(Some(stored));
+    let image: libjpeg_turbo_rs::Image = handle.decompress(&jpeg).expect("aligned crop decodes");
+    assert_eq!((image.width, image.height), (32, 16));
+}
+
+/// The 12- and 16-bit decompress paths take no region yet (P4-219), so a stored
+/// one is refused instead of being ignored: ignoring it returned the whole
+/// frame to a C caller whose buffer was sized for the region. Upstream crops at
+/// 12 bits (`turbojpeg-mp.c:211-279` is compiled for every
+/// `BITS_IN_JSAMPLE != 16`); until P4-219 lands, refusing is the safe half.
+#[test]
+fn twelve_and_sixteen_bit_decompress_refuse_a_region_they_cannot_apply() {
+    use libjpeg_turbo_rs::{CropRegion, JpegError, Subsampling};
+
+    let samples: Vec<i16> = (0..32 * 32)
+        .map(|i: i32| ((i * 13) % 4096) as i16)
+        .collect();
+    let twelve: Vec<u8> =
+        libjpeg_turbo_rs::precision::compress_12bit(&samples, 32, 32, 1, 90, Subsampling::S444)
+            .expect("12-bit encode");
+    let region: CropRegion = CropRegion {
+        x: 8,
+        y: 4,
+        width: 16,
+        height: 8,
+    };
+
+    let mut handle: TjHandle = TjHandle::new();
+    let whole: libjpeg_turbo_rs::precision::Image12 = handle
+        .decompress_12bit(&twelve)
+        .expect("no region: decodes");
+    assert_eq!((whole.width, whole.height), (32, 32));
+
+    handle.set_cropping_region(Some(region));
+    match handle.decompress_12bit(&twelve) {
+        Err(JpegError::Unsupported(message)) => assert!(message.contains("P4-219"), "{message}"),
+        Ok(image) => panic!("decoded {}x{} for a 16x8 region", image.width, image.height),
+        Err(other) => panic!("expected Unsupported, got {other:?}"),
+    }
+    match handle.decompress_16bit(&twelve) {
+        Err(JpegError::Unsupported(message)) => assert!(message.contains("P4-219"), "{message}"),
+        Ok(image) => panic!("decoded {}x{} for a 16x8 region", image.width, image.height),
+        Err(other) => panic!("expected Unsupported, got {other:?}"),
+    }
 }
 
 #[test]
