@@ -2,57 +2,115 @@
 //!
 //! Provides [`JpegDecoder`] and [`JpegEncoder`] that implement the
 //! [`image::ImageDecoder`] and [`image::ImageEncoder`] traits respectively,
-//! backed by the high-performance `libjpeg-turbo-rs` codec.
+//! backed by the `libjpeg-turbo-rs` codec.
+//!
+//! # Which `image` entry points use this backend
+//!
+//! Only the ones you construct explicitly. This crate does not register
+//! itself with `image`: `image::open`, `ImageReader::decode`,
+//! `load_from_memory` and `DynamicImage::save` keep using `image`'s own JPEG
+//! codec. To decode through this crate, build a [`JpegDecoder`] and hand it
+//! to [`image::DynamicImage::from_decoder`] (or call
+//! [`ImageDecoder::read_image`] yourself); to encode, pass a [`JpegEncoder`]
+//! to [`image::DynamicImage::write_with_encoder`].
 //!
 //! # Example
 //!
 //! ```rust,no_run
 //! use libjpeg_turbo_rs_image::JpegDecoder;
-//! use image::ImageDecoder;
+//! use image::{DynamicImage, ImageDecoder};
 //! use std::fs;
 //!
 //! let data = fs::read("photo.jpg").unwrap();
 //! let mut decoder = JpegDecoder::new(&data).unwrap();
-//! let (width, height) = decoder.dimensions();
-//! let color_type = decoder.color_type();
-//! let mut buf = vec![0u8; decoder.total_bytes() as usize];
-//! decoder.read_image(&mut buf).unwrap();
+//! let orientation = decoder.orientation().unwrap();
+//! let mut image = DynamicImage::from_decoder(decoder).unwrap();
+//! image.apply_orientation(orientation);
 //! ```
 
-use image::{ColorType, ExtendedColorType, ImageDecoder, ImageEncoder, ImageError, ImageResult};
+use image::error::{
+    DecodingError, EncodingError, ImageFormatHint, LimitError, LimitErrorKind, ParameterError,
+    ParameterErrorKind, UnsupportedError, UnsupportedErrorKind,
+};
+use image::metadata::Orientation;
+use image::{
+    ColorType, ExtendedColorType, ImageDecoder, ImageEncoder, ImageError, ImageFormat, ImageResult,
+    Limits,
+};
 use libjpeg_turbo_rs::{
-    compress, decompress_to, JpegError, PixelFormat, ScanlineDecoder, Subsampling,
+    compress, DecodeLimits, Decoder, FrameHeader, JpegError, MarkerSaveConfig, PixelFormat,
+    SavedMarker, Subsampling,
 };
 use std::io::Write;
 
+const APP1: u8 = 0xE1;
+const APP13: u8 = 0xED;
+const EXIF_SIGNATURE: &[u8] = b"Exif\0\0";
+const XMP_SIGNATURE: &[u8] = b"http://ns.adobe.com/xap/1.0/\0";
+const PHOTOSHOP_SIGNATURE: &[u8] = b"Photoshop 3.0\0";
+
 // ===== Error conversion =====
 
-/// Convert a [`JpegError`] into an [`ImageError`].
-fn jpeg_error_to_image_error(err: JpegError) -> ImageError {
-    ImageError::Decoding(image::error::DecodingError::new(
-        image::error::ImageFormatHint::Name("JPEG".to_string()),
-        err,
-    ))
+fn jpeg_format_hint() -> ImageFormatHint {
+    ImageFormatHint::Exact(ImageFormat::Jpeg)
 }
 
-/// Convert a [`JpegError`] into an [`ImageError`] for encoding context.
-fn jpeg_encode_error_to_image_error(err: JpegError) -> ImageError {
-    ImageError::Encoding(image::error::EncodingError::new(
-        image::error::ImageFormatHint::Name("JPEG".to_string()),
-        err,
-    ))
+/// The `ImageError` category a codec error belongs to, shared by decode and
+/// encode so both directions classify a refusal the same way.
+///
+/// Limit and allocation refusals are `ImageError::Limits` — the category
+/// `image` itself uses when `Limits` stop a decode — rather than a decoding
+/// failure, so a caller can tell "this file is too big for the budget I set"
+/// from "this file is broken".
+fn classify_error(err: JpegError, is_encoding: bool) -> ImageError {
+    match err {
+        JpegError::LimitExceeded { what, .. } => {
+            // The three frame-geometry refusals `DecodeLimits::check_frame`
+            // raises are dimension errors; every other limit (memory
+            // estimate, scan count, marker and ICC chunk lists) bounds a
+            // resource, which `image` calls insufficient memory.
+            let kind: LimitErrorKind = match what {
+                "image width" | "image height" | "total pixels" => LimitErrorKind::DimensionError,
+                _ => LimitErrorKind::InsufficientMemory,
+            };
+            ImageError::Limits(LimitError::from_kind(kind))
+        }
+        JpegError::AllocationFailed { .. } => {
+            ImageError::Limits(LimitError::from_kind(LimitErrorKind::InsufficientMemory))
+        }
+        JpegError::Unsupported(feature) => {
+            ImageError::Unsupported(UnsupportedError::from_format_and_kind(
+                jpeg_format_hint(),
+                UnsupportedErrorKind::GenericFeature(feature),
+            ))
+        }
+        JpegError::BufferTooSmall { .. } => ImageError::Parameter(ParameterError::from_kind(
+            ParameterErrorKind::DimensionMismatch,
+        )),
+        JpegError::Io(io_error) => ImageError::IoError(io_error),
+        other if is_encoding => ImageError::Encoding(EncodingError::new(jpeg_format_hint(), other)),
+        other => ImageError::Decoding(DecodingError::new(jpeg_format_hint(), other)),
+    }
+}
+
+fn decode_error(err: JpegError) -> ImageError {
+    classify_error(err, false)
+}
+
+fn encode_error(err: JpegError) -> ImageError {
+    classify_error(err, true)
 }
 
 // ===== ColorType mapping =====
 
-/// Map our [`PixelFormat`] to an `image::ColorType`.
-fn pixel_format_to_color_type(fmt: PixelFormat) -> Option<ColorType> {
-    match fmt {
+/// The `image::ColorType` a decode to `format` produces, if `image` has one.
+fn pixel_format_to_color_type(format: PixelFormat) -> Option<ColorType> {
+    match format {
         PixelFormat::Grayscale => Some(ColorType::L8),
         PixelFormat::Rgb => Some(ColorType::Rgb8),
         PixelFormat::Rgba => Some(ColorType::Rgba8),
-        // image crate has no native BGR/BGRA/CMYK color types — callers
-        // should request RGB/RGBA explicitly via decompress_to().
+        // image has no BGR/BGRA/ARGB/CMYK/RGB565 color types, and
+        // `ImageDecoder::read_image` must fill a buffer of `color_type()`.
         _ => None,
     }
 }
@@ -71,81 +129,190 @@ fn extended_color_type_to_pixel_format(color_type: ExtendedColorType) -> Option<
 
 /// JPEG decoder backed by `libjpeg-turbo-rs`, implementing [`image::ImageDecoder`].
 ///
-/// Decodes the full image eagerly on construction and stores the decoded pixel
-/// data in memory. This matches the contract of `ImageDecoder` which requires
-/// all metadata (`dimensions`, `color_type`) to be available before
-/// `read_image` is called.
+/// Construction parses the headers only: dimensions, color type and metadata
+/// are known, and no pixel has been decoded or allocated. The pixel decode
+/// runs in [`ImageDecoder::read_image`]. For 8-bit grayscale and
+/// three-component (YCbCr/RGB) streams, baseline or progressive, it decodes
+/// straight into the caller's buffer, so no second decoded copy of the image
+/// exists. Four-component (CMYK/YCCK), 12-bit and lossless streams are still
+/// staged by the core decoder in a full-size buffer and copied — tracked as
+/// P4-213. What the decoder holds between calls is the compressed stream: [`JpegDecoder::new`] copies it once (it
+/// takes a borrowed slice, and `read_image(self, ..)` must own what it decodes
+/// from); [`JpegDecoder::from_vec`] takes an owned buffer and copies nothing.
+///
+/// Decoding still allocates working memory — component planes for upsampling
+/// and colour conversion, and a coefficient buffer for progressive streams —
+/// so it is not allocation-free. [`ImageDecoder::set_limits`] bounds the
+/// core's *estimate* of that memory together with the output size; the
+/// estimate does not count the staging buffer of the paths above, so
+/// `max_alloc` is non-strict there.
+///
+/// # Color types
+///
+/// | JPEG                       | `color_type()` | `original_color_type()` |
+/// |----------------------------|----------------|-------------------------|
+/// | 1 component (grayscale)    | `L8`           | `L8`                    |
+/// | 3 components (YCbCr / RGB) | `Rgb8`         | `Rgb8`                  |
+/// | 4 components (CMYK / YCCK) | `Rgb8`         | `Cmyk8`                 |
+///
+/// [`JpegDecoder::new_with_format`] selects `Rgba8` (or forces `L8`/`Rgb8`).
+///
+/// # Differences from `image`'s built-in JPEG decoder
+///
+/// * Corrupt and truncated streams are errors by default, as in C
+///   libjpeg-turbo with `-strict`; `image`'s built-in decoder fills what it
+///   cannot decode. [`JpegDecoder::set_lenient`] opts into the lenient
+///   behaviour. Construction parses headers only in both, so a stream whose
+///   entropy data is corrupt constructs and fails in `read_image`.
+/// * `original_color_type()` reports `Cmyk8` for a four-component stream,
+///   where the built-in decoder reports the converted `Rgb8`.
+///
+/// EXIF, XMP, IPTC and ICC bytes and the orientation are the same as the
+/// built-in decoder's for the same file, including its choice of the *last*
+/// segment when one repeats and its omission of Extended XMP.
 pub struct JpegDecoder {
+    input: Vec<u8>,
     width: u32,
     height: u32,
+    output_format: PixelFormat,
     color_type: ColorType,
-    pixels: Vec<u8>,
-    icc_profile: Option<Vec<u8>>,
+    original_color_type: ExtendedColorType,
+    limits: DecodeLimits,
+    lenient: bool,
 }
 
 impl JpegDecoder {
-    /// Create a new decoder from raw JPEG bytes.
+    /// Create a decoder from borrowed JPEG bytes, copying them once.
     ///
-    /// Decodes the image eagerly. Returns an error if the data is not valid
-    /// JPEG or if the output color type cannot be mapped to an `image` type.
+    /// Parses the headers only. Grayscale JPEGs decode to `L8`, everything
+    /// else to `Rgb8`.
     pub fn new(data: &[u8]) -> ImageResult<Self> {
-        // Peek at the JPEG header to determine the source color space so we
-        // can choose the appropriate output pixel format. Grayscale JPEGs
-        // (1 component) must decode to L8, not RGB8.
-        let header_reader = ScanlineDecoder::new(data).map_err(jpeg_error_to_image_error)?;
-        let jpeg_color_space = header_reader.header().components.len();
-        drop(header_reader);
+        Self::from_vec(copy_input(data)?)
+    }
 
-        let output_format = if jpeg_color_space == 1 {
-            PixelFormat::Grayscale
-        } else {
-            PixelFormat::Rgb
-        };
-
-        let decoded = decompress_to(data, output_format).map_err(jpeg_error_to_image_error)?;
-
-        let color_type = pixel_format_to_color_type(decoded.pixel_format).ok_or_else(|| {
-            ImageError::Unsupported(image::error::UnsupportedError::from_format_and_kind(
-                image::error::ImageFormatHint::Name("JPEG".to_string()),
-                image::error::UnsupportedErrorKind::Color(ExtendedColorType::Unknown(
-                    decoded.pixel_format.bytes_per_pixel() as u8 * 8,
-                )),
-            ))
-        })?;
-
-        Ok(Self {
-            width: decoded.width as u32,
-            height: decoded.height as u32,
-            color_type,
-            pixels: decoded.data,
-            icc_profile: decoded.icc_profile,
-        })
+    /// Create a decoder that takes ownership of the JPEG bytes (no copy).
+    ///
+    /// Parses the headers only. Grayscale JPEGs decode to `L8`, everything
+    /// else to `Rgb8`.
+    pub fn from_vec(data: Vec<u8>) -> ImageResult<Self> {
+        Self::with_output_format(data, None)
     }
 
     /// Create a decoder that decodes to a specific pixel format.
     ///
-    /// Use this when you need a format not representable as a standard
-    /// `image::ColorType` (e.g., BGR, BGRA).
+    /// `format` must be one `image` has a color type for: `Grayscale` (`L8`),
+    /// `Rgb` (`Rgb8`) or `Rgba` (`Rgba8`). Any other format (BGR, BGRA,
+    /// CMYK, ...) is refused here with `ImageError::Unsupported`, because
+    /// `read_image` must fill a buffer laid out as `color_type()`; decode those
+    /// with `libjpeg_turbo_rs::Decoder` directly.
     pub fn new_with_format(data: &[u8], format: PixelFormat) -> ImageResult<Self> {
-        let decoded = decompress_to(data, format).map_err(jpeg_error_to_image_error)?;
+        Self::with_output_format(copy_input(data)?, Some(format))
+    }
 
-        let color_type = pixel_format_to_color_type(decoded.pixel_format).ok_or_else(|| {
-            ImageError::Unsupported(image::error::UnsupportedError::from_format_and_kind(
-                image::error::ImageFormatHint::Name("JPEG".to_string()),
-                image::error::UnsupportedErrorKind::Color(ExtendedColorType::Unknown(
-                    decoded.pixel_format.bytes_per_pixel() as u8 * 8,
+    /// One header parse for everything construction needs. `None` picks the
+    /// default output: `L8` for one component, `Rgb8` otherwise.
+    fn with_output_format(
+        input: Vec<u8>,
+        requested_format: Option<PixelFormat>,
+    ) -> ImageResult<Self> {
+        let decoder: Decoder<'_> = Decoder::new(&input).map_err(decode_error)?;
+        let header: &FrameHeader = decoder.header();
+        let component_count: usize = header.components.len();
+        let output_format: PixelFormat = requested_format.unwrap_or(if component_count == 1 {
+            PixelFormat::Grayscale
+        } else {
+            PixelFormat::Rgb
+        });
+        let color_type: ColorType = pixel_format_to_color_type(output_format).ok_or_else(|| {
+            ImageError::Unsupported(UnsupportedError::from_format_and_kind(
+                jpeg_format_hint(),
+                UnsupportedErrorKind::Color(ExtendedColorType::Unknown(
+                    (output_format.bytes_per_pixel() * 8) as u8,
                 )),
             ))
         })?;
-
+        // The core has no CMYK/YCCK -> grayscale conversion; say so now rather
+        // than after the caller has allocated a destination.
+        if component_count == 4 && output_format == PixelFormat::Grayscale {
+            return Err(ImageError::Unsupported(
+                UnsupportedError::from_format_and_kind(
+                    jpeg_format_hint(),
+                    UnsupportedErrorKind::Color(ExtendedColorType::L8),
+                ),
+            ));
+        }
+        let original_color_type: ExtendedColorType = match component_count {
+            1 => ExtendedColorType::L8,
+            4 => ExtendedColorType::Cmyk8,
+            _ => ExtendedColorType::Rgb8,
+        };
+        let (width, height): (u32, u32) = (u32::from(header.width), u32::from(header.height));
+        drop(decoder);
         Ok(Self {
-            width: decoded.width as u32,
-            height: decoded.height as u32,
+            input,
+            width,
+            height,
+            output_format,
             color_type,
-            pixels: decoded.data,
-            icc_profile: decoded.icc_profile,
+            original_color_type,
+            limits: DecodeLimits::default(),
+            lenient: false,
         })
     }
+
+    /// Decode corrupt or truncated streams best-effort instead of failing.
+    ///
+    /// Off by default. With it on, entropy-coded data that cannot be decoded
+    /// is filled rather than reported, which is what `image`'s built-in JPEG
+    /// decoder does unconditionally.
+    pub fn set_lenient(&mut self, lenient: bool) {
+        self.lenient = lenient;
+    }
+
+    /// A header-parsed core decoder over the stored input, with this
+    /// decoder's limits and options applied.
+    fn core_decoder(&self) -> ImageResult<Decoder<'_>> {
+        let mut decoder: Decoder<'_> =
+            Decoder::new_with_limits(&self.input, self.limits).map_err(decode_error)?;
+        decoder.set_output_format(self.output_format);
+        decoder.set_lenient(self.lenient);
+        Ok(decoder)
+    }
+
+    /// The payload of the last `marker` segment whose data starts with
+    /// `signature` and has at least one byte after it — the rule `image`'s
+    /// built-in decoder (zune-jpeg) applies to EXIF, XMP and IPTC. The core
+    /// crate's own accessors differ on purpose (first EXIF wins, Extended XMP
+    /// appended, IPTC reduced to the IIM payload), and an application
+    /// switching backends should get the bytes it got before.
+    fn last_segment_payload(&self, marker: u8, signature: &[u8]) -> ImageResult<Option<Vec<u8>>> {
+        let mut decoder: Decoder<'_> = Decoder::new(&self.input).map_err(decode_error)?;
+        decoder.save_markers(MarkerSaveConfig::Specific(vec![marker]));
+        Ok(decoder
+            .saved_markers()
+            .iter()
+            .rev()
+            .filter(|saved: &&SavedMarker| saved.code == marker)
+            .filter_map(|saved: &SavedMarker| saved.data.strip_prefix(signature))
+            .find(|payload: &&[u8]| !payload.is_empty())
+            .map(<[u8]>::to_vec))
+    }
+
+    /// The EXIF payload (TIFF header onward).
+    fn exif_payload(&self) -> ImageResult<Option<Vec<u8>>> {
+        self.last_segment_payload(APP1, EXIF_SIGNATURE)
+    }
+}
+
+/// Copy a borrowed stream into an owned buffer, reporting allocator refusal
+/// instead of aborting: the size is the caller's input, which may be large.
+fn copy_input(data: &[u8]) -> ImageResult<Vec<u8>> {
+    let mut input: Vec<u8> = Vec::new();
+    input.try_reserve_exact(data.len()).map_err(|_| {
+        ImageError::Limits(LimitError::from_kind(LimitErrorKind::InsufficientMemory))
+    })?;
+    input.extend_from_slice(data);
+    Ok(input)
 }
 
 impl ImageDecoder for JpegDecoder {
@@ -157,16 +324,69 @@ impl ImageDecoder for JpegDecoder {
         self.color_type
     }
 
+    fn original_color_type(&self) -> ExtendedColorType {
+        self.original_color_type
+    }
+
+    fn icc_profile(&mut self) -> ImageResult<Option<Vec<u8>>> {
+        let decoder: Decoder<'_> = Decoder::new(&self.input).map_err(decode_error)?;
+        decoder.icc_profile().map_err(decode_error)
+    }
+
+    fn exif_metadata(&mut self) -> ImageResult<Option<Vec<u8>>> {
+        self.exif_payload()
+    }
+
+    /// The standard XMP packet only, as `image`'s built-in decoder returns
+    /// it; Extended XMP segments (`http://ns.adobe.com/xmp/extension/`) are
+    /// not appended. Use `libjpeg_turbo_rs::Decoder::xmp_data` for the
+    /// reassembled extension.
+    fn xmp_metadata(&mut self) -> ImageResult<Option<Vec<u8>>> {
+        self.last_segment_payload(APP1, XMP_SIGNATURE)
+    }
+
+    /// The Photoshop image resource block from APP13 — everything after the
+    /// `Photoshop 3.0\0` signature, `8BIM` resource headers included — which
+    /// is what `image`'s own decoder returns here. (The core crate's
+    /// `Decoder::iptc_data` returns only the IIM payload inside resource
+    /// 0x0404.)
+    fn iptc_metadata(&mut self) -> ImageResult<Option<Vec<u8>>> {
+        self.last_segment_payload(APP13, PHOTOSHOP_SIGNATURE)
+    }
+
+    /// The EXIF orientation, reported and never applied: `read_image`
+    /// returns the stored pixel order, so `DynamicImage::apply_orientation`
+    /// with this value rotates exactly once. Same parse as `image`'s own
+    /// decoder (`Orientation::from_exif_chunk`), defaulting to
+    /// `NoTransforms` when the stream has no EXIF or no valid tag.
+    fn orientation(&mut self) -> ImageResult<Orientation> {
+        Ok(self
+            .exif_payload()?
+            .as_deref()
+            .and_then(Orientation::from_exif_chunk)
+            .unwrap_or(Orientation::NoTransforms))
+    }
+
     fn read_image(self, buf: &mut [u8]) -> ImageResult<()> {
-        let expected = self.total_bytes() as usize;
-        if buf.len() < expected {
-            return Err(ImageError::Parameter(
-                image::error::ParameterError::from_kind(
-                    image::error::ParameterErrorKind::DimensionMismatch,
-                ),
-            ));
+        let expected: u64 = self.total_bytes();
+        if buf.len() as u64 != expected {
+            return Err(ImageError::Parameter(ParameterError::from_kind(
+                ParameterErrorKind::DimensionMismatch,
+            )));
         }
-        buf[..expected].copy_from_slice(&self.pixels);
+        let decoder: Decoder<'_> = self.core_decoder()?;
+        let written: usize = decoder
+            .decode_image_into(buf)
+            .map_err(decode_error)?
+            .bytes_written;
+        // decode_image_into reports exactly what it wrote; anything short of
+        // the advertised size would leave caller bytes stale.
+        if written as u64 != expected {
+            return Err(ImageError::Decoding(DecodingError::new(
+                jpeg_format_hint(),
+                format!("decoded {written} bytes where the header advertised {expected}"),
+            )));
+        }
         Ok(())
     }
 
@@ -174,8 +394,38 @@ impl ImageDecoder for JpegDecoder {
         (*self).read_image(buf)
     }
 
-    fn icc_profile(&mut self) -> ImageResult<Option<Vec<u8>>> {
-        Ok(self.icc_profile.take())
+    /// Applies `max_image_width`, `max_image_height` and `max_alloc`.
+    ///
+    /// The dimension limits are checked against the header here, before any
+    /// pixel allocation, and again by the core decoder. `max_alloc` becomes
+    /// the core's decode-memory ceiling, whose estimate counts the output
+    /// buffer, the component planes and — for progressive streams — the
+    /// coefficient buffer; a stream over it is refused here as well, so
+    /// `ImageError::Limits` arrives before `read_image` allocates anything.
+    /// On refusal the previous limits stay in force.
+    fn set_limits(&mut self, limits: Limits) -> ImageResult<()> {
+        limits.check_support(&image::LimitSupport::default())?;
+        limits.check_dimensions(self.width, self.height)?;
+        let defaults: DecodeLimits = DecodeLimits::default();
+        let mut core_limits: DecodeLimits = defaults;
+        if let Some(max_width) = limits.max_image_width {
+            core_limits.max_width = defaults.max_width.min(max_width as usize);
+        }
+        if let Some(max_height) = limits.max_image_height {
+            core_limits.max_height = defaults.max_height.min(max_height as usize);
+        }
+        core_limits.max_memory = limits.max_alloc;
+        let previous: DecodeLimits = std::mem::replace(&mut self.limits, core_limits);
+        // `output_buffer_size` runs the core's header-limit checks — the same
+        // ones `read_image` will hit — without decoding anything.
+        let checked: ImageResult<usize> = self
+            .core_decoder()
+            .and_then(|decoder: Decoder<'_>| decoder.output_buffer_size().map_err(decode_error));
+        if let Err(error) = checked {
+            self.limits = previous;
+            return Err(error);
+        }
+        Ok(())
     }
 }
 
@@ -231,14 +481,24 @@ impl<W: Write> ImageEncoder for JpegEncoder<W> {
         height: u32,
         color_type: ExtendedColorType,
     ) -> ImageResult<()> {
-        let pixel_format = extended_color_type_to_pixel_format(color_type).ok_or_else(|| {
-            ImageError::Unsupported(image::error::UnsupportedError::from_format_and_kind(
-                image::error::ImageFormatHint::Name("JPEG".to_string()),
-                image::error::UnsupportedErrorKind::Color(color_type),
-            ))
-        })?;
+        let pixel_format: PixelFormat = extended_color_type_to_pixel_format(color_type)
+            .ok_or_else(|| {
+                ImageError::Unsupported(UnsupportedError::from_format_and_kind(
+                    jpeg_format_hint(),
+                    UnsupportedErrorKind::Color(color_type),
+                ))
+            })?;
 
-        let jpeg_data = compress(
+        // `ImageEncoder::write_image` takes exactly `width * height` pixels;
+        // the core accepts a longer buffer, so the contract is checked here.
+        let expected_len: u64 =
+            u64::from(width) * u64::from(height) * pixel_format.bytes_per_pixel() as u64;
+        if buf.len() as u64 != expected_len {
+            return Err(ImageError::Parameter(ParameterError::from_kind(
+                ParameterErrorKind::DimensionMismatch,
+            )));
+        }
+        let jpeg_data: Vec<u8> = compress(
             buf,
             width as usize,
             height as usize,
@@ -246,7 +506,7 @@ impl<W: Write> ImageEncoder for JpegEncoder<W> {
             self.quality,
             self.subsampling,
         )
-        .map_err(jpeg_encode_error_to_image_error)?;
+        .map_err(encode_error)?;
 
         self.writer
             .write_all(&jpeg_data)
@@ -259,7 +519,7 @@ impl<W: Write> ImageEncoder for JpegEncoder<W> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use image::ImageDecoder;
+    use libjpeg_turbo_rs::decompress_to;
 
     /// Path to a small JPEG fixture available in the workspace fuzz corpus.
     const FIXTURE_RGB: &str = concat!(
