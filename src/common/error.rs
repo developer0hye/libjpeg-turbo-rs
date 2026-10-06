@@ -50,6 +50,22 @@ pub enum JpegError {
     #[error("invalid scan script at entry {entry}: {reason}")]
     InvalidScanScript { entry: usize, reason: &'static str },
 
+    /// A cropping region was refused (issue #618).
+    ///
+    /// `Decoder` raises it when the region does not fit inside the scaled
+    /// output — `x + width > output_width` or `y + height > output_height`,
+    /// the bound `djpeg -crop` and `tj3SetCroppingRegion` enforce — or has a
+    /// zero width, instead of clamping it to a degenerate image. `TjHandle`
+    /// also raises it for TurboJPEG's other cropping rules (no header read
+    /// yet, a lossless frame, an unclassifiable subsampling, a left boundary
+    /// not divisible by the scaled iMCU width, a decode that does not match
+    /// the region).
+    ///
+    /// `reason` is upstream TurboJPEG's message, verbatim, so the C ABI can
+    /// report exactly what stock `tj3GetErrorStr` reports.
+    #[error("{reason}")]
+    InvalidCropRegion { reason: String },
+
     #[error("unexpected end of data")]
     UnexpectedEof,
 
