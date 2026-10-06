@@ -3,6 +3,9 @@
 use alloc::vec::Vec;
 #[allow(unused_imports)]
 use alloc::{format, vec};
+
+use crate::common::error::{JpegError, Result};
+use crate::common::types::ScanScript;
 /// Progressive JPEG scan script generation and encoding.
 ///
 /// Generates a simple progressive scan order following libjpeg-turbo's
@@ -20,6 +23,117 @@ pub struct ProgressiveScan {
     pub ah: u8,
     /// Successive approximation low bit.
     pub al: u8,
+}
+
+/// The highest `Ah`/`Al` C allows for 8-bit data (`jcmaster.c:349`): an `Al`
+/// above 10 drives first-scan DC values out of range.
+const MAX_AH_AL_8BIT: u8 = 10;
+
+/// `MAX_COMPS_IN_SCAN` (`jpeglib.h`).
+const MAX_COMPS_IN_SCAN: usize = 4;
+
+/// Refuse a caller-supplied progressive scan script that C's `validate_script`
+/// (`jcmaster.c:279-439`) would refuse, before any encoding work runs.
+///
+/// This is the primary guard between `Encoder::scan_script` and the AC kernels
+/// (the kernels' safe wrappers also assert the band):
+/// the band `ss..=se` becomes `band_len = se - ss + 1`, and the x86_64 SSE2
+/// preparation kernels index a `[i16; 64]` block and two `[u16; 64]` outputs
+/// with it unchecked (issue #610). The rules are C's progressive-mode rules —
+/// the script this API takes always selects progressive coding, so a first
+/// entry shaped like C's sequential (`Ss = 0, Se = 63`) or lossless
+/// (`Ss != 0, Se = 0`) selector is refused by the same rules rather than
+/// reinterpreted.
+///
+/// `num_components` is the frame's component count. The entry number in the
+/// error is 1-based like C's `scanno`; `0` names the whole script.
+pub(crate) fn validate_scan_script(script: &[ScanScript], num_components: usize) -> Result<()> {
+    let invalid =
+        |entry: usize, reason: &'static str| JpegError::InvalidScanScript { entry, reason };
+    if script.is_empty() {
+        // jcmaster.c:291-292, JERR_BAD_SCAN_SCRIPT with entry 0.
+        return Err(invalid(0, "the script has no scans"));
+    }
+    // Per component and coefficient: -1 until the coefficient is first sent,
+    // then the Al it was last sent with (C's `last_bitpos`).
+    let mut last_bitpos: Vec<[i16; 64]> = vec![[-1i16; 64]; num_components];
+    for (index, entry) in script.iter().enumerate() {
+        let scan_number: usize = index + 1;
+        let components: &[u8] = &entry.components;
+        // jcmaster.c:330-332, JERR_COMPONENT_COUNT.
+        if components.is_empty() || components.len() > MAX_COMPS_IN_SCAN {
+            return Err(invalid(
+                scan_number,
+                "a scan carries one to four components",
+            ));
+        }
+        // jcmaster.c:333-340, JERR_BAD_SCAN_SCRIPT.
+        for (position, &component) in components.iter().enumerate() {
+            if usize::from(component) >= num_components {
+                return Err(invalid(scan_number, "component index past the frame"));
+            }
+            if position > 0 && component <= components[position - 1] {
+                return Err(invalid(
+                    scan_number,
+                    "components must appear in frame order, each once",
+                ));
+            }
+        }
+        let (ss, se, ah, al) = (entry.ss, entry.se, entry.ah, entry.al);
+        // jcmaster.c:355-357, JERR_BAD_PROG_SCRIPT from here to the loop's end.
+        if ss >= 64 || se < ss || se >= 64 || ah > MAX_AH_AL_8BIT || al > MAX_AH_AL_8BIT {
+            return Err(invalid(
+                scan_number,
+                "progression parameters out of range (Ss <= Se <= 63, Ah and Al <= 10)",
+            ));
+        }
+        if ss == 0 {
+            if se != 0 {
+                return Err(invalid(
+                    scan_number,
+                    "a DC scan cannot carry AC coefficients",
+                ));
+            }
+        } else if components.len() != 1 {
+            return Err(invalid(
+                scan_number,
+                "an AC scan carries exactly one component",
+            ));
+        }
+        for &component in components {
+            let bitpos: &mut [i16; 64] = &mut last_bitpos[usize::from(component)];
+            if ss != 0 && bitpos[0] < 0 {
+                return Err(invalid(
+                    scan_number,
+                    "an AC scan precedes its component's DC scan",
+                ));
+            }
+            for last_al in &mut bitpos[usize::from(ss)..=usize::from(se)] {
+                if *last_al < 0 {
+                    if ah != 0 {
+                        return Err(invalid(
+                            scan_number,
+                            "the first scan of a coefficient must have Ah = 0",
+                        ));
+                    }
+                } else if i16::from(ah) != *last_al || u16::from(al) + 1 != u16::from(ah) {
+                    return Err(invalid(
+                        scan_number,
+                        "a refinement scan needs Ah = the previous Al and Al = Ah - 1",
+                    ));
+                }
+                *last_al = i16::from(al);
+            }
+        }
+    }
+    // jcmaster.c:422-430: progressive mode only requires some DC per component.
+    if last_bitpos.iter().any(|bitpos: &[i16; 64]| bitpos[0] < 0) {
+        return Err(invalid(
+            0,
+            "the script does not transmit every component's DC",
+        ));
+    }
+    Ok(())
 }
 
 /// Generate a simple progressive scan script.

@@ -40,6 +40,16 @@ pub enum JpegError {
     #[error("allocation of {bytes} bytes for {what} failed")]
     AllocationFailed { what: &'static str, bytes: u64 },
 
+    /// A caller-supplied progressive scan script breaks a rule C's
+    /// `validate_script` (`jcmaster.c:279-439`) enforces, so it was refused
+    /// before any encoding work ran (issue #610).
+    ///
+    /// `entry` is the 1-based script entry, as C's `scanno` is; `0` means the
+    /// script as a whole — it is empty, or it never sends some component's DC
+    /// (C's `JERR_MISSING_DATA`).
+    #[error("invalid scan script at entry {entry}: {reason}")]
+    InvalidScanScript { entry: usize, reason: &'static str },
+
     #[error("unexpected end of data")]
     UnexpectedEof,
 

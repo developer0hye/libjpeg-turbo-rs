@@ -8310,7 +8310,7 @@ the harness first would only pin current behaviour.
   [P4-191](#p4-191-seventy-one-inventoried-unsafe-items-have-no-regression-test--open)
   (#609), which includes three uncalled functions holding `unsafe`. Writing
   one of those cells also produced the criterion's first *defect*:
-  [P4-192](#p4-192-a-custom-scan-script-with-se--63-writes-past-two-stack-arrays-from-safe-rust-on-x86_64--open)
+  [P4-192](#p4-192-a-custom-scan-script-with-se--63-writes-past-two-stack-arrays-from-safe-rust-on-x86_64--closed-2026-10-07)
   (#610), a stack overflow reachable from safe Rust — the answer to the
   premise of this whole item, which is that no gate had ever found one.
   The workspace's other two crates (`libjpeg-turbo-rs-image`,
@@ -11117,7 +11117,7 @@ across four backends and the C ABI is its own work, and deleting dead
 `unsafe` changes the compiled surface, which a documentation-and-gate change
 should not.
 
-## P4-192. A Custom Scan Script With `Se > 63` Writes Past Two Stack Arrays From Safe Rust on x86_64 — **OPEN**
+## P4-192. A Custom Scan Script With `Se > 63` Writes Past Two Stack Arrays From Safe Rust on x86_64 — **CLOSED 2026-10-07**
 
 **GitHub:** [#610](https://github.com/developer0hye/libjpeg-turbo-rs/issues/610) — found 2026-09-08 by the P4-141 criterion-4 inventory; under the [#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481) umbrella.
 
@@ -11170,6 +11170,40 @@ approximation chain. This port has no equivalent.
 **Why deferred.** Filed rather than fixed inside the P4-141 criterion-4 pull
 request, which changes no file under `src/`; the fix is a behaviour change
 with its own C-parity contract and its own TDD cycle.
+
+**Status (2026-10-07): closed.** Per criterion:
+
+1. `validate_scan_script` (`src/encode/progressive.rs`) ports
+   `validate_script`'s progressive arm — the `JERR_COMPONENT_COUNT`,
+   `JERR_BAD_SCAN_SCRIPT` and `JERR_BAD_PROG_SCRIPT` checks, the
+   `last_bitpos` successive-approximation chain and the final
+   `JERR_MISSING_DATA` DC check, with the 8-bit `Ah`/`Al` ceiling of 10 — and
+   `compress_progressive_custom_with_restart` calls it before any other work.
+   Refusal is the new `JpegError::InvalidScanScript { entry, reason }`, with
+   `entry` 1-based like C's `scanno` (0 for the whole script). The builder's
+   script always selects progressive coding, so a first entry shaped like C's
+   sequential (`Ss = 0, Se = 63`) or lossless (`Ss != 0, Se = 0`) selector is
+   refused by the same rules rather than reinterpreted; that is pinned by
+   `sequential_and_lossless_shaped_scripts_are_refused`.
+2. `tests/scan_script_validation.rs::issue_610_se_past_63_is_refused_not_written`
+   drives the reproducer. Discriminating on x86_64, measured on
+   `--target x86_64-apple-darwin --release`: with the validation call and the
+   wrapper asserts removed it fails with `se = 200: expected
+   InvalidScanScript, got Ok with 1241 bytes`; with them it passes. The CI
+   x86_64 legs run it. `refusals_match_cjpeg_entry_for_entry` runs nineteen
+   refused scripts through `cjpeg -scans` and requires C to refuse each with
+   its own message naming the same entry; `accepted_scripts_match_cjpeg`
+   requires both sides to accept seven valid ones and to write the same bytes
+   (which found P4-211).
+3. Both SSE2 kernels have a `# Safety` section; both safe wrappers assert
+   `ss <= 64 && band_len <= 64 - ss` before the call (both arms) — not
+   `ss + band_len <= 64`, which a wrapped `se - ss + 1` passes in release
+   (rust-code-reviewer) — with a SAFETY comment citing it, pinned by
+   `band_bound_tests` including the wrapped length; the four
+   `docs/UNSAFE_INVENTORY.md` rows are rewritten.
+4. Validation runs before the architecture split, so the scalar and SSE2 arms
+   see only scripts that passed it; `tests/scan_script_validation.rs` has no
+   `cfg(target_arch)` and runs on every leg.
 
 ## P4-193. The C-ABI Destination Spans Do Not Use `ImageLayout::strided`, So a Decode Forms a Slice Over One Row's Padding — **OPEN**
 
@@ -12213,3 +12247,73 @@ months and the job passing says nothing about it either way.
 it: choosing between the two readings is a decision about what the sanitizer
 leg is for, and the pull request that surfaced it lands test infrastructure for
 P4-141.
+
+## P4-210. `Encoder::scan_script` Is Silently Ignored Outside the Huffman YCbCr/Grayscale Progressive Path — **OPEN**
+
+**GitHub:** [#636](https://github.com/developer0hye/libjpeg-turbo-rs/issues/636) — found 2026-10-07 while fixing P4-192 (#610); tracked under #635 Milestone A.
+
+**The defect.** `Encoder::encode` reads `self.scan_script` in one branch only
+— the Huffman progressive encode of YCbCr/grayscale output. Three branches
+dispatch ahead of it and always build C's default script, so a caller who sets
+`.progressive(true).scan_script(s)` gets `Ok` and a stream that does not follow
+`s` when any of these is also set:
+
+* `.arithmetic(true)` — `compress_arithmetic_progressive` and
+  `compress_arithmetic_progressive_rgb_direct`
+  (`simple_progression_for`, `src/encode/pipeline_impl/arithmetic.rs`);
+* `.colorspace(ColorSpace::Rgb)` (RGB-direct) — `compress_progressive_rgb_direct`;
+* custom per-component sampling factors — the `use_custom_sampling` branch.
+
+C honours `scan_info` independently of the entropy coder and the colorspace
+(`cjpeg -arithmetic -scans`, `cjpeg -rgb -scans`, `cjpeg -sample … -scans`).
+Found by the `rust-code-reviewer` pass on the P4-192 fix (RGB-direct and custom
+sampling) after the arithmetic case.
+
+**Acceptance criteria.**
+
+1. Each of the three combinations either encodes with the caller's script —
+   validated by `validate_scan_script` exactly as the Huffman path is since
+   P4-192 — or returns a typed error naming it unsupported. Silent
+   substitution is the defect.
+2. If honoured, the SOS `Ss/Se/Ah/Al` sequence is cross-validated against the
+   matching `cjpeg … -scans` invocation on the same script and the pixels
+   against `djpeg`.
+3. An invalid script on any of these paths returns `JpegError::InvalidScanScript`.
+4. The `Encoder::scan_script` doc, which names the three exceptions today, is
+   updated to match.
+
+Not a memory-safety issue: the arithmetic path never reads the caller's bands.
+
+**Why deferred.** Found while fixing P4-192, whose pull request closes a
+memory-safety defect and should not also carry an arithmetic-coder behaviour
+change with its own C cross-validation.
+
+## P4-211. Non-Interleaved Progressive DC Scans Walked the Frame's MCU Grid, and Every DC Scan Emitted Both Table Slots — **CLOSED 2026-10-07**
+
+**Found 2026-10-07** by the P4-192 fix's C oracle: once
+`tests/scan_script_validation.rs::accepted_scripts_match_cjpeg` compared the
+encoded bytes with `cjpeg -scans` instead of only decoding them, the
+per-component DC script `0: 0 0 0 0; 1: …; 2: …;` differed (363 vs 300 bytes
+at 32x32). Two independent defects, both reachable only through
+`Encoder::scan_script` — the built-in scripts send every component's DC in one
+interleaved scan, so their output is unchanged:
+
+1. **Block order.** A scan with one component is non-interleaved (T.81 A.2.2):
+   C walks that component's own `width_in_blocks x height_in_blocks` grid in
+   raster order, one block per MCU. The DC path (first and refinement) walked
+   the frame's MCU grid with the component's sampling factors, so a
+   subsampled-frame luma DC scan was coded in MCU order — and, where the frame
+   is not a multiple of the MCU, with the padding column/row C does not code.
+   The AC path already used the component grid.
+2. **Tables.** Every DC-first scan wrote both DC table slots, so a scan of Y
+   alone carried an empty chrominance table and a scan of Cb or Cr an empty
+   luminance one. `jcphuff.c` writes only the slots the scan's components use.
+
+**Status (2026-10-07): closed.** `compress_progressive_with_scans` gives a
+single-component DC scan the component's grid (`h_blocks = v_blocks = 1`,
+`comp_wib x comp_hib` MCUs) and writes only used DC slots.
+`accepted_scripts_match_cjpeg` now requires byte equality with `cjpeg -scans`
+for seven scripts at 40x40 (luma grid 5 blocks, MCU-padded 6), including
+non-interleaved DC first and refinement scans and a Cb+Cr-only DC scan;
+measured discriminating — with the single-component geometry disabled the
+per-component case differs (325 vs 318 bytes).
