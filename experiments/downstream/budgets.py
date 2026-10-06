@@ -11,7 +11,7 @@ for why only same-run ratios are budgeted.
 `--first` names the report the bands and lead budgets were set from (the
 committed first report); without it the report under test is its own first.
 Both reports must be full runs (not `--smoke`, not `--only`) with the same
-runtime CPU features and build variant. Exit status is 0 when every budgeted row is within budget, 1
+architecture, build variant and recorded runtime CPU features. Exit status is 0 when every budgeted row is within budget, 1
 when one is over, 2 on a usage error or an unusable pair. Standard library
 only.
 """
@@ -82,19 +82,18 @@ def all_ratios(report):
     return ratios
 
 
-def runner_key(report):
-    """The runtime ISA and build variant a report's ratios belong to.
-
-    Ratios move with the SIMD kernels runtime dispatch picks (the whole
-    feature line, not just the architecture: x86_64 with and without AVX2
-    run different code) and with the build variant, so a band set on one
-    does not apply to another.
-    """
-    return report["environment"]["runtime_cpu_features"], report["build"]["variant"]
+def runtime_features(report):
+    """The architecture and the `name=yes|no` dispatch inputs a report records."""
+    tokens = report["environment"]["runtime_cpu_features"].split()
+    return tokens[0], dict(token.split("=", 1) for token in tokens[1:])
 
 
 def unusable(report, first_report):
-    """Why the pair cannot be scored, or None."""
+    """Why the pair cannot be scored, or None.
+
+    Ratios move with the SIMD kernels runtime dispatch picks and with the
+    build variant, so a band set on one runner does not apply to another.
+    """
     for name, candidate in (("report", report), ("first report", first_report)):
         # A smoke run times two iterations and says it is not a measurement.
         if candidate.get("smoke"):
@@ -102,10 +101,31 @@ def unusable(report, first_report):
         # An --only run leaves cases out, so a pass would cover only them.
         if candidate.get("only") is not None:
             return f"the {name} is filtered with --only {candidate['only']!r}"
-    if runner_key(report) != runner_key(first_report):
+    if report["build"]["variant"] != first_report["build"]["variant"]:
         return (
-            f"the report is {runner_key(report)} but the first report is "
-            f"{runner_key(first_report)}; budgets are per runtime ISA and variant"
+            f"the report is VARIANT={report['build']['variant']} but the first "
+            f"report is VARIANT={first_report['build']['variant']}"
+        )
+    architecture, features = runtime_features(report)
+    first_architecture, first_features = runtime_features(first_report)
+    if architecture != first_architecture:
+        return f"the report is {architecture} but the first report is {first_architecture}"
+    differing = sorted(
+        name
+        for name in features.keys() & first_features.keys()
+        if features[name] != first_features[name]
+    )
+    if differing:
+        return f"runtime features differ from the first report: {', '.join(differing)}"
+    # The 2026-10-07 first report predates recording ssse3, bmi1 and lzcnt.
+    # Say which dispatch inputs this comparison could not check rather than
+    # refusing every later report.
+    unchecked = sorted(features.keys() ^ first_features.keys())
+    if unchecked:
+        print(
+            "budgets.py: not recorded by both reports, so not compared: "
+            + ", ".join(unchecked),
+            file=sys.stderr,
         )
     return None
 
