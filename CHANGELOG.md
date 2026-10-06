@@ -169,6 +169,21 @@ and `git log` between tags.
   runs system/Rust bidirectional cross-decodes.
 
 ### Fixed
+- **Security — a custom scan script could write past the stack from safe
+  Rust on x86_64** (P4-192, #610). `Encoder::scan_script` stored the script
+  verbatim; an AC band with `se > 63` reached an unchecked SSE2 kernel that
+  wrote past two `[u16; 64]` stack arrays and the encode returned `Ok` (other
+  architectures panicked instead). Scripts are now checked before any
+  encoding work by the rules C's `validate_script` applies to a progressive
+  script, and a refused script returns the new
+  `JpegError::InvalidScanScript { entry, reason }` on every architecture.
+  Affects 0.4.0 through 0.8.0 on x86_64 with the default `simd` feature
+  (the SSE2 kernel first shipped in 0.4.0).
+- **Custom scan scripts with single-component DC scans encoded blocks in the
+  wrong order** (P4-211). A non-interleaved DC scan walked the frame's MCU grid
+  instead of the component's own block grid, and every DC scan wrote both DC
+  table slots even when one was unused. Output from such a script now matches
+  `cjpeg -scans` byte for byte; the built-in scripts are unaffected.
 - `Encoder::encode` validates the caller's pixel buffer against
   `width x height x bytes_per_pixel` **before** it rearranges it (P4-139,
   #478). `bottom_up`, `fancy_downsampling` and `grayscale_from_color` each

@@ -134,7 +134,7 @@
 
 ### Progressive Scan Control
 - [ ] Full classic `jpeg_simple_progression()` semantics — progressive mode works, but public script installation remains P4-91
-- [ ] Classic `scan_info` / `num_scans` wiring — native `Encoder::scan_script()` is ready; classic scanline wiring remains P4-91
+- [ ] Classic `scan_info` / `num_scans` wiring — native `Encoder::scan_script()` is ready for Huffman progressive YCbCr/grayscale and silently ignored on the arithmetic, RGB-direct and custom-sampling paths ([P4-210](last_mile/phase4.md#p4-210-encoderscan_script-is-silently-ignored-outside-the-huffman-ycbcrgrayscale-progressive-path--open), #636); classic scanline wiring remains P4-91
 - [x] `jpeg_scan_info` struct — `ScanScript` struct
 
 ### DCT Method
