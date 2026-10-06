@@ -80,13 +80,13 @@ fn find_ppm_header_end(data: &[u8]) -> usize {
 
 fn decode_scaled(data: &[u8], num: u32, denom: u32) -> Image {
     let mut decoder = StreamingDecoder::new(data).unwrap();
-    decoder.set_scale(ScalingFactor::new(num, denom));
+    decoder.set_scale(ScalingFactor::try_new(num, denom).expect("supported scaling factor"));
     decoder.decode().unwrap()
 }
 
 fn decode_scaled_format(data: &[u8], num: u32, denom: u32, format: PixelFormat) -> Image {
     let mut decoder = StreamingDecoder::new(data).unwrap();
-    decoder.set_scale(ScalingFactor::new(num, denom));
+    decoder.set_scale(ScalingFactor::try_new(num, denom).expect("supported scaling factor"));
     decoder.set_output_format(format);
     decoder.decode().unwrap()
 }

@@ -33,7 +33,7 @@ fn make_test_jpeg(w: usize, h: usize, subsamp: Subsampling) -> Vec<u8> {
 
 fn decode_scaled_rust(jpeg: &[u8], num: u32, denom: u32) -> (usize, usize, Vec<u8>) {
     let mut decoder = StreamingDecoder::new(jpeg).expect("StreamingDecoder::new");
-    decoder.set_scale(ScalingFactor::new(num, denom));
+    decoder.set_scale(ScalingFactor::try_new(num, denom).expect("supported scaling factor"));
     decoder.set_output_format(PixelFormat::Rgb);
     let img = decoder.decode().expect("decode");
     (img.width, img.height, img.data)

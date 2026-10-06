@@ -472,7 +472,7 @@ mod tests {
     }
 
     /// Fuzz Smoke runs 30420069849 / 30438301770 / 30461194331 /
-    /// 30485530878: corrupt streams decoded at `ScalingFactor::new(1, 2)`
+    /// 30485530878: corrupt streams decoded at a 1/2 `ScalingFactor`
     /// drove the reduced IDCT's fixed-point intermediates past `i32` and
     /// panicked on every arithmetic op in the block (`attempt to
     /// {add,subtract,multiply} with overflow` at five distinct lines).

@@ -113,29 +113,24 @@ pub unsafe extern "C" fn tj3SetScalingFactor(
         // Defined outside the `unsafe` block below so the body's own `unsafe`
         // blocks stay meaningful rather than nesting inside a blanket one.
         let body = |inst: &mut crate::tj3::TjInstance| -> c_int {
-            if factor.num <= 0 || factor.denom <= 0 {
+            // Upstream looks the pair up in its table field by field and has
+            // one refusal for every miss, non-positive values included
+            // (`turbojpeg.c:2053-2058`). `try_from` folds the negatives into
+            // that miss rather than letting `as u32` turn -1 into a huge
+            // numerator.
+            let accepted: bool = match (u32::try_from(factor.num), u32::try_from(factor.denom)) {
+                (Ok(num), Ok(denom)) => inst.inner.set_scaling_factor(num, denom).is_ok(),
+                _ => false,
+            };
+            if accepted {
+                inst.clear_error();
+                0
+            } else {
                 inst.set_error(
-                    format!(
-                        "tj3SetScalingFactor: non-positive ratio {}/{}",
-                        factor.num, factor.denom
-                    ),
+                    "tj3SetScalingFactor: Unsupported scaling factor",
                     TJERR_FATAL,
                 );
-                return -1;
-            }
-
-            match inst
-                .inner
-                .set_scaling_factor(factor.num as u32, factor.denom as u32)
-            {
-                Ok(()) => {
-                    inst.clear_error();
-                    0
-                }
-                Err(e) => {
-                    inst.set_error(format!("tj3SetScalingFactor: {e}"), TJERR_FATAL);
-                    -1
-                }
+                -1
             }
         };
 

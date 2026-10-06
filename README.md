@@ -28,6 +28,9 @@ The crate-level doctests mirror these snippets and are compile-checked
 (`cargo test --doc`); the doctest decode calls `decompress`, the
 format-defaulting sibling of `decompress_to`. Runnable examples live in
 [`examples/`](examples/README.md).
+Choosing an integration path and evaluating it on your own images:
+[`docs/ADOPTION_GUIDE.md`](docs/ADOPTION_GUIDE.md); every other document:
+[`docs/README.md`](docs/README.md).
 
 ## How it compares
 

@@ -111,8 +111,8 @@
 
 | C Function | Description | Rust | Status |
 |---|---|---|---|
-| `tj3GetScalingFactors(&count)` | Get list of supported scaling factors | `TjHandle::scaling_factors()` / `ScalingFactor` | ✅ |
-| `tj3SetScalingFactor(handle, sf)` | Set output scaling | `Decoder::set_scale()` / `TjHandle::set_scaling_factor()` | ✅ |
+| `tj3GetScalingFactors(&count)` | Get list of supported scaling factors | `TjHandle::scaling_factors()` / `ScalingFactor::SUPPORTED` | ✅ |
+| `tj3SetScalingFactor(handle, sf)` | Set output scaling | `Decoder::set_scale(ScalingFactor::try_new(num, denom)?)` / `TjHandle::set_scaling_factor()` | ✅ |
 | `tj3SetCroppingRegion(handle, region)` | Set crop region | `TjHandle::set_cropping_region()` + `TjHandle::resolve_cropping_region()` (upstream's set-time checks and messages except the "not initialized for decompression" guard, `turbojpeg.c:2074-2075` — P4-220 —, cross-validated against stock 3.2.0 by `cabi_misuse_harness`'s `cropping_region` case); `Decoder::set_crop_region()` refuses a region past the scaled output and aligns `x` down like `jpeg_crop_scanline` (P4-197, #618). The 12-bit decode paths do not yet honour the region (P4-219) | 🔶 |
 
 ### Decompression (8-bit)
@@ -425,7 +425,7 @@
 
 | Struct | Description | Rust | Status |
 |---|---|---|---|
-| `tjscalingfactor` | {num, denom} scaling ratio | `ScalingFactor` | ✅ |
+| `tjscalingfactor` | {num, denom} scaling ratio | `ScalingFactor` (private fields; `try_new`, `num()`, `denom()`; only upstream's 16 factors are representable) | ✅ |
 | `tjregion` | {x, y, w, h} crop region | `CropRegion` | ✅ |
 | `tjtransform` | {region, op, options, data, customFilter} | `TransformOptions` | 🔶 — `region`, `op` and `options` map; `data` and `customFilter` do not. `tj3Transform` returns -1 for a non-NULL callback, so both are unreachable across the C ABI, even though `TransformOptions::custom_filter` gives Rust callers the callback (a closure captures what `data` carries) (P4-204) |
 

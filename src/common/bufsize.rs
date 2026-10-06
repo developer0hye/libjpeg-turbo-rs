@@ -12,12 +12,6 @@
 //! for an argument it rejects), and one a caller cannot mistake for a usable
 //! capacity — unlike `usize::MAX`, which is the worst value a size can take
 //! and which `tests/sizing_arithmetic_gate.rs` bars repo-wide (P4-139).
-//!
-//! The one thing that is still not a value here is
-//! [`calc_output_dimensions`]' `assert!(scale_denom != 0)`, a panic on public
-//! input. It is P4-139 criterion 4's, not this module's: the fix is making
-//! `ScalingFactor`'s fields private behind a fallible constructor, which is a
-//! breaking change sequenced for 0.9.0.
 
 use super::types::Subsampling;
 use crate::common::layout::checked_span;
@@ -223,23 +217,44 @@ pub fn transform_buf_size(
 
 /// Compute scaled output dimensions for decompression.
 ///
-/// Matches `jpeg_calc_output_dimensions()`. Applies the scaling factor
-/// `scale_num / scale_denom` to both width and height, rounding up.
+/// Matches `jpeg_calc_output_dimensions()` for a DCT-based image, which reads
+/// `scale_num`/`scale_denom` as a *request* rather than a ratio to apply:
+/// `jpeg_core_output_dimensions` (`jdmaster.c`) picks the smallest IDCT block
+/// size `N` in 1..=16 with `scale_num * 8 <= scale_denom * N` — 16 when none
+/// qualifies — and outputs `ceil(dim * N / 8)`. So every pair has an answer,
+/// zero denominators included: `1/3` gives 3/8 scale, `1/0` gives 2/1, `0/1`
+/// gives 1/8. For the sixteen [`ScalingFactor::SUPPORTED`] factors this is
+/// exactly `ceil(dim * scale_num / scale_denom)`, i.e.
+/// [`ScalingFactor::scale_dim`].
+///
+/// Both products are `unsigned int` in C and wrap; they wrap here too, so a
+/// `scale_num` above `u32::MAX / 8` gets the block size C gives it rather than
+/// a "more correct" one no C caller sees.
 ///
 /// An axis whose scaled value is not representable reports 0 — see the module
-/// note. The `scale_denom == 0` **panic** is the exception the note names: it
-/// predates this work and belongs to P4-139 criterion 4, which makes
-/// `ScalingFactor`'s fields private behind a fallible constructor in 0.9.0.
+/// note.
+///
+/// [`ScalingFactor::SUPPORTED`]: crate::ScalingFactor::SUPPORTED
+/// [`ScalingFactor::scale_dim`]: crate::ScalingFactor::scale_dim
 pub fn calc_output_dimensions(
     width: usize,
     height: usize,
     scale_num: u32,
     scale_denom: u32,
 ) -> (usize, usize) {
-    assert!(scale_denom != 0, "scale denominator must not be zero");
+    let requested: u32 = scale_num.wrapping_mul(8);
+    let block_size: usize = (1u32..16)
+        .find(|&n: &u32| requested <= scale_denom.wrapping_mul(n))
+        .unwrap_or(16) as usize;
+    // ceil(dim * N / 8) = (dim / 8) * N + ceil((dim % 8) * N / 8): split so the
+    // only product that can overflow is the one whose overflow means the
+    // result itself does not fit — `dim * N` overflowed for 1/2 at
+    // `dim = 2^62` although the answer is 2^61 (docs-drift-auditor).
     let scale = |dim: usize| -> usize {
-        dim.checked_mul(scale_num as usize)
-            .map_or(0, |scaled| scaled.div_ceil(scale_denom as usize))
+        (dim / 8)
+            .checked_mul(block_size)
+            .and_then(|whole: usize| whole.checked_add(((dim % 8) * block_size).div_ceil(8)))
+            .unwrap_or(0)
     };
     (scale(width), scale(height))
 }

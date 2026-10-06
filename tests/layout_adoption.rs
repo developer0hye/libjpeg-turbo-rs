@@ -126,7 +126,7 @@ fn crop_scanline_clamps_the_aligned_window_at_the_image_edge() {
 fn crop_scanline_bounds_and_aligns_in_output_space_not_header_space() {
     let mut decoder: StreamingDecoder<'_> =
         StreamingDecoder::new(GRADIENT_640X480).expect("fixture decodes");
-    decoder.set_scale(ScalingFactor::new(2, 1));
+    decoder.set_scale(ScalingFactor::try_new(2, 1).expect("supported scaling factor"));
 
     let mut xoffset: usize = 800;
     let mut width: usize = 16;
@@ -144,7 +144,7 @@ fn crop_scanline_bounds_and_aligns_in_output_space_not_header_space() {
 fn crop_scanline_aligns_to_the_scaled_imcu_grid_when_downscaling() {
     let mut decoder: StreamingDecoder<'_> =
         StreamingDecoder::new(GRADIENT_640X480).expect("fixture decodes");
-    decoder.set_scale(ScalingFactor::new(1, 2));
+    decoder.set_scale(ScalingFactor::try_new(1, 2).expect("supported scaling factor"));
 
     let mut xoffset: usize = 300;
     let mut width: usize = 16;
@@ -163,7 +163,7 @@ fn crop_scanline_aligns_to_the_scaled_imcu_grid_when_downscaling() {
 fn crop_scanline_refuses_an_origin_past_the_scaled_output_edge() {
     let mut decoder: StreamingDecoder<'_> =
         StreamingDecoder::new(GRADIENT_640X480).expect("fixture decodes");
-    decoder.set_scale(ScalingFactor::new(1, 2));
+    decoder.set_scale(ScalingFactor::try_new(1, 2).expect("supported scaling factor"));
 
     let mut xoffset: usize = 400;
     let mut width: usize = 16;
