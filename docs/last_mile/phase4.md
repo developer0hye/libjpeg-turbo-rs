@@ -12462,7 +12462,7 @@ bundling an audit of the decode pipeline's allocation discipline into the pull
 request that built the injection harness would put the harness's own review
 behind it.
 
-## P4-217. No Written Release, SemVer, MSRV or Security Policy, No Private Reporting Route, and No API Check Before Publish — **PARTIAL: policy, API gate and affected-version record landed; private reporting route not enabled**
+## P4-217. No Written Release, SemVer, MSRV or Security Policy, No Private Reporting Route, and No API Check Before Publish — **PARTIAL: policy, API gate and affected-version record landed; private reporting route not enabled, OSS-Fuzz not submitted**
 
 **GitHub:** [#638](https://github.com/developer0hye/libjpeg-turbo-rs/issues/638) — #635 Milestone E (first execution ticket 8, policy half) and Milestone A's disclosure review.
 
@@ -12498,3 +12498,10 @@ previous one, while `main` already carries breaking changes since 0.8.0.
    shipped development files (`.cargo/config.toml`, hooks, `scripts/`, the
    OSS-Fuzz project) plus the reference submodule's own READMEs, now excluded.
    README states the project is not affiliated with libjpeg-turbo or the IJG.
+6. OSS-Fuzz preparation re-checked against the current Rust integration guide:
+   `project.yaml` listed `undefined` and `memory`, which OSS-Fuzz does not
+   support for Rust (address only), and `build.sh` installed `cargo-fuzz` at
+   build time with `|| true`; both fixed, and `oss-fuzz/README.md` no longer
+   claims readiness. **Remaining (maintainer):** confirm the contact address in
+   `project.yaml` (it names a work address), run `helper.py build_fuzzers`, and
+   submit to `google/oss-fuzz` — or run an equivalent sustained campaign.

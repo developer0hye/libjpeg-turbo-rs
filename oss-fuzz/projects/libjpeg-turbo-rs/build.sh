@@ -15,11 +15,12 @@ set -euo pipefail
 cd "${SRC}/libjpeg-turbo-rs"
 
 # Regenerate the corpus so every fuzz target starts from meaningful seeds.
-cargo test --test generate_fuzz_seeds
+# `--locked`: build only what Cargo.lock pins (supply-chain policy).
+cargo test --locked --test generate_fuzz_seeds
 
-# cargo-fuzz is preinstalled in base-builder-rust, but enforce a known version
-# for reproducibility.
-cargo install --locked cargo-fuzz --version "0.12.0" || true
+# cargo-fuzz is preinstalled in base-builder-rust and in PATH. This used to
+# `cargo install` a pinned copy with `|| true`, which fetched a tool at build
+# time and hid the failure when it did not work.
 
 TARGETS=(
     fuzz_decompress
