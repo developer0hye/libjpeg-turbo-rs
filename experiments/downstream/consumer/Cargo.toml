@@ -1,0 +1,72 @@
+# Downstream-consumer benchmark (P4-214, issue #640).
+#
+# This crate is deliberately NOT a member of the repository workspace: the
+# empty `[workspace]` table below makes it its own root, so the workspace's
+# `[profile.release] lto = true` never applies — Cargo ignores profiles
+# declared by dependencies (https://doc.rust-lang.org/cargo/reference/profiles.html),
+# which is exactly the situation of every application that depends on
+# libjpeg-turbo-rs from crates.io. There is intentionally no `[profile.*]`
+# section here either: the measured build is Cargo's stock `release` profile.
+# `experiments/downstream/run.sh` selects LTO / target-cpu variants through
+# environment variables and labels them, so this file never changes per run.
+#
+# `@CANDIDATE@` is a placeholder for the checkout under test. run.sh copies
+# this crate OUTSIDE the repository (so no parent `.cargo/config.toml`
+# applies) and substitutes the absolute repository path before building.
+# The committed Cargo.lock records the resolution for that substitution;
+# every build uses `--locked`, so a change in the candidate's dependency set
+# fails the build instead of resolving fresh crates from the network
+# (see README.md, "Regenerating the lock").
+
+[package]
+name = "downstream-consumer"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[features]
+# The measurement binary needs every backend. The size probes build with
+# `--no-default-features` plus one backend feature, in their own target
+# directory, so each probe's clean build time and binary size isolate that
+# backend (dependencies are per package, not per binary, so separate bins of
+# one package with non-optional deps would all compile everything).
+default = ["baseline", "candidate", "adapter", "image-builtin", "zune"]
+baseline = ["dep:ljt_baseline"]
+candidate = ["dep:ljt_candidate"]
+adapter = ["candidate", "dep:libjpeg-turbo-rs-image", "image-builtin"]
+image-builtin = ["dep:image"]
+zune = ["dep:zune-jpeg"]
+
+[dependencies]
+# Published baseline, exactly the release on crates.io.
+ljt_baseline = { package = "libjpeg-turbo-rs", version = "=0.8.0", optional = true }
+# The checkout under test (substituted by run.sh).
+ljt_candidate = { package = "libjpeg-turbo-rs", path = "@CANDIDATE@", optional = true }
+libjpeg-turbo-rs-image = { path = "@CANDIDATE@/crates/libjpeg-turbo-rs-image", optional = true }
+# image's built-in JPEG codec: decode is zune-jpeg, encode is image's own.
+image = { version = "0.25", default-features = false, features = ["jpeg"], optional = true }
+zune-jpeg = { version = "0.5", optional = true }
+
+[[bin]]
+name = "downstream-consumer"
+path = "src/main.rs"
+required-features = ["baseline", "candidate", "adapter", "image-builtin", "zune"]
+
+# Size probes: the smallest program that keeps each backend's decode path
+# alive, so `size(probe) - size(probe-none)` is that backend's contribution
+# to a stock release binary.
+[[bin]]
+name = "probe-none"
+path = "src/bin/probe_none.rs"
+
+[[bin]]
+name = "probe-candidate"
+path = "src/bin/probe_candidate.rs"
+required-features = ["candidate"]
+
+[[bin]]
+name = "probe-zune"
+path = "src/bin/probe_zune.rs"
+required-features = ["zune"]

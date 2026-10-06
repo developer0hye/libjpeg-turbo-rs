@@ -12461,3 +12461,83 @@ is one line at the site that aborts and an audit of the fifty-eight others, and
 bundling an audit of the decode pipeline's allocation discipline into the pull
 request that built the injection harness would put the harness's own review
 behind it.
+
+## P4-214. No Benchmark Measures a Default-Profile Downstream Consumer — **OPEN**
+
+**GitHub:** [#640](https://github.com/developer0hye/libjpeg-turbo-rs/issues/640) — child of #635 Milestone C.
+
+**Why it matters.** The workspace sets `[profile.release] lto = true`, and
+Cargo ignores profiles that dependencies declare
+(<https://doc.rust-lang.org/cargo/reference/profiles.html>). An application
+built with its own default `release` profile therefore never gets that
+setting. It never gets the repository's `.cargo/config.toml` either. Every
+existing speed figure comes from `cargo bench` or
+`examples/bench_zune_matrix.rs`, and both run inside the workspace, so they
+measure a build no user ships. `bench_zune_matrix`'s `parity = ok` also
+compares only the output length, not the pixels.
+
+**Acceptance criteria** (from #640).
+
+1. A consumer crate is built **outside** this repository, so no parent
+   `.cargo/config.toml` applies. It uses the default `release` profile and no
+   `RUSTFLAGS`. Fat LTO, thin LTO and `target-cpu=native` get separate,
+   labelled tables. `Cargo.lock` is committed and builds use `--locked`.
+2. It compares the published baseline (`libjpeg-turbo-rs` from crates.io), the
+   candidate (this checkout), the `image` adapter, `image`'s built-in JPEG
+   decoder (zune-jpeg) and `zune-jpeg` directly. Every row uses the same
+   output format and states whether the caller or the library owns the buffer.
+   Pixel equality is checked outside the timed region. Where exact equality
+   does not hold, the measured difference is reported, against C where C is
+   the contract.
+3. The cases are: a small image, a phone-size photo, grayscale, progressive, a
+   large image, full-size vs 1/4-scaled decode, and the decode → orient →
+   resize → encode thumbnail workload. Encode is compared on time, file size
+   and PSNR against the source.
+4. Each case reports the median, the spread over repeated runs, MP/s,
+   allocation count, cumulative allocated bytes and peak live bytes, with the
+   fresh-decoder and buffer-reuse paths reported separately. The report also
+   gives the clean build time and each backend's binary-size contribution.
+5. The report records resolved crate versions, toolchain, CPU, OS, profile,
+   features, corpus source, licence and checksums, and a machine-load sample
+   taken before the run. The instructions let another developer reproduce it.
+   A `workflow_dispatch` job produces the x86_64 and aarch64 reports on hosted
+   runners, and its noise caveat is stated.
+6. The first report is committed under `experiments/`, including the cases the
+   candidate loses. It proposes regression budgets derived from its measured
+   spread.
+
+**What landed.** The harness: `experiments/downstream/consumer/` (a standalone
+crate with its own `[workspace]` and a committed lock),
+`experiments/downstream/run.sh`, `experiments/downstream/README.md` and
+`.github/workflows/downstream-bench.yml`. It covers criteria 1–5 as mechanisms.
+A local `--smoke` run on 2026-10-07 (aarch64-darwin, default variant)
+exercised every case and every correctness invariant:
+
+- candidate `decompress_into`, the image adapter and baseline reuse are each
+  byte-identical to their fresh twins, and candidate vs C `djpeg` (3.1.4.1)
+  is identical on all eight decode cases;
+- candidate vs baseline is identical on every case;
+- zune-jpeg and `image`'s decoder differ from the candidate by at most 5
+  (mean ≤ 0.36) on each of the seven cases they support. Neither has a
+  scaled decode, so the 1/4 case is N/A for both.
+
+**Smoke-run observations to triage.** These come from the allocation columns
+and output geometry, which are deterministic, so machine load does not affect
+them. Unlike the timings, they hold even though they come from a smoke run.
+
+- The candidate image adapter's `JpegDecoder` does not report EXIF orientation
+  (`ImageDecoder::orientation()` falls back to `NoTransforms`). The
+  thumbnail workload therefore produces 256x192 where every other row
+  produces the oriented 192x256.
+- `decompress_into` still allocates whole-image component planes. For the
+  12 MP 4:2:0 RGB decode the peak is 17.5 MiB (zune `decode_into`:
+  0.66 MiB), and for grayscale 1080p it is 2.0 MiB, the whole Y plane. The
+  baseline and candidate match.
+- `image`'s built-in encoder writes 4:4:4 at q85, so its encode bytes and
+  PSNR do not compare like for like with the 4:2:0 rows. The report reads
+  the subsampling back from each output's SOF marker and labels it.
+
+**Status (2026-10-07): harness landed; first measured report pending.**
+Criterion 6 needs a quiet machine and the first dispatch of the hosted job.
+GitHub registers a dispatch-only workflow only after the file reaches the
+default branch, so that dispatch waits until this lands on `main`.

@@ -1,0 +1,95 @@
+name: Downstream consumer benchmark
+
+# P4-214 (#640): libjpeg-turbo-rs measured the way an application builds it.
+#
+# The workspace's `[profile.release] lto = true` and `.cargo/config.toml`
+# reach every in-tree benchmark but no downstream crate: Cargo ignores a
+# dependency's profiles and reads config only from the build directory's
+# ancestors. experiments/downstream/run.sh therefore copies the consumer crate
+# to a temporary directory outside the checkout, builds it on Cargo's stock
+# release profile with `--locked`, and compares the published 0.8.0 release,
+# this checkout, the image adapter, image's built-in decoder and zune-jpeg.
+#
+# Manual only. Hosted runners are shared and their CPU model, frequency and
+# neighbours vary between runs, so a single dispatch is evidence of within-run
+# ratios, not an absolute number; see experiments/downstream/README.md
+# ("Hosted-runner noise"). No C reference is installed here, so the reports
+# carry no candidate-vs-C rows and say so; this job provisions no oracle.
+
+on:
+  workflow_dispatch:
+    inputs:
+      variant:
+        description: "Build variant (labelled in the report)"
+        type: choice
+        options:
+          - default
+          - thin-lto
+          - fat-lto
+          - native
+        default: default
+      iterations:
+        description: "Timed iterations per row"
+        type: string
+        default: "30"
+      warmup:
+        description: "Warmup iterations per row"
+        type: string
+        default: "5"
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+  downstream-bench:
+    name: Downstream bench (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            label: x86_64-linux
+          - os: macos-latest
+            label: aarch64-macos
+    defaults:
+      run:
+        # `bash -eo pipefail`: a harness that dies mid-report must fail the
+        # job rather than upload a partial file behind a green tick.
+        shell: bash
+    steps:
+      # The upstream test images (testorig.jpg, testimgint.jpg) live in the
+      # references submodule.
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+      - uses: dtolnay/rust-toolchain@stable
+      # No rust-cache: the report's clean build time is only true for a
+      # build that starts from nothing.
+      - name: Validate inputs
+        env:
+          ITERATIONS: ${{ inputs.iterations }}
+          WARMUP: ${{ inputs.warmup }}
+        run: |
+          [[ "$ITERATIONS" =~ ^[1-9][0-9]*$ ]] || { echo "iterations must be a positive integer"; exit 1; }
+          [[ "$WARMUP" =~ ^[0-9]+$ ]] || { echo "warmup must be a non-negative integer"; exit 1; }
+      - name: Run the downstream benchmark
+        env:
+          VARIANT: ${{ inputs.variant }}
+          ITERATIONS: ${{ inputs.iterations }}
+          WARMUP: ${{ inputs.warmup }}
+          DOWNSTREAM_WORK_DIR: ${{ runner.temp }}/downstream-work
+          DOWNSTREAM_OUT_DIR: ${{ runner.temp }}/downstream-report
+        run: |
+          experiments/downstream/run.sh --iterations "$ITERATIONS" --warmup "$WARMUP"
+          cat "$DOWNSTREAM_OUT_DIR/report.md" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: downstream-report-${{ matrix.label }}-${{ inputs.variant }}
+          path: ${{ runner.temp }}/downstream-report
+          if-no-files-found: error
