@@ -17,8 +17,11 @@ pub enum Chroma {
     S444,
 }
 
+/// `$scale` builds the crate's `ScalingFactor` from `(num, denom)`: the
+/// published 0.8.0 has an infallible `new`, while the candidate validates
+/// through `try_new` (P4-139). The harness only asks for supported factors.
 macro_rules! ljt_api {
-    ($module:ident, $krate:ident) => {
+    ($module:ident, $krate:ident, $scale:expr) => {
         pub mod $module {
             use crate::corpus::OutputLayout;
             use $krate::{Decoder, PixelFormat, ScalingFactor, Subsampling};
@@ -43,7 +46,8 @@ macro_rules! ljt_api {
                 });
                 decoder.set_output_format(pixel_format(layout));
                 if let Some((numerator, denominator)) = scale {
-                    decoder.set_scale(ScalingFactor::new(numerator, denominator));
+                    let make_scale: fn(u32, u32) -> ScalingFactor = $scale;
+                    decoder.set_scale(make_scale(numerator, denominator));
                 }
                 decoder
             }
@@ -143,5 +147,9 @@ macro_rules! ljt_api {
     };
 }
 
-ljt_api!(baseline, ljt_baseline);
-ljt_api!(candidate, ljt_candidate);
+ljt_api!(baseline, ljt_baseline, |num: u32, denom: u32| {
+    ljt_baseline::ScalingFactor::new(num, denom)
+});
+ljt_api!(candidate, ljt_candidate, |num: u32, denom: u32| {
+    ljt_candidate::ScalingFactor::try_new(num, denom).expect("the harness asks only for supported factors")
+});

@@ -178,7 +178,9 @@ it `report/corpus/`, plus a 2.7 MB binary).
 `run.sh --check` stops after step 4. Instead of benchmarking, it runs
 `cargo fmt --check`, `cargo clippy --locked --release --all-targets -- -D
 warnings` and `cargo test --locked --release` on the copied consumer. The
-workflow runs this first, in a separate work dir.
+workflow runs this first, in a separate work dir, and `ci.yml`'s
+`downstream-consumer` job runs it on every PR so a candidate API change that
+breaks the consumer fails there rather than at the next dispatch.
 
 Build variants are separate, labelled runs. The default is the stock profile.
 

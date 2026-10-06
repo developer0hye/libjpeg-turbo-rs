@@ -1600,10 +1600,12 @@ fn oracle_install_on(line: &str) -> Option<OracleInstall> {
 /// those as jobs would ask [`job_block`] for a block that is not one.
 ///
 /// Checked against a real YAML parser whenever a job is added: the scanner's
-/// list is identical to PyYAML's for all 50 jobs in the twelve workflows, name
+/// list is identical to PyYAML's for all 52 jobs in the twelve workflows, name
 /// for name (re-checked when the cross-arch pairs took it from 42 to 45, at 46
 /// when the corpus leg gained its twin, at 47 when the C Interop leg gained
-/// its own, and at 50 when `downstream-bench.yml` landed for P4-214). The
+/// its own, at 50 when `downstream-bench.yml` landed for P4-214, at 51 when
+/// `release.yml` gained `semver-check` for P4-217, and at 52 when `ci.yml`
+/// gained `downstream-consumer`). The
 /// standing protection is the sibling test —
 /// a workflow this returns nothing for is a workflow every gate here passes
 /// vacuously.
