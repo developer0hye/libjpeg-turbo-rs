@@ -13420,6 +13420,34 @@ across ~17 entry points with its own precedence questions, not part of the
 `ScalingFactor` type change; fixing only `tj3SetScalingFactor` would leave its
 siblings inconsistent.
 
+## P4-222. The Low-Level Modules Are Public, So Pipeline Internals Are De Facto API — **PARTIAL: review done and the user-facing items promoted; narrowing outstanding**
+
+**#635 Milestone E:** "Review the public surface once … Classify low-level `pub`
+modules and SIMD entry points as intentionally supported or implementation
+details; make necessary visibility changes in a documented breaking release."
+
+**The gap.** `src/lib.rs` declares `api`, `common`, `decode`, `encode`, `simd`
+and `transform` `pub`, so 228 items outside the curated root re-exports
+are reachable, a README example imported one of them, and the capi crate
+re-exports the whole crate as `inner`.
+
+**Status (2026-10-07): partial.** `docs/PUBLIC_API_REVIEW.md` classifies every
+module's non-re-exported items by who uses them. The items users have a real
+need for are now supported root paths — `yuv::*`, `StreamingDecoder`,
+`CompressParams`, `compress_with_params` — pinned by
+`tests/public_surface_root_paths.rs`, and README imports from the root.
+
+**Acceptance criteria (remaining).**
+
+1. Workspace-internal items move behind one documented-unstable
+   `#[doc(hidden)]` namespace; internal items become `pub(crate)`.
+2. Tests, benches and examples use root paths or the hidden namespace;
+   `tests/decode_pipeline_public_api.rs` / `encode_pipeline_public_api.rs` pin
+   root paths instead of module paths.
+3. capi no longer re-exports the whole crate.
+4. Done in a minor (pre-1.0) release with a CHANGELOG entry mapping every
+   moved path to its replacement, and `cargo-semver-checks` recording it.
+
 ## P4-223. 12-Bit Decodes Read Only the First Scan, So Progressive and Multi-Scan 12-Bit Streams Decode to Wrong Pixels With `Ok` — **OPEN**
 
 **Found 2026-10-07** while writing P4-199's `TJPARAM_SCANLIMIT` regression

@@ -29,13 +29,15 @@ was tested with.
 
 - **Covered:** the items re-exported at the crate root (`Decoder`, `Encoder`,
   `decompress*`, `compress*`, `probe`, `TransformOp`, `JpegError`, the types in
-  `common::types`, ...) and the named re-export modules `tj3`, `precision`,
-  `quantize`, `raw_data_12` and `stream` (with `std`).
-- **Not covered yet:** the low-level modules `api`, `common`, `decode`,
-  `encode`, `simd` and `transform` are `pub` for historical reasons and expose
-  pipeline and kernel internals. Until the pre-1.0 surface review decides
-  which of their items are supported, reaching into them is at your own risk:
-  a minor release may change or hide them, and the changelog will say so.
+  `common::types`, `StreamingDecoder`, `CompressParams`,
+  `compress_with_params`, ...) and the named re-export modules `tj3`,
+  `precision`, `quantize`, `raw_data_12`, `yuv` and `stream` (with `std`).
+- **Not covered:** the low-level modules `api`, `common`, `decode`, `encode`,
+  `simd` and `transform` are `pub` for historical reasons and expose pipeline
+  and kernel internals. [`PUBLIC_API_REVIEW.md`](PUBLIC_API_REVIEW.md)
+  classifies their items; the supported ones are re-exported at the root, and
+  the rest will be narrowed in a minor release (P4-222). Reaching into them is
+  at your own risk, and the changelog will say when they change.
 - **Never covered:** exact error *messages* — match on the variant, not the
   text.
 - The C ABI (`libjpeg-turbo-rs-capi`) follows the libjpeg/TurboJPEG ABI it

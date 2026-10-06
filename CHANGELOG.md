@@ -10,6 +10,13 @@ and `git log` between tags.
 
 ### Added
 
+- **Supported root paths for module-only APIs** (P4-222): `libjpeg_turbo_rs::yuv`
+  (`encode_yuv`, `compress_from_yuv`, `decompress_to_yuv`, `decode_yuv` and
+  their `*_planes` forms), `StreamingDecoder`, `CompressParams` and
+  `compress_with_params`. Import these from the root; the `api`, `common`,
+  `decode`, `encode`, `simd` and `transform` module paths are outside the
+  supported API and will be narrowed (`docs/PUBLIC_API_REVIEW.md`).
+
 - **`precision::decompress_12bit_with_limits` and
   `decompress_16bit_with_limits`** decode under a caller's `DecodeLimits`
   (P4-199, #620). `max_scans` bounds the header walk; the width, height and
