@@ -128,6 +128,36 @@ impl BitWriter {
         }
     }
 
+    /// Reservation for a whole sequential scan: one byte per pixel, which
+    /// [`BitWriter::new`] then doubles.
+    ///
+    /// The figure lives here rather than being spelled out at each call site
+    /// because `tests/miri_public_api.rs` re-derives it. That suite infers "the
+    /// arena grew" from a scan payload longer than this reservation, so a call
+    /// site that raised its own argument would leave the suite computing the
+    /// old, smaller number, observing no growth and still passing — the
+    /// vacuous comparison this repository keeps finding at the bottom of a
+    /// green harness. One definition is one thing for
+    /// `frame_and_progressive_reservations_are_what_the_miri_suite_models` to
+    /// pin (rust-code-reviewer, 2026-09-09).
+    ///
+    /// Plain `*`, not `saturating_mul`: the product is the caller's own frame
+    /// geometry, already bounded by the encode entry point's limits, and
+    /// P4-139 keeps saturating arithmetic out of sizing expressions.
+    pub(crate) fn for_frame(width: usize, height: usize) -> Self {
+        Self::new(width * height)
+    }
+
+    /// Reservation for one progressive scan.
+    ///
+    /// A quarter of the frame because the progressive encoder `reset`s one
+    /// writer per scan rather than building a new one, so what has to fit is a
+    /// single scan's payload. Pinned alongside [`BitWriter::for_frame`] for the
+    /// same reason.
+    pub(crate) fn for_progressive_scan(width: usize, height: usize) -> Self {
+        Self::new(width * height / 4)
+    }
+
     /// Create a writer pinned to a specific x86_64 AC tier, or `None` if
     /// this CPU cannot execute that tier.
     ///
@@ -1539,6 +1569,44 @@ fn encode_ac_value(value: i16) -> (u16, u8) {
 mod tests {
     use super::*;
     use crate::encode::tables::*;
+
+    /// Both figures `tests/miri_public_api.rs` re-derives, pinned where they
+    /// are defined.
+    ///
+    /// That suite infers "the arena must have grown" from a scan payload
+    /// longer than the reservation an encode starts with, and it computes that
+    /// reservation itself: the multiplier (`2 *`, floored at 1024) from
+    /// [`BitWriter::new`] and the argument from
+    /// [`BitWriter::for_frame`] / [`BitWriter::for_progressive_scan`]. Raising
+    /// either would leave the integration test comparing a real payload against
+    /// a stale, smaller number — observing no growth and still passing, which
+    /// is the vacuous comparison that suite exists to avoid
+    /// (rust-code-reviewer, 2026-09-09).
+    ///
+    /// `assert_eq!`, not `>=`: a *larger* reservation than the test-side copy
+    /// expects is exactly the direction that goes vacuous.
+    ///
+    /// In this module rather than in `bitwriter_unwind_tests`, which is
+    /// `#[cfg(panic = "unwind")]` — `tests/miri_public_api.rs` runs on the
+    /// `wasm32-wasip1` leg too, where `panic = "abort"` would have compiled the
+    /// pin out and left exactly that leg unpinned (`docs-drift-auditor`,
+    /// 2026-09-09).
+    #[test]
+    fn new_reserves_double_the_request_floored_at_1024() {
+        assert_eq!(BitWriter::new(1024).capacity(), 2048);
+        assert_eq!(BitWriter::new(576).capacity(), 1152);
+        assert_eq!(BitWriter::new(16).capacity(), 1024);
+    }
+
+    /// The two reservations the encoders actually start from — the second
+    /// input of that same inference.
+    #[test]
+    fn frame_and_progressive_reservations_are_what_the_miri_suite_models() {
+        // 32x32 baseline: `SIDE * SIDE` pixels, doubled.
+        assert_eq!(BitWriter::for_frame(32, 32).capacity(), 2048);
+        // 48x48 progressive: a quarter of the frame, doubled.
+        assert_eq!(BitWriter::for_progressive_scan(48, 48).capacity(), 1152);
+    }
 
     fn encode_block_reference(
         coeffs: &[i16; 64],
