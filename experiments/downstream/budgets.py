@@ -1,32 +1,39 @@
 #!/usr/bin/env python3
 """Regression budgets for the downstream-consumer report (P4-214, #640).
 
-Reads one `report.json` written by the consumer harness and prints, per case,
-the same-run timing ratios the budgets are stated in, the budget each ratio is
-held to, and whether this report meets it. See BUDGETS.md for the rules and
-for why only same-run ratios are budgeted.
+Reads one `report.json` written by the consumer harness and the reference
+reports the budgets were set from, and prints, per case, the same-run timing
+ratios the budgets are stated in, the budget each ratio is held to, and
+whether this report meets it. See BUDGETS.md for the rules and for why only
+same-run ratios are budgeted.
 
-    python3 experiments/downstream/budgets.py <report.json> [--first <first.json>] [--markdown]
+    python3 experiments/downstream/budgets.py <report.json> \\
+        [--first <reference.json>]... [--markdown]
 
-`--first` names the report the bands and lead budgets were set from (the
-committed first report); without it the report under test is its own first.
-Both reports must be full runs (not `--smoke`, not `--only`) with the same
-architecture, build variant and recorded runtime CPU features. Exit status is 0 when every budgeted row is within budget, 1
-when one is over, 2 on a usage error or an unusable pair. Standard library
-only.
+Each `--first` names one reference report (the committed reference set);
+without any, the report under test is its own single reference. Every report
+must be a full run (not `--smoke`, not `--only`) with the same architecture,
+build variant, recorded runtime CPU features and consumer sources. Exit
+status is 0 when every budgeted row is within budget, 1 when one is over, 2
+on a usage error or an unusable set. Standard library only.
 """
 
 import json
+import statistics
 import sys
 
-# The rule README.md "Regression budget" fixed before any data existed: a
-# ratio's band is twice the wider of the two rows' relative p10-p90 spreads in
-# the first report, and never under 3 %.
+# README.md "Regression budget" fixed this floor before any data existed.
 MIN_BAND = 0.03
 
-# Same-run pairs. `parity` pairs hold the candidate to the published release
-# (ratio 1.0 plus the band); `lead` pairs hold it to the lead it had over a
-# competitor in the first report (measured ratio times 1 + the band).
+# A pair whose ratio moved more than this between reference runs of one
+# consumer binary on one CPU model cannot be budgeted on hosted runners: a
+# limit that wide would pass real regressions. Such rows are reported, not
+# scored, until a quiet machine measures them.
+MAX_RESOLVABLE_RANGE = 0.10
+
+# Same-run pairs. `parity` pairs hold the candidate to the published release;
+# `lead` pairs hold it to the lead it had over another codec in the
+# reference runs.
 DECODE_PAIRS = [
     ("candidate-fresh", "baseline-fresh", "parity"),
     ("candidate-reuse", "baseline-reuse", "parity"),
@@ -44,29 +51,32 @@ THUMBNAIL_PAIRS = [
     ("candidate-image-adapter", "image-builtin", "lead"),
     ("candidate-scaled-decode", "image-builtin", "lead"),
 ]
+CONCURRENT_PAIRS = DECODE_PAIRS
 
 
-def spread(row):
-    timing = row["timing"]
+def timing_of(row):
+    # Concurrent rows time a whole batch; the other sections time one call.
+    return row.get("timing") or row.get("batch_timing")
+
+
+def spread(timing):
     return (timing["p90_ms"] - timing["p10_ms"]) / timing["median_ms"]
 
 
 def ratio_rows(case_id, rows, pairs):
-    by_backend = {row["backend"]: row for row in rows if row.get("timing")}
+    by_backend = {row["backend"]: row for row in rows if timing_of(row)}
     out = []
     for numerator, denominator, kind in pairs:
         if numerator not in by_backend or denominator not in by_backend:
             continue
-        a, b = by_backend[numerator], by_backend[denominator]
-        ratio = a["timing"]["median_ms"] / b["timing"]["median_ms"]
-        band = max(MIN_BAND, 2.0 * max(spread(a), spread(b)))
+        a = timing_of(by_backend[numerator])
+        b = timing_of(by_backend[denominator])
         out.append(
             {
-                "case": case_id,
-                "pair": f"{numerator} / {denominator}",
+                "key": (case_id, f"{numerator} / {denominator}"),
                 "kind": kind,
-                "ratio": ratio,
-                "band": band,
+                "ratio": a["median_ms"] / b["median_ms"],
+                "spread": max(spread(a), spread(b)),
             }
         )
     return out
@@ -79,6 +89,9 @@ def all_ratios(report):
     for case in report["encode"]:
         ratios += ratio_rows(case["id"], case["rows"], ENCODE_PAIRS)
     ratios += ratio_rows("thumbnail", report["thumbnail"]["rows"], THUMBNAIL_PAIRS)
+    if report.get("concurrent"):
+        concurrent = report["concurrent"]
+        ratios += ratio_rows(concurrent["id"], concurrent["rows"], CONCURRENT_PAIRS)
     return ratios
 
 
@@ -88,44 +101,41 @@ def runtime_features(report):
     return tokens[0], dict(token.split("=", 1) for token in tokens[1:])
 
 
-def unusable(report, first_report):
-    """Why the pair cannot be scored, or None.
+def comparability(report):
+    """Everything that must match for two reports' ratios to be comparable.
 
-    Ratios move with the SIMD kernels runtime dispatch picks and with the
-    build variant, so a band set on one runner does not apply to another.
+    Ratios move with the SIMD kernels runtime dispatch picks, with the build
+    variant, and with the harness binary itself (BUDGETS.md: one library, two
+    consumer builds, 5 % apart on a parity row).
     """
-    for name, candidate in (("report", report), ("first report", first_report)):
-        # A smoke run times two iterations and says it is not a measurement.
-        if candidate.get("smoke"):
-            return f"the {name} is a --smoke run, not a measurement"
-        # An --only run leaves cases out, so a pass would cover only them.
-        if candidate.get("only") is not None:
-            return f"the {name} is filtered with --only {candidate['only']!r}"
-    if report["build"]["variant"] != first_report["build"]["variant"]:
-        return (
-            f"the report is VARIANT={report['build']['variant']} but the first "
-            f"report is VARIANT={first_report['build']['variant']}"
-        )
     architecture, features = runtime_features(report)
-    first_architecture, first_features = runtime_features(first_report)
-    if architecture != first_architecture:
-        return f"the report is {architecture} but the first report is {first_architecture}"
-    differing = sorted(
-        name
-        for name in features.keys() & first_features.keys()
-        if features[name] != first_features[name]
-    )
-    if differing:
-        return f"runtime features differ from the first report: {', '.join(differing)}"
-    # A dispatch input only one report recorded cannot be shown to match, and
-    # an unmatched input may mean a different kernel: refuse rather than
-    # score a pair that may not be comparable.
-    unrecorded = sorted(features.keys() ^ first_features.keys())
-    if unrecorded:
-        return (
-            "runtime features recorded by only one report, so not comparable: "
-            + ", ".join(unrecorded)
-        )
+    return {
+        "architecture": architecture,
+        "runtime features": features,
+        "VARIANT": report["build"]["variant"],
+        "consumer sources": report["build"].get("consumer_source_sha256"),
+    }
+
+
+def unusable(paths, reports):
+    """Why the set cannot be scored, or None."""
+    for path, report in zip(paths, reports):
+        # A smoke run times two iterations and says it is not a measurement.
+        if report.get("smoke"):
+            return f"{path} is a --smoke run, not a measurement"
+        # An --only run leaves cases out, so a pass would cover only them.
+        if report.get("only") is not None:
+            return f"{path} is filtered with --only {report['only']!r}"
+        # Reports from before the hash was recorded cannot show they share a
+        # consumer binary with anything, so they cannot join a set.
+        if len(set(paths)) > 1 and not report["build"].get("consumer_source_sha256"):
+            return f"{path} predates consumer_source_sha256, so its binary cannot be matched"
+    expected = comparability(reports[0])
+    for path, report in zip(paths[1:], reports[1:]):
+        actual = comparability(report)
+        for name, value in expected.items():
+            if actual[name] != value:
+                return f"{path} differs from {paths[0]} in {name}: {actual[name]} vs {value}"
     return None
 
 
@@ -134,67 +144,98 @@ def load(path):
         return json.load(handle)
 
 
-def main(argv):
+def parse_arguments(argv):
+    """(report path, reference paths, markdown?) or None on a usage error."""
     args = argv[1:]
     as_markdown = "--markdown" in args
-    if as_markdown:
-        args.remove("--markdown")
-    first_path = None
-    if "--first" in args:
+    args = [arg for arg in args if arg != "--markdown"]
+    references = []
+    while "--first" in args:
         index = args.index("--first")
         if index + 1 >= len(args):
-            print("--first needs a path", file=sys.stderr)
-            return 2
-        first_path = args[index + 1]
+            return None
+        references.append(args[index + 1])
         del args[index : index + 2]
     if len(args) != 1:
+        return None
+    return args[0], references or [args[0]], as_markdown
+
+
+def budgets(reference_reports):
+    """Per pair: the reference median, cross-run range, band and limit."""
+    by_key = {}
+    for report in reference_reports:
+        for entry in all_ratios(report):
+            by_key.setdefault(entry["key"], []).append(entry)
+    out = {}
+    for key, entries in by_key.items():
+        ratios = [entry["ratio"] for entry in entries]
+        cross_run = max(ratios) - min(ratios)
+        within_run = 2.0 * max(entry["spread"] for entry in entries)
+        band = max(MIN_BAND, within_run, cross_run)
+        median = statistics.median(ratios)
+        kind = entries[0]["kind"]
+        out[key] = {
+            "median": median,
+            "range": cross_run,
+            "band": band,
+            "resolvable": cross_run <= MAX_RESOLVABLE_RANGE,
+            # Parity: the release's speed plus the band. Lead: the reference
+            # lead times (1 + band), so a lead may shrink only by what the
+            # reference runs could not resolve.
+            "limit": 1.0 + band if kind == "parity" else median * (1.0 + band),
+        }
+    return out
+
+
+def main(argv):
+    parsed = parse_arguments(argv)
+    if parsed is None:
         print(__doc__.strip(), file=sys.stderr)
         return 2
-    report = load(args[0])
-    first_report = load(first_path) if first_path else report
-    problem = unusable(report, first_report)
+    report_path, reference_paths, as_markdown = parsed
+    paths = [report_path] + reference_paths
+    reports = [load(path) for path in paths]
+    problem = unusable(paths, reports)
     if problem:
         print(f"budgets.py: {problem}", file=sys.stderr)
         return 2
-    ratios = all_ratios(report)
-    first = all_ratios(first_report)
-    # README.md: the first report's spread is the noise floor for every
-    # later report, so bands come from it, not from the run under test.
-    first_band = {(entry["case"], entry["pair"]): entry["band"] for entry in first}
-    lead_limit = {
-        (entry["case"], entry["pair"]): entry["ratio"] * (1.0 + entry["band"])
-        for entry in first
-        if entry["kind"] == "lead"
-    }
+    limits = budgets(reports[1:])
 
     over = 0
     if as_markdown:
-        print("| case | pair | ratio | band | budget | verdict |")
-        print("|---|---|---:|---:|---:|---|")
-    for entry in ratios:
-        # Parity: the release's speed plus the first report's band. Lead: the
-        # first report's ratio times (1 + its band), so a lead can shrink only by
-        # what the first run could not resolve.
-        key = (entry["case"], entry["pair"])
-        if entry["kind"] == "parity":
-            budget = 1.0 + first_band[key] if key in first_band else None
-        else:
-            budget = lead_limit.get(key)
+        print(
+            "| case | pair | kind | ratio | reference median | cross-run range "
+            "| band | budget | verdict |"
+        )
+        print("|---|---|---|---:|---:|---:|---:|---:|---|")
+    for entry in all_ratios(reports[0]):
+        budget = limits.get(entry["key"])
         if budget is None:
-            verdict, budget_text = "no first-report row", "-"
+            verdict = "no reference row"
+            median_text = range_text = band_text = limit_text = "-"
         else:
-            verdict = "ok" if entry["ratio"] <= budget else "OVER"
-            over += verdict == "OVER"
-            budget_text = f"{budget:.3f}"
+            median_text = f"{budget['median']:.3f}"
+            range_text = f"{100 * budget['range']:.1f}%"
+            band_text = f"{100 * budget['band']:.1f}%"
+            limit_text = f"{budget['limit']:.3f}"
+            if not budget["resolvable"]:
+                verdict = "not resolvable on these runners"
+            elif entry["ratio"] <= budget["limit"]:
+                verdict = "ok"
+            else:
+                verdict = "OVER"
+                over += 1
+        case, pair = entry["key"]
         if as_markdown:
             print(
-                f"| {entry['case']} | {entry['pair']} | {entry['ratio']:.3f} | "
-                f"{100 * first_band.get(key, entry['band']):.1f}% | {budget_text} | {verdict} |"
+                f"| {case} | {pair} | {entry['kind']} | {entry['ratio']:.3f} | "
+                f"{median_text} | {range_text} | {band_text} | {limit_text} | {verdict} |"
             )
         else:
             print(
-                f"{entry['case']:32} {entry['pair']:44} {entry['ratio']:6.3f} "
-                f"{100 * first_band.get(key, entry['band']):5.1f}% {budget_text:>20} {verdict}"
+                f"{case:32} {pair:44} {entry['ratio']:6.3f} {median_text:>6} "
+                f"{range_text:>6} {band_text:>6} {limit_text:>6} {verdict}"
             )
     return 1 if over else 0
 

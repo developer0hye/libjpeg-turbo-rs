@@ -13217,8 +13217,8 @@ run 37542461917, reproduced by run 37543406684; the candidate library is
   later report's timing ratios against them; the allocation, encode-byte
   and size rules are checked by reading the report.
 - It lists every case the candidate loses. Three were filed:
-  [P4-228](#p4-228-the-candidate-is-6--slower-than-080-on-the-thumbnail-workload--open)
-  (thumbnail 1.060 vs 0.8.0, reproduced),
+  [P4-228](#p4-228-fresh-decode-of-large-images-is-24--slower-than-080--open)
+  (8K fresh decode 1.024–1.038 vs 0.8.0 in four runs),
   [P4-229](#p4-229-the-downstream-harness-records-machine-load-but-never-acts-on-it-and-the-hosted-macos-runner-was-saturated--open)
   (the hosted macOS runner was saturated in both dispatches, so aarch64 sets
   no budget yet) and
@@ -13364,50 +13364,50 @@ need for are now supported root paths — `yuv::*`, `StreamingDecoder`,
 4. Done in a minor (pre-1.0) release with a CHANGELOG entry mapping every
    moved path to its replacement, and `cargo-semver-checks` recording it.
 
-## P4-228. The Candidate Is 6 % Slower Than 0.8.0 on the Thumbnail Workload — **OPEN**
+## P4-228. Fresh Decode of Large Images Is 2–4 % Slower Than 0.8.0 — **OPEN**
 
 **GitHub:** [#659](https://github.com/developer0hye/libjpeg-turbo-rs/issues/659) — child of #635 Milestone C.
 
-**Found 2026-10-07** by P4-214's first measured report
-(`experiments/downstream/reports/2026-10-07-x86_64-linux/`), and reproduced by
-a second dispatch (`…-x86_64-linux-run2/`). Both runs built the consumer with
-Cargo's stock `release` profile against `main@80c15d2`.
+**Found 2026-10-07** by P4-214's downstream reports. Every x86_64 hosted run
+built a stock-profile consumer against `main@80c15d2`, and the same-run ratio
+`candidate-fresh / baseline-fresh` on the 7680x4320 4:2:0 decode was:
 
-**What happens.** The thumbnail workload (decode a 4032x3024 4:2:0 photo with
-EXIF orientation 6 through `Decoder::decode_image`, `Image::apply_orientation`,
-`image::imageops::resize` to 192x256, `compress` at q85) takes 164.1 ms on the
-candidate and 154.8 ms on the published 0.8.0 in the same run: a ratio of
-1.060 in both runs, against a budget of 1.030
-(`experiments/downstream/BUDGETS.md`). Output bytes, allocation count (48) and
-peak live bytes (69.8 MiB) are identical between the two.
+| run | consumer build | 8K fresh | 8K buffer-reuse |
+|---|---|---:|---:|
+| 37542461917 | A | 1.026 | 0.992 |
+| 37543406684 | A | 1.024 | 0.990 |
+| 37546927211 | B | 1.029 | 0.990 |
+| 37547005682 | B | 1.038 | 1.042 |
 
-What is known:
+The fresh path is slower in all four runs, by 2.4–3.8 %. The buffer-reuse
+path is at parity in three of them. A gap that grows with output size and
+appears only when the library allocates the output fits one extra pass over
+the output buffer: about 3.6 ms on a 99 MB RGB buffer. 0.8.0 allocated it with
+`vec![0u8; size]`, which can take already-zeroed pages from `calloc`. `main`
+uses `try_filled_vec` (`src/common/try_alloc.rs`, P4-209):
+`try_reserve_exact` followed by `resize`, which writes every byte. That is the
+hypothesis to test first.
 
-- `Image::apply_orientation` / `apply_orientation_value` are byte-identical to
-  0.8.0 (`git diff v0.8.0 origin/main`), and resize is `image`'s.
-- The plain fresh decode of the same-size photo costs only about 1 % more
-  (phone case, 1.010–1.020), so most of the 9.3 ms is not the decode rows'
-  difference.
-- The fresh decode drifts with image size, within budget: 1.024–1.026 on 8K
-  in both runs, while the buffer-reuse rows are flat (0.990–0.992).
-  `try_filled_vec` (`src/common/try_alloc.rs`, P4-209) replaced
-  `vec![0; n]`, which can take zeroed pages straight from `calloc`, with
-  `try_reserve_exact` + `resize`, which touches every page. That fits a cost that
-  grows with output size, and is the first hypothesis to test.
+**What did not hold up.** The thumbnail workload was filed here first, at
+1.060× 0.8.0 in runs 37542461917 and 37543406684. Those two runs used the same
+consumer binary. Two runs of a second build of the same library, with
+consumer code added, measured 1.016 and 1.003. The thumbnail ratio moves with
+the harness binary, so it is not evidence about the library, and it is not
+tracked as a regression. The phone-size fresh decode (0.984–1.020) is within
+noise.
 
 **Acceptance criteria.**
 
-1. A profile on a quiet machine attributes the thumbnail difference
-   (`decode_image` vs 0.8.0's, orientation, compress).
-2. The thumbnail ratio is back within budget (≤ 1.030 on the x86_64 hosted
-   runner, two dispatches agreeing), or the cost is a deliberate trade-off
-   recorded in BUDGETS.md with its reason.
-3. If the zero-fill is the cause, the fallible allocation keeps its
-   `try_reserve` refusal and regains lazily zeroed pages; a test pins that a
-   refused allocation still returns `Err`.
+1. A quiet-machine A/B (0.8.0's `vec![0; n]` vs `try_filled_vec`) confirms or
+   refutes the zero-fill as the cause of the 8K fresh gap.
+2. If confirmed, the owned output gets lazily zeroed pages again. Either
+   `try_reserve_exact` plus `alloc_zeroed`, or a fallible equivalent of
+   `vec![0; n]`. `AllocationFailed` is kept on refusal, and the P4-209
+   refusal tests still pass.
+3. The 8K fresh parity row is within its BUDGETS.md limit in two dispatches.
 
-**Why deferred.** It needs a quiet-machine profile, and the local machine was
-loaded when the report was taken.
+**Why deferred.** It needs a quiet-machine measurement. The local machine was
+loaded, and hosted runners cannot resolve a 3 % gap on their own.
 
 ## P4-229. The Downstream Harness Records Machine Load but Never Acts on It, and the Hosted macOS Runner Was Saturated — **OPEN**
 
