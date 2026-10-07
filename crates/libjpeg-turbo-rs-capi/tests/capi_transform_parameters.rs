@@ -187,7 +187,7 @@ fn trace_label(label: &str, jpeg: &[u8]) -> String {
         tj3Destroy(probe);
         pixels
     };
-    let cases: [(&str, [(c_int, c_int); 2], c_int, c_int); 16] = [
+    let cases: [(&str, [(c_int, c_int); 2], c_int, c_int); 17] = [
         ("plain", [NONE, NONE], TJXOP_NONE, 0),
         ("rot90", [NONE, NONE], TJXOP_ROT90, 0),
         (
@@ -245,6 +245,12 @@ fn trace_label(label: &str, jpeg: &[u8]) -> String {
             "restartrows",
             [(TJPARAM_RESTARTROWS, 1), NONE],
             TJXOP_ROT90,
+            0,
+        ),
+        (
+            "restartrows_then_blocks",
+            [(TJPARAM_RESTARTROWS, 1), (TJPARAM_RESTARTBLOCKS, 4)],
+            TJXOP_NONE,
             0,
         ),
         (
@@ -426,6 +432,8 @@ fn transform_honours_the_output_parameters() {
     for case_name in ["optimize", "restartblocks"] {
         assert_ne!(output(case_name), output("plain"), "{case_name}");
     }
+    // The last restart parameter set wins: blocks after rows is blocks.
+    assert_eq!(output("restartrows_then_blocks"), output("restartblocks"));
 }
 
 /// Issue #655 (codex review): a transform's output has a restart interval
@@ -526,6 +534,25 @@ fn transform_once(
         tj3Destroy(handle);
         result
     }
+}
+
+/// Codex review of #655: `TJPARAM_MAXPIXELS` is applied from the header, as
+/// upstream applies it right after `jpeg_read_header`, before any later scan
+/// is walked — so a progressive source cut after its first SOS is refused for
+/// its size, not for the scans that are missing.
+#[test]
+fn maxpixels_is_applied_before_any_later_scan_is_read() {
+    let progressive: &[u8] = FIXTURES[1].1;
+    let first_sos: usize = progressive
+        .windows(2)
+        .position(|pair| pair == [0xFF, 0xDA])
+        .expect("an SOS marker");
+    let segment_length: usize =
+        usize::from(progressive[first_sos + 2]) << 8 | usize::from(progressive[first_sos + 3]);
+    let truncated: &[u8] = &progressive[..first_sos + 2 + segment_length + 8];
+    let message: String =
+        transform_once(truncated, TJPARAM_MAXPIXELS, 1, no_crop()).expect_err("refused");
+    assert_eq!(message, "tj3Transform(): Image is too large");
 }
 
 #[test]

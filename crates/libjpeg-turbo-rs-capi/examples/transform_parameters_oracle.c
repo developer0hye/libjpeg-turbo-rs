@@ -163,6 +163,9 @@ static int run_label(const char *workdir, const char *label)
       TJXOP_NONE, 0);
   run(label, "restartrows", jpeg, size, TJPARAM_RESTARTROWS, 1, -1, 0,
       TJXOP_ROT90, 0);
+  /* RESTARTBLOCKS set after RESTARTROWS clears it (`:819-830`). */
+  run(label, "restartrows_then_blocks", jpeg, size, TJPARAM_RESTARTROWS, 1,
+      TJPARAM_RESTARTBLOCKS, 4, TJXOP_NONE, 0);
   run(label, "opt_progressive", jpeg, size, -1, 0, -1, 0, TJXOP_NONE,
       TJXOPT_PROGRESSIVE);
   run(label, "opt_arithmetic", jpeg, size, -1, 0, -1, 0, TJXOP_NONE,

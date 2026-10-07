@@ -13756,8 +13756,11 @@ libjpeg's JCS_UNKNOWN into YCbCr for the decoder's own fallback, so the
 P4-199 publisher's `Unknown` arm was dead. `publish_decomp_parameters` now
 publishes `TJCS_DEFAULT` for any component count other than 1, 3 or 4 —
 `default_decompress_parms`' default arm — and all three entry points refuse
-that frame with stock's message. Fixed the same way, not recorded as a
-divergence.
+that frame with stock's message — before the scan walk, since stock selects
+its colour converter before absorbing the scans
+(`an_unconvertible_frame_is_refused_before_the_scan_limit`, on a progressive
+two-component fixture measured against stock). Fixed the same way, not
+recorded as a divergence.
 
 Proof: `examples/decomp_parameters_oracle.c` traces a `dec8` case
 (`tj3Decompress8` regardless of precision) for every fixture plus the
@@ -13819,7 +13822,12 @@ the field's own documentation and to both `jpegtran` and `tj3Transform`,
 which drop it (`jpeg_copy_critical_parameters` does not copy
 `restart_interval`; measured on `photo_640x480_420_rst.jpg`). A crop region
 `jtransform_request_workspace` refuses is reported as "Invalid crop request"
-before the memory and scan limits, as upstream reports it.
+before the memory and scan limits, as upstream reports it. The source checks
+read the header only (`Decoder::new_header_only`, now public), so
+`TJPARAM_MAXPIXELS` refuses before any later scan is walked, and
+`TJPARAM_RESTARTBLOCKS` / `TJPARAM_RESTARTROWS` now clear each other when
+set nonzero, as upstream's `tj3Set` does (`turbojpeg.c:819-830`), so the
+interval applied is the last one set.
 
 Proof: `examples/transform_parameters_oracle.c` traces 16 cases per fixture
 plus 14 `TJPARAM_MAXMEMORY` boundary cases on a 1024x1024 4:4:4 source
@@ -13835,7 +13843,10 @@ operations, with and without `-grayscale`, against `jpegtran` byte for byte,
 plus the RGB-colour-space grayscale case;
 `transform_drops_the_source_restart_interval` and
 `an_invalid_crop_outranks_maxmemory` pin the last two (the oracle's `rst`
-label also traces the DRI drop byte-exact).
+label also traces the DRI drop byte-exact);
+`maxpixels_is_applied_before_any_later_scan_is_read`, the oracle's
+`restartrows_then_blocks` case and `the_restart_parameters_clear_each_other`
+(`tests/tj3_decomp_parameters.rs`) pin the rest.
 
 Not covered here: the handle's `TJPARAM_SAVEMARKERS` level and ICC profile,
 filed as [P4-235](#p4-235-tj3transform-ignores-tjparam_savemarkers-levels-013-and-the-handles-icc-profile--open).

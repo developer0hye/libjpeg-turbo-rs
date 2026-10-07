@@ -652,3 +652,59 @@ fn the_yuv_decompress_publishes_the_thirteen() {
         assert_eq!(published(&inspector), fresh, "{label}: inspect_header");
     }
 }
+
+/// Issue #653 (codex review): a two-component frame is refused for its colour
+/// space before the scan walk can refuse it for `TJPARAM_SCANLIMIT`: stock's
+/// `jpeg_start_decompress` selects the colour converter before it absorbs the
+/// scans, and reports "Unsupported color conversion request" for this
+/// progressive stream under a limit of 2 (measured, 3.2.0).
+#[test]
+fn an_unconvertible_frame_is_refused_before_the_scan_limit() {
+    const UNKNOWN2_PROGRESSIVE: &[u8] =
+        include_bytes!("inputs/p4226_two_component_progressive_16x16.jpg");
+    let mut handle: TjHandle = TjHandle::new();
+    handle.set(TjParam::ScanLimit, 2).expect("SCANLIMIT");
+    let error: JpegError = handle
+        .decompress(UNKNOWN2_PROGRESSIVE)
+        .expect_err("no conversion exists");
+    assert!(
+        error
+            .to_string()
+            .contains("Unsupported color conversion request"),
+        "{error}"
+    );
+    assert_eq!(handle.get(TjParam::Progressive), 1);
+}
+
+/// Codex review of #655: `TJPARAM_RESTARTBLOCKS` and `TJPARAM_RESTARTROWS`
+/// spell one setting — a nonzero value of either clears the other, as
+/// upstream's `tj3Set` does (`turbojpeg.c:819-830`) — so the interval in force
+/// is the last one set.
+#[test]
+fn the_restart_parameters_clear_each_other() {
+    let mut handle: TjHandle = TjHandle::new();
+    handle.set(TjParam::RestartRows, 1).expect("RESTARTROWS");
+    handle
+        .set(TjParam::RestartBlocks, 4)
+        .expect("RESTARTBLOCKS");
+    assert_eq!(
+        (
+            handle.get(TjParam::RestartBlocks),
+            handle.get(TjParam::RestartRows)
+        ),
+        (4, 0)
+    );
+    handle.set(TjParam::RestartRows, 2).expect("RESTARTROWS");
+    assert_eq!(
+        (
+            handle.get(TjParam::RestartBlocks),
+            handle.get(TjParam::RestartRows)
+        ),
+        (0, 2)
+    );
+    // Zero clears only itself.
+    handle
+        .set(TjParam::RestartBlocks, 0)
+        .expect("RESTARTBLOCKS");
+    assert_eq!(handle.get(TjParam::RestartRows), 2);
+}

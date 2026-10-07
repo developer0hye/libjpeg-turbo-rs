@@ -537,7 +537,10 @@ fn source_refusal(
         max_scans: usize::MAX,
         max_memory: None,
     };
-    let decoder: Decoder<'_> = Decoder::new_with_limits(jpeg, header_limits).ok()?;
+    // Markers up to the first SOS only, as `jpeg_read_header` reads them: the
+    // pixel cap must refuse an oversized progressive source before any of its
+    // later scans is walked.
+    let decoder: Decoder<'_> = Decoder::new_header_only(jpeg, header_limits).ok()?;
     let frame = decoder.header();
     let (width, height): (usize, usize) = (frame.width(), frame.height());
 

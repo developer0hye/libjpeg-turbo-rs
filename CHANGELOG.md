@@ -24,6 +24,10 @@ and `git log` between tags.
   path's own planes and output before the first is allocated. Until now a
   Rust caller had no way to give a 12- or 16-bit decode a budget.
   `decompress_12bit` / `decompress_16bit` keep `DecodeLimits::default()`.
+- **`Decoder::new_header_only`** is public: the frame as `jpeg_read_header`
+  sees it, markers up to the first SOS and no later scan located. Not for
+  decoding. `tj3Transform` applies `TJPARAM_MAXPIXELS` from it before walking
+  any scan (P4-227).
 - **`docs/STABILITY.md` "Limits and how they are applied" / "What the memory
   budget covers"** document every limit and exactly which allocations the
   `max_memory` / `TJPARAM_MAXMEMORY` estimate counts on each decode path and
@@ -367,7 +371,10 @@ and `git log` between tags.
   disables restart markers, and `jpegtran` (without `-restart`) and
   `tj3Transform` both drop it, because `jpeg_copy_critical_parameters` does not
   copy `restart_interval`. A crop region upstream refuses is reported as
-  "Invalid crop request" before any limit.
+  "Invalid crop request" before any limit. `TJPARAM_RESTARTBLOCKS` and
+  `TJPARAM_RESTARTROWS` now clear each other when set nonzero, as upstream's
+  `tj3Set` does, so `tj3Get` and every compress or transform see the
+  interval set last.
 - An allocator refusal during a decode is reported as
   `JpegError::AllocationFailed` instead of aborting the process (P4-209,
   #632). `decompress` / `Decoder::decode_image` allocated their destination

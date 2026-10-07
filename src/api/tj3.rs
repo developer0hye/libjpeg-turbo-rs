@@ -482,11 +482,20 @@ impl TjHandle {
                 }
                 self.lossless_pt = value;
             }
+            // The two spell one setting: a nonzero value of either clears the
+            // other, as upstream's `tj3Set` does (`turbojpeg.c:819-830`), so
+            // the interval in force is always the last one set.
             TjParam::RestartBlocks => {
                 self.restart_blocks = value;
+                if value != 0 {
+                    self.restart_rows = 0;
+                }
             }
             TjParam::RestartRows => {
                 self.restart_rows = value;
+                if value != 0 {
+                    self.restart_blocks = 0;
+                }
             }
             TjParam::XDensity => {
                 self.x_density = value;
@@ -1297,22 +1306,24 @@ impl TjHandle {
     ///
     /// Publishes the thirteen header parameters first — see
     /// [`Self::decompress_header`] — then applies `TJPARAM_MAXPIXELS` to the
-    /// frame, then locates every scan under `TJPARAM_SCANLIMIT`, then refuses
-    /// what `tj3Decompress8` cannot decode — a frame above 8 bits or one with
-    /// no nameable colour space (P4-226) — then applies the scaling factor
-    /// and cropping region, then decodes.
+    /// frame, then refuses a frame with no nameable colour space, then
+    /// locates every scan under `TJPARAM_SCANLIMIT`, then refuses a frame
+    /// above 8 bits (P4-226; each where stock's 8-bit body raises it), then
+    /// applies the scaling factor and cropping region, then decodes.
     pub fn decompress(&mut self, data: &[u8]) -> Result<Image> {
         let _header: Decoder<'_> = self.read_header(data)?;
         let limits: crate::common::types::DecodeLimits = self.decode_limits();
         // Upstream's maxPixels test sits right after setDecompParameters and
         // before scaling or cropping is consulted (`turbojpeg-mp.c:195-198`).
         limits.check_frame(self.width as usize, self.height as usize)?;
+        // `jpeg_start_decompress` selects the colour converter before it
+        // absorbs a multi-scan stream, so a frame with no conversion is
+        // refused before the scan walk below can (P4-226, #653).
+        self.refuse_unconvertible_color_space()?;
         // The full walk, which the decode needs and the header read skipped.
         let mut decoder = Decoder::new_with_limits(data, limits)?;
-        // What stock's 8-bit body cannot decode, refused where it refuses —
-        // after the scan walk, as `jpeg_start_decompress` absorbs a
-        // multi-scan stream before either check (P4-226, #653).
-        self.refuse_unconvertible_color_space()?;
+        // The precision is refused only by `_jpeg_read_scanlines`, after
+        // `jpeg_start_decompress` has absorbed the scans (P4-226, #653).
         Self::refuse_precision_above_8(decoder.header())?;
 
         // Apply scaling
