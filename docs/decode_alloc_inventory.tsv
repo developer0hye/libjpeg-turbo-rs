@@ -5,10 +5,11 @@
 # allocator refuses: there is no Result to return. For a size that comes out of
 # a JPEG stream that turns a hostile — or merely large — file into an
 # uncatchable denial of service, so every such size goes through
-# `common::try_alloc` (`try_filled_vec`, `try_reserved_vec`, `try_with_capacity`,
-# `try_copy_of`) and surfaces refusal as `JpegError::AllocationFailed`. This file
-# pins the infallible allocations that REMAIN, each with the reason its size is
-# bounded by something other than the input's geometry.
+# `common::try_alloc` (`try_zeroed_bytes`, `try_filled_vec`, `try_reserved_vec`,
+# `try_with_capacity`, `try_copy_of`) and surfaces refusal as
+# `JpegError::AllocationFailed`. This file pins the infallible allocations
+# that REMAIN, each with the reason its size is bounded by something other than
+# the input's geometry.
 #
 # `tests/decode_alloc_gate.rs` fails if this file and the sources disagree, so a
 # new infallible allocation under src/decode/ cannot land without a human either

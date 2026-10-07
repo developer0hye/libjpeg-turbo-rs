@@ -4,7 +4,7 @@ use crate::common::error::{DecodeWarning, JpegError, Result};
 use crate::common::quant_table::QuantTable;
 use crate::common::try_alloc::{
     try_clone_opt, try_clone_opt_string, try_clone_saved_markers, try_copy_of, try_filled_vec,
-    try_reserved_vec,
+    try_reserved_vec, try_zeroed_bytes,
 };
 use crate::common::types::{ColorSpace, ComponentInfo, PixelFormat};
 use alloc::{
@@ -82,9 +82,8 @@ fn take_out_buf<'a>(sink: &mut Option<&'a mut [u8]>, size: usize) -> Result<OutB
         // process on refusal. This is the owned destination most
         // `decompress` paths allocate, so it was the abort the simplest
         // decode hit.
-        None => Ok(OutBuf::Owned(try_filled_vec(
+        None => Ok(OutBuf::Owned(try_zeroed_bytes(
             size,
-            0u8,
             "decode output buffer",
         )?)),
     }
@@ -507,7 +506,7 @@ impl<'a> Decoder<'a> {
                         // set_dither_565 must not be silently ignored).
                         // One row of 8-bit scratch, not a full plane.
                         let mut out: Vec<u8> =
-                            try_filled_vec(width * height * 2, 0u8, "12-bit downscaled output")?;
+                            try_zeroed_bytes(width * height * 2, "12-bit downscaled output")?;
                         let mut row8: Vec<u8> = vec![0u8; width];
                         for y in 0..height {
                             for (dst, &v12) in
@@ -558,7 +557,7 @@ impl<'a> Decoder<'a> {
             // Convert to the requested output format.
             let bpp: usize = out_format.bytes_per_pixel();
             let mut data: Vec<u8> =
-                try_filled_vec(width * height * bpp, 0u8, "12-bit downscaled output")?;
+                try_zeroed_bytes(width * height * bpp, "12-bit downscaled output")?;
 
             let r_off: Option<usize> = out_format.red_offset();
             let g_off: Option<usize> = out_format.green_offset();
@@ -1346,7 +1345,7 @@ impl<'a> Decoder<'a> {
                     let merged_bpp: usize = 3;
                     let merged_size: usize = out_width * out_height * merged_bpp;
                     let mut merged_rgb: Vec<u8> =
-                        try_filled_vec(merged_size, 0u8, "merged upsample RGB buffer")?;
+                        try_zeroed_bytes(merged_size, "merged upsample RGB buffer")?;
 
                     if v_factor == 1 {
                         // H2V1 (4:2:2): one chroma row per Y row
@@ -1397,11 +1396,8 @@ impl<'a> Decoder<'a> {
                     } else {
                         // RGB565 little-endian: word = (R5 << 11) | (G6 << 5) | B5,
                         // with 5-6-5 truncation matching upstream.
-                        let mut packed: Vec<u8> = try_filled_vec(
-                            out_width * out_height * bpp,
-                            0u8,
-                            "merged RGB565 output",
-                        )?;
+                        let mut packed: Vec<u8> =
+                            try_zeroed_bytes(out_width * out_height * bpp, "merged RGB565 output")?;
                         for i in 0..(out_width * out_height) {
                             let r: u16 = merged_rgb[i * 3] as u16;
                             let g: u16 = merged_rgb[i * 3 + 1] as u16;
@@ -1823,10 +1819,8 @@ impl<'a> Decoder<'a> {
 
                 // All remaining paths need full-plane cb_full/cr_full buffers.
                 let alloc_size = full_width * full_height;
-                let mut cb_full: Vec<u8> =
-                    try_filled_vec(alloc_size, 0u8, "upsampled chroma plane")?;
-                let mut cr_full: Vec<u8> =
-                    try_filled_vec(alloc_size, 0u8, "upsampled chroma plane")?;
+                let mut cb_full: Vec<u8> = try_zeroed_bytes(alloc_size, "upsampled chroma plane")?;
+                let mut cr_full: Vec<u8> = try_zeroed_bytes(alloc_size, "upsampled chroma plane")?;
 
                 // Upsample each chroma component independently using its own factors.
                 // This handles non-uniform chroma sampling (e.g. Cb=2x1, Cr=1x1)
