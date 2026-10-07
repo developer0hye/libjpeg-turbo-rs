@@ -95,9 +95,9 @@ pub const MAX_DECODE_WARNINGS: usize = 64;
 /// [`MAX_DECODE_WARNINGS`] `HuffmanError` entries, then at most one
 /// `WarningsSuppressed` counting the rest. `TruncatedData` and
 /// `UnsupportedRecovered` occur at most once each per decode and are never
-/// suppressed, so a caller looking for them always finds them; either may
-/// come after `WarningsSuppressed`, so search the list rather than reading
-/// its last entry.
+/// suppressed, so a caller looking for them always finds them; `TruncatedData`
+/// comes before `WarningsSuppressed` and `UnsupportedRecovered` after it, so
+/// search the list rather than reading its last entry.
 ///
 /// `#[non_exhaustive]` for the reason [`JpegError`] is: adding
 /// `WarningsSuppressed` broke exhaustive matches, and this prevents a repeat.
@@ -123,9 +123,9 @@ pub enum DecodeWarning {
     UnsupportedRecovered { detail: String },
     /// `count` further `HuffmanError` warnings were not recorded because the
     /// decode had already recorded [`MAX_DECODE_WARNINGS`]. Appears at most
-    /// once, after the recorded `HuffmanError` entries (not necessarily last:
-    /// `TruncatedData` or `UnsupportedRecovered` can follow); `count` is never
-    /// zero.
+    /// once, after the recorded `HuffmanError` entries and any `TruncatedData`
+    /// (not necessarily last: `UnsupportedRecovered` can follow); `count` is
+    /// never zero.
     WarningsSuppressed { count: usize },
 }
 

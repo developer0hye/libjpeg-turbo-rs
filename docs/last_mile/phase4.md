@@ -13016,7 +13016,8 @@ byte equality with stock 3.2.0 `cjpeg -scans` for all seven scripts in five
 modes (Huffman YCbCr, `-arithmetic`, `-rgb`, `-rgb -sample 2x2,1x1,1x1`,
 `-rgb -arithmetic -sample 2x2,1x1,1x1`; grayscale cases also under
 `-arithmetic`), `refusals_match_cjpeg_entry_for_entry` requires the same
-refused entry as `cjpeg` for all 19 refusals in every mode,
+refused entry as `cjpeg` for all 19 refusals in every mode (the two
+grayscale refusals skip the three RGB-direct modes),
 `issue_636_invalid_script_outranks_frame_errors_on_every_path` pins the
 precedence, and `issue_636_scripts_no_path_can_honour_are_refused` pins the
 three refusals. Measured discriminating: with the arithmetic DC geometry fix
