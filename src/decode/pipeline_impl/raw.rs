@@ -60,6 +60,22 @@ impl<'a> Decoder<'a> {
             )));
         }
         let comp_block_sizes: Vec<usize> = vec![block_size; num_components];
+        // At a block size above 8 the planes outgrow the frame (2x at 16), so
+        // their spans are checked before any is sized: on a 32-bit target a
+        // frame the pixel limit admits can otherwise wrap a plane's length.
+        for component in &frame.components {
+            crate::common::layout::checked_span(
+                &[
+                    width.div_ceil(max_h * 8),
+                    component.horizontal_sampling as usize,
+                    block_size,
+                    height.div_ceil(max_v * 8),
+                    component.vertical_sampling as usize,
+                    block_size,
+                ],
+                "raw component plane",
+            )?;
+        }
         let mcu_width: usize = max_h * 8;
         let mcu_height: usize = max_v * 8;
         let mcus_x: usize = width.div_ceil(mcu_width);

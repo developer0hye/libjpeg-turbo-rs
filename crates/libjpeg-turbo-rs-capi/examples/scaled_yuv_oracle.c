@@ -11,6 +11,10 @@
  * exports and compares the transcripts verbatim, so every sample — the
  * padding columns and rows of a plane included — must equal stock's.
  *
+ * The first line is `version=<LIBJPEG_TURBO_VERSION_NUMBER>`: TurboJPEG
+ * before 3.2 classifies 4:1:0 and 2:4 frames as TJSAMP_UNKNOWN and refuses
+ * them, so the mirror compares those labels only against a 3.2+ oracle.
+ *
  * Usage: scaled_yuv_oracle <workdir> <label>...
  */
 
@@ -18,6 +22,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <jconfig.h>
 #include <turbojpeg.h>
 
 static unsigned char *read_file(const char *path, size_t *size)
@@ -64,6 +69,7 @@ int main(int argc, char **argv)
     fprintf(stderr, "usage: %s <workdir> <label>...\n", argv[0]);
     return 2;
   }
+  printf("version=%d\n", LIBJPEG_TURBO_VERSION_NUMBER);
   for (arg = 2; arg < argc; arg++) {
     char path[4096];
     size_t size = 0;

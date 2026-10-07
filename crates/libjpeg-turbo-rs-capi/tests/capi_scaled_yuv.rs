@@ -185,8 +185,13 @@ fn scaled_yuv_planes_match_stock_turbojpeg() {
         args.push(label);
     }
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let c_trace: String = helpers::run_oracle(&oracle, &arg_refs);
+    let c_output: String = helpers::run_oracle(&oracle, &arg_refs);
     let _ = std::fs::remove_dir_all(&workdir);
+    let (version_line, c_trace) = c_output.split_once('\n').expect("a version line");
+    let version: u32 = version_line
+        .strip_prefix("version=")
+        .and_then(|number| number.parse().ok())
+        .unwrap_or_else(|| panic!("oracle printed {version_line:?}, not its version"));
 
     let rust_trace: String = our_trace();
     assert_eq!(rust_trace.lines().count(), 36 * 16);
@@ -194,8 +199,26 @@ fn scaled_yuv_planes_match_stock_turbojpeg() {
         !rust_trace.contains("rc=-1"),
         "every stream decodes at every factor:\n{rust_trace}"
     );
+    // TurboJPEG before 3.2 cannot name 4:1:0 or 2:4 (`getSubsamp`), so it
+    // refuses those frames; against such an oracle they are left out rather
+    // than compared with a refusal.
+    let comparable = |trace: &str| -> String {
+        trace
+            .lines()
+            .filter(|line| {
+                version >= 3_002_000 || !(line.starts_with("s410_") || line.starts_with("s24_"))
+            })
+            .map(|line| format!("{line}\n"))
+            .collect()
+    };
+    if version < 3_002_000 {
+        eprintln!(
+            "NOTE: oracle {version} predates 4:1:0 / 2:4 support; those rows are not compared"
+        );
+    }
     assert_eq!(
-        rust_trace, c_trace,
+        comparable(&rust_trace),
+        comparable(c_trace),
         "scaled YUV planes differ from stock TurboJPEG"
     );
 }

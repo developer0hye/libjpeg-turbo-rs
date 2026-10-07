@@ -607,17 +607,30 @@ pub(crate) fn turbojpeg_yuv_planes(
             plane_height,
             scratch_len,
         ));
+        let component_len: usize = crate::common::layout::checked_span(
+            &[scratch_width, scratch_rows],
+            "YUV scratch rows",
+        )?;
         scratch_len = scratch_len
-            .checked_add(scratch_width * scratch_rows)
+            .checked_add(component_len)
             .ok_or_else(|| JpegError::CorruptData("YUV scratch size overflows".to_string()))?;
     }
     // Upstream's scratch is `malloc`ed and never cleared; a row read before
-    // libjpeg first writes it is undefined there and zero here.
-    let mut scratch: Vec<u8> = vec![0u8; scratch_len];
-    let mut planes: Vec<Vec<u8>> = layout
-        .iter()
-        .map(|&(_, _, _, plane_width, plane_height, _)| vec![0u8; plane_width * plane_height])
-        .collect();
+    // libjpeg first writes it is undefined there and zero here. Sized and
+    // allocated fallibly: an upscaled frame can be large, and an allocator
+    // abort is not something the C ABI's unwind guard can turn into -1.
+    let mut scratch: Vec<u8> =
+        crate::common::try_alloc::try_filled_vec(scratch_len, 0u8, "YUV scratch")?;
+    let mut planes: Vec<Vec<u8>> = Vec::with_capacity(layout.len());
+    for &(_, _, _, plane_width, plane_height, _) in &layout {
+        let plane_len: usize =
+            crate::common::layout::checked_span(&[plane_width, plane_height], "YUV plane")?;
+        planes.push(crate::common::try_alloc::try_filled_vec(
+            plane_len,
+            0u8,
+            "YUV plane",
+        )?);
+    }
     let imcu_rows: usize = out_height.div_ceil(max_v * block);
     for imcu_row in 0..imcu_rows {
         // What `jpeg_read_raw_data` writes into the scratch: the component's
