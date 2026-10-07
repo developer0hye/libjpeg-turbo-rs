@@ -53,8 +53,8 @@ crates/libjpeg-turbo-rs-capi/src/memmgr.rs	1	clamped-difference	budget.saturatin
 crates/libjpeg-turbo-rs-capi/src/memmgr.rs	1	counter	.saturating_sub(block.layout.size());
 crates/libjpeg-turbo-rs-capi/src/memmgr.rs	1	counter	self.total_space_allocated = self.total_space_allocated.saturating_add(size);
 crates/libjpeg-turbo-rs-capi/src/memmgr.rs	2	bounds-check	if start_row.saturating_add(num_rows) > ctrl_ref.rows_in_array {
-crates/libjpeg-turbo-rs-capi/src/transform.rs	1	clamped-difference	crop.height.min(out_height.saturating_sub(crop.y))
-crates/libjpeg-turbo-rs-capi/src/transform.rs	1	clamped-difference	crop.width.min(out_width.saturating_sub(crop.x))
+crates/libjpeg-turbo-rs-capi/src/transform.rs	1	clamped-difference	extent.min(frame.saturating_sub(offset))
+crates/libjpeg-turbo-rs-capi/src/transform.rs	1	clamped-difference	frame.saturating_sub(offset)
 crates/libjpeg-turbo-rs-capi/src/transform.rs	1	bounds-check	.fold(retained_markers, u64::saturating_add);
 crates/libjpeg-turbo-rs-capi/src/transform.rs	1	bounds-check	.saturating_mul(128)
 crates/libjpeg-turbo-rs-capi/src/transform.rs	1	bounds-check	.saturating_mul(blocks_high as u64)
