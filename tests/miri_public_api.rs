@@ -27,8 +27,8 @@
 //!      `pipeline_impl/baseline.rs`.
 //!   2. **A tripwire.** *Reading* every byte does not, today, test
 //!      initialisation: both destinations are initialised by construction —
-//!      the colour path allocates with `try_filled_vec(.., 0u8, ..)` and the
-//!      grayscale path reserves and `extend_from_slice`es — so Miri's uninit
+//!      the colour path allocates with `try_zeroed_bytes` (`alloc_zeroed`) and
+//!      the grayscale path reserves and `extend_from_slice`es — so Miri's uninit
 //!      tracking cannot fire. It is a guard against the shape P4-136 removed:
 //!      a `set_len` over spare capacity, whose bytes the lib test's
 //!      `image.data.len()` assertion would pass over exactly as happily as

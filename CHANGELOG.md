@@ -102,6 +102,13 @@ and `git log` between tags.
   `match`es on `DecodeWarning` need a wildcard arm. The list is also moved
   into the `Image` instead of cloned.
 
+- **Zero-filled `u8` decode buffers are allocated with `alloc_zeroed` again**
+  (P4-228, #659). P4-209 made the owned decode output and the decoder planes
+  fallible, but by reserving and then filling them, which wrote every byte
+  once more than 0.8.0's `vec![0u8; n]` did. Fresh decodes of large images
+  were 2–5 % slower; on the Zen 3 reference runners they are back at 0.8.0's
+  speed, and allocator refusal still returns `AllocationFailed`.
+
 - **Breaking (Rust API): low-level modules and two exhaustively constructible
   structs changed since 0.8.0** — the evidence for the next root release being
   0.9.0 (`cargo-semver-checks` on `cargo rustdoc --locked` output,
