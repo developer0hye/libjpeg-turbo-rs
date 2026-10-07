@@ -222,7 +222,11 @@ pub unsafe extern "C" fn tj3Transform(
                 };
 
                 if (t.options & TJXOPT_CROP) != 0 {
-                    if t.r.x < 0 || t.r.y < 0 || t.r.w <= 0 || t.r.h <= 0 {
+                    // Only a negative field is invalid (`turbojpeg.c:2970-2971`);
+                    // a zero width or height is `JCROP_UNSET`, "to the edge"
+                    // (`:2979-2986`), resolved against the transformed frame
+                    // once the header is read (P4-240, #675).
+                    if t.r.x < 0 || t.r.y < 0 || t.r.w < 0 || t.r.h < 0 {
                         inst.set_error(
                             format!(
                                 "tj3Transform[{i}]: invalid crop region {{x={},y={},w={},h={}}}",
@@ -405,10 +409,14 @@ fn crop_is_refused(opts: &TransformOptions, width: usize, height: usize) -> bool
         (width, height)
     };
     let axis_refused = |offset: usize, extent: usize, frame: usize| -> bool {
+        if extent == 0 {
+            // `JCROP_UNSET`: to the edge, refused only for an origin outside.
+            return offset >= frame;
+        }
         if extent > frame {
             opts.op != TransformOp::None || offset >= extent || offset > extent - frame
         } else {
-            offset >= frame || extent == 0 || offset > frame - extent
+            offset >= frame || offset > frame - extent
         }
     };
     axis_refused(crop.x, crop.width, out_width) || axis_refused(crop.y, crop.height, out_height)
@@ -549,16 +557,18 @@ fn transform_memory_estimate(
             (width, height)
         };
         if let Some(crop) = opts.crop {
-            out_width = if crop.width > out_width {
-                crop.width
-            } else {
-                crop.width.min(out_width.saturating_sub(crop.x))
+            // A zero extent runs to the edge (`JCROP_UNSET`).
+            let extent = |extent: usize, offset: usize, frame: usize| -> usize {
+                if extent == 0 {
+                    frame.saturating_sub(offset)
+                } else if extent > frame {
+                    extent
+                } else {
+                    extent.min(frame.saturating_sub(offset))
+                }
             };
-            out_height = if crop.height > out_height {
-                crop.height
-            } else {
-                crop.height.min(out_height.saturating_sub(crop.y))
-            };
+            out_width = extent(crop.width, crop.x, out_width);
+            out_height = extent(crop.height, crop.y, out_height);
         }
         let components: usize = if gray_only { 1 } else { frame.components.len() };
         let (imcu_width, imcu_height): (usize, usize) = match (components, transposed) {
@@ -775,18 +785,21 @@ pub(crate) fn transformed_specs(
             other => other,
         };
     }
-    // Crop detection: upstream gates on `TJXOPT_CROP` and treats `r.w == 0`
-    // as "remainder of width post-x". `tjbench` only takes the `IS_CROPPED`
-    // path when at least one of x/y/w/h is non-zero, so the simpler "any of
-    // r.{w,h} positive" heuristic matches its usage; a stricter caller that
-    // wants the remainder-mode behaviour can pass an explicit `r.w` / `r.h`.
+    // Crop: upstream's `getTransformedSpecs` (`turbojpeg.c:2847-2870`) takes
+    // `r.w` / `r.h`, and a zero one as the remainder past `r.x` / `r.y`
+    // (`JCROP_UNSET`, P4-240). Its range checks are not repeated here: a
+    // region `tj3Transform` would refuse never reaches an output.
     if (xform.options & TJXOPT_CROP) != 0 {
-        if xform.r.w > 0 {
-            w = xform.r.w;
-        }
-        if xform.r.h > 0 {
-            h = xform.r.h;
-        }
+        w = if xform.r.w > 0 {
+            xform.r.w
+        } else {
+            (w - xform.r.x.max(0)).max(1)
+        };
+        h = if xform.r.h > 0 {
+            xform.r.h
+        } else {
+            (h - xform.r.y.max(0)).max(1)
+        };
     }
     (w, h, subsamp)
 }

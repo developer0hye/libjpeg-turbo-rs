@@ -7,7 +7,7 @@ use crate::common::error::{JpegError, Result};
 use crate::common::layout::checked_span;
 use crate::common::quant_table::NATURAL_ORDER;
 use crate::common::try_alloc::try_filled_vec;
-use crate::common::types::{ColorSpace, MarkerSaveConfig, SavedMarker};
+use crate::common::types::{ColorSpace, CropRegion, MarkerSaveConfig, SavedMarker};
 use crate::decode::marker::{JpegMetadata, MarkerReader};
 use crate::encode::huffman_encode::{build_huff_table, BitWriter, HuffTable, HuffmanEncoder};
 use crate::encode::marker_writer;
@@ -658,6 +658,45 @@ pub fn write_coefficients(coeffs: &JpegCoefficients) -> Result<Vec<u8>> {
     Ok(output)
 }
 
+/// `jtransform_request_workspace`'s crop validation (`transupp.c:1705-1757`)
+/// for one region in the transformed image's `frame_width` x `frame_height`:
+/// a zero extent becomes "to the edge" (`JCROP_UNSET`), and every region it
+/// refuses with `JERR_BAD_CROP_SPEC` is refused with its message. A region
+/// larger than the frame is crop *expansion*, legal there only for
+/// `TransformOp::None`; it is let through (and clamped below, P4-173).
+pub(crate) fn resolve_crop(
+    crop: CropRegion,
+    op: TransformOp,
+    frame_width: usize,
+    frame_height: usize,
+) -> Result<CropRegion> {
+    let refused = || JpegError::InvalidCropRegion {
+        reason: "Invalid crop request".to_string(),
+    };
+    let axis = |offset: usize, extent: usize, frame: usize| -> Result<usize> {
+        if extent == 0 {
+            if offset >= frame {
+                return Err(refused());
+            }
+            return Ok(frame - offset);
+        }
+        if extent > frame {
+            if op != TransformOp::None || offset >= extent || offset > extent - frame {
+                return Err(refused());
+            }
+        } else if offset >= frame || offset > frame - extent {
+            return Err(refused());
+        }
+        Ok(extent)
+    };
+    Ok(CropRegion {
+        x: crop.x,
+        y: crop.y,
+        width: axis(crop.x, crop.width, frame_width)?,
+        height: axis(crop.y, crop.height, frame_height)?,
+    })
+}
+
 /// Re-lay component 0 of `coeffs` as a plain 1x1-sampled raster of
 /// `ceil(width / 8)` x `ceil(height / 8)` blocks, dropping the MCU padding a
 /// larger sampling factor left around it. A no-op when it is already 1x1.
@@ -1174,6 +1213,15 @@ pub fn transform_jpeg_with_options(data: &[u8], options: &TransformOptions) -> R
         // remainder_x)` then underflows. Found via fuzz_transform_options
         // round-5 (CI run 25218344069) at coefficient.rs:907. Reject up
         // front rather than wrap silently.
+        // A zero extent is jpegtran's omitted `W` / `H` (`JCROP_UNSET`): to
+        // the edge. A region `jtransform_request_workspace` refuses
+        // (`transupp.c:1705-1757`, `JERR_BAD_CROP_SPEC`) is refused rather
+        // than clamped to the image (P4-240, #675).
+        let crop: CropRegion =
+            resolve_crop(*crop, op, coeffs.width as usize, coeffs.height as usize)?;
+        // What is left past this is a legal crop *expansion* (P4-173), which
+        // is clamped below; an expansion origin outside the image would
+        // underflow that arithmetic, so it is refused.
         if crop.x >= coeffs.width as usize || crop.y >= coeffs.height as usize {
             return Err(JpegError::Unsupported(format!(
                 "crop origin (x={}, y={}) lies outside post-transform image \

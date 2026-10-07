@@ -141,7 +141,7 @@
 
 | C Function | Description | Rust | Status |
 |---|---|---|---|
-| `tj3Transform(handle, jpeg, size, n, &dstBufs, &dstSizes, transforms)` | Lossless transform with options | `transform_jpeg()` / `transform_jpeg_with_options()` (all ops + all TJXOPT flags, including arithmetic/progressive output, + custom filter). The C entry point applies the handle's `TJPARAM_MAXPIXELS` / `SCANLIMIT` / `MAXMEMORY` to the source and its `PROGRESSIVE` / `ARITHMETIC` / `OPTIMIZE` / `RESTARTBLOCKS` / `RESTARTROWS` to the output, byte-exact vs stock (P4-227, #655); the handle's `SAVEMARKERS` level and ICC profile are not applied (P4-235, #668) | 🔶 |
+| `tj3Transform(handle, jpeg, size, n, &dstBufs, &dstSizes, transforms)` | Lossless transform with options | `transform_jpeg()` / `transform_jpeg_with_options()` (all ops + all TJXOPT flags, including arithmetic/progressive output, + custom filter). The C entry point applies the handle's `TJPARAM_MAXPIXELS` / `SCANLIMIT` / `MAXMEMORY` to the source and its `PROGRESSIVE` / `ARITHMETIC` / `OPTIMIZE` / `RESTARTBLOCKS` / `RESTARTROWS` to the output, byte-exact vs stock (P4-227, #655); the handle's `SAVEMARKERS` level and ICC profile are not applied (P4-235, #668). Crop regions follow `jtransform_request_workspace`'s rules — a zero `r.w` / `r.h` runs to the edge, an out-of-range region is "Invalid crop request" (P4-240, #675) | 🔶 |
 | `tj3TransformBufSize(handle, transform)` | Estimate output buffer size | `transform_buf_size()` | ✅ |
 
 ### Error Handling

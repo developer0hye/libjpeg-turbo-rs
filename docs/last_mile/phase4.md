@@ -14181,7 +14181,7 @@ band of 0.8.0.
 **Why deferred.** No Zen 4 machine is available locally, and hosted runners
 land on Zen 4 only some of the time.
 
-## P4-240. `tj3Transform` Refuses a Zero Crop Width or Height, and the Rust Transform Clamps Crops jpegtran Refuses — **OPEN**
+## P4-240. `tj3Transform` Refuses a Zero Crop Width or Height, and the Rust Transform Clamps Crops jpegtran Refuses — **CLOSED 2026-10-08**
 
 **GitHub:** [#675](https://github.com/developer0hye/libjpeg-turbo-rs/issues/675) — found 2026-10-08 by the review of P4-227 (#655, PR #674).
 
@@ -14209,4 +14209,28 @@ refuses, cross-validated against `jpegtran -crop`. Crop *expansion* stays with
 
 **Why deferred.** Both are behaviour changes outside P4-227's limits and output
 parameters; (2) changes what the Rust API accepts.
+
+**Status (2026-10-08): closed.** The clamping was not a documented Rust-API
+choice — `TransformOptions::crop` said only "MCU-aligned coordinates", and the
+code's own comment claimed jpegtran semantics — so the core now follows
+`jtransform_request_workspace` (`resolve_crop` in `src/api/coefficient.rs`):
+a zero `width` / `height` is `JCROP_UNSET`, "to the edge"; an origin outside
+the transformed image, a region running past it, and a region larger than it
+under any transform are `JpegError::InvalidCropRegion("Invalid crop request")`,
+jpegtran's message. Crop *expansion* — a larger region with
+`TransformOp::None`, which jpegtran 3.2 accepts — is still clamped and stays
+with P4-173. `tj3Transform` accepts a zero `r.w` / `r.h` (only a negative
+field is "Invalid cropping region"), its pre-limit crop check treats a zero
+extent as unset, its memory estimate sizes such a region to the edge, and
+`tj3TransformBufSize` sizes it as `getTransformedSpecs` does
+(`turbojpeg.c:2862-2865`) instead of as the whole frame. The field doc now
+states the rules.
+
+Proof: `tests/transform_crop_c_parity.rs` (twelve regions under none, flip,
+transpose and rotations — zero extents, unaligned origins, and the five jpegtran
+refuses — byte-exact against `jpegtran -crop`, refusals with jpegtran's
+message); the transform oracle trace gains five `crop_*` cases per fixture,
+verbatim against stock `tj3Transform`; `a_zero_crop_extent_runs_to_the_edge`
+pins the outcomes and the `tj3TransformBufSize` bound. The parity test fails
+on the previous code.
 
