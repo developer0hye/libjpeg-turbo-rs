@@ -414,3 +414,28 @@ fn issue_664_grayscale_lossless_ignores_sampling_as_c_does() {
         assert_same_stream(label, &jpeg, &c_jpeg);
     }
 }
+
+/// Issue #664: the lossless reset holds for RGB-direct output too.
+/// `cjpeg -lossless 1 -rgb -sample 3x2,1x1,1x1` codes every component at 1x1;
+/// Rust used to refuse the combination before reaching the lossless encoder.
+#[test]
+fn issue_664_rgb_direct_lossless_ignores_sampling_as_c_does() {
+    let cjpeg = require_c_tool!("cjpeg");
+    let pixels: Vec<u8> = textured_rgb(WIDTH, HEIGHT);
+    let c_jpeg: Vec<u8> = cjpeg_encode(
+        &cjpeg,
+        &["-lossless", "1", "-rgb"],
+        false,
+        &pixels,
+        "3x2,1x1,1x1",
+    )
+    .unwrap_or_else(|stderr| panic!("cjpeg refused: {stderr}"));
+    let jpeg: Vec<u8> = Encoder::new(&pixels, WIDTH, HEIGHT, PixelFormat::Rgb)
+        .colorspace(libjpeg_turbo_rs::ColorSpace::Rgb)
+        .sampling_factors(vec![(3, 2), (1, 1), (1, 1)])
+        .lossless(true)
+        .lossless_predictor(1)
+        .encode()
+        .unwrap_or_else(|error| panic!("Rust refused: {error}"));
+    assert_same_stream("RGB-direct lossless 3x2", &jpeg, &c_jpeg);
+}

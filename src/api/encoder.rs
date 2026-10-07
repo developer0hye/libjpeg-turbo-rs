@@ -1018,7 +1018,8 @@ impl<'a> Encoder<'a> {
             _ => 0,
         };
 
-        if rgb_direct && use_custom_sampling {
+        // Lossless resets the factors to 1x1 (below), so this does not apply.
+        if rgb_direct && use_custom_sampling && !self.lossless {
             return Err(JpegError::Unsupported(
                 "direct-RGB encoding requires sampling factors [(H,V),(1,1),(1,1)] with a supported H/V pair"
                     .to_string(),
