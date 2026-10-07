@@ -688,19 +688,6 @@ pub(super) fn is_y_dummy(block_x_px: usize, block_y_px: usize, y_wib: usize, y_h
     block_x_px / 8 >= y_wib || block_y_px / 8 >= y_hib
 }
 
-/// Encode a dummy block (AC=0, DC=previous block's DC) matching C jccoefct.c.
-#[inline]
-pub(super) fn encode_dummy_block(
-    dc_table: &HuffTable,
-    ac_table: &HuffTable,
-    writer: &mut BitWriter,
-    prev_dc: &mut i16,
-) {
-    let mut dummy: [i16; 64] = [0i16; 64];
-    dummy[0] = *prev_dc;
-    HuffmanEncoder::encode_block(writer, &dummy, prev_dc, dc_table, ac_table);
-}
-
 /// Encode a color MCU with dummy Y blocks for the last MCU column.
 ///
 /// C libjpeg-turbo creates "dummy" blocks beyond `width_in_blocks`: all AC=0,

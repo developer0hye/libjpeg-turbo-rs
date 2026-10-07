@@ -166,7 +166,7 @@ Open on `main` (the [OPEN Items table](LAST_MILE.md#open-items) is the full list
 
 | Item | Effect |
 | --- | --- |
-| [P4-236](last_mile/phase4.md#p4-236-encoder-with-non-standard-sampling_factors-silently-drops-progressive-arithmetic-lossless-and-restart-options--open) | `Encoder` with non-standard `sampling_factors` (e.g. 3x2) writes a baseline stream, silently dropping progressive, arithmetic, lossless and restart options. |
+| [P4-237](last_mile/phase4.md#p4-237-encoder-refuses-scan_script-smoothing-rgb-direct-cmyk-and-grayscale_from_color-with-non-standard-sampling_factors-that-cjpeg--sample-accepts--open) | `Encoder` with non-standard `sampling_factors` (e.g. 3x2) refuses `scan_script`, smoothing, RGB-direct, CMYK and `grayscale_from_color`, all of which `cjpeg -sample` accepts. |
 | [P4-213](last_mile/phase4.md#p4-213-cmykycck-12-bit-and-lossless-decodes-stage-a-full-size-copy-even-when-given-a-caller-buffer--open) | CMYK/YCCK, 12-bit and lossless decodes stage a full-size copy even into a caller buffer, and `max_memory` does not count it. |
 | [P4-216](last_mile/phase4.md#p4-216-the-12-16-bit-decode-entry-points-in-srcapi-still-allocate-geometry-sized-buffers-infallibly--open) | 12-/16-bit decode entry points abort on allocator refusal. |
 | [P4-219](last_mile/phase4.md#p4-219-12-bit-decodes-ignore-the-horizontal-crop-and-tjhandles-1216-bit-decompress-ignores-the-cropping-region-entirely--open) | 12-bit decodes ignore the horizontal crop. |
