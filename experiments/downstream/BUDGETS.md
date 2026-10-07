@@ -21,7 +21,7 @@ stock `release` profile, no `RUSTFLAGS`, 30 timed iterations per row.
 - **Baseline:** the published `libjpeg-turbo-rs` 0.8.0.
 - **Consumer sources:** `consumer_source_sha256` `aac5b6b3…5253`.
 
-A fourth run of the same dispatch landed on an AMD EPYC 9V74 (Zen 4) and is
+A fourth dispatch at `dd8afb1` (run 37548326976) landed on an AMD EPYC 9V74 (Zen 4) and is
 committed as [`reports/2026-10-07-zen4/`](reports/2026-10-07-zen4/report.md).
 It is not part of the reference: `budgets.py` refuses to compare across CPU
 models.
@@ -35,7 +35,7 @@ decode case and on the concurrent section's reference decode. Both
 `compress` outputs are byte-identical to `cjpeg -quality 85` (`-sample 1x1`
 for the 4:4:4 rows).
 
-**No aarch64 budget.** All eight `macos-latest` legs across the 2026-10-07
+**No aarch64 budget.** All eight measured `macos-latest` legs across the 2026-10-07
 dispatches ran on a 3-vCPU runner that the harness's own pre-run sample showed
 saturated, with load averages of 28–50. Two of those reports are committed
 as a record (`reports/2026-10-07-aarch64-macos-contaminated*/`). The aarch64
@@ -55,7 +55,9 @@ python3 experiments/downstream/budgets.py <new report.json> \
   - be a full run, with no `--smoke` and no `--only`;
   - have the same CPU model, architecture, build variant and recorded runtime
     CPU features;
-  - have the same `consumer_source_sha256`.
+  - have the same `consumer_source_sha256` and `rustc` version;
+  - use the same iterations and warmup, and the same concurrent thread
+    and decode counts.
 
   `budgets.py` refuses anything else (exit 2). A report of a different CPU
   model means re-dispatching, not widening the band.
@@ -88,10 +90,15 @@ python3 experiments/downstream/budgets.py <new report.json> \
   `T ×` single-decode ceiling, not equality.
 - **Encode output: identical.** Candidate `compress` bytes equal the
   baseline's on every encode case, and C `cjpeg`'s where C is available.
+  The harness asserts this only through `cjpeg`. Without C (every hosted
+  report) it records each output's length and PSNR, not its bytes, so
+  equal length and PSNR is all a hosted report shows.
 - **Binary size and build time:** the probe contributions below are the
   reference. Growth over 5 % needs a stated reason.
-- **Regenerate the reference when the consumer changes.** A new
-  `consumer_source_sha256` makes the old set unusable by construction. Dispatch
+- **Regenerate the reference when the consumer or the compiler changes.** A
+  new `consumer_source_sha256` or a new stable `rustc` (the workflow uses
+  `dtolnay/rust-toolchain@stable`; the reference was built by rustc 1.99.0)
+  makes the old set unusable by construction. Dispatch
   three runs, keep those on one CPU model, and replace the set and the tables
   below.
 
@@ -247,7 +254,7 @@ runs. Clean build times come from `ref-zen3-1` and are indicative only.
   - *Concurrent fresh:* 1.057 / 1.059 / 1.023. The reuse rows are at parity.
 
   The first hypothesis is the eager zero-fill in `try_filled_vec`.
-  [P4-228](../../docs/last_mile/phase4.md#p4-228-fresh-decode-of-large-images-is-24--slower-than-080--open)
+  [P4-228](../../docs/last_mile/phase4.md#p4-228-fresh-decode-of-large-images-is-25--slower-than-080--open)
   ([#659](https://github.com/developer0hye/libjpeg-turbo-rs/issues/659)).
 - **1/4-scaled decode, buffer-reuse vs 0.8.0: 1.024–1.039,** behind by the
   rule. The same library measured 0.90 with the earlier consumer build, so
@@ -265,7 +272,7 @@ runs. Clean build times come from `ref-zen3-1` and are indicative only.
   [P4-230](../../docs/last_mile/phase4.md#p4-230-the-candidate-adds-1015--more-code-to-a-stock-profile-binary-than-080--open)
   ([#661](https://github.com/developer0hye/libjpeg-turbo-rs/issues/661)).
 - **Small-image decode vs zune-jpeg:** a tie at 64x64. Every larger decode
-  case leads by 14–26 %.
+  case leads by 14–28 % in each reference run.
 
 ## Why the band has a cross-run term
 

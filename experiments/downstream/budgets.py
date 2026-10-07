@@ -13,8 +13,9 @@ same-run ratios are budgeted.
 Each `--first` names one reference report (the committed reference set);
 without any, the report under test is its own single reference. Every report
 must be a full run (not `--smoke`, not `--only`) with the same CPU model,
-architecture, build variant, recorded runtime CPU features and consumer
-sources. Exit status is 0 when every budgeted row is within budget, 1 when
+architecture, build variant, recorded runtime CPU features, consumer
+sources, rustc, iterations and warmup, and concurrent thread and decode
+counts. Exit status is 0 when every budgeted row is within budget, 1 when
 one is over, 2 on a usage error or an unusable set. Standard library only.
 """
 
@@ -105,10 +106,12 @@ def comparability(report):
     """Everything that must match for two reports' ratios to be comparable.
 
     Ratios move with the CPU model, with the SIMD kernels runtime dispatch
-    picks, with the build variant, and with the harness binary itself (BUDGETS.md: one library, two
-    consumer builds, 5 % apart on a parity row).
+    picks, with the build variant, the compiler, the sampling settings, the
+    concurrent workload's shape, and with the harness binary itself (BUDGETS.md: one library, two
+    consumer builds, 5 % and 30 % apart on two parity rows).
     """
     architecture, features = runtime_features(report)
+    concurrent = report.get("concurrent") or {}
     return {
         # The same features on another microarchitecture still move ratios:
         # hosted x86_64 runners alternate between Zen 3 and Zen 4 parts.
@@ -117,6 +120,16 @@ def comparability(report):
         "runtime features": features,
         "VARIANT": report["build"]["variant"],
         "consumer sources": report["build"].get("consumer_source_sha256"),
+        # The compiler is part of the binary; stable moves every six weeks,
+        # and the reference has to be regenerated when it does.
+        "rustc": report["environment"]["rustc"].splitlines()[0],
+        # A band measured over 30 samples says nothing about a 3-sample run.
+        "iterations": report["iterations"],
+        "warmup": report["warmup"],
+        # T comes from the runner's parallelism, so two runners of one CPU
+        # model can still run different concurrent workloads.
+        "concurrent threads": concurrent.get("threads"),
+        "concurrent decodes per thread": concurrent.get("decodes_per_thread"),
     }
 
 

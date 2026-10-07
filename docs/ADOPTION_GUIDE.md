@@ -180,6 +180,11 @@ Also open on `main`, filed by the pull requests linked:
 - **P4-218** ([#646](https://github.com/developer0hye/libjpeg-turbo-rs/pull/646)):
   `decompress_into` still allocates whole-image component planes, so the
   buffer-reuse path is not a low-memory path.
+- **P4-228** ([#659](https://github.com/developer0hye/libjpeg-turbo-rs/issues/659)):
+  a fresh (library-allocated) decode of a large image is 2–5 % slower than
+  0.8.0; the buffer-reuse path is not affected.
+- **P4-230** ([#661](https://github.com/developer0hye/libjpeg-turbo-rs/issues/661)):
+  the crate adds 10–15 % more code to a release binary than 0.8.0 did.
 - **P4-222** ([#649](https://github.com/developer0hye/libjpeg-turbo-rs/pull/649)):
   the low-level modules are de facto API until they are narrowed.
 - **P4-220** ([#645](https://github.com/developer0hye/libjpeg-turbo-rs/pull/645)):

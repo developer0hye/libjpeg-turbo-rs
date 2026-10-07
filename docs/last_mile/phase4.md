@@ -13291,8 +13291,10 @@ of one consumer build on one CPU model, AMD EPYC 7763: runs 37548314633,
   with a band of `max(3 %, cross-run range, 2 × within-run spread)`, plus a
   zero allocation budget, identical encode bytes and 5 % for size.
   `experiments/downstream/budgets.py` checks a later report's timing ratios.
-  It refuses a report from a different CPU model, runtime feature line,
-  variant or consumer source hash (`consumer_source_sha256`).
+  It refuses a report that differs from the reference in any of: CPU model,
+  runtime feature line, variant, consumer source hash
+  (`consumer_source_sha256`), rustc, iterations, warmup, or the concurrent
+  section's thread and decode counts.
 - **Why it took four extra runs.** The first two dispatches (37542461917,
   37543406684) agreed with each other. A second consumer build of the same
   library then moved two parity ratios by 5 % and 30 %, so one run's spread
@@ -13304,11 +13306,11 @@ of one consumer build on one CPU model, AMD EPYC 7763: runs 37548314633,
   memory" #635 asks for.
 - **Losing cases.** BUDGETS.md lists every case the candidate loses. Three
   were filed:
-  - [P4-228](#p4-228-fresh-decode-of-large-images-is-24--slower-than-080--open):
+  - [P4-228](#p4-228-fresh-decode-of-large-images-is-25--slower-than-080--open):
     8K fresh decode at 1.024–1.050× 0.8.0 in eight runs, and concurrent
     fresh decode at 1.02–1.06×.
   - [P4-229](#p4-229-the-downstream-harness-records-machine-load-but-never-acts-on-it-and-the-hosted-macos-runner-was-saturated--open):
-    all eight hosted macOS legs were saturated, so aarch64 sets no budget
+    all eight measured hosted macOS legs were saturated, so aarch64 sets no budget
     yet.
   - [P4-230](#p4-230-the-candidate-adds-1015--more-code-to-a-stock-profile-binary-than-080--open):
     binary size +10–15 % vs 0.8.0, unattributed.
@@ -13364,6 +13366,12 @@ names grayscale and "every streamed subsampling mode" as writing directly
 into `out` — the grayscale row above allocates the output's size anyway). A caller that sized its memory budget from that promise will
 find the decoder's working set grows with the image instead: 47.5 MiB extra
 for an 8K frame, against about 1 MiB for zune-jpeg on the same call.
+
+**Under concurrency (P4-214's concurrent section, 2026-10-07 reference
+runs).** Four threads each decoding the 12 MP photo hold 209.4 MiB of heap
+plus caller buffers with the candidate, against 142.1 MiB for zune-jpeg and
+154.0 MiB for `image`'s codec. The 67 MiB difference is these planes, four
+times over.
 
 **Acceptance criteria.**
 
@@ -13456,7 +13464,7 @@ need for are now supported root paths — `yuv::*`, `StreamingDecoder`,
 4. Done in a minor (pre-1.0) release with a CHANGELOG entry mapping every
    moved path to its replacement, and `cargo-semver-checks` recording it.
 
-## P4-228. Fresh Decode of Large Images Is 2–4 % Slower Than 0.8.0 — **OPEN**
+## P4-228. Fresh Decode of Large Images Is 2–5 % Slower Than 0.8.0 — **OPEN**
 
 **GitHub:** [#659](https://github.com/developer0hye/libjpeg-turbo-rs/issues/659) — child of #635 Milestone C.
 
@@ -13481,7 +13489,7 @@ path is at parity in five of them. The concurrent section (four threads,
 and 1.023 in the reference runs, and reuse at 0.98. On Zen 3 the 8K median
 (1.028) sits just under BUDGETS.md's 3 % floor, but its sign never changed. A gap that grows with output size and
 appears only when the library allocates the output fits one extra pass over
-the output buffer: about 3.6 ms on a 99 MB RGB buffer. 0.8.0 allocated it with
+the output buffer: 3.8–4.3 ms on a 99 MB RGB buffer in the reference runs. 0.8.0 allocated it with
 `vec![0u8; size]`, which can take already-zeroed pages from `calloc`. `main`
 uses `try_filled_vec` (`src/common/try_alloc.rs`, P4-209):
 `try_reserve_exact` followed by `resize`, which writes every byte. That is the
@@ -13492,8 +13500,8 @@ hypothesis to test first.
 consumer binary. Two runs of a second build of the same library, with
 consumer code added, measured 1.016 and 1.003. The thumbnail ratio moves with
 the harness binary, so it is not evidence about the library, and it is not
-tracked as a regression. The phone-size fresh decode (0.984–1.020) is within
-noise.
+tracked as a regression. The phone-size fresh decode (1.008–1.024 in the
+reference runs, whose band for it is 7.0 %; 1.042 on Zen 4) is within noise.
 
 **Acceptance criteria.**
 
@@ -13513,7 +13521,7 @@ loaded, and hosted runners cannot resolve a 3 % gap on their own.
 
 **GitHub:** [#660](https://github.com/developer0hye/libjpeg-turbo-rs/issues/660) — child of #635 Milestone C.
 
-**Found 2026-10-07** taking P4-214's first report. All eight
+**Found 2026-10-07** taking P4-214's first report. All eight measured
 `downstream-bench.yml` dispatches that day put the aarch64 leg on a 3-vCPU
 `macos-latest` runner whose own pre-run sample showed it saturated: load
 averages of 28–50 and, in the first run, 0.3 % idle. The figures below are
@@ -13558,3 +13566,30 @@ growth beyond 5 % needs a stated reason.
 attribution in BUDGETS.md, and file or fix anything that is accidental (for
 example monomorphised copies or panic paths that a stock profile no longer
 folds).
+
+## P4-231. Two Downstream-Harness Checks Are Weaker Than Their Names Suggest — **OPEN**
+
+**GitHub:** [#662](https://github.com/developer0hye/libjpeg-turbo-rs/issues/662) — child of #635 Milestone C.
+
+**Found 2026-10-07** by the docs audit of P4-214's concurrent section.
+
+1. **The concurrent reuse buffer is never poisoned.** `reuse_buffer` is zeroed
+   once and then reused for K decodes of the same image, so every decode after
+   the first finds the previous decode's correct pixels in it. A decoder that
+   under-writes a reused buffer passes. Only the first decode on threads
+   2..T starts from a zeroed buffer.
+2. **Hosted reports cannot show encode byte equality.** Candidate and baseline
+   `compress` outputs are compared byte for byte only through `cjpeg`.
+   Without a C oracle the harness asserts only adapter == candidate, and the
+   report records length and PSNR, which equal bytes would produce but do not
+   prove. Every hosted report runs without C.
+
+**Acceptance criteria.** (1) Each checked reuse decode starts from a buffer
+filled with a sentinel that no correct decode leaves in place, and a unit
+test shows an under-write fails. (2) Candidate and baseline encode outputs
+are compared byte for byte, or by a recorded digest, with or without C.
+
+**Why deferred.** Both are consumer changes. They change
+`consumer_source_sha256` and so invalidate BUDGETS.md's reference set, which
+then has to be regenerated with three new dispatches. Do them together, at
+the next deliberate reference refresh.

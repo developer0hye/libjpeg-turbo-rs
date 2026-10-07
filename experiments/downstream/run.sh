@@ -164,9 +164,10 @@ fi
 candidate_sha=$(git -C "$repo_root" rev-parse HEAD 2>/dev/null || echo unknown)
 candidate_dirty=$(git -C "$repo_root" status --porcelain --untracked-files=no 2>/dev/null | wc -l | tr -d ' ')
 # The harness binary itself moves same-run ratios: two consumer builds of one
-# library differed by 5 % on a parity row (BUDGETS.md), so budgets.py only
-# compares reports built from the same consumer sources. Hash the committed
-# tree as copied (before the path substitution), file names included.
+# library differed by 5 % and 30 % on two parity rows (BUDGETS.md), so budgets.py only
+# compares reports built from the same consumer sources. Hash the consumer
+# directory as copied: the working tree, untracked files included and
+# target/ excluded, before the path substitution, file names included.
 consumer_source_sha256=$(cd "$consumer_src" &&
   find . -path ./target -prune -o -type f -print | LC_ALL=C sort |
   while IFS= read -r file; do
