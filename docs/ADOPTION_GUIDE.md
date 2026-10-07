@@ -168,7 +168,6 @@ Open on `main` (the [OPEN Items table](LAST_MILE.md#open-items) is the full list
 | --- | --- |
 | [P4-210](last_mile/phase4.md#p4-210-encoderscan_script-is-silently-ignored-outside-the-huffman-ycbcrgrayscale-progressive-path--open) | `Encoder::scan_script` is silently ignored for arithmetic, RGB-direct and custom-sampling progressive encodes. |
 | [P4-213](last_mile/phase4.md#p4-213-cmykycck-12-bit-and-lossless-decodes-stage-a-full-size-copy-even-when-given-a-caller-buffer--open) | CMYK/YCCK, 12-bit and lossless decodes stage a full-size copy even into a caller buffer, and `max_memory` does not count it. |
-| [P4-215](last_mile/phase4.md#p4-215-lenient-decodes-collect-one-warning-string-per-corrupt-mcu-without-a-cap-and-clone-the-list-infallibly-into-every-image--open) | Lenient decodes keep an uncapped per-MCU warning list. |
 | [P4-216](last_mile/phase4.md#p4-216-the-12-16-bit-decode-entry-points-in-srcapi-still-allocate-geometry-sized-buffers-infallibly--open) | 12-/16-bit decode entry points abort on allocator refusal. |
 | [P4-219](last_mile/phase4.md#p4-219-12-bit-decodes-ignore-the-horizontal-crop-and-tjhandles-1216-bit-decompress-ignores-the-cropping-region-entirely--open) | 12-bit decodes ignore the horizontal crop. |
 | [P4-221](last_mile/phase4.md#p4-221-encode-path-allocations-are-all-infallible-and-no-gate-tracks-them--open) | Encode-path allocations abort on allocator refusal. |

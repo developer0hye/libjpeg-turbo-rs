@@ -63,7 +63,10 @@ pub struct Image {
     pub density: DensityInfo,
     /// Saved APP/COM markers.
     pub saved_markers: Vec<SavedMarker>,
-    /// Warnings accumulated during lenient decoding.
+    /// Warnings accumulated during lenient decoding. Bounded: at most
+    /// [`MAX_DECODE_WARNINGS`](crate::MAX_DECODE_WARNINGS) Huffman errors,
+    /// then one [`DecodeWarning::WarningsSuppressed`] counting the rest (see
+    /// [`DecodeWarning`]).
     pub warnings: Vec<DecodeWarning>,
 }
 
@@ -93,7 +96,10 @@ pub struct ImageInfo {
     pub density: DensityInfo,
     /// Saved APP/COM markers.
     pub saved_markers: Vec<SavedMarker>,
-    /// Warnings accumulated during lenient decoding.
+    /// Warnings accumulated during lenient decoding. Bounded: at most
+    /// [`MAX_DECODE_WARNINGS`](crate::MAX_DECODE_WARNINGS) Huffman errors,
+    /// then one [`DecodeWarning::WarningsSuppressed`] counting the rest (see
+    /// [`DecodeWarning`]).
     pub warnings: Vec<DecodeWarning>,
 }
 

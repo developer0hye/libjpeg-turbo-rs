@@ -13121,7 +13121,7 @@ nor the upsample planes, so the limit is non-strict there.
 **Why deferred.** A decode-pipeline change across three output paths with
 their own C parity, found while reviewing an adapter pull request.
 
-## P4-215. Lenient Decodes Collect One Warning String per Corrupt MCU Without a Cap, and Clone the List Infallibly Into Every `Image` — **OPEN**
+## P4-215. Lenient Decodes Collect One Warning String per Corrupt MCU Without a Cap, and Clone the List Infallibly Into Every `Image` — **CLOSED 2026-10-07**
 
 **GitHub:** [#641](https://github.com/developer0hye/libjpeg-turbo-rs/issues/641) — found 2026-10-07 by the P4-209 allocation audit.
 
@@ -13141,6 +13141,23 @@ decode and asserts the bound.
 
 **Why deferred.** Found while closing P4-209, whose scope was the allocation
 macros under `src/decode/`; bounding warnings is an API-visible decision.
+
+**Status (2026-10-07): closed.** A decode records at most
+`MAX_DECODE_WARNINGS` (64, exported at the root) `HuffmanError` entries — the
+first ones, as C's `emit_message` prints the first warning — and counts the
+rest in one trailing `DecodeWarning::WarningsSuppressed { count }`; a
+suppressed warning builds no message string. `TruncatedData` and
+`UnsupportedRecovered` occur at most once per decode and are never suppressed.
+The bound is documented on `MAX_DECODE_WARNINGS`, `DecodeWarning` and
+`Image::warnings`; `DecodeWarning` is now `#[non_exhaustive]` (breaking, like
+the new variant). Every `warnings.clone()` in
+`src/decode/pipeline_impl/output.rs` is now a move. Proof:
+`tests/lenient_warning_cap.rs` — a fully corrupt 256x256 4:4:4 stream (1024
+MCUs) returned 1024 entries before the fix and now returns 64 plus
+`WarningsSuppressed { count: 960 }`; a 512x512 one returns the same length;
+a 16-MCU one records all 16 with no suppression entry; and a restart-resynced
+stream truncated after 200 MCUs still reports `TruncatedData` past the cap,
+with recorded + suppressed equal to the MCUs decoded.
 
 ## P4-216. The 12-/16-Bit Decode Entry Points in `src/api` Still Allocate Geometry-Sized Buffers Infallibly — **OPEN**
 

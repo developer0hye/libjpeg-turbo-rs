@@ -1,5 +1,5 @@
 use super::Decoder;
-use crate::common::error::{DecodeWarning, JpegError, Result};
+use crate::common::error::{DecodeWarning, JpegError, Result, MAX_DECODE_WARNINGS};
 use crate::common::huffman_table::HuffmanTable;
 use crate::common::quant_table::QuantTable;
 use crate::common::try_alloc::try_filled_vec;
@@ -7,6 +7,54 @@ use crate::common::types::FrameHeader;
 use crate::decode::bitstream::BitReader;
 use crate::decode::entropy::{self, McuDecoder};
 use alloc::{format, string::ToString, vec::Vec};
+
+/// A lenient decode's warnings, holding at most [`MAX_DECODE_WARNINGS`]
+/// Huffman errors and counting the rest (P4-215, #641). Without the cap a
+/// stream corrupt everywhere recorded one heap string per MCU.
+struct WarningLog {
+    warnings: Vec<DecodeWarning>,
+    huffman_recorded: usize,
+    huffman_suppressed: usize,
+}
+
+impl WarningLog {
+    fn new() -> Self {
+        Self {
+            warnings: Vec::new(),
+            huffman_recorded: 0,
+            huffman_suppressed: 0,
+        }
+    }
+
+    /// Records a Huffman error, or only counts it once the cap is reached —
+    /// before building its message, so a suppressed warning allocates nothing.
+    fn huffman_error(&mut self, mcu_x: usize, mcu_y: usize, error: &JpegError) {
+        if self.huffman_recorded < MAX_DECODE_WARNINGS {
+            self.warnings.push(DecodeWarning::HuffmanError {
+                mcu_x,
+                mcu_y,
+                message: error.to_string(),
+            });
+            self.huffman_recorded += 1;
+        } else {
+            self.huffman_suppressed = self.huffman_suppressed.saturating_add(1);
+        }
+    }
+
+    /// Records a warning that occurs at most once per decode; never suppressed.
+    fn once(&mut self, warning: DecodeWarning) {
+        self.warnings.push(warning);
+    }
+
+    fn finish(mut self) -> Vec<DecodeWarning> {
+        if self.huffman_suppressed > 0 {
+            self.warnings.push(DecodeWarning::WarningsSuppressed {
+                count: self.huffman_suppressed,
+            });
+        }
+        self.warnings
+    }
+}
 
 impl<'a> Decoder<'a> {
     /// Decode baseline (single-scan) into component planes.
@@ -124,7 +172,7 @@ impl<'a> Decoder<'a> {
         let mut mcu_decoder = McuDecoder::new(num_components);
         let mut mcu_count: u32 = 0;
         let mut coeffs = [0i16; 64];
-        let mut warnings: Vec<DecodeWarning> = Vec::new();
+        let mut warnings: WarningLog = WarningLog::new();
         let total_mcus = mcus_x * mcus_y;
 
         // Fast path: non-lenient, no cropping — tight loop with minimal branching.
@@ -221,15 +269,11 @@ impl<'a> Decoder<'a> {
                                     Err(e) if self.lenient => {
                                         coeffs = [0i16; 64];
                                         if !mcu_error {
-                                            warnings.push(DecodeWarning::HuffmanError {
-                                                mcu_x,
-                                                mcu_y,
-                                                message: e.to_string(),
-                                            });
+                                            warnings.huffman_error(mcu_x, mcu_y, &e);
                                             mcu_error = true;
                                         }
                                         if matches!(e, JpegError::UnexpectedEof) {
-                                            warnings.push(DecodeWarning::TruncatedData {
+                                            warnings.once(DecodeWarning::TruncatedData {
                                                 decoded_mcus: mcu_count as usize,
                                                 total_mcus,
                                             });
@@ -269,7 +313,7 @@ impl<'a> Decoder<'a> {
 
                     if bit_reader.is_eof() && (mcu_count as usize) < total_mcus {
                         if self.lenient {
-                            warnings.push(DecodeWarning::TruncatedData {
+                            warnings.once(DecodeWarning::TruncatedData {
                                 decoded_mcus: mcu_count as usize,
                                 total_mcus,
                             });
@@ -282,7 +326,7 @@ impl<'a> Decoder<'a> {
             }
         }
 
-        Ok((component_planes, warnings))
+        Ok((component_planes, warnings.finish()))
     }
 
     /// Decode non-interleaved baseline JPEG (multiple SOS markers, one component per scan).
@@ -322,7 +366,7 @@ impl<'a> Decoder<'a> {
             .collect::<Result<Vec<Vec<u8>>>>()?;
 
         // Process each scan independently
-        let mut warnings: Vec<DecodeWarning> = Vec::new();
+        let mut warnings: WarningLog = WarningLog::new();
         for scan_info in &self.metadata.scans {
             let scan = &scan_info.header;
 
@@ -452,11 +496,7 @@ impl<'a> Decoder<'a> {
                         Err(e) if self.lenient => {
                             coeffs = [0i16; 64];
                             if !scan_error {
-                                warnings.push(DecodeWarning::HuffmanError {
-                                    mcu_x: bx,
-                                    mcu_y: by,
-                                    message: e.to_string(),
-                                });
+                                warnings.huffman_error(bx, by, &e);
                                 scan_error = true;
                             }
                             // Out of entropy data: remaining blocks keep the 128
@@ -484,6 +524,6 @@ impl<'a> Decoder<'a> {
             }
         }
 
-        Ok((component_planes, warnings))
+        Ok((component_planes, warnings.finish()))
     }
 }

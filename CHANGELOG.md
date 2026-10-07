@@ -79,6 +79,17 @@ and `git log` between tags.
 
 ### Changed
 
+- **Breaking (Rust API): a lenient decode's warning list is bounded, and
+  `DecodeWarning` is `#[non_exhaustive]`** (P4-215, #641). A stream corrupt in
+  every MCU used to return one `DecodeWarning::HuffmanError` (with its own
+  heap string) per MCU — about 16.7 M for a 65500x65500 frame. A decode now
+  records the first `MAX_DECODE_WARNINGS` (64, exported at the root) and ends
+  the list with one new `DecodeWarning::WarningsSuppressed { count }` for the
+  rest, as C prints only the first warning and counts the others.
+  `TruncatedData` and `UnsupportedRecovered` are never suppressed. Exhaustive
+  `match`es on `DecodeWarning` need a wildcard arm. The list is also moved
+  into the `Image` instead of cloned.
+
 - **Breaking (Rust API): low-level modules and two exhaustively constructible
   structs changed since 0.8.0** — the evidence for the next root release being
   0.9.0 (`cargo-semver-checks` on `cargo rustdoc --locked` output,

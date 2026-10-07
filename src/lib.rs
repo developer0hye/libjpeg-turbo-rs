@@ -226,7 +226,7 @@ pub use common::bufsize::{
     yuv_plane_height, yuv_plane_size, yuv_plane_width,
 };
 #[doc(inline)]
-pub use common::error::{DecodeWarning, JpegError, Result};
+pub use common::error::{DecodeWarning, JpegError, Result, MAX_DECODE_WARNINGS};
 pub use common::jfif::extract_jfif_thumbnail;
 pub use common::sample::Sample;
 pub use common::traits::{DefaultErrorHandler, ErrorHandler, ProgressInfo, ProgressListener};
