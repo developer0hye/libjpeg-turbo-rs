@@ -49,8 +49,7 @@ use std::ffi::{c_int, c_void};
 // three-plane image — the inference that makes them unsafe to hand a length
 // this layer already knows (P4-165).
 use libjpeg_turbo_rs::api::yuv::{
-    compress_from_yuv_planes, decode_yuv_planes, decompress_to_yuv_planes, encode_yuv,
-    encode_yuv_planes,
+    compress_from_yuv_planes, decode_yuv_planes, encode_yuv, encode_yuv_planes,
 };
 use libjpeg_turbo_rs::common::layout::checked_span;
 use libjpeg_turbo_rs::tj3::FrameInfo;
@@ -887,6 +886,27 @@ pub unsafe extern "C" fn tj3CompressFromYUVPlanes8(
 /// therefore reject those frames, mirroring the guard upstream applies in
 /// `tj3DecompressToYUVPlanes8` (turbojpeg.c).
 const MAX_YUV_PLANES: usize = 3;
+
+/// `TJSAMP_UNKNOWN`: what `getSubsamp` publishes for a frame no TurboJPEG
+/// subsampling describes, a two-component one among them.
+const TJSAMP_UNKNOWN: c_int = -1;
+
+/// Upstream's `TJPARAM_MAXPIXELS` test, which both YUV decompressors run in
+/// the planar body right after `setDecompParameters`
+/// (`turbojpeg.c:2228-2231`), against the frame dimensions the header read
+/// just published. It is applied here, rather than left to
+/// `TjHandle::decompress_to_yuv_planes`, because upstream runs it *before*
+/// the subsampling, plane-pointer and component checks below, which
+/// precede the decode. The message is upstream's — the packed wrapper's
+/// refusal names the planar function too, since that is where it is raised.
+fn exceeds_max_pixels(inst: &TjInstance) -> bool {
+    use libjpeg_turbo_rs::tj3::TjParam;
+    let max_pixels: c_int = inst.inner.get(TjParam::MaxPixels);
+    let pixels: u64 = u64::try_from(inst.inner.get(TjParam::Width)).unwrap_or(0)
+        * u64::try_from(inst.inner.get(TjParam::Height)).unwrap_or(0);
+    max_pixels > 0 && pixels > max_pixels as u64
+}
+
 /// # Safety
 ///
 /// C ABI entry point. `handle`, `jpeg_buf`, `dst_buf` must satisfy the crate-level
@@ -923,16 +943,32 @@ pub unsafe extern "C" fn tj3DecompressToYUV8(
                 return -1;
             }
             let jpeg: &[u8] = unsafe { std::slice::from_raw_parts(jpeg_buf, jpeg_size) };
-            // Header first, decode second — the whole point of P4-127. This also
-            // applies the handle's TJPARAM_MAXPIXELS, which the handle-less
-            // `decompress_to_yuv_planes` below cannot see.
-            let info: FrameInfo = match inst.inner.inspect_header(jpeg) {
+            // Header first, decode second — P4-127's order — and the header
+            // read publishes the thirteen `setDecompParameters` parameters,
+            // as upstream's does at `turbojpeg.c:2416` (P4-225, #652).
+            let info: FrameInfo = match inst.inner.decompress_header_info(jpeg) {
                 Ok(info) => info,
                 Err(e) => {
                     inst.set_error(format!("tj3DecompressToYUV8: {e}"), TJERR_FATAL);
                     return -1;
                 }
             };
+            // The packed wrapper refuses an unknown subsampling before its
+            // planar delegate applies TJPARAM_MAXPIXELS (`:2417-2418`).
+            if inst.inner.get(libjpeg_turbo_rs::tj3::TjParam::Subsampling) == TJSAMP_UNKNOWN {
+                inst.set_error(
+                    "tj3DecompressToYUV8(): Could not determine subsampling level of JPEG image",
+                    TJERR_FATAL,
+                );
+                return -1;
+            }
+            if exceeds_max_pixels(inst) {
+                inst.set_error(
+                    "tj3DecompressToYUVPlanes8(): Image is too large",
+                    TJERR_FATAL,
+                );
+                return -1;
+            }
             if info.num_components > MAX_YUV_PLANES {
                 inst.set_error(
                     "tj3DecompressToYUV8: JPEG image must have 3 or fewer components",
@@ -940,7 +976,9 @@ pub unsafe extern "C" fn tj3DecompressToYUV8(
                 );
                 return -1;
             }
-            let (planes, w, h, ss) = match decompress_to_yuv_planes(jpeg) {
+            // Under the handle's limits — SCANLIMIT and MAXMEMORY, which the
+            // handle-less `decompress_to_yuv_planes` cannot see (P4-225).
+            let (planes, w, h, ss) = match inst.inner.decompress_to_yuv_planes(jpeg) {
                 Ok(v) => v,
                 Err(e) => {
                     inst.set_error(format!("tj3DecompressToYUV8: {e}"), TJERR_FATAL);
@@ -948,7 +986,7 @@ pub unsafe extern "C" fn tj3DecompressToYUV8(
                 }
             };
             // Bounded by `MAX_YUV_PLANES`, not merely by the guard above: that
-            // guard checked `inspect_header`'s component count, while `planes`
+            // guard checked the header read's component count, while `planes`
             // comes from a second, independent parse. The caller sized
             // `dst_buf` for at most three planes, so this is the count that
             // must bound what is packed into it — the two parses agreeing is
@@ -995,23 +1033,38 @@ pub unsafe extern "C" fn tj3DecompressToYUVPlanes8(
         // Defined outside the `unsafe` block below so the body's own `unsafe`
         // blocks stay meaningful rather than nesting inside a blanket one.
         let body = |inst: &mut TjInstance| -> c_int {
-            if jpeg_buf.is_null() || dst_planes.is_null() || jpeg_size < 2 {
+            // `!dstPlanes || !dstPlanes[0]` is an argument error at entry,
+            // before the header is read (`turbojpeg.c:2207-2208`).
+            if jpeg_buf.is_null()
+                || dst_planes.is_null()
+                || jpeg_size < 2
+                || unsafe { *dst_planes }.is_null()
+            {
                 inst.set_error("tj3DecompressToYUVPlanes8: NULL / size", TJERR_FATAL);
                 return -1;
             }
             let jpeg: &[u8] = unsafe { std::slice::from_raw_parts(jpeg_buf, jpeg_size) };
-            // Header first (P4-127): this applies the handle's TJPARAM_MAXPIXELS and
-            // settles the component count before a single MCU is decoded.
-            let info: FrameInfo = match inst.inner.inspect_header(jpeg) {
+            // Header first (P4-127), publishing as upstream's
+            // `setDecompParameters` call at `turbojpeg.c:2227` does (P4-225).
+            let info: FrameInfo = match inst.inner.decompress_header_info(jpeg) {
                 Ok(info) => info,
                 Err(e) => {
                     inst.set_error(format!("tj3DecompressToYUVPlanes8: {e}"), TJERR_FATAL);
                     return -1;
                 }
             };
-            if info.num_components > MAX_YUV_PLANES {
+            if exceeds_max_pixels(inst) {
                 inst.set_error(
-                    "tj3DecompressToYUVPlanes8: JPEG image must have 3 or fewer components",
+                    "tj3DecompressToYUVPlanes8(): Image is too large",
+                    TJERR_FATAL,
+                );
+                return -1;
+            }
+            let tjsamp: c_int = inst.inner.get(libjpeg_turbo_rs::tj3::TjParam::Subsampling);
+            if tjsamp == TJSAMP_UNKNOWN {
+                inst.set_error(
+                    "tj3DecompressToYUVPlanes8(): Could not determine subsampling level of JPEG \
+                     image",
                     TJERR_FATAL,
                 );
                 return -1;
@@ -1030,7 +1083,37 @@ pub unsafe extern "C" fn tj3DecompressToYUVPlanes8(
                     return -1;
                 }
             }
-            let (planes, w, h, ss) = match decompress_to_yuv_planes(jpeg) {
+            if info.num_components > MAX_YUV_PLANES {
+                inst.set_error(
+                    "tj3DecompressToYUVPlanes8: JPEG image must have 3 or fewer components",
+                    TJERR_FATAL,
+                );
+                return -1;
+            }
+            // A stride shorter than its plane's width is an argument error
+            // (`turbojpeg.c:2253-2254`), not a pitch to honour: each row would
+            // overwrite the previous one's tail and the last would run
+            // `pw - stride` bytes past a buffer sized `stride * ph` (P4-234).
+            // Zero means "the plane width"; a negative stride is refused too.
+            if !strides.is_null() {
+                let width: c_int = inst.inner.get(libjpeg_turbo_rs::tj3::TjParam::Width);
+                for i in 0..plane_count {
+                    let stride: c_int = unsafe { *strides.add(i) };
+                    let plane_width: c_int =
+                        crate::bufsize::tj3YUVPlaneWidth(i as c_int, width, tjsamp);
+                    if stride != 0 && stride < plane_width {
+                        inst.set_error(
+                            "tj3DecompressToYUVPlanes8: Invalid argument (stride smaller than the \
+                             plane width)",
+                            TJERR_FATAL,
+                        );
+                        return -1;
+                    }
+                }
+            }
+            // Under the handle's limits — SCANLIMIT and MAXMEMORY, which the
+            // handle-less `decompress_to_yuv_planes` cannot see (P4-225).
+            let (planes, w, h, ss) = match inst.inner.decompress_to_yuv_planes(jpeg) {
                 Ok(v) => v,
                 Err(e) => {
                     inst.set_error(format!("tj3DecompressToYUVPlanes8: {e}"), TJERR_FATAL);
@@ -1038,9 +1121,9 @@ pub unsafe extern "C" fn tj3DecompressToYUVPlanes8(
                 }
             };
             // `take(MAX_YUV_PLANES)` for the same reason the packed sibling
-            // clamps: the `> MAX_YUV_PLANES` guard above tested
-            // `inspect_header`'s count, while `planes` comes from a second,
-            // independent parse, and `dstPlanes` is a three-element array in
+            // clamps: the `> MAX_YUV_PLANES` guard above tested the header
+            // read's count, while `planes` comes from a second, independent
+            // parse, and `dstPlanes` is a three-element array in
             // `turbojpeg.h`. The two parses agreeing is an invariant of this
             // crate, not something the caller's array size can rely on.
             unsafe {
@@ -1052,15 +1135,11 @@ pub unsafe extern "C" fn tj3DecompressToYUVPlanes8(
                         inst.set_error("tj3DecompressToYUVPlanes8: NULL plane dst", TJERR_FATAL);
                         return -1;
                     }
-                    let stride: usize = if strides.is_null() {
+                    let stride: usize = if strides.is_null() || *strides.add(i) == 0 {
                         pw
                     } else {
-                        let s: c_int = *strides.add(i);
-                        if s <= 0 {
-                            pw
-                        } else {
-                            s as usize
-                        }
+                        // Checked `>= pw` above, against the same plane width.
+                        *strides.add(i) as usize
                     };
                     for row in 0..ph {
                         let src_row = plane[row * pw..row * pw + pw].as_ptr();

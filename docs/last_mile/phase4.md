@@ -12219,7 +12219,7 @@ refuse, as upstream's call precedes its refusals. Per criterion:
 Filed on the way: [P4-223](#p4-223-12-bit-decodes-read-only-the-first-scan-so-progressive-and-multi-scan-12-bit-streams-decode-to-wrong-pixels-with-ok--open)
 (12-bit progressive and multi-scan streams decode wrongly),
 [P4-224](#p4-224-decoders-memory-estimate-does-not-count-the-12-bit-staging-when-it-decodes-a-12-bit-frame--open),
-[P4-225](#p4-225-tj3decompresstoyuv8--tj3decompresstoyuvplanes8-publish-nothing-where-upstream-calls-setdecompparameters--open)
+[P4-225](#p4-225-tj3decompresstoyuv8--tj3decompresstoyuvplanes8-publish-nothing-where-upstream-calls-setdecompparameters--closed-2026-10-08)
 and [P4-226](#p4-226-tj3decompress8-decodes-a-12-bit-frame-that-stock-turbojpeg-refuses--closed-2026-10-07).
 
 ## P4-200. `JPEGWIDTH` / `JPEGHEIGHT` Publish the Scaled and Cropped Output Dimensions Where Upstream Publishes the SOF's — **CLOSED 2026-10-07**
@@ -13642,7 +13642,7 @@ threads the caller's `max_scans` into the inner parse. (2) A test sizes a
 callers see on 12-bit input, which is a behaviour change of its own; P4-199
 was about the TurboJPEG entry points.
 
-## P4-225. `tj3DecompressToYUV8` / `tj3DecompressToYUVPlanes8` Publish Nothing, Where Upstream Calls `setDecompParameters` — **OPEN**
+## P4-225. `tj3DecompressToYUV8` / `tj3DecompressToYUVPlanes8` Publish Nothing, Where Upstream Calls `setDecompParameters` — **CLOSED 2026-10-08**
 
 **Found 2026-10-07** while closing P4-199 (#620). GitHub: [#652](https://github.com/developer0hye/libjpeg-turbo-rs/issues/652).
 
@@ -13668,6 +13668,42 @@ only (found by the P4-199 docs audit).
 **Why deferred.** It needs a publishing twin of `inspect_header` and a C
 oracle extension; P4-199's scope was the pixel decompress entry points its
 harness drives.
+
+**Status (2026-10-08): closed.** Both entry points read the header through
+the new `TjHandle::decompress_header_info` — `read_header`, so the thirteen
+and the ICC profile are published exactly as by the other entry points — and
+decode through the new `TjHandle::decompress_to_yuv_planes`, which re-reads
+the header (upstream's planar delegate calls `setDecompParameters` a second
+time), applies `TJPARAM_MAXPIXELS`, and decodes under the handle's
+`DecodeLimits`, so `TJPARAM_SCANLIMIT` and `TJPARAM_MAXMEMORY` both reach the
+raw decode (criterion 4) — the handle-less `decompress_to_yuv_planes` they
+called before decoded under the defaults. The C entry points keep upstream's
+refusal order: the packed wrapper refuses `TJSAMP_UNKNOWN` before
+`TJPARAM_MAXPIXELS` and the planar body after it (`turbojpeg.c:2417-2418`
+vs `:2228-2233`), with upstream's messages for both; a frame stock's raw
+path refuses after the scan walk — lossless ("Requested features are
+incompatible") or above 8 bits ("Unsupported JPEG data precision N") — is
+refused there too. `inspect_header` keeps writing nothing.
+
+Proof: `examples/decomp_parameters_oracle.c` traces both entry points per
+fixture — fresh, under `TJPARAM_MAXPIXELS` 1 and `TJPARAM_SCANLIMIT` 2, and
+on the long-lived handle — verbatim against stock 3.2.0
+(`decompress_publishes_what_stock_turbojpeg_publishes`); without the oracle,
+`the_yuv_decompressors_publish_the_thirteen` (capi) and
+`the_yuv_decompress_publishes_the_thirteen` (`tests/tj3_decomp_parameters.rs`);
+`TJPARAM_MAXMEMORY` by `the_yuv_decompressors_honour_maxmemory`
+(`crates/libjpeg-turbo-rs-capi/tests/yuv_decompress_overrun_guard.rs`: 5 MiB
+refuses and 6 MiB decodes a 1024x1024 4:4:4 frame, the raw path's measured
+estimate; stock's budget reaches other allocations, so this is not traced).
+Criterion 3: the P4-141 harness gains `Op::DecompressToYuv` (wire code 13,
+after `Reset`, so no committed seed changes meaning); it publishes for P2,
+joins `published_parameters_do_not_survive_a_change_of_image`, the wire
+round trip and `every_publishing_operation_leaves_the_same_icc_profile`, and
+a mutation that stops it publishing fails two of those tests.
+
+Filed on the way: [P4-234](#p4-234-tj3decompresstoyuv8--tj3decompresstoyuvplanes8-ignore-the-scaling-factor-and-short-strides-overrunning-a-correctly-sized-buffer--partial-overruns-refused-scaled-output-not-implemented)
+(the same entry points overran a correctly sized buffer) and
+[P4-235](#p4-235-tj3transform-ignores-tjparam_savemarkers-levels-013-and-the-handles-icc-profile--open).
 
 ## P4-226. `tj3Decompress8` Decodes a 12-Bit Frame That Stock TurboJPEG Refuses — **CLOSED 2026-10-07**
 
@@ -13889,3 +13925,76 @@ comparability check.
 `consumer_source_sha256` and so invalidate BUDGETS.md's reference set, which
 then has to be regenerated with three new dispatches. Do them together, at
 the next deliberate reference refresh.
+
+## P4-234. `tj3DecompressToYUV8` / `tj3DecompressToYUVPlanes8` Ignore the Scaling Factor and Short Strides, Overrunning a Correctly Sized Buffer — **PARTIAL: overruns refused; scaled output not implemented**
+
+**GitHub:** [#667](https://github.com/developer0hye/libjpeg-turbo-rs/issues/667) — found 2026-10-07 while closing P4-225 (#652).
+
+**What was wrong.** Upstream emits YUV planes at the *scaled* size
+(`TJSCALED` in the packed wrapper, `jpeg_calc_output_dimensions` and
+`dctsize` in the planar body, `turbojpeg.c:2241-2262`, `:2421-2422`), so a
+caller following `turbojpeg.h` sizes its buffer with
+`tj3YUVBufSize(TJSCALED(w), align, TJSCALED(h), subsamp)`. Both entry points
+decoded at full size whatever the handle's scaling factor and wrote the
+unscaled planes into that buffer: a **heap overflow** from documented-correct
+use. Measured on `tests/fixtures/photo_64x64_420.jpg` at 1/2 into a
+sentinel-filled buffer: stock 3.2.0 writes 1536 bytes, the port wrote 6144.
+The legacy `tjDecompressToYUV2` / `tjDecompressToYUVPlanes` are not exported
+(P4-18), but upstream's own body for them — and so the shim
+`docs/ABI_COMPATIBILITY.md` tells their callers to write — is exactly this
+call: choose the factor that fits the requested size, `tj3SetScalingFactor`,
+then the TJ3 entry point. Separately, `tj3DecompressToYUVPlanes8` honoured a
+`strides[i]` shorter than its plane's width and read a negative one as "the
+default", where upstream refuses both (`:2253-2254`): a short stride runs the
+last row `pw - stride` bytes past a buffer sized `stride * ph`. Present in
+every published capi (0.1.0-0.1.2).
+
+**Acceptance criteria.** (1) No YUV decompress writes past a buffer sized
+per the documented contract at any scaling factor or stride. (2) Scaled YUV
+decompression emits upstream's scaled planes, byte-exact against stock at
+every `tj3GetScalingFactors` factor.
+
+**Status (2026-10-08): partial — criterion 1 met.**
+`TjHandle::decompress_to_yuv_planes` refuses a scaling factor other than
+1/1 after publishing and before decoding, so both C entry points return -1
+having written nothing, and `tj3DecompressToYUVPlanes8` refuses a stride
+shorter than its plane's width, or negative, as upstream does, before
+writing. Pinned by `crates/libjpeg-turbo-rs-capi/tests/yuv_decompress_overrun_guard.rs`
+(`a_scaled_yuv_decompress_writes_nothing_past_the_scaled_buffer`,
+`a_stride_shorter_than_the_plane_is_refused`,
+`the_legacy_decompress_to_yuv2_shim_cannot_overrun` — upstream's legacy body
+replayed through the TJ3 calls), each checking an 8 KiB sentinel band past
+the caller's buffer; all three fail on the previous code. The sanitizers
+workflow's ASan job runs the file too, where a write beyond the band is also
+reported.
+
+**Still open (criterion 2).** A scaled decode is refused where stock
+succeeds. Emitting scaled planes needs the raw-data decode to run the scaled
+IDCTs per component, including upstream's override that keeps 4:2:0 /
+4:1:0 / 2:4 chroma at its subsampled size (`turbojpeg.c:2304-2320`);
+`Decoder::decode_raw` always runs the 8x8 IDCT today.
+
+## P4-235. `tj3Transform` Ignores `TJPARAM_SAVEMARKERS` Levels 0/1/3 and the Handle's ICC Profile — **OPEN**
+
+**GitHub:** [#668](https://github.com/developer0hye/libjpeg-turbo-rs/issues/668) — found 2026-10-07 while working P4-227 (#655).
+
+Upstream uses the handle's `TJPARAM_SAVEMARKERS` as the copy option
+(`turbojpeg.c:2991-2992`, `:3039-3041`) and writes the profile set with
+`tj3SetICCProfile` whenever that option is neither `JCOPYOPT_ALL` nor
+`JCOPYOPT_ICC` (`:3044-3046`). `crates/libjpeg-turbo-rs-capi/src/transform.rs`
+maps only `TJXOPT_COPYNONE` (to `MarkerCopyMode::None`) and otherwise copies
+everything; it never writes the handle's profile. Measured against stock
+3.2.0 on a 16x16 JFIF + ICC source, identity transform: at levels 0, 1 and 3
+stock drops the source ICC (and writes the handle's when one is set); the
+port copies the source ICC at every level.
+
+**Acceptance criteria.** (1) `tj3Transform` copies exactly the markers
+upstream's `jcopy_markers_execute` copies for each level 0-4, and writes the
+handle's ICC profile under the same condition upstream does, byte-exact
+against stock `tj3Transform` for every level with and without a handle
+profile. (2) The legacy NOREALLOC bridge's P4-156 quirk keeps holding.
+
+**Why deferred.** `MarkerCopyMode` has no COM-only or all-but-ICC variant and
+the transform writer has no ICC injection path; both are core-crate API
+work outside P4-227's limits and output parameters.
+

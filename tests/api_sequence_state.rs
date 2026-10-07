@@ -204,6 +204,11 @@ fn published_parameters_do_not_survive_a_change_of_image() {
         Op::SelectInput { index: 0 },
         Op::Decompress12,
         Op::Decompress16,
+        // P4-225 (#652): a YUV decompress publishes too, and must replace
+        // what the other image left.
+        Op::DecompressToYuv,
+        Op::SelectInput { index: 1 },
+        Op::DecompressToYuv,
     ];
     for (first_label, first) in &corpus {
         for (second_label, second) in &corpus {
@@ -747,6 +752,13 @@ fn every_publishing_operation_leaves_the_same_icc_profile() {
                 profiles.push(("decompress_16bit", handle.icc_profile().map(<[u8]>::to_vec)));
                 compared_precision += 1;
             }
+            let mut handle: TjHandle = fresh();
+            if handle.decompress_to_yuv_planes(&jpeg).is_ok() {
+                profiles.push((
+                    "decompress_to_yuv_planes",
+                    handle.icc_profile().map(<[u8]>::to_vec),
+                ));
+            }
             for (name, profile) in &profiles[1.min(profiles.len())..] {
                 compared += 1;
                 assert_eq!(
@@ -1143,6 +1155,7 @@ fn program_round_trips_through_its_wire_format() {
         Op::Decompress12,
         Op::Decompress16,
         Op::InspectHeader,
+        Op::DecompressToYuv,
         Op::Reset,
     ]);
     for program in &programs {

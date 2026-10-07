@@ -19,6 +19,7 @@ use std::path::PathBuf;
 
 mod helpers;
 
+use libjpeg_turbo_rs_capi::yuv::{tj3DecompressToYUV8, tj3DecompressToYUVPlanes8};
 use libjpeg_turbo_rs_capi::{
     tj3Decompress12, tj3Decompress16, tj3Decompress8, tj3DecompressHeader, tj3Destroy, tj3Get,
     tj3Init, tj3Set, tj3SetCroppingRegion, tj3SetScalingFactor, TjRegion, TjScalingFactor,
@@ -189,6 +190,34 @@ fn routed_decompress(
     }
 }
 
+/// The oracle's `yuv_decompress`: packed at align 1, or three planes
+/// `plane_size` bytes apart with default strides.
+fn yuv_decompress(
+    handle: *mut c_void,
+    jpeg: &[u8],
+    yuv: &mut [u8],
+    plane_size: usize,
+    planar: bool,
+) -> c_int {
+    // SAFETY: `yuv` holds three `plane_size` planes, each at least the frame
+    // padded to a 4:1:0 iMCU, which bounds every plane either entry point
+    // writes for the frame whose header sized it.
+    unsafe {
+        if !planar {
+            return tj3DecompressToYUV8(handle, jpeg.as_ptr(), jpeg.len(), yuv.as_mut_ptr(), 1);
+        }
+        let base: *mut u8 = yuv.as_mut_ptr();
+        let mut planes: [*mut u8; 3] = [base, base.add(plane_size), base.add(2 * plane_size)];
+        tj3DecompressToYUVPlanes8(
+            handle,
+            jpeg.as_ptr(),
+            jpeg.len(),
+            planes.as_mut_ptr(),
+            std::ptr::null(),
+        )
+    }
+}
+
 fn header(handle: *mut c_void, jpeg: &[u8]) -> c_int {
     // SAFETY: `jpeg` is a live slice of `jpeg.len()` bytes.
     unsafe { tj3DecompressHeader(handle, jpeg.as_ptr(), jpeg.len()) }
@@ -220,6 +249,8 @@ fn trace_label(label: &str, jpeg: &[u8], sequence: *mut c_void) -> String {
         "{label}: probe header published no dimensions"
     );
     let mut buffer: Vec<u16> = vec![0; width as usize * height as usize * 4];
+    let plane_size: usize = (width as usize + 16) * (height as usize + 16);
+    let mut yuv: Vec<u8> = vec![0; plane_size * 3];
 
     let handle: *mut c_void = instance();
     let rc: c_int = header(handle, jpeg);
@@ -261,6 +292,38 @@ fn trace_label(label: &str, jpeg: &[u8], sequence: *mut c_void) -> String {
 
     let rc: c_int = routed_decompress(sequence, jpeg, &mut buffer, precision, pixel_format);
     trace.push_str(&emit(label, "sequence", rc, sequence));
+
+    for planar in [false, true] {
+        let names: [&str; 4] = if planar {
+            [
+                "yuvplanes",
+                "yuvplanes_maxpixels",
+                "yuvplanes_scanlimit",
+                "yuvplanes_sequence",
+            ]
+        } else {
+            ["yuv", "yuv_maxpixels", "yuv_scanlimit", "yuv_sequence"]
+        };
+        for (case_index, limit) in [
+            None,
+            Some((TJPARAM_MAXPIXELS, 1)),
+            Some((TJPARAM_SCANLIMIT, 2)),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let handle: *mut c_void = instance();
+            if let Some((param, value)) = limit {
+                // SAFETY: live handle, valid parameter.
+                unsafe { tj3Set(handle, param, value) };
+            }
+            let rc: c_int = yuv_decompress(handle, jpeg, &mut yuv, plane_size, planar);
+            trace.push_str(&emit(label, names[case_index], rc, handle));
+            destroy(handle);
+        }
+        let rc: c_int = yuv_decompress(sequence, jpeg, &mut yuv, plane_size, planar);
+        trace.push_str(&emit(label, names[3], rc, sequence));
+    }
 
     if precision == 8 && lossless == 0 {
         let handle: *mut c_void = instance();
@@ -528,6 +591,46 @@ fn a_two_component_frame_publishes_tjcs_default_and_is_refused() {
             format!("unknown2 {case_name} rc=-1 {expected_params}")
         );
     }
+}
+
+/// Issue #652: both YUV decompressors publish the thirteen, as upstream's
+/// `setDecompParameters` calls at `turbojpeg.c:2227` / `:2416` do — before
+/// their `TJPARAM_MAXPIXELS` refusal and before the decode `TJPARAM_SCANLIMIT`
+/// refuses — and a YUV decode on a used handle replaces what the previous
+/// decode published. They published nothing.
+#[test]
+fn the_yuv_decompressors_publish_the_thirteen() {
+    let trace: String = our_trace();
+    let prog: &str =
+        "subsamp=2 jw=64 jh=64 prec=8 cs=1 prog=1 arith=0 lossless=0 psv=0 pt=1 xd=1 yd=1 du=0";
+    for (case_name, rc) in [
+        ("yuv", 0),
+        ("yuvplanes", 0),
+        ("yuv_maxpixels", -1),
+        ("yuvplanes_maxpixels", -1),
+        ("yuv_scanlimit", -1),
+        ("yuvplanes_scanlimit", -1),
+    ] {
+        assert_eq!(
+            line_for(&trace, "prog", case_name),
+            format!("prog {case_name} rc={rc} {prog}")
+        );
+    }
+    // On the long-lived handle `gray` — the first fixture — ends with a
+    // planar YUV decode, so the next YUV decode there must replace a
+    // grayscale image's values; the stale-parameter shape this item closed.
+    let sequence: *mut c_void = instance();
+    let gray: &[u8] = FIXTURES[0].1;
+    let dense: &[u8] = FIXTURES[1].1;
+    let mut yuv: Vec<u8> = vec![0; (16 + 16) * (16 + 16) * 3];
+    assert_eq!(yuv_decompress(sequence, gray, &mut yuv, 32 * 32, true), 0);
+    assert_eq!(yuv_decompress(sequence, dense, &mut yuv, 32 * 32, false), 0);
+    assert_eq!(
+        emit("dense", "yuv_sequence", 0, sequence).trim_end(),
+        "dense yuv_sequence rc=0 subsamp=1 jw=16 jh=16 prec=8 cs=1 prog=0 arith=0 \
+         lossless=0 psv=0 pt=0 xd=72 yd=71 du=1"
+    );
+    destroy(sequence);
 }
 
 /// P4-142: the header of a stream with garbage entropy data is read — and

@@ -77,6 +77,22 @@ and `git log` between tags.
   skipping. MSVC only — no MinGW bundle — and the DLL links the dynamic
   Visual C++ runtime, as upstream's does.
 
+### Security
+
+- **Heap overflow in `tj3DecompressToYUV8` / `tj3DecompressToYUVPlanes8`**
+  (P4-234, #667; every published capi, 0.1.0-0.1.2). Both ignored the
+  handle's scaling factor and wrote full-size planes into a buffer the caller
+  had sized, as `turbojpeg.h` documents, for the scaled image — 6144 bytes
+  into a 1536-byte buffer for a 64x64 4:2:0 frame at 1/2. The legacy
+  `tjDecompressToYUV2` / `tjDecompressToYUVPlanes` shim recipe in
+  `docs/ABI_COMPATIBILITY.md` reaches the same call. `tj3DecompressToYUVPlanes8`
+  also honoured a stride shorter than its plane, running the last row past
+  a buffer sized `stride * height`. **Breaking (behaviour):** a YUV
+  decompress at any scaling factor other than 1/1 now returns -1 having
+  written nothing (stock decodes it; scaled YUV output is still open under
+  P4-234), and a stride shorter than its plane's width, or negative, is
+  refused with "Invalid argument" as upstream refuses it.
+
 ### Changed
 
 - **Breaking (Rust API): low-level modules and two exhaustively constructible
@@ -262,7 +278,7 @@ and `git log` between tags.
   12/16-bit entry points three; all of them, and `decompress_header` /
   `tj3DecompressHeader`, now publish the thirteen upstream writes
   (`turbojpeg.c:514-536`) with the frame's values (the YUV decompressors
-  still publish nothing, P4-225), cross-validated against
+  followed under P4-225, below), cross-validated against
   stock TurboJPEG 3.2.0 (`crates/libjpeg-turbo-rs-capi/tests/capi_decomp_parameters.rs`).
   Callers see: `TJPARAM_PROGRESSIVE`, `ARITHMETIC`, `LOSSLESS`, `LOSSLESSPSV`
   and `LOSSLESSPT` set from the stream — `LOSSLESSPT` is the first scan's
@@ -311,6 +327,23 @@ and `git log` between tags.
   conversion request", as stock 3.2.0 does. `Decoder` and `decompress()`
   still downscale a 12-bit frame; only the TurboJPEG-shaped entry point
   changed.
+- **Breaking (behaviour): `tj3DecompressToYUV8` / `tj3DecompressToYUVPlanes8`
+  publish the thirteen parameters and honour the handle's limits** (P4-225,
+  #652). They published nothing, so `tj3Get` after a YUV decompress returned
+  whatever the previous call left, and they decoded under the default limits,
+  ignoring `TJPARAM_SCANLIMIT` and `TJPARAM_MAXMEMORY`. Both now publish what
+  `setDecompParameters` writes (and the ICC profile) right after the header
+  read, then apply `TJPARAM_MAXPIXELS` ("Image is too large"), then decode
+  under `TJPARAM_SCANLIMIT` and `TJPARAM_MAXMEMORY`, cross-validated against
+  stock 3.2.0. A frame stock's YUV path cannot describe is refused with
+  stock's message: an unknown subsampling ("Could not determine subsampling
+  level of JPEG image"), a lossless frame ("Requested features are
+  incompatible"). `tj3DecompressToYUVPlanes8` now refuses a NULL
+  `dstPlanes[0]` at entry, before the header read, as upstream does. New
+  Rust API: `TjHandle::decompress_header_info` and
+  `TjHandle::decompress_to_yuv_planes`, which refuses a frame of more than
+  three components where the handle-free `yuv::decompress_to_yuv_planes`
+  returns four planes.
 - An allocator refusal during a decode is reported as
   `JpegError::AllocationFailed` instead of aborting the process (P4-209,
   #632). `decompress` / `Decoder::decode_image` allocated their destination

@@ -32,12 +32,21 @@
  * header, and refuses every pixel decompress ("Unsupported color conversion
  * request").
  *
+ * Both YUV decompressors call setDecompParameters too
+ * (`turbojpeg.c:2227`, `:2416`) before their own TJPARAM_MAXPIXELS refusal
+ * (`:2228-2231`), so every label traces them as well -- fresh, under
+ * TJPARAM_MAXPIXELS and TJPARAM_SCANLIMIT, and on the long-lived handle
+ * (P4-225).
+ *
  * Cases deliberately absent, because the two implementations diverge on them
  * by design or under another item, and printing them would make this gate
  * fail on something it is not about:
  *
  *   - tj3Decompress12 on an 8-bit frame (stock promotes `data_precision` to
  *     12 at `turbojpeg-mp.c:191-194`; the port refuses, P4-171);
+ *   - a YUV decompress at a scaling factor other than 1/1 (stock emits
+ *     scaled planes; the port refuses rather than emit unscaled planes into
+ *     a buffer sized for scaled ones -- P4-234);
  *   - TJPARAM_MAXMEMORY refusals (stock's budget reaches only its
  *     whole-image arrays, the port's a header-time estimate that includes the
  *     output buffer, so the two refuse different frames by design).
@@ -126,6 +135,22 @@ static int routed_decompress(tjhandle handle, const unsigned char *jpeg,
                          pixel_format);
 }
 
+/* tj3DecompressToYUV8 (packed, align 1) or tj3DecompressToYUVPlanes8 (three
+ * planes `plane_size` bytes apart, default strides) into `yuv`. */
+static int yuv_decompress(tjhandle handle, const unsigned char *jpeg,
+                          size_t size, unsigned char *yuv, size_t plane_size,
+                          int planar)
+{
+  unsigned char *planes[3];
+
+  if (!planar)
+    return tj3DecompressToYUV8(handle, jpeg, size, yuv, 1);
+  planes[0] = yuv;
+  planes[1] = yuv + plane_size;
+  planes[2] = yuv + 2 * plane_size;
+  return tj3DecompressToYUVPlanes8(handle, jpeg, size, planes, NULL);
+}
+
 static int run_label(const char *workdir, const char *label,
                      tjhandle sequence)
 {
@@ -135,6 +160,9 @@ static int run_label(const char *workdir, const char *label,
   tjhandle probe, handle;
   int width, height, precision, pixel_format, lossless, rc;
   void *buffer;
+  unsigned char *yuv;
+  size_t plane_size;
+  int planar;
 
   snprintf(path, sizeof(path), "%s/%s.jpg", workdir, label);
   jpeg = read_file(path, &size);
@@ -177,6 +205,10 @@ static int run_label(const char *workdir, const char *label,
   }
   buffer = calloc((size_t)width * (size_t)height * 4, 2);
   if (!buffer) return 1;
+  /* A YUV plane is at most the frame padded to a 4:1:0 iMCU. */
+  plane_size = ((size_t)width + 16) * ((size_t)height + 16);
+  yuv = (unsigned char *)calloc(plane_size, 3);
+  if (!yuv) return 1;
 
   /* 1. tj3DecompressHeader alone. */
   handle = tj3Init(TJINIT_DECOMPRESS);
@@ -233,6 +265,38 @@ static int run_label(const char *workdir, const char *label,
                          pixel_format);
   emit(label, "sequence", rc, sequence);
 
+  /* 5b. Both YUV decompressors publish (P4-225): fresh, refused by
+   * TJPARAM_MAXPIXELS and by TJPARAM_SCANLIMIT after publishing, and on the
+   * long-lived handle, where each must replace what the previous decode
+   * published. */
+  for (planar = 0; planar < 2; planar++) {
+    const char *names[4][2] = {
+      { "yuv", "yuvplanes" }, { "yuv_maxpixels", "yuvplanes_maxpixels" },
+      { "yuv_scanlimit", "yuvplanes_scanlimit" },
+      { "yuv_sequence", "yuvplanes_sequence" }
+    };
+
+    handle = tj3Init(TJINIT_DECOMPRESS);
+    rc = yuv_decompress(handle, jpeg, size, yuv, plane_size, planar);
+    emit(label, names[0][planar], rc, handle);
+    tj3Destroy(handle);
+
+    handle = tj3Init(TJINIT_DECOMPRESS);
+    tj3Set(handle, TJPARAM_MAXPIXELS, 1);
+    rc = yuv_decompress(handle, jpeg, size, yuv, plane_size, planar);
+    emit(label, names[1][planar], rc, handle);
+    tj3Destroy(handle);
+
+    handle = tj3Init(TJINIT_DECOMPRESS);
+    tj3Set(handle, TJPARAM_SCANLIMIT, 2);
+    rc = yuv_decompress(handle, jpeg, size, yuv, plane_size, planar);
+    emit(label, names[2][planar], rc, handle);
+    tj3Destroy(handle);
+
+    rc = yuv_decompress(sequence, jpeg, size, yuv, plane_size, planar);
+    emit(label, names[3][planar], rc, sequence);
+  }
+
   /* 6-7. Scaled and cropped 8-bit lossy decodes publish the SOF's dimensions,
    * not the output's (P4-200). */
   if (precision == 8 && !lossless) {
@@ -256,6 +320,7 @@ static int run_label(const char *workdir, const char *label,
     tj3Destroy(handle);
   }
 
+  free(yuv);
   free(buffer);
   free(jpeg);
   return 0;

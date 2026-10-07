@@ -622,3 +622,33 @@ fn a_two_component_frame_publishes_tjcs_default_and_is_refused() {
         assert_eq!(published(&handle), expected);
     }
 }
+
+/// Issue #652: `decompress_to_yuv_planes` — `tj3DecompressToYUVPlanes8` —
+/// publishes the thirteen on every frame, the ones it then refuses (12/16-bit,
+/// lossless, CMYK) included, and refuses a frame over `TJPARAM_MAXPIXELS`
+/// having published. `inspect_header` still writes nothing.
+#[test]
+fn the_yuv_decompress_publishes_the_thirteen() {
+    for (label, jpeg, expected) in EXPECTED {
+        let mut handle: TjHandle = TjHandle::new();
+        let decoded: bool = handle.decompress_to_yuv_planes(jpeg).is_ok();
+        assert_eq!(published(&handle), expected, "{label}");
+        // Stock 3.2.0 decodes exactly the 8-bit lossy frames of at most three
+        // components to YUV.
+        let decodable: bool = expected[3] == 8 && expected[7] == 0 && expected[4] != 4;
+        assert_eq!(decoded, decodable, "{label}");
+
+        let mut limited: TjHandle = TjHandle::new();
+        limited.set(TjParam::MaxPixels, 1).expect("MAXPIXELS");
+        assert!(matches!(
+            limited.decompress_to_yuv_planes(jpeg),
+            Err(JpegError::LimitExceeded { .. })
+        ));
+        assert_eq!(published(&limited), expected, "{label} under MAXPIXELS");
+
+        let fresh: [i32; 13] = published(&TjHandle::new());
+        let inspector: TjHandle = TjHandle::new();
+        let _ = inspector.inspect_header(jpeg);
+        assert_eq!(published(&inspector), fresh, "{label}: inspect_header");
+    }
+}

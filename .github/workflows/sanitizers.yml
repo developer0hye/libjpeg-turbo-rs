@@ -151,6 +151,27 @@ jobs:
             -- --test-threads=1
         timeout-minutes: 20
 
+      - name: Run the YUV decompress overrun guards under AddressSanitizer
+        # P4-234 (#667): tj3DecompressToYUV8 / tj3DecompressToYUVPlanes8 wrote
+        # unscaled planes into a buffer sized for the scaled image, and
+        # honoured a stride shorter than the plane. The tests detect a write
+        # into an 8 KiB sentinel band past each buffer on any build; here ASan
+        # also reports one that lands beyond the band. An integration test,
+        # so `--lib` above does not reach it; it runs no external C tool.
+        run: |
+          set -o pipefail
+          cargo +nightly test --locked \
+            -p libjpeg-turbo-rs-capi \
+            --test yuv_decompress_overrun_guard \
+            --target x86_64-unknown-linux-gnu \
+            -- --test-threads=1 2>&1 | tee yuv_overrun.log
+          passed=$(grep -E '^test result: ok\.' yuv_overrun.log | awk '{s += $4} END {print s + 0}')
+          if [ "$passed" -ne 4 ]; then
+            echo "yuv_decompress_overrun_guard: $passed passed, expected 4" >&2
+            exit 1
+          fi
+        timeout-minutes: 15
+
       - name: Confirm the kernel_bounds_tests ran under AddressSanitizer
         # The step above already ran these; this re-run (same flags, so no
         # rebuild) exists to fail if they stop being selected — renamed out
