@@ -111,11 +111,18 @@ pub fn runtime_cpu_features() -> String {
     let mut features: Vec<String> = Vec::new();
     #[cfg(target_arch = "x86_64")]
     {
-        let probes: [(&str, bool); 5] = [
+        // Every feature the candidate's runtime dispatch reads (`cpu_has!`
+        // in src/), plus sse4.1: budgets.py only compares reports whose
+        // dispatch inputs match, so a missing one would let two different
+        // kernel selections pass as the same runner.
+        let probes: [(&str, bool); 8] = [
             ("sse2", std::arch::is_x86_feature_detected!("sse2")),
+            ("ssse3", std::arch::is_x86_feature_detected!("ssse3")),
             ("sse4.1", std::arch::is_x86_feature_detected!("sse4.1")),
             ("avx2", std::arch::is_x86_feature_detected!("avx2")),
+            ("bmi1", std::arch::is_x86_feature_detected!("bmi1")),
             ("bmi2", std::arch::is_x86_feature_detected!("bmi2")),
+            ("lzcnt", std::arch::is_x86_feature_detected!("lzcnt")),
             ("fma", std::arch::is_x86_feature_detected!("fma")),
         ];
         for (name, present) in probes {

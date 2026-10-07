@@ -144,6 +144,38 @@ pub struct ThumbnailReport {
     pub rows: Vec<ThumbnailRow>,
 }
 
+/// One backend's row in the concurrent section. Timing is per batch (T
+/// threads × K decodes each); MP/s is the whole batch's.
+pub struct ConcurrentRow {
+    pub backend: String,
+    pub path: String,
+    pub timing: Option<TimingSummary>,
+    pub megapixels_per_second: Option<f64>,
+    /// One batch under the counting allocator, all threads together.
+    pub alloc: Option<AllocStats>,
+    /// Caller-owned output buffers, one per thread, allocated before the
+    /// allocation window and so not in `alloc`. An application holds them
+    /// too: compare `peak_live + caller_buffer_bytes` across rows.
+    pub caller_buffer_bytes: Option<u64>,
+    /// Outputs compared with the same backend's single-threaded output, all
+    /// byte-identical (a difference aborts the run).
+    pub outputs_compared: Option<usize>,
+    pub not_applicable: Option<String>,
+}
+
+pub struct ConcurrentReport {
+    pub id: String,
+    pub corpus_id: String,
+    pub source_width: usize,
+    pub source_height: usize,
+    pub threads: usize,
+    pub decodes_per_thread: usize,
+    pub rows: Vec<ConcurrentRow>,
+    /// The single-threaded references against each other and C djpeg, on
+    /// the decode section's contract; or why C was not compared.
+    pub correctness: Vec<CorrectnessRecord>,
+}
+
 pub struct Report {
     pub started_at: String,
     pub smoke: bool,
@@ -170,7 +202,11 @@ pub struct Report {
     pub decode: Vec<DecodeCaseReport>,
     pub encode: Vec<EncodeCaseReport>,
     pub thumbnail: Option<ThumbnailReport>,
+    pub concurrent: Option<ConcurrentReport>,
 }
+
+/// Bumped when a consumer of report.json must change: /2 added `concurrent`.
+const SCHEMA: &str = "downstream-consumer-report/2";
 
 /// Dependency features as declared in the consumer's Cargo.toml. Static on
 /// purpose: the manifest is the single place they are chosen.
@@ -281,6 +317,154 @@ fn diff_json(diff: Option<&PixelDiff>) -> Json {
             ("differing_samples", Json::int(d.differing_samples as u64)),
         ])
     })
+}
+
+/// The decode and concurrent sections share one correctness contract, so
+/// they share its rendering too.
+fn correctness_markdown(out: &mut String, records: &[CorrectnessRecord]) {
+    let _ = writeln!(
+        out,
+        "\nCorrectness (outside the timed region):\n\n| row | compared with | result |\n|---|---|---|"
+    );
+    for record in records {
+        let result: String = match (&record.diff, &record.note) {
+            (Some(diff), _) => diff_text(Some(diff)),
+            (None, Some(note)) => note.clone(),
+            (None, None) => "—".to_string(),
+        };
+        let _ = writeln!(
+            out,
+            "| {} | {} | {} |",
+            record.subject, record.compared_to, result
+        );
+    }
+}
+
+fn correctness_json(records: &[CorrectnessRecord]) -> Json {
+    Json::Array(
+        records
+            .iter()
+            .map(|record| {
+                Json::object(vec![
+                    ("subject", Json::str(&record.subject)),
+                    ("compared_to", Json::str(&record.compared_to)),
+                    ("diff", diff_json(record.diff.as_ref())),
+                    ("note", Json::opt(record.note.as_deref(), Json::str)),
+                ])
+            })
+            .collect(),
+    )
+}
+
+fn concurrent_json(section: &ConcurrentReport) -> Json {
+    Json::object(vec![
+        ("id", Json::str(&section.id)),
+        ("corpus_id", Json::str(&section.corpus_id)),
+        ("source_width", Json::int(section.source_width as u64)),
+        ("source_height", Json::int(section.source_height as u64)),
+        ("threads", Json::int(section.threads as u64)),
+        (
+            "decodes_per_thread",
+            Json::int(section.decodes_per_thread as u64),
+        ),
+        ("memory_measure", Json::str(CONCURRENT_MEMORY_MEASURE)),
+        (
+            "rows",
+            Json::Array(
+                section
+                    .rows
+                    .iter()
+                    .map(|row| {
+                        Json::object(vec![
+                            ("backend", Json::str(&row.backend)),
+                            ("path", Json::str(&row.path)),
+                            ("batch_timing", timing_json(row.timing.as_ref())),
+                            (
+                                "aggregate_megapixels_per_second",
+                                Json::opt(row.megapixels_per_second, Json::num),
+                            ),
+                            ("alloc", alloc_json(row.alloc.as_ref())),
+                            (
+                                "caller_buffer_bytes",
+                                Json::opt(row.caller_buffer_bytes, Json::int),
+                            ),
+                            (
+                                "outputs_identical_to_single_threaded",
+                                Json::opt(row.outputs_compared, |count| Json::int(count as u64)),
+                            ),
+                            (
+                                "not_applicable",
+                                Json::opt(row.not_applicable.as_deref(), Json::str),
+                            ),
+                        ])
+                    })
+                    .collect(),
+            ),
+        ),
+        ("correctness", correctness_json(&section.correctness)),
+    ])
+}
+
+/// Said in both renderings, so a reader of either cannot take the peak for
+/// resident memory.
+const CONCURRENT_MEMORY_MEASURE: &str = "peak live heap through the global allocator, all threads \
+     together, above the heap at the batch's start; not RSS (allocator retention, fragmentation, \
+     thread stacks and code pages are not in it)";
+
+fn concurrent_markdown(out: &mut String, section: &ConcurrentReport) {
+    let _ = writeln!(
+        out,
+        "\n## Concurrent decode\n\n`{}`: {} threads, each decoding `{}` ({}x{}, RGB) {} \
+             times back to back; one batch is all {} decodes. Each thread owns its decoder per \
+             decode and, on reuse rows, one output buffer. Times are ms per batch (wall, \
+             thread spawn and join included); MP/s is the whole batch's source pixels at the \
+             median. Allocation columns are one batch under the counting allocator: **{}**. \
+             `caller buffers` is the reuse rows' T output buffers, allocated before that \
+             window — an application holds them too, so compare `peak live heap + caller \
+             buffers` across rows. Every output of the correctness batch is compared with the \
+             same backend's single-threaded output, and those references are held to the \
+             decode section's contract (table below); a difference aborts the run.\n",
+        section.id,
+        section.threads,
+        section.corpus_id,
+        section.source_width,
+        section.source_height,
+        section.decodes_per_thread,
+        section.threads * section.decodes_per_thread,
+        CONCURRENT_MEMORY_MEASURE
+    );
+    let _ = writeln!(
+            out,
+            "| row | path | median | p10 | p90 | min | max | MP/s | allocs | alloc bytes | peak live heap | caller buffers | vs single-threaded |\n|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|"
+        );
+    for row in &section.rows {
+        match &row.not_applicable {
+            Some(reason) => {
+                let _ = writeln!(
+                    out,
+                    "| {} | {} | N/A: {} | — | — | — | — | — | — | — | — | — | — |",
+                    row.backend, row.path, reason
+                );
+            }
+            None => {
+                let _ = writeln!(
+                    out,
+                    "| {} | {} | {} | {} | {} | {} |",
+                    row.backend,
+                    row.path,
+                    timing_cells(row.timing.as_ref(), row.megapixels_per_second),
+                    alloc_cells(row.alloc.as_ref()),
+                    row.caller_buffer_bytes
+                        .map(mib)
+                        .unwrap_or_else(|| "—".to_string()),
+                    row.outputs_compared
+                        .map(|count| format!("{count} identical (asserted)"))
+                        .unwrap_or_else(|| "—".to_string())
+                );
+            }
+        }
+    }
+    correctness_markdown(out, &section.correctness);
 }
 
 fn frame_text(frame: Option<&FrameFacts>) -> String {
@@ -458,22 +642,7 @@ impl Report {
                     }
                 }
             }
-            let _ = writeln!(
-                out,
-                "\nCorrectness (outside the timed region):\n\n| row | compared with | result |\n|---|---|---|"
-            );
-            for record in &case.correctness {
-                let result: String = match (&record.diff, &record.note) {
-                    (Some(diff), _) => diff_text(Some(diff)),
-                    (None, Some(note)) => note.clone(),
-                    (None, None) => "—".to_string(),
-                };
-                let _ = writeln!(
-                    out,
-                    "| {} | {} | {} |",
-                    record.subject, record.compared_to, result
-                );
-            }
+            correctness_markdown(&mut out, &case.correctness);
         }
 
         let _ = writeln!(out, "\n## Encode\n\nBackends:\n\n| row | API |\n|---|---|");
@@ -574,6 +743,10 @@ impl Report {
                 }
             }
         }
+
+        if let Some(section) = &self.concurrent {
+            concurrent_markdown(&mut out, section);
+        }
         out
     }
 
@@ -617,22 +790,7 @@ impl Report {
                                 .collect(),
                         ),
                     ),
-                    (
-                        "correctness",
-                        Json::Array(
-                            case.correctness
-                                .iter()
-                                .map(|record| {
-                                    Json::object(vec![
-                                        ("subject", Json::str(&record.subject)),
-                                        ("compared_to", Json::str(&record.compared_to)),
-                                        ("diff", diff_json(record.diff.as_ref())),
-                                        ("note", Json::opt(record.note.as_deref(), Json::str)),
-                                    ])
-                                })
-                                .collect(),
-                        ),
-                    ),
+                    ("correctness", correctness_json(&case.correctness)),
                 ])
             })
             .collect();
@@ -726,7 +884,7 @@ impl Report {
             ])
         });
         Json::object(vec![
-            ("schema", Json::str("downstream-consumer-report/1")),
+            ("schema", Json::str(SCHEMA)),
             ("started_at", Json::str(&self.started_at)),
             ("smoke", Json::Bool(self.smoke)),
             ("iterations", Json::int(self.iterations as u64)),
@@ -820,6 +978,151 @@ impl Report {
             ("decode", Json::Array(decode)),
             ("encode", Json::Array(encode)),
             ("thumbnail", thumbnail),
+            (
+                "concurrent",
+                Json::opt(self.concurrent.as_ref(), concurrent_json),
+            ),
         ])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn section() -> ConcurrentReport {
+        let batch: TimingSummary = TimingSummary {
+            iterations: 2,
+            calls_per_sample: 1,
+            median_ms: 400.0,
+            p10_ms: 390.0,
+            p90_ms: 410.0,
+            min_ms: 390.0,
+            max_ms: 410.0,
+        };
+        ConcurrentReport {
+            id: "concurrent-phone-4032x3024-420".to_string(),
+            corpus_id: "synthetic-4032x3024-420".to_string(),
+            source_width: 4032,
+            source_height: 3024,
+            threads: 4,
+            decodes_per_thread: 4,
+            rows: vec![
+                ConcurrentRow {
+                    backend: "candidate-reuse".to_string(),
+                    path: "buffer-reuse".to_string(),
+                    timing: Some(batch),
+                    megapixels_per_second: Some(487.7),
+                    alloc: Some(AllocStats {
+                        count: 64,
+                        bytes: 3 << 20,
+                        peak_live: 1 << 20,
+                    }),
+                    caller_buffer_bytes: Some(4 * 36_578_304),
+                    outputs_compared: Some(16),
+                    not_applicable: None,
+                },
+                ConcurrentRow {
+                    backend: "zune-fresh".to_string(),
+                    path: "fresh".to_string(),
+                    timing: None,
+                    megapixels_per_second: None,
+                    alloc: None,
+                    caller_buffer_bytes: None,
+                    outputs_compared: None,
+                    not_applicable: Some("no API".to_string()),
+                },
+            ],
+            correctness: vec![CorrectnessRecord::note(
+                "all rows",
+                "C djpeg",
+                "C decode comparison: disabled (--no-c-oracle)".to_string(),
+            )],
+        }
+    }
+
+    fn field<'a>(object: &'a Json, key: &str) -> &'a Json {
+        match object {
+            Json::Object(entries) => entries
+                .iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value)
+                .unwrap_or_else(|| panic!("missing key {key}")),
+            other => panic!("not an object: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn concurrent_json_records_the_pool_shape_and_per_row_memory() {
+        let json: Json = concurrent_json(&section());
+        assert!(matches!(field(&json, "threads"), Json::Integer(4)));
+        assert!(matches!(
+            field(&json, "decodes_per_thread"),
+            Json::Integer(4)
+        ));
+        assert!(
+            matches!(field(&json, "memory_measure"), Json::String(text) if text.contains("not RSS"))
+        );
+        let rows: &Vec<Json> = match field(&json, "rows") {
+            Json::Array(rows) => rows,
+            other => panic!("rows: {other:?}"),
+        };
+        assert_eq!(rows.len(), 2);
+        let measured: &Json = &rows[0];
+        assert!(matches!(
+            field(field(measured, "batch_timing"), "median_ms"),
+            Json::Number(value) if *value == 400.0
+        ));
+        assert!(matches!(
+            field(field(measured, "alloc"), "peak_live_bytes"),
+            Json::Integer(value) if *value == 1 << 20
+        ));
+        assert!(matches!(
+            field(measured, "caller_buffer_bytes"),
+            Json::Integer(146_313_216)
+        ));
+        assert!(matches!(
+            field(measured, "outputs_identical_to_single_threaded"),
+            Json::Integer(16)
+        ));
+        assert!(matches!(field(&rows[1], "batch_timing"), Json::Null));
+        assert!(matches!(field(&rows[1], "not_applicable"), Json::String(_)));
+        let correctness: &Vec<Json> = match field(&json, "correctness") {
+            Json::Array(records) => records,
+            other => panic!("correctness: {other:?}"),
+        };
+        assert!(matches!(
+            field(&correctness[0], "note"),
+            Json::String(text) if text.contains("disabled (--no-c-oracle)")
+        ));
+    }
+
+    #[test]
+    fn concurrent_markdown_says_heap_not_rss_and_fills_every_column() {
+        let mut out: String = String::new();
+        concurrent_markdown(&mut out, &section());
+        assert!(out.contains("## Concurrent decode"));
+        assert!(out.contains("4 threads"));
+        assert!(out.contains("not RSS"));
+        let header_columns: usize = out
+            .lines()
+            .find(|line| line.starts_with("| row |"))
+            .expect("table header")
+            .matches('|')
+            .count();
+        let rows: Vec<&str> = out
+            .lines()
+            .filter(|line| {
+                line.starts_with("| candidate-reuse") || line.starts_with("| zune-fresh")
+            })
+            .collect();
+        assert_eq!(rows.len(), 2);
+        for row in rows {
+            assert_eq!(row.matches('|').count(), header_columns, "{row}");
+        }
+        assert!(out.contains("| 139.5 MiB | 16 identical (asserted) |"));
+        assert!(
+            out.contains("| all rows | C djpeg | C decode comparison: disabled (--no-c-oracle) |")
+        );
     }
 }

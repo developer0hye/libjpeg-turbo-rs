@@ -64,6 +64,7 @@ grayscale case. Each report row also states who owns the output buffer:
 | `testorig`, `testimgint` | upstream `references/libjpeg-turbo/testimages/`, under the IJG License (see that directory's `LICENSE.txt`) |
 | `encode-*` | 64×64, 1920×1080 and 4032×3024 RGB, encoded at quality 85 |
 | thumbnail | 12 MP photo with EXIF orientation 6: decode → orient → `imageops::resize` (Triangle) to 256 px → encode q85 |
+| `concurrent-phone-4032x3024-420` | the 12 MP photo decoded by T = min(4, available parallelism) threads at once, K = 4 decodes each (2 under `--smoke`); every decode row's backend |
 
 `consumer/src/corpus.rs` generates the synthetic content using integer
 arithmetic only, so the pixels are identical on every platform. The **published
@@ -114,6 +115,22 @@ These run outside every timed region.
   maintainer's machine). `--no-c-oracle` turns off both tools. The workflow
   passes it, because it provisions no C reference and a tool that happens
   to be on a runner image is an unpinned release.
+- **Concurrent decode (asserted).** One untimed batch runs before the
+  allocation and timing passes, and every output of every thread is
+  compared with the same backend's single-threaded output, dimensions
+  included. Any difference fails the run. Each reuse thread decodes K times
+  into the same buffer, which is never cleared, and every decode is of the
+  same image. A decode that leaves part of the buffer unwritten is therefore
+  caught only on the first decode of threads 2..T, whose buffers start
+  zeroed: thread 1's buffer already holds its reference decode, and later
+  decodes find the previous decode's correct pixels there.
+  The single-threaded references are held to the decode cases' contract as
+  well: the same exact pairs, every row's difference from `candidate-fresh`,
+  and, with a C decoder, `candidate-fresh` and `baseline-fresh` asserted
+  pixel-identical to `djpeg`. `--only concurrent` runs no decode case, so
+  without this a backend that was consistently wrong would only be compared
+  with itself. Without a C decoder the section's correctness table says so
+  ("C decode comparison: disabled (--no-c-oracle)" or "skipped (no djpeg)").
 - **Encode PSNR.** PSNR is measured against the source pixels. The published
   baseline decodes every row's output. Each output's real subsampling is read
   back from its SOF marker. `image`'s encoder writes **4:4:4** at q85 even
@@ -193,7 +210,8 @@ Build variants are separate, labelled runs. The default is the stock profile.
 
 Harness options: `--iterations N`, `--warmup N`, `--smoke` (2 iterations after
 1 warmup; this proves the harness works and measures nothing), `--only
-<substring>` (case filter), `--djpeg <path>`, `--cjpeg <path>`,
+<substring>` (case filter; `--only concurrent` runs just the concurrent
+section), `--djpeg <path>`, `--cjpeg <path>`,
 `--no-c-oracle`.
 
 **Before a measured run,** follow the timing-experiment rules in the global
@@ -248,8 +266,41 @@ typosquat) before you copy the lock back.
   allocator counts only inside that pass. In timed regions it costs one
   relaxed atomic load per call, the same for every backend. These numbers are
   deterministic, so machine load does not affect them.
+- **Concurrent decode** answers what an application that decodes several
+  12 MP photos at once holds in memory. The section's preamble (and the
+  JSON's `threads` / `decodes_per_thread`) records T and K: T is
+  4 on a 4-core or larger machine and 3 on the hosted arm64 runners, so
+  compare reports only at equal T.
+  - Times are wall milliseconds per batch (T × K decodes). Thread spawn and
+    join are inside the batch, roughly 100 µs against a batch of hundreds
+    of ms. MP/s is the whole batch's source pixels at the median.
+  - `peak live heap` is the highest heap requested through the global
+    allocator, all threads together, during one batch, above the heap at
+    the batch's start. The counter is exact under concurrency (see
+    `consumer/src/alloc_counter.rs`). It is **not RSS**. Thread stacks
+    (mapped directly), malloc arenas and retained free pages, and code pages
+    are not in it. Peak RSS is not reported, because no std-only API resets
+    a process's high-water mark portably, and the earlier 8K case would
+    otherwise set it.
+  - Unlike the single-threaded columns, this peak is **not deterministic**.
+    It depends on how far the threads' working sets overlap in time, and its
+    ceiling is T × one decode's peak. On two 2026-10-07 smoke runs on the
+    same machine, `baseline-fresh` measured 209.4 MiB and 174.5 MiB, and
+    `candidate-fresh` 209.4 MiB both times. Allocation count and cumulative
+    bytes stay deterministic. The zero-tolerance allocation budget below
+    therefore cannot apply to this peak as it stands.
+  - `caller buffers` is the T output buffers the reuse rows own. They are
+    allocated before the window, as in the single-threaded rows, so
+    `peak live heap + caller buffers` is the like-for-like total between
+    fresh and reuse rows.
+  - The allocation columns count the small `Thread` handles that spawning
+    allocates, the same for every row.
 - **N/A** means the backend has no API for the case. The reason appears in the
   row.
+
+`report.json`'s `schema` is `downstream-consumer-report/2`. Version 2 added
+the top-level `concurrent` object (`null` when `--only` excludes it). A `/1`
+report has no such key.
 
 ## Committing a report
 
@@ -260,15 +311,21 @@ and `build-info.txt`. Leave `corpus/` out: it is regenerated byte for byte
 
 ## Regression budget
 
-The budget is set from the first measured report (#640 criterion 6) and is
-not yet fixed. It will be derived as follows:
+[`BUDGETS.md`](BUDGETS.md) holds the budgets (#640 criterion 6), the
+reference set they come from, and the cases the candidate loses. `budgets.py`
+checks a later report's timing ratios against that set; BUDGETS.md gives the
+command. The rules below were fixed before any data existed. The data then
+added a cross-run term to the band, held each ratio to the reference median
+× (1 + band) rather than to the baseline, and bound the reference to one
+consumer build and CPU model; BUDGETS.md explains why.
 
 - **Time:** for each row, the relative spread `(p90 - p10) / median` of the
   first report on each runner gives the noise floor. A candidate row regresses
   when its median exceeds the baseline row from the **same run** by more than
   `max(2 × spread, 3 %)`, and the excess reproduces in a second run.
 - **Allocations:** these are deterministic, so the budget is zero. Any
-  increase in count or peak for the same case is a change to explain.
+  increase in count or peak for the same case is a change to explain. The
+  concurrent section's peak is the exception (see "Concurrent decode").
 - **Binary size and build time:** the probe contributions in the first report
   become the reference. Growth over 5 % needs a stated reason.
 

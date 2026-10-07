@@ -80,9 +80,9 @@ and threading policy. Two points matter most when adopting:
 - **Only the root re-exports and the named re-export modules are covered
   API.** The `pub` low-level modules (`api`, `common`, `decode`, `encode`,
   `simd`, `transform`) are not, and 0.9.0 already changes some of them. The
-  review that classifies their items (P4-222) is in PR
-  [#649](https://github.com/developer0hye/libjpeg-turbo-rs/pull/649),
-  forthcoming.
+  review that classifies their items (P4-222, PR
+  [#649](https://github.com/developer0hye/libjpeg-turbo-rs/pull/649)) is
+  [`PUBLIC_API_REVIEW.md`](PUBLIC_API_REVIEW.md).
 - **Set your own resource budget for untrusted input.** The defaults accept
   what `djpeg` accepts and set no memory ceiling, by design
   ([`STABILITY.md#resource-limits`](STABILITY.md#resource-limits)). Pass the
@@ -175,11 +175,16 @@ Open on `main` (the [OPEN Items table](LAST_MILE.md#open-items) is the full list
 | [P4-217](last_mile/phase4.md#p4-217-no-written-release-semver-msrv-or-security-policy-no-private-reporting-route-and-no-api-check-before-publish--partial-policy-api-gate-and-affected-version-record-landed-private-reporting-route-not-enabled-oss-fuzz-not-submitted) | GitHub private vulnerability reporting is not enabled yet; [`SECURITY.md`](../SECURITY.md) gives the fallback. |
 | [P4-170](last_mile/phase4.md#p4-170-classic-source-manager-parity-fails-in---release-and-passes-in-debug-so-ci-never-sees-it--open) | Classic source-manager parity fails in `--release` builds. |
 
-Filed in open pull requests, not yet on `main`:
+Also open on `main`, filed by the pull requests linked:
 
 - **P4-218** ([#646](https://github.com/developer0hye/libjpeg-turbo-rs/pull/646)):
   `decompress_into` still allocates whole-image component planes, so the
   buffer-reuse path is not a low-memory path.
+- **P4-228** ([#659](https://github.com/developer0hye/libjpeg-turbo-rs/issues/659)):
+  a fresh (library-allocated) decode of a large image is 2–5 % slower than
+  0.8.0; the buffer-reuse path is not affected.
+- **P4-230** ([#661](https://github.com/developer0hye/libjpeg-turbo-rs/issues/661)):
+  the crate adds 10–15 % more code to a release binary than 0.8.0 did.
 - **P4-222** ([#649](https://github.com/developer0hye/libjpeg-turbo-rs/pull/649)):
   the low-level modules are de facto API until they are narrowed.
 - **P4-220** ([#645](https://github.com/developer0hye/libjpeg-turbo-rs/pull/645)):
@@ -210,13 +215,15 @@ Check §8 if you decode 12-bit, lossless or CMYK input.
 
 **Performance.** Benchmark your build, not this workspace's: Cargo ignores a
 dependency's `[profile.release]`, so this workspace's `lto = true` does not
-reach your application, and the README's tables are in-tree builds. A
-standalone default-profile consumer harness (P4-214, `experiments/downstream/`)
-is in PR [#646](https://github.com/developer0hye/libjpeg-turbo-rs/pull/646),
-forthcoming. Until it reports, measure inside your application with the
-release profile you ship, portable and `target-cpu=native` separately, and
-record CPU, toolchain, flags and corpus with every number. Measure peak
-memory as well as latency (P4-218).
+reach your application, and the README's tables are in-tree builds. The
+standalone default-profile consumer harness (`experiments/downstream/`)
+measures that build. Its first report and the losing cases are in
+[`experiments/downstream/BUDGETS.md`](../experiments/downstream/BUDGETS.md).
+It ran on x86_64 hosted runners; no aarch64 figures are budget-grade yet
+(P4-229). Still measure inside your application with the release profile you
+ship, portable and `target-cpu=native` separately, and record CPU,
+toolchain, flags and corpus with every number. Measure peak memory as well as
+latency (P4-218).
 
 ## 10. Roll out and roll back
 

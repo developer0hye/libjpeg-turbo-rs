@@ -163,6 +163,16 @@ fi
 
 candidate_sha=$(git -C "$repo_root" rev-parse HEAD 2>/dev/null || echo unknown)
 candidate_dirty=$(git -C "$repo_root" status --porcelain --untracked-files=no 2>/dev/null | wc -l | tr -d ' ')
+# The harness binary itself moves same-run ratios: two consumer builds of one
+# library differed by 5 % and 30 % on two parity rows (BUDGETS.md), so budgets.py only
+# compares reports built from the same consumer sources. Hash the consumer
+# directory as copied: the working tree, untracked files included and
+# target/ excluded, before the path substitution, file names included.
+consumer_source_sha256=$(cd "$consumer_src" &&
+  find . -path ./target -prune -o -type f -print | LC_ALL=C sort |
+  while IFS= read -r file; do
+    printf '%s %s\n' "$(shasum -a 256 <"$file" | cut -d' ' -f1)" "$file"
+  done | shasum -a 256 | cut -d' ' -f1)
 
 echo "run.sh: variant=$variant work=$work_dir candidate=$repo_root@$candidate_sha" >&2
 
@@ -232,6 +242,7 @@ build_info="$work_dir/build-info.txt"
     grep -Ev '=.*://.*@' | sort | sed 's|^|env_|' || true
   echo "candidate_sha=$candidate_sha"
   echo "candidate_tracked_changes=$candidate_dirty"
+  echo "consumer_source_sha256=$consumer_source_sha256"
   echo "work_dir=$work_dir"
   echo "clean_build_seconds=$(elapsed "$build_started" "$build_finished") (all dependencies, fresh target dir, downloads excluded)"
   echo "binary_bytes=$(file_bytes "$binary") (downstream-consumer, unstripped)"
