@@ -53,8 +53,8 @@ crates/libjpeg-turbo-rs-capi/src/memmgr.rs	1	clamped-difference	budget.saturatin
 crates/libjpeg-turbo-rs-capi/src/memmgr.rs	1	counter	.saturating_sub(block.layout.size());
 crates/libjpeg-turbo-rs-capi/src/memmgr.rs	1	counter	self.total_space_allocated = self.total_space_allocated.saturating_add(size);
 crates/libjpeg-turbo-rs-capi/src/memmgr.rs	2	bounds-check	if start_row.saturating_add(num_rows) > ctrl_ref.rows_in_array {
-crates/libjpeg-turbo-rs-capi/src/transform.rs	1	clamped-difference	crop.height.min(out_height.saturating_sub(crop.y))
-crates/libjpeg-turbo-rs-capi/src/transform.rs	1	clamped-difference	crop.width.min(out_width.saturating_sub(crop.x))
+crates/libjpeg-turbo-rs-capi/src/transform.rs	1	clamped-difference	extent.min(frame.saturating_sub(offset))
+crates/libjpeg-turbo-rs-capi/src/transform.rs	1	clamped-difference	frame.saturating_sub(offset)
 crates/libjpeg-turbo-rs-capi/src/transform.rs	1	bounds-check	.fold(retained_markers, u64::saturating_add);
 crates/libjpeg-turbo-rs-capi/src/transform.rs	1	bounds-check	.saturating_mul(128)
 crates/libjpeg-turbo-rs-capi/src/transform.rs	1	bounds-check	.saturating_mul(blocks_high as u64)
@@ -73,6 +73,14 @@ src/api/quantize.rs	1	counter	*cell = cell.saturating_add(1);
 src/api/raw_data_12.rs	1	clamped-difference	let sx: usize = (block_x + col).min(plane_width.saturating_sub(1));
 src/api/raw_data_12.rs	1	clamped-difference	let sy: usize = (block_y + row).min(plane_height.saturating_sub(1));
 src/api/streaming.rs	1	clamped-difference	let remaining: usize = out_h.saturating_sub(self.skip_rows);
+src/api/yuv.rs	1	bounds-check	.saturating_add(plane)
+src/api/yuv.rs	1	bounds-check	.saturating_add(raw)
+src/api/yuv.rs	1	bounds-check	.saturating_add(scratch)
+src/api/yuv.rs	1	bounds-check	.saturating_mul(v as u64 * block);
+src/api/yuv.rs	1	bounds-check	.saturating_mul(yuv_plane_height(dim_component, out_height, subsampling) as u64);
+src/api/yuv.rs	1	bounds-check	let raw: u64 = (mcus_x * h as u64 * block).saturating_mul(mcus_y * v as u64 * block);
+src/api/yuv.rs	1	clamped-difference	let available: usize = scratch_len.saturating_sub(source).min(plane_width);
+src/api/yuv.rs	1	clamped-difference	let rows: usize = scratch_rows.min(plane_height.saturating_sub(first_row));
 src/decode/color.rs	1	value-saturation	let bd: u8 = b.saturating_add(d);
 src/decode/color.rs	1	value-saturation	let gd: u8 = g.saturating_add(d >> 1);
 src/decode/color.rs	1	value-saturation	let rd: u8 = r.saturating_add(d);

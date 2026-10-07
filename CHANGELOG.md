@@ -10,6 +10,8 @@ and `git log` between tags.
 
 ### Added
 
+- **`TjHandle::scaling_factor`** returns the factor `set_scaling_factor`
+  set; `TjHandle::decompress_to_yuv_planes` now applies it (P4-234, #667).
 - **Supported root paths for module-only APIs** (P4-222): `libjpeg_turbo_rs::yuv`
   (`encode_yuv`, `compress_from_yuv`, `decompress_to_yuv`, `decode_yuv` and
   their `*_planes` forms), `StreamingDecoder`, `CompressParams` and
@@ -89,10 +91,11 @@ and `git log` between tags.
   also honoured a stride shorter than its plane, running the last row past
   a buffer sized `stride * height`, and `tj3DecompressToYUV8` grew its packed
   planes infallibly from the caller's `align`, so an alignment of 2^30 aborted
-  the process. **Breaking (behaviour):** a YUV
-  decompress at any scaling factor other than 1/1 now returns -1 having
-  written nothing (stock decodes it; scaled YUV output is still open under
-  P4-234), and a stride shorter than its plane's width, or negative, is
+  the process. Both now decode the planes of the *scaled* frame, writing
+  exactly the `tj3YUVBufSize(TJSCALED(w), align, TJSCALED(h), subsamp)`
+  bytes, byte-identical to stock 3.2.0 at all sixteen scaling factors.
+  **Breaking (behaviour):** a stride shorter than its plane's width, or
+  negative, is
   refused with "Invalid argument" as upstream refuses it, and padded planes
   past `INT_MAX` are refused with "Image or row alignment is too large", as
   upstream refuses them. The overruns are pinned in the C-boundary misuse
@@ -393,6 +396,20 @@ and `git log` between tags.
   other when set nonzero and refuse values outside 0-65535, as upstream's
   `tj3Set` does, so `tj3Get` and every compress or transform see the
   interval set last.
+- **Breaking (behaviour): crop regions follow jpegtran's rules** (P4-240,
+  #675). `TransformOptions::crop` with a `width` or `height` of 0 now runs to
+  the edge of the transformed image, as jpegtran's omitted `W` / `H` does; it
+  used to produce an empty or remainder-wide image. A region jpegtran refuses
+  — an origin outside the transformed image, or a region running past it —
+  is now `JpegError::InvalidCropRegion("Invalid crop request")` instead of
+  being clamped to the image; crop *expansion* (legal in jpegtran 3.2 for an
+  untransformed image) is still clamped, or refused with
+  `JpegError::Unsupported` when its origin lies outside the image (P4-173).
+  `tj3Transform` accepts a
+  zero `r.w` / `r.h` as "to the edge" (it returned -1), and
+  `tj3TransformBufSize` sizes that region as upstream does (it sized the
+  whole frame) and, like upstream's `getTransformedSpecs`, returns 0 with
+  upstream's message for a region it refuses. Byte-exact against `jpegtran -crop` and stock `tj3Transform`.
 - An allocator refusal during a decode is reported as
   `JpegError::AllocationFailed` instead of aborting the process (P4-209,
   #632). `decompress` / `Decoder::decode_image` allocated their destination

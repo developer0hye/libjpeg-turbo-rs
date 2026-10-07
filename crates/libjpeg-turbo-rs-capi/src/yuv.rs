@@ -903,18 +903,34 @@ const MAX_YUV_PLANES: usize = 3;
 /// subsampling describes, a two-component one among them.
 const TJSAMP_UNKNOWN: c_int = -1;
 
-/// Upstream's `INT_MAX` guard on the packed planes (`turbojpeg.c:2433-2438`):
+/// The published frame dimensions at the handle's scaling factor —
+/// `TJSCALED(dimension, scalingFactor)`, which is what upstream sizes YUV
+/// planes from (`turbojpeg.c:2420-2421`, and `jpeg_calc_output_dimensions` in
+/// the planar body).
+fn scaled_frame(inst: &TjInstance) -> (c_int, c_int) {
+    use libjpeg_turbo_rs::tj3::TjParam;
+    let factor = inst.inner.scaling_factor();
+    let (num, denom): (i64, i64) = (i64::from(factor.num()), i64::from(factor.denom()));
+    let scaled = |dimension: c_int| -> c_int {
+        let scaled: i64 = (i64::from(dimension) * num + denom - 1) / denom;
+        c_int::try_from(scaled).unwrap_or(c_int::MAX)
+    };
+    (
+        scaled(inst.inner.get(TjParam::Width)),
+        scaled(inst.inner.get(TjParam::Height)),
+    )
+}
+
+/// Upstream's `INT_MAX` guard on the packed planes (`turbojpeg.c:2435-2439`):
 /// a chroma-carrying subsampling whose luma or chroma plane, padded to
 /// `align`, is larger than `INT_MAX` bytes. Upstream applies it to the
 /// non-grayscale branch only; a grayscale plane that large is caught by
 /// `pack_yuv_planes`' fallible reservation instead.
 fn packed_planes_exceed_int_max(inst: &TjInstance, tjsamp: c_int, align: c_int) -> bool {
-    use libjpeg_turbo_rs::tj3::TjParam;
     if crate::bufsize::is_gray(tjsamp) {
         return false;
     }
-    let width: c_int = inst.inner.get(TjParam::Width);
-    let height: c_int = inst.inner.get(TjParam::Height);
+    let (width, height): (c_int, c_int) = scaled_frame(inst);
     let padded = |component: c_int| -> u64 {
         let plane_width: u64 =
             u64::try_from(crate::bufsize::tj3YUVPlaneWidth(component, width, tjsamp)).unwrap_or(0);
@@ -1000,9 +1016,8 @@ pub unsafe extern "C" fn tj3DecompressToYUV8(
                 return -1;
             }
             // Then a row alignment whose padded planes exceed `INT_MAX`
-            // (`:2433-2438`), from the published size. Upstream sizes from the
-            // *scaled* frame; the unscaled one is never smaller, and any other
-            // scaling factor is refused below anyway (P4-234).
+            // (`:2435-2439`), from the published size at the handle's scaling
+            // factor, as upstream sizes the planes.
             if packed_planes_exceed_int_max(inst, tjsamp, align) {
                 inst.set_error(
                     "tj3DecompressToYUV8(): Image or row alignment is too large",
@@ -1147,7 +1162,9 @@ pub unsafe extern "C" fn tj3DecompressToYUVPlanes8(
             // `pw - stride` bytes past a buffer sized `stride * ph` (P4-234).
             // Zero means "the plane width"; a negative stride is refused too.
             if !strides.is_null() {
-                let width: c_int = inst.inner.get(libjpeg_turbo_rs::tj3::TjParam::Width);
+                // Against the scaled plane, as upstream's per-component loop
+                // checks it after `jpeg_calc_output_dimensions`.
+                let (width, _): (c_int, c_int) = scaled_frame(inst);
                 for i in 0..plane_count {
                     // SAFETY: `strides` is non-NULL here and, per
                     // `turbojpeg.h`, holds one entry per plane; `i` is below
@@ -1178,7 +1195,7 @@ pub unsafe extern "C" fn tj3DecompressToYUVPlanes8(
             // the copy below uses the decode's. They come from two parses, so
             // their agreement is checked rather than assumed before any byte
             // is written at a caller-checked stride.
-            let published_width: c_int = inst.inner.get(libjpeg_turbo_rs::tj3::TjParam::Width);
+            let (published_width, _): (c_int, c_int) = scaled_frame(inst);
             for i in 0..planes.len().min(MAX_YUV_PLANES) {
                 let published: c_int =
                     crate::bufsize::tj3YUVPlaneWidth(i as c_int, published_width, tjsamp);

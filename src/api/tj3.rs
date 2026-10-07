@@ -667,6 +667,12 @@ impl TjHandle {
         }
     }
 
+    /// The scaling factor set by [`Self::set_scaling_factor`] (1/1 by
+    /// default), which the decompress and YUV-decompress paths apply.
+    pub fn scaling_factor(&self) -> ScalingFactor {
+        self.scaling_factor
+    }
+
     /// Get available scaling factors.
     ///
     /// Returns all supported (numerator, denominator) pairs for JPEG decompression scaling.
@@ -1241,10 +1247,10 @@ impl TjHandle {
     /// more than three components and one whose subsampling TurboJPEG cannot
     /// name.
     ///
-    /// A scaling factor other than 1/1 is refused: upstream emits planes at
-    /// the scaled size, which the raw decode here cannot produce yet, and
-    /// planes at the unscaled size would overrun a buffer sized for the
-    /// scaled image (P4-234).
+    /// The planes are at the handle's scaling factor, as upstream's are: each
+    /// `yuv_plane_width` x `yuv_plane_height` of the scaled frame
+    /// (`TJSCALED(dimension, factor)`), reconstructed with the scaled IDCT of
+    /// size `8 * num / denom` for every component (P4-234, #667).
     #[allow(clippy::type_complexity)]
     pub fn decompress_to_yuv_planes(
         &mut self,
@@ -1266,13 +1272,6 @@ impl TjHandle {
                 "JPEG image must have 3 or fewer components",
             )));
         }
-        if self.scaling_factor != ScalingFactor::default() {
-            return Err(JpegError::Unsupported(format!(
-                "decompression to YUV at scaling factor {}/{} (P4-234)",
-                self.scaling_factor.num(),
-                self.scaling_factor.denom()
-            )));
-        }
         let mut decoder: Decoder<'_> = Decoder::new_with_limits(data, limits)?;
         // Upstream sets `dct_method` from TJPARAM_FASTDCT here too
         // (`turbojpeg.c:2285`).
@@ -1290,7 +1289,38 @@ impl TjHandle {
                 "Requested features are incompatible",
             )));
         }
-        let (raw, warnings) = decoder.decode_raw_with_warnings()?;
+        // Every supported factor is N/8, so the IDCT size is a whole number
+        // of samples: `dctsize = DCTSIZE * num / denom` (`turbojpeg.c:2245`).
+        let (num, denom): (usize, usize) = (
+            self.scaling_factor.num() as usize,
+            self.scaling_factor.denom() as usize,
+        );
+        let block_size: usize = 8 * num / denom;
+        let sampling: Vec<crate::api::yuv::ComponentSampling> = decoder
+            .header()
+            .components
+            .iter()
+            .map(|c| (c.horizontal_sampling as usize, c.vertical_sampling as usize))
+            .collect();
+        let (image_width, image_height): (usize, usize) =
+            (decoder.header().width(), decoder.header().height());
+        let (out_width, out_height): (usize, usize) = (
+            (image_width * num).div_ceil(denom),
+            (image_height * num).div_ceil(denom),
+        );
+        let subsampling: Subsampling = Self::plane_geometry(self.subsampling);
+        // `Decoder`'s own estimate is the 1/1 frame's; the scaled raw planes,
+        // scratch and output planes are checked here before any is sized.
+        limits.check_memory(crate::api::yuv::turbojpeg_yuv_estimate(
+            &sampling,
+            image_width,
+            image_height,
+            block_size,
+            out_width,
+            out_height,
+            subsampling,
+        ))?;
+        let (raw, warnings) = decoder.decode_raw_with_warnings(block_size)?;
         // Under TJPARAM_STOPONWARNING upstream's warning handler aborts the
         // decode. The raw decode is strict, so corrupt or truncated entropy
         // data is already an error here rather than a warning; this refuses
@@ -1302,7 +1332,35 @@ impl TjHandle {
                 )));
             }
         }
-        crate::api::yuv::yuv_planes_from_raw(raw)
+        // The planes describe the scaled frame (`jpeg_calc_output_dimensions`'
+        // `output_width`, which TJSCALED reproduces).
+        let planes: Vec<Vec<u8>> = crate::api::yuv::turbojpeg_yuv_planes(
+            &raw,
+            &sampling,
+            image_width,
+            image_height,
+            block_size,
+            out_width,
+            out_height,
+            subsampling,
+        )?;
+        Ok((planes, out_width, out_height, subsampling))
+    }
+
+    /// The plane geometry of a `TJSAMP_*` value: grayscale's one plane is
+    /// full resolution, which is 4:4:4's plane-0 rule. Called only after the
+    /// unknown subsampling (-1) has been refused.
+    fn plane_geometry(tjsamp: i32) -> Subsampling {
+        match tjsamp {
+            1 => Subsampling::S422,
+            2 => Subsampling::S420,
+            4 => Subsampling::S440,
+            5 => Subsampling::S411,
+            6 => Subsampling::S441,
+            7 => Subsampling::S410,
+            8 => Subsampling::S24,
+            _ => Subsampling::S444,
+        }
     }
 
     /// Decompress JPEG data using current handle parameters (like

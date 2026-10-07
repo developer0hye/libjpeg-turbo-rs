@@ -143,19 +143,6 @@ const KNOWN_DIVERGENCES: &[KnownDivergence] = &[
         key: "norealloc_exact_bytes",
         item: "P4-206 (#628)",
     },
-    // P4-234 (#667): at a scaling factor other than 1/1 the YUV decompressors
-    // refuse, writing nothing, where stock emits the scaled planes. Refusing is
-    // the overrun fix; emitting scaled planes is the item's open half.
-    KnownDivergence {
-        case: "yuv_overrun",
-        key: "scaled_packed_rc",
-        item: "P4-234 (#667)",
-    },
-    KnownDivergence {
-        case: "yuv_overrun",
-        key: "scaled_planar_rc",
-        item: "P4-234 (#667)",
-    },
 ];
 
 fn workspace_root() -> PathBuf {
@@ -907,8 +894,9 @@ fn twelve_bit_round_trip_crosses_the_boundary() {
 /// documents, each flush against a guard page, so an overrun faults this child
 /// (and is an ASan report in `sanitizers.yml`'s `c_boundary_asan` leg). At
 /// scaling factor 1/2 the port wrote the unscaled planes into the scaled
-/// buffer — against `origin/main` before the fix this case died by `SIGBUS` on
-/// its first call. A luma stride shorter than the plane (`turbojpeg.c:2253-2254`)
+/// buffer — before the fix this case died by `SIGBUS` on its first call; it
+/// now writes the scaled planes, whose digests the stock comparison holds
+/// byte-equal. A luma stride shorter than the plane (`turbojpeg.c:2253-2254`)
 /// and an alignment whose padded planes pass `INT_MAX` (`:2435-2439`) are
 /// refused by both libraries, writing nothing.
 #[test]
@@ -919,8 +907,8 @@ fn yuv_decompression_cannot_overrun_a_documented_buffer() {
         "yuv_overrun",
         &[
             ("yuv_header_rc", "0"),
-            ("scaled_packed_rc", "-1"),
-            ("scaled_planar_rc", "-1"),
+            ("scaled_packed_rc", "0"),
+            ("scaled_planar_rc", "0"),
             ("short_stride_rc", "-1"),
             ("huge_align_rc", "-1"),
         ],
