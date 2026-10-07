@@ -79,6 +79,18 @@ and `git log` between tags.
 
 ### Changed
 
+- **Breaking (behaviour): `Encoder::scan_script` is honoured on every
+  progressive path, and refused where none can follow it** (P4-210, #636).
+  The arithmetic-coded progressive encode (YCbCr, grayscale and RGB-direct)
+  and the Huffman RGB-direct one used to write C's default script and return
+  `Ok`; they now follow and validate the caller's script, byte-identical to
+  stock `cjpeg -scans` with `-arithmetic` / `-rgb`, and an invalid one returns
+  `JpegError::InvalidScanScript`. A script with `progressive(false)`, with
+  `lossless(true)`, or with `sampling_factors` that map to no standard
+  subsampling now returns `JpegError::Unsupported` instead of being ignored.
+  Non-interleaved DC scans on the arithmetic path walk the component's own
+  block grid, as the Huffman path does since P4-211.
+
 - **Breaking (Rust API): a lenient decode's warning list is bounded, and
   `DecodeWarning` is `#[non_exhaustive]`** (P4-215, #641). A stream corrupt in
   every MCU used to return one `DecodeWarning::HuffmanError` (with its own

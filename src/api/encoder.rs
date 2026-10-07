@@ -174,17 +174,21 @@ impl<'a> Encoder<'a> {
 
     /// Set a custom progressive scan script.
     ///
-    /// Honoured by the Huffman-coded progressive encode of YCbCr and
-    /// grayscale output — [`progressive`](Self::progressive) on, with no
-    /// arithmetic coding, no RGB-direct [`colorspace`](Self::colorspace) and
-    /// no custom per-component sampling factors. Those three paths still use
-    /// C's default script and ignore this one (tracked as P4-210, #636);
-    /// [`lossless`](Self::lossless) ignores it too, because lossless JPEG has no
-    /// progressive mode for a script to describe. Where
-    /// it is honoured, the script is checked at [`encode`](Self::encode) time,
-    /// before any entropy coding, by the rules C's `validate_script` applies to
-    /// a progressive script (`jcmaster.c`), and a script C would refuse
-    /// returns [`JpegError::InvalidScanScript`].
+    /// Honoured by every progressive encode — Huffman or
+    /// [`arithmetic`](Self::arithmetic) coding, YCbCr, grayscale or RGB-direct
+    /// [`colorspace`](Self::colorspace) output — as `cjpeg -scans` is. The
+    /// script is checked at [`encode`](Self::encode) time, before any entropy
+    /// coding, by the rules C's `validate_script` applies to a progressive
+    /// script (`jcmaster.c`), and a script C would refuse returns
+    /// [`JpegError::InvalidScanScript`].
+    ///
+    /// [`encode`](Self::encode) returns [`JpegError::Unsupported`] instead of
+    /// ignoring the script when no path can follow it: without
+    /// [`progressive`](Self::progressive) (in C the script itself selects
+    /// progressive mode; this builder does not switch modes for you), with
+    /// [`lossless`](Self::lossless), or with
+    /// [`sampling_factors`](Self::sampling_factors) that map to no standard
+    /// subsampling, whose encoder is baseline-only.
     pub fn scan_script(mut self, script: Vec<ScanScript>) -> Self {
         self.scan_script = Some(script);
         self
@@ -1005,6 +1009,34 @@ impl<'a> Encoder<'a> {
             ));
         }
 
+        // Every progressive path below follows a caller's script (P4-210,
+        // #636). Where no path can, refuse rather than encode a stream that
+        // silently ignores it.
+        let scan_script: Option<&[ScanScript]> = self.scan_script.as_deref();
+        if scan_script.is_some() {
+            if self.lossless {
+                return Err(JpegError::Unsupported(
+                    "scan_script describes progressive scans and cannot be combined with lossless"
+                        .to_string(),
+                ));
+            }
+            if !self.progressive {
+                // In C the script itself selects the mode (`validate_script`);
+                // this builder never turns a sequential request progressive.
+                return Err(JpegError::Unsupported(
+                    "scan_script requires progressive(true)".to_string(),
+                ));
+            }
+            if use_custom_sampling {
+                // Non-standard sampling factors take a baseline-only encoder
+                // (P4-236).
+                return Err(JpegError::Unsupported(
+                    "scan_script is not supported with sampling factors that map to no standard subsampling"
+                        .to_string(),
+                ));
+            }
+        }
+
         // One params value carrying every baseline option, instead of an if/else
         // chain in which the first matching arm silently discarded whatever it
         // could not express. That chain lost `restart_blocks` behind either
@@ -1037,10 +1069,11 @@ impl<'a> Encoder<'a> {
 
         let base = if rgb_direct && self.arithmetic && self.progressive && !self.lossless {
             // JCS_RGB arithmetic progressive (#345).
-            encoder::compress_arithmetic_progressive_rgb_direct(
+            encoder::compress_arithmetic_progressive_rgb_direct_scripted(
                 &baseline_params,
                 self.icc_profile,
                 restart_in_rows,
+                scan_script,
             )?
         } else if rgb_direct && self.arithmetic && !self.lossless {
             // JCS_RGB arithmetic (#345). `jcarith.c` codes coefficients and
@@ -1051,10 +1084,11 @@ impl<'a> Encoder<'a> {
             // colorspace-agnostic in C — the scan script comes from the
             // component count, not the colorspace — so `colorspace(Rgb)` and
             // `progressive` compose rather than one silently winning.
-            encoder::compress_progressive_rgb_direct(
+            encoder::compress_progressive_rgb_direct_scripted(
                 &baseline_params,
                 self.icc_profile,
                 restart_in_rows,
+                scan_script,
             )?
         } else if rgb_direct && !self.lossless {
             // Ahead of the remaining mode switches, as the early return it
@@ -1095,7 +1129,7 @@ impl<'a> Encoder<'a> {
         } else if self.arithmetic && self.progressive {
             // Custom quantization tables reach these paths too; they used to be
             // discarded because only the baseline arms could carry them (#322).
-            encoder::compress_arithmetic_progressive(
+            encoder::compress_arithmetic_progressive_scripted(
                 effective_pixels,
                 self.width,
                 self.height,
@@ -1106,6 +1140,7 @@ impl<'a> Encoder<'a> {
                 restart_interval,
                 restart_in_rows,
                 progressive_quant_tables.as_ref(),
+                scan_script,
             )?
         } else if self.arithmetic {
             encoder::compress_arithmetic(
@@ -1120,7 +1155,7 @@ impl<'a> Encoder<'a> {
                 progressive_quant_tables.as_ref(),
             )?
         } else if self.progressive {
-            if let Some(ref script) = self.scan_script {
+            if let Some(script) = scan_script {
                 encoder::compress_progressive_custom_with_restart(
                     effective_pixels,
                     self.width,
