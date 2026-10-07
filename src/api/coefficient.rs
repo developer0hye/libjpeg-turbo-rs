@@ -412,26 +412,37 @@ pub fn read_coefficients(data: &[u8]) -> Result<JpegCoefficients> {
 /// Encodes quantized DCT coefficients using Huffman coding,
 /// producing a valid baseline JPEG file.
 pub fn write_coefficients(coeffs: &JpegCoefficients) -> Result<Vec<u8>> {
-    write_coefficients_from(coeffs, |ci: usize, bx: usize, by: usize| {
-        let comp: &ComponentCoefficients = &coeffs.components[ci];
-        comp.blocks[by * comp.blocks_x + bx]
-    })
+    write_coefficients_from(coeffs, &mut StoredBlocks(coeffs))
 }
 
-/// [`write_coefficients`] with the coded blocks supplied by `block_at(component,
-/// block_x, block_y)` instead of read from `coeffs.components[..].blocks`,
-/// which may then be empty. Blocks are requested in MCU order, one iMCU row
-/// at a time, so a caller can produce them a row at a time instead of
-/// buffering the frame — the way `cjpeg` streams a sequential encode
-/// (P4-236). Dummy blocks past a component's edge are synthesized here and
-/// never requested.
-pub(crate) fn write_coefficients_from<F>(
+/// Where [`write_coefficients_from`] reads the blocks it codes.
+pub(crate) trait CoefficientBlockSource {
+    /// The quantized block (zigzag order) at `block_x, block_y` of component
+    /// `component`. Called in MCU order, one iMCU row at a time, and never for
+    /// a dummy block past the component's edge.
+    fn block(&mut self, component: usize, block_x: usize, block_y: usize) -> &[i16; 64];
+}
+
+/// The blocks stored in `JpegCoefficients::components`.
+struct StoredBlocks<'a>(&'a JpegCoefficients);
+
+impl CoefficientBlockSource for StoredBlocks<'_> {
+    #[inline]
+    fn block(&mut self, component: usize, block_x: usize, block_y: usize) -> &[i16; 64] {
+        let comp: &ComponentCoefficients = &self.0.components[component];
+        &comp.blocks[block_y * comp.blocks_x + block_x]
+    }
+}
+
+/// [`write_coefficients`] with the coded blocks taken from `source` instead
+/// of `coeffs.components[..].blocks`, which may then be empty. Because blocks
+/// are requested one iMCU row at a time, a source can produce them a row at a
+/// time instead of buffering the frame — the way `cjpeg` streams a sequential
+/// encode (P4-236). Dummy blocks past a component's edge are synthesized here.
+pub(crate) fn write_coefficients_from<S: CoefficientBlockSource>(
     coeffs: &JpegCoefficients,
-    mut block_at: F,
-) -> Result<Vec<u8>>
-where
-    F: FnMut(usize, usize, usize) -> [i16; 64],
-{
+    source: &mut S,
+) -> Result<Vec<u8>> {
     let num_components = coeffs.components.len();
     let is_grayscale = num_components == 1;
     let uses_secondary_table: bool = !is_grayscale && !uses_single_rgb_coding_table(coeffs);
@@ -557,10 +568,10 @@ where
                                 ac_table,
                             );
                         } else {
-                            let block: [i16; 64] = block_at(ci, bx, by);
+                            let block: &[i16; 64] = source.block(ci, bx, by);
                             HuffmanEncoder::encode_block(
                                 &mut bit_writer,
-                                &block,
+                                block,
                                 &mut prev_dc[ci],
                                 dc_table,
                                 ac_table,

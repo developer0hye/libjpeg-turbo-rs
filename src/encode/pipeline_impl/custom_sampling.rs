@@ -3,7 +3,9 @@ use super::{
     scale_quant_for_ifast, vec, DctMethod, ImageLayout, JpegError, PixelFormat, QuantDivisors,
     Result, ToString, Vec,
 };
-use crate::api::coefficient::{write_coefficients_from, ComponentCoefficients, JpegCoefficients};
+use crate::api::coefficient::{
+    write_coefficients_from, CoefficientBlockSource, ComponentCoefficients, JpegCoefficients,
+};
 
 /// `C_MAX_BLOCKS_IN_MCU` (`jpegint.h`): the most data units one interleaved
 /// MCU may hold.
@@ -352,23 +354,46 @@ impl CustomSamplingFrame {
     pub(crate) fn write_sequential(&self, restart_interval: u16) -> Result<Vec<u8>> {
         let mut header: JpegCoefficients = self.header();
         header.restart_interval = restart_interval;
-        let mut rows: Vec<Vec<[i16; 64]>> = header
-            .components
-            .iter()
-            .enumerate()
-            .map(|(ci, component)| vec![[0i16; 64]; component.blocks_x * self.components[ci].v])
-            .collect();
-        let mut current_row: Vec<Option<usize>> = vec![None; self.components.len()];
-        let mut band: Vec<u8> = Vec::new();
-        write_coefficients_from(&header, |ci: usize, bx: usize, by: usize| {
-            let v: usize = self.components[ci].v;
-            let mcu_y: usize = by / v;
-            if current_row[ci] != Some(mcu_y) {
-                self.quantize_imcu_row(ci, mcu_y, &mut rows[ci], &mut band);
-                current_row[ci] = Some(mcu_y);
-            }
-            rows[ci][(by % v) * self.mcus_x * self.components[ci].h + bx]
-        })
+        let mut source: ImcuRowSource<'_> = ImcuRowSource {
+            rows: header
+                .components
+                .iter()
+                .zip(&self.components)
+                .map(|(component, geometry)| vec![[0i16; 64]; component.blocks_x * geometry.v])
+                .collect(),
+            current_row: vec![None; self.components.len()],
+            band: Vec::new(),
+            frame: self,
+        };
+        write_coefficients_from(&header, &mut source)
+    }
+}
+
+/// Feeds [`write_coefficients_from`] one iMCU row of quantized blocks per
+/// component, quantizing the next row when the entropy coder first asks for
+/// it.
+struct ImcuRowSource<'a> {
+    frame: &'a CustomSamplingFrame,
+    rows: Vec<Vec<[i16; 64]>>,
+    current_row: Vec<Option<usize>>,
+    band: Vec<u8>,
+}
+
+impl CoefficientBlockSource for ImcuRowSource<'_> {
+    fn block(&mut self, component: usize, block_x: usize, block_y: usize) -> &[i16; 64] {
+        let geometry: &ComponentGeometry = &self.frame.components[component];
+        let mcu_y: usize = block_y / geometry.v;
+        if self.current_row[component] != Some(mcu_y) {
+            self.frame.quantize_imcu_row(
+                component,
+                mcu_y,
+                &mut self.rows[component],
+                &mut self.band,
+            );
+            self.current_row[component] = Some(mcu_y);
+        }
+        let blocks_x: usize = self.frame.mcus_x * geometry.h;
+        &self.rows[component][(block_y % geometry.v) * blocks_x + block_x]
     }
 }
 
