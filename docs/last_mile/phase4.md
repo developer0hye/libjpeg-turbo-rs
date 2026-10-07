@@ -13776,7 +13776,7 @@ loaded, and hosted runners cannot resolve a 3 % gap on their own.
 (`src/common/try_alloc.rs`) is the fallible counterpart of `vec![0u8; n]`:
 it allocates through `alloc_zeroed`, reports a null return as
 `AllocationFailed`, and adopts the block with `Vec::from_raw_parts`. Every
-`try_filled_vec(n, 0u8, …)` site in `src/` now uses it.
+non-test `try_filled_vec(n, 0u8, …)` site in `src/` now uses it.
 `tests/decode_output_lazily_zeroed.rs` pins the mechanism: the owned output
 arrives through `alloc_zeroed` and never through plain `alloc`.
 
@@ -13790,7 +13790,7 @@ branch against that set directly. Two Zen 3 dispatches of the fix (runs
 |---|---:|---:|---:|
 | 8K `candidate-fresh / baseline-fresh` | 1.028 / 1.028 / 1.032 | 1.008 | 1.000 |
 | concurrent `candidate-fresh / baseline-fresh` | 1.057 / 1.059 / 1.023 | 0.997 | 1.002 |
-| thumbnail `candidate / baseline` | 1.010 / 1.002 / 1.015 | 0.951 | 0.954 |
+| thumbnail `candidate / baseline` | 1.010 / 1.002 / 1.014 | 0.951 | 0.954 |
 
 Both rows are back within band of 0.8.0 in both dispatches (criterion 3). The
 Zen 4 dispatch (37638529184) moved the same rows, 8K fresh from 1.050 to
@@ -13898,8 +13898,11 @@ EPYC 9V74 (Zen 4), runs 37548326976 and 37638529184. The same-run ratio
 | 37638529184 | 1.053 | 1.051 | 1.054 |
 
 On Zen 3 (EPYC 7763) the same rows are 0.99–1.00 in every run, and the
-4:4:4 encode rows are at parity on both. The encoded bytes are identical to
-0.8.0's. The gap is therefore code speed on one microarchitecture, in the
+4:4:4 encode rows are at parity on both. The encoded output has the same
+size and PSNR as 0.8.0's; byte equality is not shown, because these hosted
+reports ran without C
+([P4-231](#p4-231-three-downstream-harness-checks-are-weaker-than-their-names-suggest--open)).
+The gap is therefore code speed on one microarchitecture, in the
 4:2:0 path: downsampling, or a dispatch tier such as the BMI2/LZCNT AC tier
 (P4-133), which both CPUs report.
 

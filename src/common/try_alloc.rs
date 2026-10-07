@@ -3,8 +3,9 @@
 //! `vec![0u8; n]`, `Vec::with_capacity(n)` and `slice.to_vec()` **abort the
 //! process** when the allocator refuses. For a size that came out of a JPEG
 //! stream that turns a hostile or merely large file into an uncatchable denial
-//! of service, so every such size goes through `try_reserve_exact` here and
-//! surfaces refusal as [`JpegError::AllocationFailed`] (P4-136, P4-144).
+//! of service, so every such size goes through `try_reserve_exact` (or, for
+//! zeroed bytes, `alloc_zeroed`) here and surfaces refusal as
+//! [`JpegError::AllocationFailed`] (P4-136, P4-144, P4-228).
 //!
 //! These lived in `api::progressive_output` until P4-144 needed the same three
 //! in `common::icc` and `decode::marker`. Copying them would have been the

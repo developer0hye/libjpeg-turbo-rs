@@ -16,7 +16,9 @@
 //! test's injection cannot reach another's (libtest runs them in parallel) and
 //! the harness's own allocations are never refused. The size is exact rather
 //! than a threshold because every buffer refused here comes from
-//! `try_reserve_exact`, and a `>=` rule would also catch whatever else happens
+//! `try_reserve_exact` or, for the owned output and zero-filled planes,
+//! `try_zeroed_bytes`'s `alloc_zeroed` (which the allocator below also
+//! intercepts), and a `>=` rule would also catch whatever else happens
 //! to be large — including an *infallible* allocation, which aborts the process
 //! instead of failing an assertion. Then it asserts three
 //! things per case, in this order:
@@ -56,7 +58,8 @@ thread_local! {
     /// whatever else happens to be large, and every *infallible* allocation it
     /// catches aborts the process — which is a `SIGABRT` with no assertion
     /// message, the failure mode P4-209 demonstrated. Every size this suite
-    /// refuses comes from `try_reserve_exact` or `try_filled_vec`, so it is
+    /// refuses comes from `try_reserve_exact`, `try_filled_vec` or
+    /// `try_zeroed_bytes`, so it is
     /// exactly predictable, and naming it means an unrelated allocation of a
     /// different size cannot be caught by accident (rust-code-reviewer,
     /// 2026-09-09).
@@ -163,7 +166,7 @@ fn with_refusals_of<T>(size: usize, body: impl FnOnce() -> T) -> (T, usize) {
 const SIDE: usize = 32;
 
 /// The progressive destination image: `width * height * 3` bytes, allocated by
-/// `try_filled_vec` in `api::progressive_output` and therefore refusable.
+/// `try_zeroed_bytes` in `api::progressive_output` and therefore refusable.
 const PIXELS_BYTES: usize = SIDE * SIDE * 3;
 
 /// Bytes of ICC profile to embed for the metadata case. `common::icc`
@@ -357,8 +360,8 @@ fn a_refused_icc_reassembly_leaves_the_decoder_usable() {
 /// P4-136 criterion 4 and P4-144 had already removed from the progressive,
 /// arithmetic, ICC and marker paths, still live on the API almost every caller
 /// uses. This test was committed `#[ignore]`d with the harness (P4-141) and
-/// aborted with `SIGABRT` when run; it now passes, and the site is
-/// `try_filled_vec`.
+/// aborted with `SIGABRT` when run; it now passes. The site was
+/// `try_filled_vec`, and since P4-228 it is `try_zeroed_bytes` (`alloc_zeroed`).
 ///
 /// The fixture is 4:2:0, which takes the row-streamed H2V2 path (merged
 /// upsampling is off by default), so the refused buffer is the caller-visible

@@ -265,11 +265,14 @@ runs. Clean build times come from `ref-zen3-1` and are indicative only.
   rule. The same library measured 0.90 with the earlier consumer build, so
   this row is binary-sensitive. It is a losing case of this reference, not
   yet a diagnosed regression.
-- **Zen 4, one run:**
+- **Zen 4, run 37548326976:**
   - 4:2:0 encode at 1.053–1.071× 0.8.0;
   - 8K fresh at 1.050× and 8K reuse at 1.033×.
 
-  Not confirmed: it is one run, and Zen 4 runners are not the reference.
+  Zen 4 runners are not the reference. A second Zen 4 dispatch (37638529184,
+  on the P4-228 fix) reproduced the encode rows at 1.051–1.054:
+  [P4-239](../../docs/last_mile/phase4.md#p4-239-on-zen-4-420-encode-is-5--slower-than-080--open)
+  ([#665](https://github.com/developer0hye/libjpeg-turbo-rs/issues/665)).
 - **Image adapter vs `image`'s codec on a 64x64 image:** a fixed per-image
   overhead; see the reference table (27 vs 19 allocations).
 - **Binary size vs 0.8.0:** +14.7 % (x86_64) and +10.1 % (aarch64), not yet
