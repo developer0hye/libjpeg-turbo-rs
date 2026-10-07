@@ -14,6 +14,8 @@
 #[allow(unused_imports)]
 use alloc::vec::Vec;
 
+use core::alloc::Layout;
+
 use crate::common::error::{JpegError, Result};
 
 /// Allocate `len` copies of `value`, reporting allocator refusal as an error.
@@ -57,6 +59,45 @@ pub(crate) fn try_filled_vec<T: Clone>(len: usize, value: T, what: &'static str)
     // reallocate — the abort path `vec![]` would have taken is gone.
     buf.resize(len, value);
     Ok(buf)
+}
+
+/// `len` zero bytes, reporting allocator refusal as an error — the fallible
+/// counterpart to `vec![0u8; len]`.
+///
+/// [`try_filled_vec`]`(len, 0u8, …)` has the same contract, but it reserves
+/// with `try_reserve_exact` and then writes every byte with `resize`. The
+/// decoder overwrites those bytes anyway, so a large buffer is written twice.
+/// `vec![0u8; len]` instead asks for `alloc_zeroed` (`calloc`), which can hand
+/// out pages the kernel has already zeroed, and so does this. The extra pass
+/// made fresh decodes of large images 2–5 % slower than 0.8.0 (P4-228, #659;
+/// `experiments/downstream/BUDGETS.md`).
+pub(crate) fn try_zeroed_bytes(len: usize, what: &'static str) -> Result<Vec<u8>> {
+    if len == 0 {
+        // A zero-sized layout must not reach the allocator.
+        return Ok(Vec::new());
+    }
+    // `Layout::array` refuses sizes over `isize::MAX`, the same bound
+    // `try_filled_vec` reports as a geometry limit rather than a failed
+    // request.
+    let layout: Layout = Layout::array::<u8>(len).map_err(|_| JpegError::LimitExceeded {
+        what,
+        actual: len as u64,
+        limit: isize::MAX as u64,
+    })?;
+    // SAFETY: `layout` has a non-zero size; `len == 0` returned above.
+    let pointer: *mut u8 = unsafe { alloc::alloc::alloc_zeroed(layout) };
+    if pointer.is_null() {
+        return Err(JpegError::AllocationFailed {
+            what,
+            bytes: len as u64,
+        });
+    }
+    // SAFETY: `pointer` is a live block from the global allocator for
+    // `layout`, which is `len` bytes at `u8`'s alignment, so `len` is both its
+    // capacity and a length within it. `alloc_zeroed` initialised every byte,
+    // and zero is a valid `u8`. Ownership passes to the `Vec`, which frees it
+    // with the same layout.
+    Ok(unsafe { Vec::from_raw_parts(pointer, len, len) })
 }
 
 /// Empty `Vec<u8>` with exactly `len` bytes reserved — the fallible
@@ -190,6 +231,47 @@ pub(crate) fn try_clone_saved_markers(
 mod tests {
     use super::*;
     use crate::common::types::IccChunk;
+
+    /// Issue #659 (P4-228): the zeroed helper keeps `try_filled_vec`'s
+    /// refusal contract — an unservable size is an error, not an abort.
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    #[cfg_attr(miri, ignore = "Miri aborts on an unservable request; see P4-136")]
+    fn zeroed_bytes_refusal_is_an_error() {
+        let err: JpegError =
+            try_zeroed_bytes(isize::MAX as usize, "test plane").expect_err("must refuse");
+        assert!(
+            matches!(err, JpegError::AllocationFailed { what, bytes }
+                if what == "test plane" && bytes == isize::MAX as u64),
+            "expected AllocationFailed, got {err:?}"
+        );
+    }
+
+    /// Issue #659 (P4-228): a size no allocation can express reports the
+    /// geometry limit, as `try_filled_vec` does, rather than a failed request.
+    #[test]
+    fn zeroed_bytes_past_isize_max_is_a_limit_error() {
+        let err: JpegError = try_zeroed_bytes(usize::MAX, "test plane").expect_err("must refuse");
+        assert!(
+            matches!(err, JpegError::LimitExceeded { what, .. } if what == "test plane"),
+            "expected LimitExceeded, got {err:?}"
+        );
+    }
+
+    /// Issue #659 (P4-228): the buffer is exactly `len` initialised zero
+    /// bytes, usable like `vec![0u8; len]`, including at length zero.
+    #[test]
+    fn zeroed_bytes_are_len_zeroes() {
+        for len in [0usize, 1, 7, 4096, 3 * 4096 + 5] {
+            let mut buf: Vec<u8> = try_zeroed_bytes(len, "test plane").expect("small request");
+            assert_eq!(buf.len(), len);
+            assert_eq!(buf.capacity(), len);
+            assert!(buf.iter().all(|&byte| byte == 0), "len {len} not all zero");
+            // Writable and growable like any Vec from the global allocator.
+            buf.push(1);
+            assert_eq!(buf[len], 1);
+        }
+    }
 
     /// The whole point of the module: refusal is a value, not an abort.
     ///

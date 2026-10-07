@@ -1,7 +1,8 @@
 use super::{Decoder, Image};
 use crate::common::error::{DecodeWarning, JpegError, Result};
 use crate::common::try_alloc::{
-    try_clone_opt, try_clone_opt_string, try_clone_saved_markers, try_filled_vec, try_reserved_vec,
+    try_clone_opt, try_clone_opt_string, try_clone_saved_markers, try_reserved_vec,
+    try_zeroed_bytes,
 };
 use crate::common::types::{ColorSpace, DctMethod, FrameHeader, PixelFormat};
 use crate::decode::{idct_extended, idct_scaled};
@@ -811,7 +812,7 @@ impl<'a> Decoder<'a> {
         }
 
         let mut full: Vec<u8> =
-            try_filled_vec(full_width * full_height, 0u8, "upsampled component plane")?;
+            try_zeroed_bytes(full_width * full_height, "upsampled component plane")?;
         // C disables fancy upsampling for a 1x1 scaled IDCT, and for the
         // horizontal 2:1 kernels when the active input is at most two pixels.
         let horizontal_fancy_too_narrow = horizontal_factor == 2 && active_width <= 2;

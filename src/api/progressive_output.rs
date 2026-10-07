@@ -17,6 +17,7 @@ use crate::common::try_alloc::try_clone_saved_markers;
 /// output the image after each scan, progressively refining the quality.
 use crate::common::try_alloc::{
     try_clone_opt, try_clone_opt_string, try_copy_of, try_filled_vec, try_reserved_vec,
+    try_zeroed_bytes,
 };
 use crate::common::types::*;
 use crate::decode::bitstream::BitReader;
@@ -176,7 +177,7 @@ impl ProgressiveDecoder {
             .map(|ci| {
                 let blocks: usize =
                     checked_span(&[ci.blocks_x, ci.blocks_y], "progressive AC-max buffer")?;
-                try_filled_vec(blocks, 0u8, "progressive AC-max buffer")
+                try_zeroed_bytes(blocks, "progressive AC-max buffer")
             })
             .collect::<Result<Vec<Vec<u8>>>>()?;
 
@@ -278,7 +279,7 @@ impl ProgressiveDecoder {
                     &[ci.comp_w, ci.blocks_y, block_size],
                     "progressive component plane",
                 )?;
-                try_filled_vec(size, 0u8, "progressive component plane")
+                try_zeroed_bytes(size, "progressive component plane")
             })
             .collect::<Result<Vec<Vec<u8>>>>()?;
 
@@ -724,7 +725,7 @@ impl ProgressiveDecoder {
             // 4:4:4: no upsampling needed
             let data_size: usize =
                 checked_span(&[out_width, out_height, bpp], "progressive output image")?;
-            let mut data: Vec<u8> = try_filled_vec(data_size, 0u8, "progressive output image")?;
+            let mut data: Vec<u8> = try_zeroed_bytes(data_size, "progressive output image")?;
             for y in 0..out_height {
                 self.ycbcr_to_rgb_row(
                     &y_plane[y * y_width..],
@@ -756,9 +757,9 @@ impl ProgressiveDecoder {
                 "progressive upsampled chroma plane",
             )?;
             let mut cb_full: Vec<u8> =
-                try_filled_vec(alloc_size, 0u8, "progressive upsampled chroma plane")?;
+                try_zeroed_bytes(alloc_size, "progressive upsampled chroma plane")?;
             let mut cr_full: Vec<u8> =
-                try_filled_vec(alloc_size, 0u8, "progressive upsampled chroma plane")?;
+                try_zeroed_bytes(alloc_size, "progressive upsampled chroma plane")?;
 
             if h_factor == 2 && v_factor == 1 {
                 for row in 0..cb_h {
@@ -828,7 +829,7 @@ impl ProgressiveDecoder {
 
             let data_size: usize =
                 checked_span(&[out_width, out_height, bpp], "progressive output image")?;
-            let mut data: Vec<u8> = try_filled_vec(data_size, 0u8, "progressive output image")?;
+            let mut data: Vec<u8> = try_zeroed_bytes(data_size, "progressive output image")?;
             for y in 0..out_height {
                 self.ycbcr_to_rgb_row(
                     &y_plane[y * y_width..],
@@ -876,7 +877,7 @@ impl ProgressiveDecoder {
             &[out_width, out_height, bpp],
             "progressive CMYK output image",
         )?;
-        let mut data: Vec<u8> = try_filled_vec(data_size, 0u8, "progressive CMYK output image")?;
+        let mut data: Vec<u8> = try_zeroed_bytes(data_size, "progressive CMYK output image")?;
 
         for y in 0..out_height {
             for x in 0..out_width {
