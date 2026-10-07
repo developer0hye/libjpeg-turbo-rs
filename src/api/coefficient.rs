@@ -412,6 +412,37 @@ pub fn read_coefficients(data: &[u8]) -> Result<JpegCoefficients> {
 /// Encodes quantized DCT coefficients using Huffman coding,
 /// producing a valid baseline JPEG file.
 pub fn write_coefficients(coeffs: &JpegCoefficients) -> Result<Vec<u8>> {
+    write_coefficients_from(coeffs, &mut StoredBlocks(coeffs))
+}
+
+/// Where [`write_coefficients_from`] reads the blocks it codes.
+pub(crate) trait CoefficientBlockSource {
+    /// The quantized block (zigzag order) at `block_x, block_y` of component
+    /// `component`. Called in MCU order, one iMCU row at a time, and never for
+    /// a dummy block past the component's edge.
+    fn block(&mut self, component: usize, block_x: usize, block_y: usize) -> &[i16; 64];
+}
+
+/// The blocks stored in `JpegCoefficients::components`.
+struct StoredBlocks<'a>(&'a JpegCoefficients);
+
+impl CoefficientBlockSource for StoredBlocks<'_> {
+    #[inline]
+    fn block(&mut self, component: usize, block_x: usize, block_y: usize) -> &[i16; 64] {
+        let comp: &ComponentCoefficients = &self.0.components[component];
+        &comp.blocks[block_y * comp.blocks_x + block_x]
+    }
+}
+
+/// [`write_coefficients`] with the coded blocks taken from `source` instead
+/// of `coeffs.components[..].blocks`, which may then be empty. Because blocks
+/// are requested one iMCU row at a time, a source can produce them a row at a
+/// time instead of buffering the frame — the way `cjpeg` streams a sequential
+/// encode (P4-236). Dummy blocks past a component's edge are synthesized here.
+pub(crate) fn write_coefficients_from<S: CoefficientBlockSource>(
+    coeffs: &JpegCoefficients,
+    source: &mut S,
+) -> Result<Vec<u8>> {
     let num_components = coeffs.components.len();
     let is_grayscale = num_components == 1;
     let uses_secondary_table: bool = !is_grayscale && !uses_single_rgb_coding_table(coeffs);
@@ -537,8 +568,7 @@ pub fn write_coefficients(coeffs: &JpegCoefficients) -> Result<Vec<u8>> {
                                 ac_table,
                             );
                         } else {
-                            let block_idx = by * comp.blocks_x + bx;
-                            let block = &comp.blocks[block_idx];
+                            let block: &[i16; 64] = source.block(ci, bx, by);
                             HuffmanEncoder::encode_block(
                                 &mut bit_writer,
                                 block,

@@ -13008,7 +13008,7 @@ scan walked the frame's MCU grid — and now walks the component's own grid.
 Where no path can follow a script, `encode` returns `JpegError::Unsupported`
 naming `scan_script` instead of ignoring it: custom sampling factors that map
 to no standard subsampling (baseline-only encoder, filed as
-[P4-236](#p4-236-encoder-with-non-standard-sampling_factors-silently-drops-progressive-arithmetic-lossless-and-restart-options--open)),
+[P4-236](#p4-236-encoder-with-non-standard-sampling_factors-silently-drops-progressive-arithmetic-lossless-and-restart-options--closed-2026-10-08)),
 `progressive(false)` (C's script selects the mode itself; the builder does not
 switch modes for the caller), and `lossless(true)`. Proof:
 `tests/scan_script_validation.rs` — `accepted_scripts_match_cjpeg` requires
@@ -13926,7 +13926,7 @@ comparability check.
 then has to be regenerated with three new dispatches. Do them together, at
 the next deliberate reference refresh.
 
-## P4-236. Encoder With Non-Standard `sampling_factors` Silently Drops Progressive, Arithmetic, Lossless and Restart Options — **OPEN**
+## P4-236. Encoder With Non-Standard `sampling_factors` Silently Drops Progressive, Arithmetic, Lossless and Restart Options — **CLOSED 2026-10-08**
 
 **GitHub:** [#664](https://github.com/developer0hye/libjpeg-turbo-rs/issues/664) — found 2026-10-07 while fixing P4-210 (#636); under #635.
 
@@ -13950,6 +13950,88 @@ combination. P4-210's fix already refuses `scan_script` here.
 **Why deferred.** Found while fixing P4-210, whose scope is the scan script;
 honouring each option needs its own encoder work and C cross-validation, and
 refusing them is a behaviour change for callers that deserves its own review.
+
+**Status (2026-10-08): closed.** Non-standard factors no longer have their own
+entropy coder. `CustomSamplingFrame`
+(`src/encode/pipeline_impl/custom_sampling.rs`) yields the quantized
+coefficients `cjpeg -sample` codes, following libjpeg's front end:
+- downsampling is `jinit_downsampler`'s kernel choice;
+- vertical padding is C's two-phase row-group model — pad the input to
+  `max_v` rows, then pad the downsampled output to the iMCU height;
+- dummy blocks follow `jccoefct.c`'s DC rule.
+
+A sequential Huffman encode streams those blocks into the entropy coder one
+iMCU row at a time (`write_coefficients_from`), as C's single-pass
+coefficient controller does, so the default path holds no more than the old
+encoder did. Optimized, progressive and arithmetic coding buffer the frame's
+coefficients, as C's multi-pass controller does, and use the matching
+transcode writer (`_optimized`, `_progressive`, `_arithmetic`,
+`_progressive_arithmetic`). Restart intervals in blocks or rows and the
+builder's resolved quantisation tables reach every mode.
+
+Changes in what `encode` returns:
+- `lossless(true)` ignores the factors as `jcmaster.c` does, for RGB-direct
+  output too. That includes a grayscale frame, whose SOF used to be patched to the requested factor after
+  encoding (found here; it affected `subsampling(S420)` too).
+- Factor sets C refuses are refused with `CorruptData`:
+  - more than 10 blocks in an interleaved MCU (`JERR_BAD_MCU_SIZE`);
+  - a fractional ratio (`JERR_FRACT_SAMPLE_NOTIMPL`, as before).
+- `smoothing_factor`, `fancy_downsampling` and custom Huffman tables return
+  `Unsupported` instead of being dropped.
+- The combinations C accepts and Rust still refuses are filed as
+  [P4-237](#p4-237-encoder-refuses-scan_script-smoothing-rgb-direct-cmyk-and-grayscale_from_color-with-non-standard-sampling_factors-that-cjpeg--sample-accepts--open).
+
+Proof: `tests/custom_sampling_modes.rs`.
+- `issue_664_every_mode_matches_cjpeg_for_nonstandard_color_factors` requires
+  byte equality with stock 3.2.0 `cjpeg -sample` at 45x74 for:
+  - 5 factor sets: `3x2,1x1,1x1`, `2x2,2x1,1x1`, `1x4,1x2,1x1`,
+    `1x1,2x2,1x1` and `4x1,2x1,1x1`, covering every downsampling kernel and
+    a component 0 that is not the largest;
+  - 13 modes each: baseline, `-optimize`, `-progressive`, `-arithmetic`, both,
+    `-restart 1B`, `-restart 1`, `-restart 1 -progressive`,
+    `-restart 1B -arithmetic`, `-dct fast`, `-quality 10`,
+    `-quality 10 -baseline` and `-quality 90,40 -progressive`.
+- The grayscale `2x2` set runs in every mode too.
+- Lossless is cross-validated for colour and grayscale.
+- Refused factor sets are matched against `cjpeg`'s stderr.
+
+Measured discriminating: with the row-group padding replaced by a clamp to
+the downsampled rows, `1x4,1x2,1x1` differs (2908 vs 2916 bytes).
+
+## P4-237. Encoder Refuses `scan_script`, Smoothing, RGB-Direct, CMYK and `grayscale_from_color` With Non-Standard `sampling_factors` That `cjpeg -sample` Accepts — **OPEN**
+
+**GitHub:** [#673](https://github.com/developer0hye/libjpeg-turbo-rs/issues/673) — found 2026-10-08 while fixing P4-236 (#664); under #635.
+
+Since P4-236, `Encoder::sampling_factors` with factors that map to no
+standard `Subsampling` composes with every mode switch, byte-identical to
+`cjpeg -sample`. These combinations are still refused with a typed error, and
+stock 3.2.0 `cjpeg` accepts each of them (checked 2026-10-08):
+
+- `scan_script`: `Unsupported`; `cjpeg -scans FILE -sample 3x2,1x1,1x1` encodes.
+- `smoothing_factor`: `Unsupported`; `cjpeg -smooth 10 -sample 3x2,1x1,1x1`
+  smooths the full-size components and traces "Smoothing not supported with
+  nonstandard sampling ratios".
+- `colorspace(ColorSpace::Rgb)`: `Unsupported`;
+  `cjpeg -rgb -sample 3x2,1x1,1x1` encodes.
+- CMYK with four factors: `CorruptData` (three expected); C samples all four.
+- `grayscale_from_color` with three factors: `CorruptData` (one expected);
+  `cjpeg -grayscale -sample 3x2,1x1,1x1` uses component 0's.
+- Custom Huffman tables: `Unsupported`; C honours installed tables.
+
+Nothing is silently dropped. This is a parity gap, not a correctness defect.
+
+**Notes.** The coefficient writers in `src/api/coefficient.rs` take only C's
+default progression, so `scan_script` needs a scans parameter. They also walk
+the interleaved MCU grid for a single-component DC scan (P4-211's defect,
+unreachable while no caller supplies a script), which must be fixed first.
+
+**Acceptance criteria.** (1) Each combination is byte-identical to the
+matching `cjpeg -sample …` invocation, or stays refused for a reason recorded
+here. (2) There is a test per combination, in the shape of
+`tests/custom_sampling_modes.rs`.
+
+**Why deferred.** Each needs encoder work beyond P4-236's acceptance criteria,
+which asked that no option be silently dropped.
 
 ## P4-239. On Zen 4, 4:2:0 Encode Is 5 % Slower Than 0.8.0 — **OPEN**
 
@@ -13981,4 +14063,3 @@ band of 0.8.0.
 
 **Why deferred.** No Zen 4 machine is available locally, and hosted runners
 land on Zen 4 only some of the time.
-

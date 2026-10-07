@@ -79,6 +79,21 @@ and `git log` between tags.
 
 ### Changed
 
+- **Breaking (behaviour): non-standard `Encoder::sampling_factors` compose
+  with every mode** (P4-236, #664).
+  - Factors that map to no standard `Subsampling` (3x2, 1x4, a component 0
+    that is not the largest, …) used to take a baseline-only encoder.
+    `progressive`, `arithmetic`, `lossless`, restart intervals, optimized
+    Huffman, the DCT method and custom or 16-bit quantisation tables were
+    dropped, and `encode` returned an SOF0 stream.
+  - These now code as requested, byte-identical to `cjpeg -sample`.
+  - `lossless(true)` ignores the factors, as C does. A grayscale lossless
+    encode with an explicit sampling request no longer has its SOF patched to
+    that factor.
+  - Factor sets C refuses (more than 10 blocks per MCU) return `CorruptData`.
+  - `smoothing_factor`, `fancy_downsampling`, custom Huffman tables and
+    `scan_script` return `Unsupported` with such factors (P4-237, #673).
+
 - **Breaking (behaviour): `Encoder::scan_script` is honoured on every
   progressive path, and refused where none can follow it** (P4-210, #636).
   The arithmetic-coded progressive encode (YCbCr, grayscale and RGB-direct)

@@ -50,10 +50,7 @@ use dispatch::{
     select_bgra_to_ycbcr_fn, select_rgba_to_ycbcr_fn, ColorConvertRowFn,
 };
 use huffman_tables::ResolvedHuffman;
-use mcu::{
-    encode_color_mcu, encode_color_mcu_with_dummies, encode_downsampled_chroma_block,
-    encode_dummy_block, encode_single_block, is_y_dummy,
-};
+use mcu::{encode_color_mcu, encode_color_mcu_with_dummies, encode_single_block, is_y_dummy};
 pub use params::CompressParams;
 pub use quant_divisors::compute_reciprocal;
 use quant_divisors::{scale_quant_for_fdct, scale_quant_for_ifast};
@@ -99,6 +96,7 @@ pub use raw::compress_raw;
 pub(crate) use arithmetic::{
     compress_arithmetic_progressive_rgb_direct_scripted, compress_arithmetic_progressive_scripted,
 };
+pub(crate) use custom_sampling::CustomSamplingFrame;
 pub(crate) use progressive::compress_progressive_rgb_direct_scripted;
 
 pub(crate) use progressive_entropy::{
