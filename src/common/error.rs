@@ -81,10 +81,10 @@ pub type Result<T> = core::result::Result<T, JpegError>;
 ///
 /// A lenient decode warns once per corrupt MCU (once per scan on the
 /// non-interleaved path), so a stream corrupt everywhere would otherwise build
-/// a list proportional to its MCU count — about 16.7 M heap strings for a
-/// 65500x65500 frame (P4-215, #641). The first `MAX_DECODE_WARNINGS` are kept;
-/// the rest are counted in one trailing
-/// [`DecodeWarning::WarningsSuppressed`]. C's `emit_message` (`jerror.c`)
+/// a list proportional to its MCU count — about 67 M heap strings for a
+/// 65500x65500 4:4:4 frame, 16.7 M at 4:2:0 (P4-215, #641). The first
+/// `MAX_DECODE_WARNINGS` are kept; the rest are counted in one
+/// [`DecodeWarning::WarningsSuppressed`] after them. C's `emit_message` (`jerror.c`)
 /// likewise prints only the first warning and counts the others in
 /// `num_warnings`.
 pub const MAX_DECODE_WARNINGS: usize = 64;
@@ -95,7 +95,9 @@ pub const MAX_DECODE_WARNINGS: usize = 64;
 /// [`MAX_DECODE_WARNINGS`] `HuffmanError` entries, then at most one
 /// `WarningsSuppressed` counting the rest. `TruncatedData` and
 /// `UnsupportedRecovered` occur at most once each per decode and are never
-/// suppressed, so a caller looking for them always finds them.
+/// suppressed, so a caller looking for them always finds them; either may
+/// come after `WarningsSuppressed`, so search the list rather than reading
+/// its last entry.
 ///
 /// `#[non_exhaustive]` for the reason [`JpegError`] is: adding
 /// `WarningsSuppressed` broke exhaustive matches, and this prevents a repeat.
@@ -121,7 +123,9 @@ pub enum DecodeWarning {
     UnsupportedRecovered { detail: String },
     /// `count` further `HuffmanError` warnings were not recorded because the
     /// decode had already recorded [`MAX_DECODE_WARNINGS`]. Appears at most
-    /// once, after the recorded ones; `count` is never zero.
+    /// once, after the recorded `HuffmanError` entries (not necessarily last:
+    /// `TruncatedData` or `UnsupportedRecovered` can follow); `count` is never
+    /// zero.
     WarningsSuppressed { count: usize },
 }
 

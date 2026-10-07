@@ -4,10 +4,10 @@
 //! Before the fix the interleaved lenient loop pushed one
 //! `DecodeWarning::HuffmanError` (with a heap `String`) per corrupt MCU, so a
 //! stream corrupt everywhere produced a list proportional to the MCU count —
-//! about 16.7 M entries for a 65500x65500 frame. C's `emit_message`
+//! about 67 M entries for a 65500x65500 4:4:4 frame. C's `emit_message`
 //! (`jerror.c`) prints the first warning and only counts the others in
 //! `num_warnings`; the Rust list now keeps the first `MAX_DECODE_WARNINGS` and
-//! ends with one `WarningsSuppressed { count }` entry for the rest.
+//! follows them with one `WarningsSuppressed { count }` entry for the rest.
 //!
 //! There is no C oracle for the list itself — it is a Rust API — so these
 //! tests pin its bound and its arithmetic, not pixels.

@@ -13169,7 +13169,7 @@ macros under `src/decode/`; bounding warnings is an API-visible decision.
 **Status (2026-10-07): closed.** A decode records at most
 `MAX_DECODE_WARNINGS` (64, exported at the root) `HuffmanError` entries — the
 first ones, as C's `emit_message` prints the first warning — and counts the
-rest in one trailing `DecodeWarning::WarningsSuppressed { count }`; a
+rest in one `DecodeWarning::WarningsSuppressed { count }` after them; a
 suppressed warning builds no message string. `TruncatedData` and
 `UnsupportedRecovered` occur at most once per decode and are never suppressed.
 The bound is documented on `MAX_DECODE_WARNINGS`, `DecodeWarning` and
