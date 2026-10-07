@@ -641,7 +641,7 @@ impl<'a> MarkerReader<'a> {
                     let mut chunks: Vec<&XmpExtChunk> = Vec::new();
                     let listed: bool = chunks.try_reserve_exact(xmp_ext_chunks.len()).is_ok();
                     let buffer =
-                        crate::common::try_alloc::try_filled_vec(full_len, 0u8, "Extended XMP");
+                        crate::common::try_alloc::try_zeroed_bytes(full_len, "Extended XMP");
 
                     if let (true, Ok(mut ext)) = (listed, buffer) {
                         chunks.extend(

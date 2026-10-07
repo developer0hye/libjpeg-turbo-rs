@@ -3,7 +3,7 @@ use super::Decoder;
 use crate::common::error::{DecodeWarning, JpegError, Result};
 use crate::common::layout::checked_span;
 use crate::common::quant_table::QuantTable;
-use crate::common::try_alloc::try_filled_vec;
+use crate::common::try_alloc::{try_filled_vec, try_zeroed_bytes};
 use crate::common::types::FrameHeader;
 use alloc::{format, vec::Vec};
 
@@ -54,7 +54,7 @@ impl<'a> Decoder<'a> {
                     ],
                     "arithmetic component plane",
                 )?;
-                try_filled_vec(size, 0u8, "arithmetic component plane")
+                try_zeroed_bytes(size, "arithmetic component plane")
             })
             .collect::<Result<Vec<Vec<u8>>>>()?;
 
@@ -602,7 +602,7 @@ impl<'a> Decoder<'a> {
                     &[ci.comp_w, ci.blocks_y, ci.block_size],
                     "arithmetic component plane",
                 )?;
-                try_filled_vec(size, 0u8, "arithmetic component plane")
+                try_zeroed_bytes(size, "arithmetic component plane")
             })
             .collect::<Result<Vec<Vec<u8>>>>()?;
 
