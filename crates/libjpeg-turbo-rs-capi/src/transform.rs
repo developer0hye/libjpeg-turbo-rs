@@ -839,7 +839,7 @@ fn crop_spec_refusal(
             "tj3TransformBufSize(): Could not determine subsampling level of JPEG image",
         ));
     };
-    if r.x as usize % mcu_width != 0 || r.y as usize % mcu_height != 0 {
+    if !(r.x as usize).is_multiple_of(mcu_width) || !(r.y as usize).is_multiple_of(mcu_height) {
         return Some(format!(
             "tj3TransformBufSize(): To crop this JPEG image, x must be a multiple of \
              {mcu_width}\nand y must be a multiple of {mcu_height}."
