@@ -55,9 +55,12 @@ python3 experiments/downstream/budgets.py <new report.json> \
   - be a full run, with no `--smoke` and no `--only`;
   - have the same CPU model, architecture, build variant and recorded runtime
     CPU features;
-  - have the same `consumer_source_sha256` and `rustc` version;
+  - have the same `consumer_source_sha256` and the same `rustc -Vv` output;
   - use the same iterations and warmup, and the same concurrent thread
-    and decode counts.
+    and decode counts;
+  - time each row in batches within half to double the batch sizes the
+    reference used. Batch sizes are adaptive, and the reference's own
+    variation is inside the band.
 
   `budgets.py` refuses anything else (exit 2). A report of a different CPU
   model means re-dispatching, not widening the band.

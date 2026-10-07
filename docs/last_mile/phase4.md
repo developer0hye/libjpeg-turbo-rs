@@ -13567,7 +13567,7 @@ attribution in BUDGETS.md, and file or fix anything that is accidental (for
 example monomorphised copies or panic paths that a stock profile no longer
 folds).
 
-## P4-231. Two Downstream-Harness Checks Are Weaker Than Their Names Suggest — **OPEN**
+## P4-231. Three Downstream-Harness Checks Are Weaker Than Their Names Suggest — **OPEN**
 
 **GitHub:** [#662](https://github.com/developer0hye/libjpeg-turbo-rs/issues/662) — child of #635 Milestone C.
 
@@ -13583,13 +13583,20 @@ folds).
    Without a C oracle the harness asserts only adapter == candidate, and the
    report records length and PSNR, which equal bytes would produce but do not
    prove. Every hosted report runs without C.
+3. **Batch sizes are adaptive.** Each row's `calls_per_sample` is chosen from
+   its warmup timing, so two runs time different batch sizes. Within the
+   reference they ranged 26–34 on the 64x64 rows. `budgets.py` refuses a
+   report outside half-to-double the reference range, and the band absorbs
+   the rest. A fixed per-row batch size would remove the variable.
 
 **Acceptance criteria.** (1) Each checked reuse decode starts from a buffer
 filled with a sentinel that no correct decode leaves in place, and a unit
 test shows an under-write fails. (2) Candidate and baseline encode outputs
 are compared byte for byte, or by a recorded digest, with or without C.
+(3) Each row's batch size is fixed, recorded, and part of `budgets.py`'s
+comparability check.
 
-**Why deferred.** Both are consumer changes. They change
+**Why deferred.** All three are consumer changes. They change
 `consumer_source_sha256` and so invalidate BUDGETS.md's reference set, which
 then has to be regenerated with three new dispatches. Do them together, at
 the next deliberate reference refresh.

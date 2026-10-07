@@ -122,7 +122,9 @@ def comparability(report):
         "consumer sources": report["build"].get("consumer_source_sha256"),
         # The compiler is part of the binary; stable moves every six weeks,
         # and the reference has to be regenerated when it does.
-        "rustc": report["environment"]["rustc"].splitlines()[0],
+        # The whole `rustc -Vv`: host and LLVM version change code generation
+        # as surely as the release number does.
+        "rustc": report["environment"]["rustc"],
         # A band measured over 30 samples says nothing about a 3-sample run.
         "iterations": report["iterations"],
         "warmup": report["warmup"],
@@ -152,6 +154,41 @@ def unusable(paths, reports):
         for name, value in expected.items():
             if actual[name] != value:
                 return f"{path} differs from {paths[0]} in {name}: {actual[name]} vs {value}"
+    return None
+
+
+def batch_sizes(report):
+    """Per timed row, how many back-to-back calls one sample timed."""
+    out = {}
+    sections = [(case["id"], case["rows"]) for case in report["decode"] + report["encode"]]
+    sections.append(("thumbnail", report["thumbnail"]["rows"]))
+    if report.get("concurrent"):
+        sections.append((report["concurrent"]["id"], report["concurrent"]["rows"]))
+    for case_id, rows in sections:
+        for row in rows:
+            timing = timing_of(row)
+            if timing:
+                out[(case_id, row["backend"])] = timing["calls_per_sample"]
+    return out
+
+
+def batch_outlier(report, references):
+    """A row whose batch size is outside what the reference saw, or None.
+
+    The harness sizes each row's batch from its warmup timing, so batch sizes
+    differ between runs; within the 2026-10-07 reference they ranged 26-34 on
+    the 64x64 rows, and the band already absorbs that. A batch under half or
+    over double the reference's range times the calls at a different timer
+    granularity, which the band does not cover. (Fixing the batch size is a
+    consumer change: P4-231.)
+    """
+    seen = {}
+    for reference in references:
+        for key, size in batch_sizes(reference).items():
+            seen.setdefault(key, []).append(size)
+    for key, size in batch_sizes(report).items():
+        if key in seen and not (min(seen[key]) / 2 <= size <= max(seen[key]) * 2):
+            return f"{key[0]} {key[1]} timed {size} calls per sample; the reference timed {min(seen[key])}-{max(seen[key])}"
     return None
 
 
@@ -221,6 +258,10 @@ def main(argv):
     problem = unusable(paths, reports)
     if problem:
         print(f"budgets.py: {problem}", file=sys.stderr)
+        return 2
+    outlier = batch_outlier(reports[0], reports[1:])
+    if outlier:
+        print(f"budgets.py: {outlier}", file=sys.stderr)
         return 2
     limits = budgets(reports[1:])
 
