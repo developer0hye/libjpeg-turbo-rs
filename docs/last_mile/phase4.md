@@ -12220,7 +12220,7 @@ Filed on the way: [P4-223](#p4-223-12-bit-decodes-read-only-the-first-scan-so-pr
 (12-bit progressive and multi-scan streams decode wrongly),
 [P4-224](#p4-224-decoders-memory-estimate-does-not-count-the-12-bit-staging-when-it-decodes-a-12-bit-frame--open),
 [P4-225](#p4-225-tj3decompresstoyuv8--tj3decompresstoyuvplanes8-publish-nothing-where-upstream-calls-setdecompparameters--open)
-and [P4-226](#p4-226-tj3decompress8-decodes-a-12-bit-frame-that-stock-turbojpeg-refuses--open).
+and [P4-226](#p4-226-tj3decompress8-decodes-a-12-bit-frame-that-stock-turbojpeg-refuses--closed-2026-10-07).
 
 ## P4-200. `JPEGWIDTH` / `JPEGHEIGHT` Publish the Scaled and Cropped Output Dimensions Where Upstream Publishes the SOF's — **CLOSED 2026-10-07**
 
@@ -13669,7 +13669,7 @@ only (found by the P4-199 docs audit).
 oracle extension; P4-199's scope was the pixel decompress entry points its
 harness drives.
 
-## P4-226. `tj3Decompress8` Decodes a 12-Bit Frame That Stock TurboJPEG Refuses — **OPEN**
+## P4-226. `tj3Decompress8` Decodes a 12-Bit Frame That Stock TurboJPEG Refuses — **CLOSED 2026-10-07**
 
 **Found 2026-10-07** while building P4-199's C oracle (#620), whose header
 comment lists it as one of the cases the trace leaves out. GitHub: [#653](https://github.com/developer0hye/libjpeg-turbo-rs/issues/653).
@@ -13699,6 +13699,40 @@ deliberate divergence.
 **Why deferred.** Refusing what decodes today is a behaviour change for C
 callers that rely on it, and needs its own decision; P4-199 was about what a
 decompress publishes, not which frames it accepts.
+
+**Status (2026-10-07): closed.** `TjHandle::decompress` (and so
+`tj3Decompress8`) refuses any frame above 8 bits — lossy 12-bit and lossless
+9-to-16-bit alike, as stock's 8-bit `_jpeg_read_scanlines` does
+(`jdapistd.c:328-341`) — with "Unsupported JPEG data precision N", after
+publishing, after `TJPARAM_MAXPIXELS` and after the scan walk that applies
+`TJPARAM_SCANLIMIT` (stock's `jpeg_start_decompress` absorbs a multi-scan
+stream before its precision check). `Decoder` / `decompress()` still
+downscale a 12-bit frame.
+
+Criterion 2, measured against stock 3.2.0 on a two-component frame written
+through libjpeg's API (`tests/inputs/p4226_two_component_unknown_16x16.jpg`):
+stock publishes `TJCS_DEFAULT` and `TJSAMP_UNKNOWN`, refuses
+`tj3DecompressHeader` ("Could not determine colorspace of JPEG image") and
+refuses `tj3Decompress8/12/16` ("Unsupported color conversion request"). The
+port already refused the decompresses (with other messages) but published
+`COLORSPACE` = 1 and accepted the header: `Decoder::jpeg_color_space` folds
+libjpeg's JCS_UNKNOWN into YCbCr for the decoder's own fallback, so the
+P4-199 publisher's `Unknown` arm was dead. `publish_decomp_parameters` now
+publishes `TJCS_DEFAULT` for any component count other than 1, 3 or 4 —
+`default_decompress_parms`' default arm — and all three entry points refuse
+that frame with stock's message. Fixed the same way, not recorded as a
+divergence.
+
+Proof: `examples/decomp_parameters_oracle.c` traces a `dec8` case
+(`tj3Decompress8` regardless of precision) for every fixture plus the
+two-component fixture, verbatim against stock
+(`decompress_publishes_what_stock_turbojpeg_publishes`); without the oracle,
+`decompress8_refuses_a_12_bit_frame_after_publishing` and
+`a_two_component_frame_publishes_tjcs_default_and_is_refused` in
+`crates/libjpeg-turbo-rs-capi/tests/capi_decomp_parameters.rs`, and
+`decompress_refuses_a_frame_above_8_bits_after_publishing` /
+`a_two_component_frame_publishes_tjcs_default_and_is_refused` in
+`tests/tj3_decomp_parameters.rs`.
 
 ## P4-227. `tj3Transform` Ignores the Handle's MAXPIXELS/SCANLIMIT/MAXMEMORY and Its PROGRESSIVE/ARITHMETIC Parameters — **OPEN**
 

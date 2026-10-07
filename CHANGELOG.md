@@ -298,6 +298,19 @@ and `git log` between tags.
   TurboJPEG cannot name, as upstream's does. Every decompress entry point
   reads the header the same way first, so a stream over `TJPARAM_SCANLIMIT`
   is now refused after publishing, as upstream's is.
+- **Breaking (behaviour): `tj3Decompress8` refuses a frame above 8 bits and a
+  two-component frame** (P4-226, #653). `TjHandle::decompress` /
+  `tj3Decompress8` downscaled a 12-bit frame and returned 0 where stock
+  TurboJPEG returns -1 ("Unsupported JPEG data precision 12"); it now refuses
+  every frame above 8 bits, lossy or lossless, after publishing, so a caller
+  reading `TJPARAM_PRECISION` routes to `tj3Decompress12` / `16`. A
+  two-component frame (libjpeg's `JCS_UNKNOWN`) now publishes `TJCS_DEFAULT`
+  as the P4-199 entry above said it did — it published YCbCr — so
+  `tj3DecompressHeader` refuses it ("Could not determine colorspace of JPEG
+  image") and every pixel decompress refuses it with "Unsupported color
+  conversion request", as stock 3.2.0 does. `Decoder` and `decompress()`
+  still downscale a 12-bit frame; only the TurboJPEG-shaped entry point
+  changed.
 - An allocator refusal during a decode is reported as
   `JpegError::AllocationFailed` instead of aborting the process (P4-209,
   #632). `decompress` / `Decoder::decode_image` allocated their destination

@@ -67,7 +67,7 @@ const TJPF_GRAY: c_int = 6;
 const TJPF_CMYK: c_int = 11;
 
 /// `(label, bytes)` — the oracle reads `<workdir>/<label>.jpg`.
-const FIXTURES: [(&str, &[u8]); 9] = [
+const FIXTURES: [(&str, &[u8]); 10] = [
     (
         "gray",
         include_bytes!("../../../tests/fixtures/gray_8x8.jpg"),
@@ -105,6 +105,10 @@ const FIXTURES: [(&str, &[u8]); 9] = [
     (
         "cmyk",
         include_bytes!("../../../tests/fixtures/real_world/pil_cmyk.jpg"),
+    ),
+    (
+        "unknown2",
+        include_bytes!("../../../tests/inputs/p4226_two_component_unknown_16x16.jpg"),
     ),
 ];
 
@@ -202,14 +206,20 @@ fn trace_label(label: &str, jpeg: &[u8], sequence: *mut c_void) -> String {
     }
 
     let probe: *mut c_void = instance();
-    assert_eq!(header(probe, jpeg), 0, "{label}: probe header");
-    let width: usize = get(probe, TJPARAM_JPEGWIDTH) as usize;
-    let height: usize = get(probe, TJPARAM_JPEGHEIGHT) as usize;
+    // A header refused after publishing (a JCS_UNKNOWN frame) still leaves
+    // the dimensions that size the buffer, as in the oracle.
+    header(probe, jpeg);
+    let width: c_int = get(probe, TJPARAM_JPEGWIDTH);
+    let height: c_int = get(probe, TJPARAM_JPEGHEIGHT);
     let precision: c_int = get(probe, TJPARAM_PRECISION);
     let lossless: c_int = get(probe, TJPARAM_LOSSLESS);
     let pixel_format: c_int = pixel_format_for(probe);
     destroy(probe);
-    let mut buffer: Vec<u16> = vec![0; width * height * 4];
+    assert!(
+        width > 0 && height > 0,
+        "{label}: probe header published no dimensions"
+    );
+    let mut buffer: Vec<u16> = vec![0; width as usize * height as usize * 4];
 
     let handle: *mut c_void = instance();
     let rc: c_int = header(handle, jpeg);
@@ -222,6 +232,11 @@ fn trace_label(label: &str, jpeg: &[u8], sequence: *mut c_void) -> String {
     let handle: *mut c_void = instance();
     let rc: c_int = routed_decompress(handle, jpeg, &mut buffer, precision, pixel_format);
     trace.push_str(&emit(label, "direct", rc, handle));
+    destroy(handle);
+
+    let handle: *mut c_void = instance();
+    let rc: c_int = routed_decompress(handle, jpeg, &mut buffer, 8, pixel_format);
+    trace.push_str(&emit(label, "dec8", rc, handle));
     destroy(handle);
 
     let handle: *mut c_void = instance();
@@ -476,6 +491,43 @@ fn the_12_and_16_bit_entry_points_publish_and_honour_maxpixels() {
         "lossless16 maxpixels rc=-1 subsamp=3 jw=8 jh=8 prec=16 cs=2 prog=0 arith=0 \
          lossless=1 psv=1 pt=0 xd=1 yd=1 du=0"
     );
+}
+
+/// Issue #653: `tj3Decompress8` refuses a 12-bit frame, as stock's 8-bit
+/// body does ("Unsupported JPEG data precision 12") — after publishing, so the
+/// caller can read `TJPARAM_PRECISION` and route to `tj3Decompress12`.
+#[test]
+fn decompress8_refuses_a_12_bit_frame_after_publishing() {
+    let trace: String = our_trace();
+    assert_eq!(
+        line_for(&trace, "lossy12", "dec8"),
+        "lossy12 dec8 rc=-1 subsamp=2 jw=227 jh=149 prec=12 cs=1 prog=0 arith=0 \
+         lossless=0 psv=0 pt=0 xd=1 yd=1 du=0"
+    );
+    assert_eq!(
+        line_for(&trace, "lossless16", "dec8"),
+        "lossless16 dec8 rc=-1 subsamp=3 jw=8 jh=8 prec=16 cs=2 prog=0 arith=0 \
+         lossless=1 psv=1 pt=0 xd=1 yd=1 du=0"
+    );
+    // An 8-bit frame still decodes through the same entry point.
+    assert!(line_for(&trace, "dense", "dec8").starts_with("dense dec8 rc=0 "));
+}
+
+/// Issue #653 (P4-226 criterion 2): a two-component frame is libjpeg's
+/// JCS_UNKNOWN. Stock publishes `TJCS_DEFAULT` and `TJSAMP_UNKNOWN` for it,
+/// refuses its header ("Could not determine colorspace of JPEG image") and
+/// refuses every decompress; the port published YCbCr and accepted the header.
+#[test]
+fn a_two_component_frame_publishes_tjcs_default_and_is_refused() {
+    let trace: String = our_trace();
+    let expected_params: &str =
+        "subsamp=-1 jw=16 jh=16 prec=8 cs=-1 prog=0 arith=0 lossless=0 psv=0 pt=0 xd=1 yd=1 du=0";
+    for case_name in ["header", "direct", "dec8", "sequence"] {
+        assert_eq!(
+            line_for(&trace, "unknown2", case_name),
+            format!("unknown2 {case_name} rc=-1 {expected_params}")
+        );
+    }
 }
 
 /// P4-142: the header of a stream with garbage entropy data is read — and

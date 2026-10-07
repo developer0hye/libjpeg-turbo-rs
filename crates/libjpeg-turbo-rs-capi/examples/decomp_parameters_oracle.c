@@ -24,13 +24,18 @@
  * compared verbatim. Error *messages* are not printed: the two libraries word
  * them differently on purpose, and what is pinned here is publication.
  *
+ * Every label also traces `dec8`: tj3Decompress8 regardless of the published
+ * precision, which stock refuses for a frame above 8 bits ("Unsupported JPEG
+ * data precision 12", raised from `_jpeg_read_scanlines`) after publishing
+ * (P4-226). A two-component frame (libjpeg's JCS_UNKNOWN) is traced too:
+ * TurboJPEG publishes TJCS_DEFAULT and TJSAMP_UNKNOWN for it, refuses its
+ * header, and refuses every pixel decompress ("Unsupported color conversion
+ * request").
+ *
  * Cases deliberately absent, because the two implementations diverge on them
  * by design or under another item, and printing them would make this gate
  * fail on something it is not about:
  *
- *   - tj3Decompress8 on a 12-bit frame (stock raises JERR_BAD_PRECISION,
- *     "Unsupported JPEG data precision 12"; the port downscales to 8 bits --
- *     P4-226);
  *   - tj3Decompress12 on an 8-bit frame (stock promotes `data_precision` to
  *     12 at `turbojpeg-mp.c:191-194`; the port refuses, P4-171);
  *   - TJPARAM_MAXMEMORY refusals (stock's budget reaches only its
@@ -156,16 +161,20 @@ static int run_label(const char *workdir, const char *label,
   /* Size the destination and choose the route from a separate handle, so
    * every case below starts from a handle that has read nothing. */
   probe = tj3Init(TJINIT_DECOMPRESS);
-  if (!probe || tj3DecompressHeader(probe, jpeg, size) != 0) {
-    fprintf(stderr, "%s: probe header failed\n", label);
-    return 1;
-  }
+  if (!probe) return 1;
+  /* A header TurboJPEG refuses after publishing (a JCS_UNKNOWN frame) still
+   * leaves the dimensions that size the buffer. */
+  tj3DecompressHeader(probe, jpeg, size);
   width = tj3Get(probe, TJPARAM_JPEGWIDTH);
   height = tj3Get(probe, TJPARAM_JPEGHEIGHT);
   precision = tj3Get(probe, TJPARAM_PRECISION);
   lossless = tj3Get(probe, TJPARAM_LOSSLESS);
   pixel_format = pixel_format_for(probe);
   tj3Destroy(probe);
+  if (width <= 0 || height <= 0) {
+    fprintf(stderr, "%s: probe header published no dimensions\n", label);
+    return 1;
+  }
   buffer = calloc((size_t)width * (size_t)height * 4, 2);
   if (!buffer) return 1;
 
@@ -184,6 +193,14 @@ static int run_label(const char *workdir, const char *label,
   handle = tj3Init(TJINIT_DECOMPRESS);
   rc = routed_decompress(handle, jpeg, size, buffer, precision, pixel_format);
   emit(label, "direct", rc, handle);
+  tj3Destroy(handle);
+
+  /* 3b. tj3Decompress8 whatever the precision: stock refuses a frame above
+   * 8 bits after publishing (P4-226). */
+  handle = tj3Init(TJINIT_DECOMPRESS);
+  rc = tj3Decompress8(handle, jpeg, size, (unsigned char *)buffer, 0,
+                      pixel_format);
+  emit(label, "dec8", rc, handle);
   tj3Destroy(handle);
 
   /* 4. tj3DecompressHeader applies no TJPARAM_MAXPIXELS test

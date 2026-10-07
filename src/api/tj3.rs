@@ -1104,7 +1104,13 @@ impl TjHandle {
         self.width = i32::from(frame.width);
         self.height = i32::from(frame.height);
         self.precision = i32::from(frame.precision);
+        // libjpeg's `default_decompress_parms` names a colour space only for
+        // one, three or four components and says JCS_UNKNOWN otherwise
+        // (P4-226). `jpeg_color_space` folds that case into YCbCr for the
+        // decoder's own fallback, so the count is checked here.
+        let names_a_color_space: bool = matches!(frame.components.len(), 1 | 3 | 4);
         self.color_space = match decoder.jpeg_color_space() {
+            _ if !names_a_color_space => TJCS_DEFAULT,
             ColorSpace::Grayscale => 2,
             ColorSpace::Rgb => 0,
             ColorSpace::YCbCr => 1,
@@ -1188,8 +1194,10 @@ impl TjHandle {
     ///
     /// Publishes the thirteen header parameters first — see
     /// [`Self::decompress_header`] — then applies `TJPARAM_MAXPIXELS` to the
-    /// frame, then locates every scan under `TJPARAM_SCANLIMIT`, then applies
-    /// the scaling factor and cropping region, then decodes.
+    /// frame, then locates every scan under `TJPARAM_SCANLIMIT`, then refuses
+    /// what `tj3Decompress8` cannot decode — a frame above 8 bits or one with
+    /// no nameable colour space (P4-226) — then applies the scaling factor
+    /// and cropping region, then decodes.
     pub fn decompress(&mut self, data: &[u8]) -> Result<Image> {
         self.read_header(data)?;
         let limits: crate::common::types::DecodeLimits = self.decode_limits();
@@ -1198,6 +1206,11 @@ impl TjHandle {
         limits.check_frame(self.width as usize, self.height as usize)?;
         // The full walk, which the decode needs and the header read skipped.
         let mut decoder = Decoder::new_with_limits(data, limits)?;
+        // What stock's 8-bit body cannot decode, refused where it refuses —
+        // after the scan walk, as `jpeg_start_decompress` absorbs a
+        // multi-scan stream before either check (P4-226, #653).
+        self.refuse_unconvertible_color_space()?;
+        Self::refuse_precision_above_8(decoder.header())?;
 
         // Apply scaling
         if self.scaling_factor != ScalingFactor::default() {
@@ -1358,8 +1371,9 @@ impl TjHandle {
 
     /// The shared head of the 12/16-bit paths, in upstream's order: read the
     /// header and publish, then apply `TJPARAM_MAXPIXELS`
-    /// (`turbojpeg-mp.c:190`, `:195-198`). Returns the limits the decode
-    /// itself must honour, `TJPARAM_SCANLIMIT` among them.
+    /// (`turbojpeg-mp.c:190`, `:195-198`), then refuse a frame with no
+    /// colour space to convert from. Returns the limits the decode itself
+    /// must honour, `TJPARAM_SCANLIMIT` among them.
     fn prepare_precision_decode(
         &mut self,
         data: &[u8],
@@ -1367,7 +1381,38 @@ impl TjHandle {
         self.read_header(data)?;
         let limits: crate::common::types::DecodeLimits = self.decode_limits();
         limits.check_frame(self.width as usize, self.height as usize)?;
+        self.refuse_unconvertible_color_space()?;
         Ok(limits)
+    }
+
+    /// A frame whose colour space TurboJPEG publishes as `TJCS_DEFAULT`
+    /// (libjpeg's JCS_UNKNOWN: two components) has no conversion to any
+    /// `TJPF_*`, so stock's `jpeg_start_decompress` refuses it
+    /// (`jdcolor.c`, `JERR_CONVERSION_NOTIMPL`) at every precision. Measured
+    /// against stock 3.2.0 (P4-226).
+    fn refuse_unconvertible_color_space(&self) -> Result<()> {
+        if self.color_space == TJCS_DEFAULT {
+            return Err(JpegError::Unsupported(alloc::string::String::from(
+                "Unsupported color conversion request",
+            )));
+        }
+        Ok(())
+    }
+
+    /// `tj3Decompress8` is the 8-bit build of `turbojpeg-mp.c`, whose
+    /// `_jpeg_read_scanlines` refuses any frame above 8 bits
+    /// (`jdapistd.c:328-341`, `JERR_BAD_PRECISION`): a lossy 12-bit frame
+    /// and a lossless 9-to-16-bit one alike (P4-226, #653). [`Decoder`]
+    /// downscales a 12-bit frame on purpose — a Rust-API feature this
+    /// handle, which models the C entry point, does not inherit.
+    fn refuse_precision_above_8(frame: &FrameHeader) -> Result<()> {
+        if frame.precision > 8 {
+            return Err(JpegError::Unsupported(format!(
+                "Unsupported JPEG data precision {}",
+                frame.precision
+            )));
+        }
+        Ok(())
     }
 }
 

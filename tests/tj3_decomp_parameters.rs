@@ -556,3 +556,69 @@ fn a_frame_libjpeg_refuses_in_the_header_publishes_nothing() {
         assert_eq!(published(&decode), fresh, "{label}: decompress published");
     }
 }
+
+/// Issue #653: `TjHandle::decompress` models `tj3Decompress8`, whose 8-bit
+/// body refuses any frame above 8 bits (`jdapistd.c:328-341`) — after
+/// publishing, so the published `PRECISION` routes the caller to
+/// `decompress_12bit` / `decompress_16bit`. `Decoder` still downscales a
+/// 12-bit frame; only the TurboJPEG-shaped entry point refuses.
+#[test]
+fn decompress_refuses_a_frame_above_8_bits_after_publishing() {
+    for (jpeg, precision, expected) in [
+        (LOSSY12, 12, [2, 227, 149, 12, 1, 0, 0, 0, 0, 0, 1, 1, 0]),
+        (LOSSLESS16, 16, [3, 8, 8, 16, 2, 0, 0, 1, 1, 0, 1, 1, 0]),
+    ] {
+        let mut handle: TjHandle = TjHandle::new();
+        let error: JpegError = handle
+            .decompress(jpeg)
+            .expect_err("an 8-bit decompress of a wider frame");
+        assert!(
+            error
+                .to_string()
+                .contains(&format!("Unsupported JPEG data precision {precision}")),
+            "{error}"
+        );
+        assert_eq!(published(&handle), expected);
+    }
+    libjpeg_turbo_rs::Decoder::new(LOSSY12)
+        .expect("header")
+        .decode_image()
+        .expect("the Rust decoder still downscales a 12-bit frame");
+}
+
+/// Issue #653 (P4-226 criterion 2): a two-component frame is libjpeg's
+/// JCS_UNKNOWN. Stock publishes `TJCS_DEFAULT` for it, refuses the header
+/// read and refuses every decompress; measured against stock 3.2.0.
+#[test]
+fn a_two_component_frame_publishes_tjcs_default_and_is_refused() {
+    const UNKNOWN2: &[u8] = include_bytes!("inputs/p4226_two_component_unknown_16x16.jpg");
+    let expected: [i32; 13] = [-1, 16, 16, 8, -1, 0, 0, 0, 0, 0, 1, 1, 0];
+
+    let mut handle: TjHandle = TjHandle::new();
+    let error: JpegError = handle
+        .decompress_header(UNKNOWN2)
+        .expect_err("stock refuses the header");
+    assert!(
+        error
+            .to_string()
+            .contains("Could not determine colorspace of JPEG image"),
+        "{error}"
+    );
+    assert_eq!(published(&handle), expected);
+
+    for decode in [
+        |handle: &mut TjHandle| handle.decompress(UNKNOWN2).map(|_| ()),
+        |handle: &mut TjHandle| handle.decompress_12bit(UNKNOWN2).map(|_| ()),
+        |handle: &mut TjHandle| handle.decompress_16bit(UNKNOWN2).map(|_| ()),
+    ] {
+        let mut handle: TjHandle = TjHandle::new();
+        let error: JpegError = decode(&mut handle).expect_err("no conversion exists");
+        assert!(
+            error
+                .to_string()
+                .contains("Unsupported color conversion request"),
+            "{error}"
+        );
+        assert_eq!(published(&handle), expected);
+    }
+}
