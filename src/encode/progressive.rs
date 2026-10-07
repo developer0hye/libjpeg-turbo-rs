@@ -5,7 +5,7 @@ use alloc::vec::Vec;
 use alloc::{format, vec};
 
 use crate::common::error::{JpegError, Result};
-use crate::common::types::ScanScript;
+use crate::common::types::{PixelFormat, ScanScript};
 /// Progressive JPEG scan script generation and encoding.
 ///
 /// Generates a simple progressive scan order following libjpeg-turbo's
@@ -134,6 +134,35 @@ pub(crate) fn validate_scan_script(script: &[ScanScript], num_components: usize)
         ));
     }
     Ok(())
+}
+
+/// Validate a caller's script for a frame of `pixel_format` and convert it to
+/// the scans the progressive encoders walk — the one entry from
+/// `Encoder::scan_script` into every progressive path, Huffman and
+/// arithmetic, YCbCr and RGB-direct (P4-210, #636).
+///
+/// CMYK counts as four components so a script valid for a CMYK frame passes
+/// here and the format's own `Unsupported` still comes first.
+pub(crate) fn scans_from_script(
+    script: &[ScanScript],
+    pixel_format: PixelFormat,
+) -> Result<Vec<ProgressiveScan>> {
+    let num_components: usize = match pixel_format {
+        PixelFormat::Grayscale => 1,
+        PixelFormat::Cmyk => 4,
+        _ => 3,
+    };
+    validate_scan_script(script, num_components)?;
+    Ok(script
+        .iter()
+        .map(|entry: &ScanScript| ProgressiveScan {
+            component_indices: entry.components.iter().map(|&c| usize::from(c)).collect(),
+            ss: entry.ss,
+            se: entry.se,
+            ah: entry.ah,
+            al: entry.al,
+        })
+        .collect())
 }
 
 /// Generate a simple progressive scan script.

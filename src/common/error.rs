@@ -77,8 +77,32 @@ pub enum JpegError {
 /// Convenience alias used throughout the crate.
 pub type Result<T> = core::result::Result<T, JpegError>;
 
+/// How many [`DecodeWarning::HuffmanError`] entries one decode records.
+///
+/// A lenient decode warns once per corrupt MCU (once per scan on the
+/// non-interleaved path), so a stream corrupt everywhere would otherwise build
+/// a list proportional to its MCU count — about 67 M heap strings for a
+/// 65500x65500 4:4:4 frame, 16.7 M at 4:2:0 (P4-215, #641). The first
+/// `MAX_DECODE_WARNINGS` are kept; the rest are counted in one
+/// [`DecodeWarning::WarningsSuppressed`] after them. C's `emit_message` (`jerror.c`)
+/// likewise prints only the first warning and counts the others in
+/// `num_warnings`.
+pub const MAX_DECODE_WARNINGS: usize = 64;
+
 /// Non-fatal warning that allows recovery in lenient mode.
+///
+/// A decode's list (`Image::warnings`) is bounded: at most
+/// [`MAX_DECODE_WARNINGS`] `HuffmanError` entries, then at most one
+/// `WarningsSuppressed` counting the rest. `TruncatedData` and
+/// `UnsupportedRecovered` occur at most once each per decode and are never
+/// suppressed, so a caller looking for them always finds them; `TruncatedData`
+/// comes before `WarningsSuppressed` and `UnsupportedRecovered` after it, so
+/// search the list rather than reading its last entry.
+///
+/// `#[non_exhaustive]` for the reason [`JpegError`] is: adding
+/// `WarningsSuppressed` broke exhaustive matches, and this prevents a repeat.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DecodeWarning {
     /// Huffman decode error at the given MCU position.
     HuffmanError {
@@ -97,6 +121,12 @@ pub enum DecodeWarning {
     /// upsample pipeline assumes luma is the maximally-sampled component; see
     /// LAST_MILE P4-21). Strict mode rejects these instead.
     UnsupportedRecovered { detail: String },
+    /// `count` further `HuffmanError` warnings were not recorded because the
+    /// decode had already recorded [`MAX_DECODE_WARNINGS`]. Appears at most
+    /// once, after the recorded `HuffmanError` entries and any `TruncatedData`
+    /// (not necessarily last: `UnsupportedRecovered` can follow); `count` is
+    /// never zero.
+    WarningsSuppressed { count: usize },
 }
 
 impl core::fmt::Display for DecodeWarning {
@@ -125,6 +155,9 @@ impl core::fmt::Display for DecodeWarning {
             }
             Self::UnsupportedRecovered { detail } => {
                 write!(f, "unsupported feature recovered (lenient): {}", detail)
+            }
+            Self::WarningsSuppressed { count } => {
+                write!(f, "{} further decode warnings suppressed", count)
             }
         }
     }

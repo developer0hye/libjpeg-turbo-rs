@@ -77,6 +77,7 @@ src/decode/lossless.rs	1	clamped-difference	.saturating_sub(point_transform as i
 src/decode/marker.rs	1	bounds-check	if size > data_end.saturating_sub(payload) {
 src/decode/marker.rs	1	bounds-check	if total > end.saturating_sub(self.pos) || self.pos + total > self.data.len() {
 src/decode/marker.rs	2	clamped-difference	let data_len = data_end.saturating_sub(data_start);
+src/decode/pipeline_impl/baseline.rs	1	counter	self.huffman_suppressed = self.huffman_suppressed.saturating_add(1);
 src/decode/pipeline_impl/color.rs	1	bounds-check	if output_x_offset.saturating_add(out_width) > full_width || out_height > full_height {
 src/decode/pipeline_impl/output.rs	1	clamped-difference	*off = (cx * comp_w / full_width).min(comp_w.saturating_sub(1));
 src/decode/pipeline_impl/output.rs	1	clamped-difference	cw.min(out_width.saturating_sub(cx))

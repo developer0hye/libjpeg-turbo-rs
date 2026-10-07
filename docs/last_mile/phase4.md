@@ -12959,7 +12959,7 @@ explicit fill. `experiments/progressive.tsv` measured that exact swap neutral on
 an 8K progressive decode (P4-136 criterion 4); the baseline mainline has no row
 of its own yet.
 
-## P4-210. `Encoder::scan_script` Is Silently Ignored Outside the Huffman YCbCr/Grayscale Progressive Path — **OPEN**
+## P4-210. `Encoder::scan_script` Is Silently Ignored Outside the Huffman YCbCr/Grayscale Progressive Path — **CLOSED 2026-10-07**
 
 **GitHub:** [#636](https://github.com/developer0hye/libjpeg-turbo-rs/issues/636) — found 2026-10-07 while fixing P4-192 (#610); tracked under #635 Milestone A.
 
@@ -12998,6 +12998,31 @@ Not a memory-safety issue: the arithmetic path never reads the caller's bands.
 **Why deferred.** Found while fixing P4-192, whose pull request closes a
 memory-safety defect and should not also carry an arithmetic-coder behaviour
 change with its own C cross-validation.
+
+**Status (2026-10-07): closed.** The arithmetic (YCbCr, grayscale and
+RGB-direct) and Huffman RGB-direct progressive encodes now follow the
+caller's script, validated first through the shared
+`encode::progressive::scans_from_script` exactly as the Huffman YCbCr path is.
+The arithmetic path had P4-211's geometry defect too — a non-interleaved DC
+scan walked the frame's MCU grid — and now walks the component's own grid.
+Where no path can follow a script, `encode` returns `JpegError::Unsupported`
+naming `scan_script` instead of ignoring it: custom sampling factors that map
+to no standard subsampling (baseline-only encoder, filed as
+[P4-236](#p4-236-encoder-with-non-standard-sampling_factors-silently-drops-progressive-arithmetic-lossless-and-restart-options--open)),
+`progressive(false)` (C's script selects the mode itself; the builder does not
+switch modes for the caller), and `lossless(true)`. Proof:
+`tests/scan_script_validation.rs` — `accepted_scripts_match_cjpeg` requires
+byte equality with stock 3.2.0 `cjpeg -scans` for all seven scripts in five
+modes (Huffman YCbCr, `-arithmetic`, `-rgb`, `-rgb -sample 2x2,1x1,1x1`,
+`-rgb -arithmetic -sample 2x2,1x1,1x1`; grayscale cases also under
+`-arithmetic`), `refusals_match_cjpeg_entry_for_entry` requires the same
+refused entry as `cjpeg` for all 19 refusals in every mode (the two
+grayscale refusals skip the three RGB-direct modes),
+`issue_636_invalid_script_outranks_frame_errors_on_every_path` pins the
+precedence, and `issue_636_scripts_no_path_can_honour_are_refused` pins the
+three refusals. Measured discriminating: with the arithmetic DC geometry fix
+disabled the per-component DC script differs (277 vs 266 bytes). Matching the
+stream byte for byte also covers the decoded pixels against `djpeg`.
 
 ## P4-211. Non-Interleaved Progressive DC Scans Walked the Frame's MCU Grid, and Every DC Scan Emitted Both Table Slots — **CLOSED 2026-10-07**
 
@@ -13121,7 +13146,7 @@ nor the upsample planes, so the limit is non-strict there.
 **Why deferred.** A decode-pipeline change across three output paths with
 their own C parity, found while reviewing an adapter pull request.
 
-## P4-215. Lenient Decodes Collect One Warning String per Corrupt MCU Without a Cap, and Clone the List Infallibly Into Every `Image` — **OPEN**
+## P4-215. Lenient Decodes Collect One Warning String per Corrupt MCU Without a Cap, and Clone the List Infallibly Into Every `Image` — **CLOSED 2026-10-07**
 
 **GitHub:** [#641](https://github.com/developer0hye/libjpeg-turbo-rs/issues/641) — found 2026-10-07 by the P4-209 allocation audit.
 
@@ -13141,6 +13166,23 @@ decode and asserts the bound.
 
 **Why deferred.** Found while closing P4-209, whose scope was the allocation
 macros under `src/decode/`; bounding warnings is an API-visible decision.
+
+**Status (2026-10-07): closed.** A decode records at most
+`MAX_DECODE_WARNINGS` (64, exported at the root) `HuffmanError` entries — the
+first ones, as C's `emit_message` prints the first warning — and counts the
+rest in one `DecodeWarning::WarningsSuppressed { count }` after them; a
+suppressed warning builds no message string. `TruncatedData` and
+`UnsupportedRecovered` occur at most once per decode and are never suppressed.
+The bound is documented on `MAX_DECODE_WARNINGS`, `DecodeWarning` and
+`Image::warnings`; `DecodeWarning` is now `#[non_exhaustive]` (breaking, like
+the new variant). Every `warnings.clone()` in
+`src/decode/pipeline_impl/output.rs` is now a move. Proof:
+`tests/lenient_warning_cap.rs` — a fully corrupt 256x256 4:4:4 stream (1024
+MCUs) returned 1024 entries before the fix and now returns 64 plus
+`WarningsSuppressed { count: 960 }`; a 512x512 one returns the same length;
+a 16-MCU one records all 16 with no suppression entry; and a restart-resynced
+stream truncated after 200 MCUs still reports `TruncatedData` past the cap,
+with recorded + suppressed equal to the MCUs decoded.
 
 ## P4-216. The 12-/16-Bit Decode Entry Points in `src/api` Still Allocate Geometry-Sized Buffers Infallibly — **OPEN**
 
@@ -13883,6 +13925,31 @@ comparability check.
 `consumer_source_sha256` and so invalidate BUDGETS.md's reference set, which
 then has to be regenerated with three new dispatches. Do them together, at
 the next deliberate reference refresh.
+
+## P4-236. Encoder With Non-Standard `sampling_factors` Silently Drops Progressive, Arithmetic, Lossless and Restart Options — **OPEN**
+
+**GitHub:** [#664](https://github.com/developer0hye/libjpeg-turbo-rs/issues/664) — found 2026-10-07 while fixing P4-210 (#636); under #635.
+
+`Encoder::encode` sends `sampling_factors` that map to no standard
+`Subsampling` (e.g. `[(3,2),(1,1),(1,1)]`) to `compress_custom_sampling` ahead
+of the progressive, arithmetic and lossless arms. That encoder is baseline
+Huffman and takes only pixels, size, format, quality and the factors, so the
+other mode options are dropped and `encode` returns `Ok`. Measured on a 48x48
+RGB frame with `[(3,2),(1,1),(1,1)]`: `.progressive(true)`,
+`.arithmetic(true)` and `.lossless(true)` each write SOF0, and
+`.restart_blocks(1)` writes no DRI. Custom quantisation tables, `dct_method`
+and optimised Huffman tables do not reach it either (by signature). C
+composes `cjpeg -sample 3x2,1x1,1x1` with all of these.
+
+**Acceptance criteria.** (1) Each option with non-standard sampling either
+encodes as requested, cross-validated byte for byte against the matching
+`cjpeg -sample …` invocation, or returns `JpegError::Unsupported` naming the
+combination; silent substitution is the defect. (2) A test pins each
+combination. P4-210's fix already refuses `scan_script` here.
+
+**Why deferred.** Found while fixing P4-210, whose scope is the scan script;
+honouring each option needs its own encoder work and C cross-validation, and
+refusing them is a behaviour change for callers that deserves its own review.
 
 ## P4-239. On Zen 4, 4:2:0 Encode Is 5 % Slower Than 0.8.0 — **OPEN**
 

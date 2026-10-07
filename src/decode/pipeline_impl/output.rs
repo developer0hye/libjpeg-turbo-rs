@@ -380,6 +380,11 @@ impl<'a> Decoder<'a> {
                 DecodeWarning::UnsupportedRecovered { detail } => {
                     format!("unsupported feature: {}", detail)
                 }
+                // Never first — it follows the recorded warnings it counts —
+                // but the match must say something for it.
+                DecodeWarning::WarningsSuppressed { count } => {
+                    format!("{} further warnings suppressed", count)
+                }
             };
             return Err(JpegError::CorruptData(format!(
                 "stop_on_warning: {}",
@@ -998,7 +1003,7 @@ impl<'a> Decoder<'a> {
                     comment: try_clone_opt_string(&self.metadata.comment, "COM comment")?,
                     density: self.metadata.density,
                     saved_markers: try_clone_saved_markers(&self.metadata.saved_markers)?,
-                    warnings: warnings.clone(),
+                    warnings,
                 })
             } else {
                 // Expand grayscale to requested color format
@@ -1068,7 +1073,7 @@ impl<'a> Decoder<'a> {
                     comment: try_clone_opt_string(&self.metadata.comment, "COM comment")?,
                     density: self.metadata.density,
                     saved_markers: try_clone_saved_markers(&self.metadata.saved_markers)?,
-                    warnings: warnings.clone(),
+                    warnings,
                 })
             }
         } else if num_components == 3 {
@@ -1187,7 +1192,7 @@ impl<'a> Decoder<'a> {
                     comment: try_clone_opt_string(&self.metadata.comment, "COM comment")?,
                     density: self.metadata.density,
                     saved_markers: try_clone_saved_markers(&self.metadata.saved_markers)?,
-                    warnings: warnings.clone(),
+                    warnings,
                 });
             }
 
@@ -1246,7 +1251,7 @@ impl<'a> Decoder<'a> {
                 // reject and be *less* accepting than the reference, emit a
                 // best-effort neutral raster plus a warning so the lenient
                 // contract holds. Pixel-correct decoding is tracked as P4-21.
-                let mut recovered_warnings: Vec<DecodeWarning> = warnings.clone();
+                let mut recovered_warnings: Vec<DecodeWarning> = warnings;
                 recovered_warnings.push(DecodeWarning::UnsupportedRecovered { detail });
                 let data: Vec<u8> = try_filled_vec(
                     out_width * out_height * bpp,
@@ -1423,7 +1428,7 @@ impl<'a> Decoder<'a> {
                         comment: try_clone_opt_string(&self.metadata.comment, "COM comment")?,
                         density: self.metadata.density,
                         saved_markers: try_clone_saved_markers(&self.metadata.saved_markers)?,
-                        warnings: warnings.clone(),
+                        warnings,
                     });
                 }
 
@@ -1533,7 +1538,7 @@ impl<'a> Decoder<'a> {
                         comment: try_clone_opt_string(&self.metadata.comment, "COM comment")?,
                         density: self.metadata.density,
                         saved_markers: try_clone_saved_markers(&self.metadata.saved_markers)?,
-                        warnings: warnings.clone(),
+                        warnings,
                     });
                 }
 
@@ -1608,7 +1613,7 @@ impl<'a> Decoder<'a> {
                         comment: try_clone_opt_string(&self.metadata.comment, "COM comment")?,
                         density: self.metadata.density,
                         saved_markers: try_clone_saved_markers(&self.metadata.saved_markers)?,
-                        warnings: warnings.clone(),
+                        warnings,
                     });
                 }
 
@@ -1688,7 +1693,7 @@ impl<'a> Decoder<'a> {
                         comment: try_clone_opt_string(&self.metadata.comment, "COM comment")?,
                         density: self.metadata.density,
                         saved_markers: try_clone_saved_markers(&self.metadata.saved_markers)?,
-                        warnings: warnings.clone(),
+                        warnings,
                     });
                 }
 
@@ -1813,7 +1818,7 @@ impl<'a> Decoder<'a> {
                         comment: try_clone_opt_string(&self.metadata.comment, "COM comment")?,
                         density: self.metadata.density,
                         saved_markers: try_clone_saved_markers(&self.metadata.saved_markers)?,
-                        warnings: warnings.clone(),
+                        warnings,
                     });
                 }
 
@@ -1979,7 +1984,7 @@ impl<'a> Decoder<'a> {
                     comment: try_clone_opt_string(&self.metadata.comment, "COM comment")?,
                     density: self.metadata.density,
                     saved_markers: try_clone_saved_markers(&self.metadata.saved_markers)?,
-                    warnings: warnings.clone(),
+                    warnings,
                 });
             }
 
@@ -2011,7 +2016,7 @@ impl<'a> Decoder<'a> {
                 comment: try_clone_opt_string(&self.metadata.comment, "COM comment")?,
                 density: self.metadata.density,
                 saved_markers: try_clone_saved_markers(&self.metadata.saved_markers)?,
-                warnings: warnings.clone(),
+                warnings,
             })
         } else if num_components == 4 {
             self.decode_4_component(

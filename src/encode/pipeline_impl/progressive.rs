@@ -136,24 +136,8 @@ pub fn compress_progressive_custom_with_restart(
 ) -> Result<Vec<u8>> {
     // Before anything else: the AC kernels index with `ss..=se` unchecked on
     // x86_64 (issue #610).
-    // CMYK counts as four so a script valid for a CMYK frame passes here and
-    // the format's own `Unsupported` still comes first, as it did before.
-    let num_components: usize = match pixel_format {
-        PixelFormat::Grayscale => 1,
-        PixelFormat::Cmyk => 4,
-        _ => 3,
-    };
-    crate::encode::progressive::validate_scan_script(script, num_components)?;
-    let scans: Vec<ProgressiveScan> = script
-        .iter()
-        .map(|s| ProgressiveScan {
-            component_indices: s.components.iter().map(|&c| c as usize).collect(),
-            ss: s.ss,
-            se: s.se,
-            ah: s.ah,
-            al: s.al,
-        })
-        .collect();
+    let scans: Vec<ProgressiveScan> =
+        crate::encode::progressive::scans_from_script(script, pixel_format)?;
 
     compress_progressive_with_scans(
         pixels,
@@ -182,11 +166,26 @@ pub fn compress_progressive_rgb_direct(
     icc_profile: Option<&[u8]>,
     restart_in_rows: u16,
 ) -> Result<Vec<u8>> {
-    use crate::encode::progressive::simple_progression_for;
+    compress_progressive_rgb_direct_scripted(params, icc_profile, restart_in_rows, None)
+}
 
-    // JCS_RGB is not YCbCr, so it takes C's 14-scan all-purpose script rather
-    // than the 10-scan one tuned for chroma (`jcparam.c`).
-    let scans = simple_progression_for(3, false);
+/// [`compress_progressive_rgb_direct`] with the caller's scan script, when
+/// there is one (`cjpeg -rgb -scans`, P4-210).
+pub(crate) fn compress_progressive_rgb_direct_scripted(
+    params: &CompressParams<'_>,
+    icc_profile: Option<&[u8]>,
+    restart_in_rows: u16,
+    script: Option<&[ScanScript]>,
+) -> Result<Vec<u8>> {
+    use crate::encode::progressive::{scans_from_script, simple_progression_for};
+
+    let scans: Vec<ProgressiveScan> = match script {
+        // Validated before anything else, as on the YCbCr path (issue #610).
+        Some(script) => scans_from_script(script, PixelFormat::Rgb)?,
+        // JCS_RGB is not YCbCr, so it takes C's 14-scan all-purpose script
+        // rather than the 10-scan one tuned for chroma (`jcparam.c`).
+        None => simple_progression_for(3, false),
+    };
     let base: Vec<u8> = compress_progressive_with_scans(
         params.pixels,
         params.width,
