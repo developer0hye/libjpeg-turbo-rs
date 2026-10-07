@@ -270,9 +270,11 @@ runs. Clean build times come from `ref-zen3-1` and are indicative only.
   Not confirmed: it is one run, and Zen 4 runners are not the reference.
 - **Image adapter vs `image`'s codec on a 64x64 image:** a fixed per-image
   overhead; see the reference table (27 vs 19 allocations).
-- **Binary size vs 0.8.0:** +14.7 % (x86_64) and +10.1 % (aarch64), not yet
-  attributed.
-  [P4-230](../../docs/last_mile/phase4.md#p4-230-the-candidate-adds-1015--more-code-to-a-stock-profile-binary-than-080--open)
+- **Binary size vs 0.8.0:** +14.7 % (x86_64) and +10.1 % (aarch64). It is
+  attributed to the 12-bit decode route, the smoothing toggle, the grayscale
+  override and fallible metadata reassembly; only about 6 KB of it (two
+  slice-sort instantiations) is accidental.
+  [P4-230](../../docs/last_mile/phase4.md#p4-230-the-candidate-adds-1015--more-code-to-a-stock-profile-binary-than-080--closed-2026-10-08)
   ([#661](https://github.com/developer0hye/libjpeg-turbo-rs/issues/661)).
 - **Small-image decode vs zune-jpeg:** a tie at 64x64. Every larger decode
   case leads by 14–28 % in each reference run.
