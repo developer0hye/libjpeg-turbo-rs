@@ -89,9 +89,8 @@ impl<'a> Decoder<'a> {
                 let comp_w = mcus_x * comp.horizontal_sampling as usize * comp_block_sizes[ci];
                 let comp_h = mcus_y * comp.vertical_sampling as usize * comp_block_sizes[ci];
                 // P4-209: frame-geometry sized, so refusal must be an error.
-                crate::common::try_alloc::try_filled_vec(
+                crate::common::try_alloc::try_zeroed_bytes(
                     comp_w * comp_h,
-                    0u8,
                     "streaming component plane",
                 )
             })

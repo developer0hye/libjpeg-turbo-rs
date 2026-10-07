@@ -4,7 +4,8 @@
 //! `vec![…]`, `Vec::with_capacity(…)` and `.to_vec()` abort the process when
 //! the allocator refuses. `src/common/try_alloc.rs` states the rule this gate
 //! holds the decoder to: a size that came out of a JPEG stream goes through
-//! `try_reserve_exact` and surfaces refusal as `JpegError::AllocationFailed`.
+//! `try_reserve_exact` (or, for zeroed bytes, `alloc_zeroed` via
+//! `try_zeroed_bytes`) and surfaces refusal as `JpegError::AllocationFailed`.
 //! P4-136 and P4-144 applied that rule site by site, and the primary decode
 //! destination still slipped through (P4-209) — which is why the criterion asks
 //! for a *mechanism* rather than another sweep.
@@ -336,8 +337,9 @@ fn decode_allocations_match_the_classified_inventory() {
          If its size comes from the JPEG stream's geometry (width, height, \
          blocks, planes, output size — scaled or cropped), it is a bug: an \
          allocator refusal aborts the process. Route it through \
-         `common::try_alloc` (`try_filled_vec`, `try_reserved_vec`, \
-         `try_with_capacity`, `try_copy_of`) and propagate with `?` (P4-209).\n\n\
+         `common::try_alloc` (`try_zeroed_bytes`, `try_filled_vec`, \
+         `try_reserved_vec`, `try_with_capacity`, `try_copy_of`) and \
+         propagate with `?` (P4-209).\n\n\
          If it genuinely is bounded by something else, add the row with a \
          classification from {KNOWN_CLASSIFICATIONS:?} and a justification:\n\n{}\n",
         unlisted.join("\n")
