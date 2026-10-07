@@ -412,6 +412,26 @@ pub fn read_coefficients(data: &[u8]) -> Result<JpegCoefficients> {
 /// Encodes quantized DCT coefficients using Huffman coding,
 /// producing a valid baseline JPEG file.
 pub fn write_coefficients(coeffs: &JpegCoefficients) -> Result<Vec<u8>> {
+    write_coefficients_from(coeffs, |ci: usize, bx: usize, by: usize| {
+        let comp: &ComponentCoefficients = &coeffs.components[ci];
+        comp.blocks[by * comp.blocks_x + bx]
+    })
+}
+
+/// [`write_coefficients`] with the coded blocks supplied by `block_at(component,
+/// block_x, block_y)` instead of read from `coeffs.components[..].blocks`,
+/// which may then be empty. Blocks are requested in MCU order, one iMCU row
+/// at a time, so a caller can produce them a row at a time instead of
+/// buffering the frame — the way `cjpeg` streams a sequential encode
+/// (P4-236). Dummy blocks past a component's edge are synthesized here and
+/// never requested.
+pub(crate) fn write_coefficients_from<F>(
+    coeffs: &JpegCoefficients,
+    mut block_at: F,
+) -> Result<Vec<u8>>
+where
+    F: FnMut(usize, usize, usize) -> [i16; 64],
+{
     let num_components = coeffs.components.len();
     let is_grayscale = num_components == 1;
     let uses_secondary_table: bool = !is_grayscale && !uses_single_rgb_coding_table(coeffs);
@@ -537,11 +557,10 @@ pub fn write_coefficients(coeffs: &JpegCoefficients) -> Result<Vec<u8>> {
                                 ac_table,
                             );
                         } else {
-                            let block_idx = by * comp.blocks_x + bx;
-                            let block = &comp.blocks[block_idx];
+                            let block: [i16; 64] = block_at(ci, bx, by);
                             HuffmanEncoder::encode_block(
                                 &mut bit_writer,
-                                block,
+                                &block,
                                 &mut prev_dc[ci],
                                 dc_table,
                                 ac_table,

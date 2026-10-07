@@ -96,7 +96,7 @@ pub use raw::compress_raw;
 pub(crate) use arithmetic::{
     compress_arithmetic_progressive_rgb_direct_scripted, compress_arithmetic_progressive_scripted,
 };
-pub(crate) use custom_sampling::custom_sampling_coefficients;
+pub(crate) use custom_sampling::CustomSamplingFrame;
 pub(crate) use progressive::compress_progressive_rgb_direct_scripted;
 
 pub(crate) use progressive_entropy::{

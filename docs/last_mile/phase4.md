@@ -13952,18 +13952,22 @@ honouring each option needs its own encoder work and C cross-validation, and
 refusing them is a behaviour change for callers that deserves its own review.
 
 **Status (2026-10-08): closed.** Non-standard factors no longer have their own
-entropy coder. `custom_sampling_coefficients`
-(`src/encode/pipeline_impl/custom_sampling.rs`) builds the quantized
+entropy coder. `CustomSamplingFrame`
+(`src/encode/pipeline_impl/custom_sampling.rs`) yields the quantized
 coefficients `cjpeg -sample` codes, following libjpeg's front end:
 - downsampling is `jinit_downsampler`'s kernel choice;
 - vertical padding is C's two-phase row-group model — pad the input to
   `max_v` rows, then pad the downsampled output to the iMCU height;
 - dummy blocks follow `jccoefct.c`'s DC rule.
 
-`Encoder` hands those coefficients to the transcode writer for the requested
-mode (`write_coefficients`, `_optimized`, `_progressive`, `_arithmetic`,
-`_progressive_arithmetic`), with restart intervals in blocks or rows and the
-builder's resolved quantisation tables.
+A sequential Huffman encode streams those blocks into the entropy coder one
+iMCU row at a time (`write_coefficients_from`), as C's single-pass
+coefficient controller does, so the default path holds no more than the old
+encoder did. Optimized, progressive and arithmetic coding buffer the frame's
+coefficients, as C's multi-pass controller does, and use the matching
+transcode writer (`_optimized`, `_progressive`, `_arithmetic`,
+`_progressive_arithmetic`). Restart intervals in blocks or rows and the
+builder's resolved quantisation tables reach every mode.
 
 Changes in what `encode` returns:
 - `lossless(true)` ignores the factors as `jcmaster.c` does, for RGB-direct

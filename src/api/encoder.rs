@@ -1317,10 +1317,11 @@ impl<'a> Encoder<'a> {
         Ok(with_tables)
     }
 
-    /// Encode with sampling factors that map to no standard `Subsampling`:
-    /// build the coefficients `cjpeg -sample` codes, then hand them to the
-    /// coefficient writer for the requested mode, so progressive, arithmetic,
-    /// optimized Huffman and restart intervals all apply (P4-236, #664).
+    /// Encode with sampling factors that map to no standard `Subsampling`
+    /// (P4-236, #664). A sequential Huffman encode streams the quantized
+    /// blocks into the entropy coder one iMCU row at a time, as `cjpeg` does;
+    /// optimized, progressive and arithmetic coding buffer the frame's
+    /// coefficients and hand them to the matching coefficient writer.
     fn encode_custom_sampling(
         &self,
         pixels: &[u8],
@@ -1329,12 +1330,12 @@ impl<'a> Encoder<'a> {
         custom_quant: Option<&[Option<[u16; 64]>; 4]>,
     ) -> Result<Vec<u8>> {
         use crate::api::coefficient::{
-            write_coefficients, write_coefficients_arithmetic, write_coefficients_optimized,
+            write_coefficients_arithmetic, write_coefficients_optimized,
             write_coefficients_progressive, write_coefficients_progressive_arithmetic,
         };
 
         let factors: &[(u8, u8)] = self.custom_sampling_factors.as_deref().unwrap_or(&[]);
-        let mut coefficients = encoder::custom_sampling_coefficients(
+        let frame: encoder::CustomSamplingFrame = encoder::CustomSamplingFrame::new(
             pixels,
             self.width,
             self.height,
@@ -1349,7 +1350,7 @@ impl<'a> Encoder<'a> {
         // interleaved MCU grid, or a lone component's own block columns
         // (`jcmaster.c` `per_scan_setup`). Progressive writers re-derive it per
         // scan from `restart_rows`.
-        let mcus_per_row: usize = if coefficients.components.len() == 1 {
+        let mcus_per_row: usize = if factors.len() == 1 {
             self.width.div_ceil(8)
         } else {
             let max_h: usize = factors
@@ -1359,31 +1360,30 @@ impl<'a> Encoder<'a> {
                 .unwrap_or(1);
             self.width.div_ceil(max_h * 8)
         };
-        let restart_rows: Option<u16> = match self.restart_interval {
-            Some(RestartConfig::Blocks(n)) => {
-                coefficients.restart_interval = n;
-                None
-            }
-            Some(RestartConfig::Rows(n)) if n > 0 => {
-                coefficients.restart_interval =
-                    (usize::from(n) * mcus_per_row).min(usize::from(u16::MAX)) as u16;
-                Some(n)
-            }
-            _ => None,
+        let (restart_interval, restart_rows): (u16, Option<u16>) = match self.restart_interval {
+            Some(RestartConfig::Blocks(n)) => (n, None),
+            Some(RestartConfig::Rows(n)) if n > 0 => (
+                (usize::from(n) * mcus_per_row).min(usize::from(u16::MAX)) as u16,
+                Some(n),
+            ),
+            _ => (0, None),
         };
 
         // C turns `optimize_coding` off under arithmetic coding and on for
         // progressive Huffman (`jcmaster.c`), which these writers do too.
+        if !self.progressive && !self.arithmetic && !self.optimize_huffman {
+            return frame.write_sequential(restart_interval);
+        }
+        let mut coefficients = frame.into_coefficients();
+        coefficients.restart_interval = restart_interval;
         if self.progressive && self.arithmetic {
             write_coefficients_progressive_arithmetic(&coefficients, restart_rows)
         } else if self.progressive {
             write_coefficients_progressive(&coefficients, restart_rows)
         } else if self.arithmetic {
             write_coefficients_arithmetic(&coefficients)
-        } else if self.optimize_huffman {
-            write_coefficients_optimized(&coefficients)
         } else {
-            write_coefficients(&coefficients)
+            write_coefficients_optimized(&coefficients)
         }
     }
 
