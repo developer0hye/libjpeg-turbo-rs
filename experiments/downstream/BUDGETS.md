@@ -256,8 +256,10 @@ runs. Clean build times come from `ref-zen3-1` and are indicative only.
     3 % floor, but it never changed sign in eight runs.
   - *Concurrent fresh:* 1.057 / 1.059 / 1.023. The reuse rows are at parity.
 
-  The first hypothesis is the eager zero-fill in `try_filled_vec`.
-  [P4-228](../../docs/last_mile/phase4.md#p4-228-fresh-decode-of-large-images-is-25--slower-than-080--open)
+  The cause was the eager zero-fill in `try_filled_vec`, and it is fixed.
+  Two dispatches of the fix against this reference put 8K fresh at
+  1.008 / 1.000 and concurrent fresh at 0.997 / 1.002.
+  [P4-228](../../docs/last_mile/phase4.md#p4-228-fresh-decode-of-large-images-is-25--slower-than-080--closed-2026-10-07)
   ([#659](https://github.com/developer0hye/libjpeg-turbo-rs/issues/659)).
 - **1/4-scaled decode, buffer-reuse vs 0.8.0: 1.024–1.039,** behind by the
   rule. The same library measured 0.90 with the earlier consumer build, so
