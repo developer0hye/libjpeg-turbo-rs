@@ -772,12 +772,38 @@ pub fn transform_jpeg_with_options(data: &[u8], options: &TransformOptions) -> R
     let has_partial_width: bool = needs_width_aligned && !width_aligned;
     let has_partial_height: bool = needs_height_aligned && !height_aligned;
 
-    // PERFECT: fail if partial iMCU blocks exist for this transform.
-    if options.perfect && (has_partial_width || has_partial_height) {
-        return Err(JpegError::CorruptData(format!(
-            "perfect transform requested but image {}x{} is not iMCU-aligned (iMCU={}x{})",
-            coeffs.width, coeffs.height, imcu_w, imcu_h
-        )));
+    // PERFECT: upstream's `jtransform_perfect_transform` (transupp.c:2415-2450),
+    // which tests only the edges `op` moves — the right edge for HFlip and
+    // Rot270, the bottom for VFlip and Rot90, both for Transverse and Rot180 —
+    // against an 8x8 iMCU when the output has one component
+    // (`jtransform_request_workspace`, transupp.c:1631-1655). The trim logic
+    // below keeps its own, wider alignment flags. Testing those here refused
+    // `-perfect -rotate 90` on a frame whose width alone was ragged, which
+    // jpegtran and tj3Transform accept (P4-227). Upstream forces one component
+    // only for a YCbCr source; `JpegCoefficients` does not record the colour
+    // space, so a three-component source under `grayscale` is taken as YCbCr.
+    if options.perfect {
+        let one_component: bool =
+            coeffs.components.len() == 1 || (options.grayscale && coeffs.components.len() == 3);
+        let (perfect_imcu_w, perfect_imcu_h): (usize, usize) = if one_component {
+            (8, 8)
+        } else {
+            (imcu_w, imcu_h)
+        };
+        let width_whole: bool = (coeffs.width as usize).is_multiple_of(perfect_imcu_w);
+        let height_whole: bool = (coeffs.height as usize).is_multiple_of(perfect_imcu_h);
+        let is_perfect: bool = match op {
+            TransformOp::HFlip | TransformOp::Rot270 => width_whole,
+            TransformOp::VFlip | TransformOp::Rot90 => height_whole,
+            TransformOp::Transverse | TransformOp::Rot180 => width_whole && height_whole,
+            TransformOp::None | TransformOp::Transpose => true,
+        };
+        if !is_perfect {
+            return Err(JpegError::CorruptData(format!(
+                "perfect transform requested but image {}x{} is not iMCU-aligned (iMCU={}x{})",
+                coeffs.width, coeffs.height, perfect_imcu_w, perfect_imcu_h
+            )));
+        }
     }
 
     // TRIM: discard partial iMCU blocks at edges.

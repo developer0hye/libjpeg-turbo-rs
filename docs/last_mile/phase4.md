@@ -13770,7 +13770,7 @@ two-component fixture, verbatim against stock
 `a_two_component_frame_publishes_tjcs_default_and_is_refused` in
 `tests/tj3_decomp_parameters.rs`.
 
-## P4-227. `tj3Transform` Ignores the Handle's MAXPIXELS/SCANLIMIT/MAXMEMORY and Its PROGRESSIVE/ARITHMETIC Parameters — **OPEN**
+## P4-227. `tj3Transform` Ignores the Handle's MAXPIXELS/SCANLIMIT/MAXMEMORY and Its PROGRESSIVE/ARITHMETIC Parameters — **CLOSED 2026-10-08**
 
 **GitHub:** [#655](https://github.com/developer0hye/libjpeg-turbo-rs/issues/655) — found 2026-10-07 by the docs-drift audit of the P4-199 fix.
 
@@ -13788,6 +13788,45 @@ way upstream does, with upstream's messages. (2) It honours
 `TJPARAM_PROGRESSIVE` and `TJPARAM_ARITHMETIC` for the output as upstream
 does. (3) Cross-validated against stock 3.2.0 `tj3Transform` with an oracle
 trace in the shape of `capi_decomp_parameters`.
+
+**Status (2026-10-08): closed.** `tj3Transform` now validates every
+transform's arguments before the header read, then applies the handle's
+limits to the source in upstream's order with upstream's messages:
+`TJPARAM_MAXPIXELS` ("tj3Transform(): Image is too large"), each transform's
+`TJXOPT_PERFECT` test ("tj3Transform(): Transform is not perfect"),
+`TJPARAM_MAXMEMORY` ("Memory limit exceeded") and `TJPARAM_SCANLIMIT`
+("Progressive JPEG image has more than N scans"). The memory estimate counts
+what stock's memory manager realizes before the first scan — the source's
+whole-image coefficient arrays plus every transform's workspace, following
+`jtransform_request_workspace`'s rules — and refuses at `estimate >= budget`;
+stock's few KiB of pool overhead is not modelled. Every transform's output
+takes the handle's `TJPARAM_PROGRESSIVE`, `TJPARAM_ARITHMETIC` and
+`TJPARAM_OPTIMIZE` (OR-ed with the `TJXOPT_*` twins) and its restart interval
+(`TJPARAM_RESTARTROWS` over `TJPARAM_RESTARTBLOCKS`) — the last two found
+ignored too by the probe that measured this item, and fixed with the same
+code (`turbojpeg.c:3029-3037`). A transform still publishes nothing, as
+upstream's does not call `setDecompParameters`.
+
+The precedence work exposed one more divergence, fixed here: the core
+`TransformOptions::perfect` tested both edges for every rotation, so
+`-perfect -rotate 90` on a frame whose width alone is ragged was refused
+where jpegtran and `tj3Transform` accept it. It now follows
+`jtransform_perfect_transform`, with an 8x8 iMCU for a one-component output.
+
+Proof: `examples/transform_parameters_oracle.c` traces 16 cases per fixture
+plus 14 `TJPARAM_MAXMEMORY` boundary cases on a 1024x1024 4:4:4 source
+(6/7 MiB in place, 12/13 MiB with a workspace, 8/9 MiB for a grayscale
+rotation), printing each output's SOF marker, size and FNV-1a hash; the port
+matches stock 3.2.0 verbatim
+(`crates/libjpeg-turbo-rs-capi/tests/capi_transform_parameters.rs`,
+`transform_applies_what_stock_turbojpeg_applies`), and the oracle-free
+`transform_honours_maxpixels_and_scanlimit`, `transform_honours_maxmemory`
+and `transform_honours_the_output_parameters` fail on the previous code.
+`tests/transform_perfect_c_parity.rs` compares all seven `-perfect`
+operations, with and without `-grayscale`, against `jpegtran` byte for byte.
+
+Not covered here: the handle's `TJPARAM_SAVEMARKERS` level and ICC profile,
+filed as [P4-235](#p4-235-tj3transform-ignores-tjparam_savemarkers-levels-013-and-the-handles-icc-profile--open).
 
 ## P4-228. Fresh Decode of Large Images Is 2–5 % Slower Than 0.8.0 — **OPEN**
 

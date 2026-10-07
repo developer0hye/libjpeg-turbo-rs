@@ -344,6 +344,22 @@ and `git log` between tags.
   `TjHandle::decompress_to_yuv_planes`, which refuses a frame of more than
   three components where the handle-free `yuv::decompress_to_yuv_planes`
   returns four planes.
+- **Breaking (behaviour): `tj3Transform` applies the handle's limits and
+  output parameters** (P4-227, #655). It read none of them. It now refuses a
+  source over `TJPARAM_MAXPIXELS` ("tj3Transform(): Image is too large"),
+  over `TJPARAM_MAXMEMORY` ("Memory limit exceeded": the source's
+  coefficient arrays plus each transform's workspace, as stock counts them)
+  or with more scans than `TJPARAM_SCANLIMIT` ("Progressive JPEG image has
+  more than N scans"), and its output takes the handle's
+  `TJPARAM_PROGRESSIVE`, `TJPARAM_ARITHMETIC`, `TJPARAM_OPTIMIZE`,
+  `TJPARAM_RESTARTBLOCKS` and `TJPARAM_RESTARTROWS`, so a decompress that
+  published `PROGRESSIVE` = 1 on the same handle now makes the transform's
+  output progressive, as upstream's does. Byte-exact against stock 3.2.0.
+  Every transform's arguments are now validated before any output is
+  produced. `TransformOptions::perfect` follows
+  `jtransform_perfect_transform`: a 90- or 270-degree rotation needs only the
+  edge it moves to be whole iMCUs, and a grayscale output uses an 8x8 iMCU,
+  so `-perfect` transforms jpegtran accepts are no longer refused.
 - An allocator refusal during a decode is reported as
   `JpegError::AllocationFailed` instead of aborting the process (P4-209,
   #632). `decompress` / `Decoder::decode_image` allocated their destination

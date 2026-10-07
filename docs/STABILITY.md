@@ -155,6 +155,8 @@ with what the allocator reports. Each decode path estimates its own buffers:
 | 8-bit `Decoder` / `decompress*` / `TjHandle::decompress` | the output buffer (width × height × output bytes per pixel, owned or caller-supplied); one byte per pixel per component for the component planes; one more full-size plane per subsampled component of an RGB-colour-space frame, or for a subsampled luma plane when YCbCr is decoded to grayscale; for a progressive frame, the coefficient buffer (two bytes per pixel per component plus one byte per 8×8 block) |
 | `decompress_12bit_with_limits`, `TjHandle::decompress_12bit` | the per-component planes at their padded iMCU size, the upsampled full-size planes and the interleaved result, two bytes a sample each |
 | `decompress_16bit_with_limits`, `TjHandle::decompress_16bit` | the output, plus for a multi-component frame the full-size planes it is interleaved from, two bytes a sample each |
+| `TjHandle::decompress_to_yuv_planes` (`tj3DecompressToYUV8` / `tj3DecompressToYUVPlanes8`) | the 8-bit `Decoder` estimate above, as for an RGB decode: the raw path shares its check (P4-225) |
+| `tj3Transform` (C ABI only) | what stock's memory manager realizes before the first scan: the source's whole-image coefficient arrays, each component padded to its sampling factors, plus every transform's workspace — none for an in-place flip, the source's size for a vertical flip or 180-degree rotation, transposed for the transpose family, luma only under `TJXOPT_GRAY` — at 128 bytes a block; refused at `estimate >= budget`, which matches stock at the measured boundaries (P4-227) |
 
 Not counted anywhere:
 
@@ -180,4 +182,7 @@ during the decode; both have published the frame's parameters first. The same
 holds for `TJPARAM_SCANLIMIT`: the handle reads the header up to the first
 SOS and publishes, then refuses while locating the remaining scans, where
 stock refuses from its progress monitor mid-decode. `tj3DecompressHeader`
-applies neither limit, as upstream's does not.
+applies neither limit, as upstream's does not. `tj3Transform` is the
+exception to "stricter": its estimate counts what stock's memory manager
+counts, so the two refuse the same sources except within stock's few KiB of
+pool overhead, which the estimate does not model.

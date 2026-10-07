@@ -214,12 +214,12 @@
 - [x] Lenient / error recovery mode (`decompress_lenient`)
 - [x] `DecodeWarning` list in Image
 - [x] `TJPARAM_STOPONWARNING` — Treat warnings as fatal (`Decoder::set_stop_on_warning()`)
-- [x] `TJPARAM_SCANLIMIT` — Max progressive scans before error (`Decoder::set_scan_limit()`, `DecodeLimits::max_scans`); every `TjHandle` decompress entry point and `precision::decompress_{12,16}bit_with_limits` ([P4-199](last_mile/phase4.md#p4-199-setdecompparameters-publishes-thirteen-handle-parameters-our-8-bit-decode-publishes-eight-and-the-1216-bit-ones-publish-three-and-ignore-the-handles-limits--closed-2026-10-07), #620)
+- [x] `TJPARAM_SCANLIMIT` — Max progressive scans before error (`Decoder::set_scan_limit()`, `DecodeLimits::max_scans`); every `TjHandle` decompress entry point, `tj3DecompressToYUV8` / `tj3DecompressToYUVPlanes8` (P4-225) and `tj3Transform` (P4-227, upstream's "Progressive JPEG image has more than N scans"), and `precision::decompress_{12,16}bit_with_limits` ([P4-199](last_mile/phase4.md#p4-199-setdecompparameters-publishes-thirteen-handle-parameters-our-8-bit-decode-publishes-eight-and-the-1216-bit-ones-publish-three-and-ignore-the-handles-limits--closed-2026-10-07), #620)
 - [x] Custom error callbacks — `ErrorHandler` trait
 
 ### Limits
-- [x] `TJPARAM_MAXMEMORY` — Memory limit (`Decoder::set_max_memory()`, `DecodeLimits::max_memory`); the 8-bit `Decoder` path, `precision::decompress_{12,16}bit_with_limits`, and `TjHandle::decompress` / `decompress_12bit` / `decompress_16bit` (not the C ABI's `tj3DecompressToYUV8` / `tj3DecompressToYUVPlanes8`), each against an estimate of its own buffers — docs/STABILITY.md "What the memory budget covers" lists what is and is not counted (P4-199, #620)
-- [x] `TJPARAM_MAXPIXELS` — Image size limit (`Decoder::set_max_pixels()`, `DecodeLimits::max_pixels`); the 8-bit `Decoder` path, `precision::decompress_{12,16}bit_with_limits`, and every `TjHandle` decompress entry point but `decompress_header` (as upstream), against the SOF (P4-199, #620)
+- [x] `TJPARAM_MAXMEMORY` — Memory limit (`Decoder::set_max_memory()`, `DecodeLimits::max_memory`); the 8-bit `Decoder` path, `precision::decompress_{12,16}bit_with_limits`, `TjHandle::decompress` / `decompress_12bit` / `decompress_16bit` / `decompress_to_yuv_planes` (and so `tj3DecompressToYUV8` / `tj3DecompressToYUVPlanes8`, P4-225), and `tj3Transform` (P4-227: source coefficients plus workspaces, as stock's memory manager counts them), each against an estimate of its own buffers — docs/STABILITY.md "What the memory budget covers" lists what is and is not counted (P4-199, #620)
+- [x] `TJPARAM_MAXPIXELS` — Image size limit (`Decoder::set_max_pixels()`, `DecodeLimits::max_pixels`); the 8-bit `Decoder` path, `precision::decompress_{12,16}bit_with_limits`, every `TjHandle` decompress entry point but `decompress_header` (as upstream), against the SOF (P4-199, #620), and `tj3Transform` (P4-227, #655)
 
 ### Marker Handling
 - [x] ICC profile reassembly from APP2 chunks
