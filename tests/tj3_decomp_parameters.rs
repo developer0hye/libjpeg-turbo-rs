@@ -39,7 +39,7 @@ const PROG: &[u8] = include_bytes!("fixtures/photo_64x64_420_prog.jpg");
 const ARITH: &[u8] =
     include_bytes!("fixtures/real_world/libjpeg_testimgari_227x149_arithmetic.jpg");
 const PROG_ARITH: &[u8] = include_bytes!("fixtures/decomp_params_prog_arith_24x16_420.jpg");
-const LOSSLESS8: &[u8] = include_bytes!("fixtures/decomp_params_lossless8_psv4_pt1_24x16.jpg");
+const LOSSLESS8: &[u8] = include_bytes!("inputs/decomp_params_lossless8_psv4_pt1_24x16.jpg");
 const LOSSY12: &[u8] = include_bytes!("fixtures/real_world/libjpeg_testorig12_227x149_12bit.jpg");
 const LOSSLESS16: &[u8] = include_bytes!("inputs/api_sequence_lossless16_gray_8x8.jpg");
 const CMYK: &[u8] = include_bytes!("fixtures/real_world/pil_cmyk.jpg");

@@ -92,7 +92,7 @@ const FIXTURES: [(&str, &[u8]); 9] = [
     ),
     (
         "lossless8",
-        include_bytes!("../../../tests/fixtures/decomp_params_lossless8_psv4_pt1_24x16.jpg"),
+        include_bytes!("../../../tests/inputs/decomp_params_lossless8_psv4_pt1_24x16.jpg"),
     ),
     (
         "lossy12",
