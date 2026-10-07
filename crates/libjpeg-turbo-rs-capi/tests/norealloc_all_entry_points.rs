@@ -1497,16 +1497,19 @@ fn legacy_tj_transform_fills_a_zero_dst_size_from_geometry() {
 /// compressor.
 ///
 /// **Which parameter to watch was measured, not assumed.** The obvious guess —
-/// that `TJPARAM_SUBSAMP` would be overwritten with the source's — is wrong in
-/// this port: a header parse leaves it alone. What it *does* move, measured on
-/// a 32x32 4:4:4 source with the handle pre-set, is `TJPARAM_JPEGHEIGHT`
-/// (0 -> 32) and `TJPARAM_COLORSPACE` (-1 -> 1). An earlier version of this
+/// that `TJPARAM_SUBSAMP` would be overwritten with the source's — did not
+/// hold when this was measured: the parse left it unchanged (since P4-199
+/// every header parse writes it, through `publish_decomp_parameters`). What it
+/// *does* move, measured on a 32x32 4:4:4 source with the handle pre-set, is
+/// `TJPARAM_JPEGHEIGHT`
+/// (-1 -> 32) and `TJPARAM_COLORSPACE` (-1 -> 1). An earlier version of this
 /// test asserted `TJPARAM_SUBSAMP` and passed with the rejected approach
 /// injected, which is how the mistake surfaced.
 ///
 /// `TJPARAM_JPEGHEIGHT` is the sharper of the two: nothing but a header parse
-/// sets it, so it staying at zero says the handle was never used to read the
-/// source at all.
+/// sets it, so it staying at -1 — `tj3InitVersion`'s "not read yet" sentinel
+/// (`turbojpeg.c:600-601`, P4-200) — says the handle was never used to read
+/// the source at all.
 #[test]
 fn legacy_tj_transform_does_not_parse_the_source_into_the_handle() {
     use libjpeg_turbo_rs_capi::{tj3Get, tjTransform};
@@ -1532,7 +1535,7 @@ fn legacy_tj_transform_does_not_parse_the_source_into_the_handle() {
         );
         assert_eq!(
             tj3Get(handle, TJPARAM_JPEGHEIGHT),
-            0,
+            -1,
             "no header has been parsed on this handle yet"
         );
     }
@@ -1567,9 +1570,10 @@ fn legacy_tj_transform_does_not_parse_the_source_into_the_handle() {
         )
     };
     assert_eq!(
-        height_after, 0,
-        "TJPARAM_JPEGHEIGHT is set only by a header parse, so a non-zero value \
-         means the size bridge parsed the source into the caller's handle"
+        height_after, -1,
+        "TJPARAM_JPEGHEIGHT is set only by a header parse, so anything but the \
+         -1 sentinel means the size bridge parsed the source into the caller's \
+         handle"
     );
     assert_ne!(
         colorspace_after, TJCS_YCBCR,

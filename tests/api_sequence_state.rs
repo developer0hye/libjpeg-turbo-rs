@@ -23,6 +23,7 @@ use api_sequence::{
     decode_outcome, encode_program, fuzz_inputs, program_from_bytes, run_program, run_program_with,
     Limits, Op, ReferencePolicy, ALL_PARAMS, BUILTIN_INPUTS, FUZZ_INPUT_BODY,
     FUZZ_INPUT_COLOR_DENSE, FUZZ_INPUT_GRAY, FUZZ_INPUT_LOSSLESS16, FUZZ_INPUT_LOSSY12,
+    FUZZ_INPUT_PROG_ARITH,
 };
 use libjpeg_turbo_rs::tj3::{TjHandle, TjParam};
 use libjpeg_turbo_rs::{CropRegion, PixelFormat, Subsampling};
@@ -351,12 +352,19 @@ fn program_decoding_is_total_and_deterministic() {
 /// `TjHandle::decompress` left every test and all 168 seeds it then had green.
 #[test]
 fn the_builtin_inputs_can_move_every_published_parameter() {
+    // `setDecompParameters`' thirteen (`turbojpeg.c:514-536`), which every
+    // decode-family entry point publishes since P4-199 (#620).
     let published: &[TjParam] = &[
+        TjParam::Subsampling,
         TjParam::Width,
         TjParam::Height,
         TjParam::Precision,
         TjParam::ColorSpace,
-        TjParam::Subsampling,
+        TjParam::Progressive,
+        TjParam::Arithmetic,
+        TjParam::Lossless,
+        TjParam::LosslessPsv,
+        TjParam::LosslessPt,
         TjParam::XDensity,
         TjParam::YDensity,
         TjParam::DensityUnits,
@@ -530,7 +538,7 @@ fn the_fuzz_input_indices_name_the_images_they_claim() {
     assert_eq!(
         lossless.get(TjParam::Precision),
         16,
-        "this input is the only way PRECISION ever holds anything but 8"
+        "this input is the only one on which PRECISION holds 16"
     );
 
     let mut twelve: TjHandle = TjHandle::new();
@@ -543,6 +551,21 @@ fn the_fuzz_input_indices_name_the_images_they_claim() {
         12,
         "this input is the only one `Decompress12` accepts, so it is the only \
          one on which P4's write-back comparison for that opcode runs"
+    );
+
+    let mut progressive_arithmetic: TjHandle = TjHandle::new();
+    progressive_arithmetic
+        .decompress(inputs[usize::from(FUZZ_INPUT_PROG_ARITH)])
+        .expect("FUZZ_INPUT_PROG_ARITH must be an 8-bit image");
+    assert_eq!(
+        (
+            progressive_arithmetic.get(TjParam::Progressive),
+            progressive_arithmetic.get(TjParam::Arithmetic),
+            progressive_arithmetic.get(TjParam::LosslessPt)
+        ),
+        (1, 1, 1),
+        "FUZZ_INPUT_PROG_ARITH is the only input publishing PROGRESSIVE, \
+         ARITHMETIC and a non-zero LOSSLESSPT (its DC scan's Al)"
     );
 }
 
@@ -670,67 +693,93 @@ fn the_twelve_bit_write_back_comparison_runs_on_some_input() {
     );
 }
 
-/// P2 is free of a merged-ICC false positive only because
-/// `decompress_header` is implemented as `decompress`.
+/// P2 is free of a merged-ICC false positive only because every publishing
+/// operation writes the handle's ICC field the same way.
 ///
 /// `TjHandle` keeps one ICC field where upstream keeps two (P4-198, #619), so
 /// `compress` reads whatever the last decode left. P2's reference replays only
-/// the *most recent* publishing operation, so if `DecompressHeader` and
-/// `Decompress` treated that field differently, the program
-/// `SetIcc(v), Decompress, DecompressHeader, Compress` would leave the two
-/// handles carrying different profiles and P2 would panic on the harness
-/// rather than on the library — from four operations, well inside libFuzzer's
-/// reach.
+/// the *most recent* publishing operation, so if two publishers treated that
+/// field differently, a program such as
+/// `SetIcc(v), Decompress, Decompress16, Compress` would leave the two handles
+/// carrying different profiles and P2 would panic on the harness rather than
+/// on the library — from four operations, well inside libFuzzer's reach.
 ///
-/// Making `decompress_header` header-only is P4-142, which is open. This
-/// fails the moment it lands without carrying the ICC write with it, which is
-/// a named test failure instead of a mystery crash.
+/// `decompress_header` used to be `decompress` and agreed by construction;
+/// since P4-142 made it header-only, and P4-199 made `Decompress12` /
+/// `Decompress16` publishers, the agreement is a property of four separate
+/// code paths, which this holds them to. Compared wherever an operation
+/// succeeds — a header-only read now succeeds on streams a decode refuses, so
+/// "both succeed or both fail" is no longer the contract.
 #[test]
-fn the_two_publishing_operations_agree_on_the_icc_profile() {
+fn every_publishing_operation_leaves_the_same_icc_profile() {
     let icc: Vec<u8> = vec![0x5A; 32];
+    let mut compared: usize = 0;
+    let mut compared_precision: usize = 0;
     for (label, jpeg) in corpus() {
         for level in [0, 1, 2, 3, 4] {
-            let mut header_side: TjHandle = TjHandle::new();
-            header_side.set_icc_profile(Some(icc.clone()));
-            header_side
-                .set(TjParam::SaveMarkers, level)
-                .expect("SAVEMARKERS accepts 0..=4");
-            let header_ok: bool = header_side.decompress_header(&jpeg).is_ok();
-
-            let mut decode_side: TjHandle = TjHandle::new();
-            decode_side.set_icc_profile(Some(icc.clone()));
-            decode_side
-                .set(TjParam::SaveMarkers, level)
-                .expect("SAVEMARKERS accepts 0..=4");
-            let decode_ok: bool = decode_side.decompress(&jpeg).is_ok();
-
-            assert_eq!(
-                header_ok, decode_ok,
-                "{label} @ SAVEMARKERS={level}: the two publishers disagree on \
-                 whether the stream decodes"
-            );
-            assert_eq!(
-                header_side.icc_profile().map(<[u8]>::to_vec),
-                decode_side.icc_profile().map(<[u8]>::to_vec),
-                "{label} @ SAVEMARKERS={level}: `decompress_header` and \
-                 `decompress` must leave the same ICC profile on the handle, \
-                 or P2's reference replay reports a harness bug as a library \
-                 crash (P4-198 #619 via P4-142)"
-            );
+            let fresh = || -> TjHandle {
+                let mut handle: TjHandle = TjHandle::new();
+                handle.set_icc_profile(Some(icc.clone()));
+                handle
+                    .set(TjParam::SaveMarkers, level)
+                    .expect("SAVEMARKERS accepts 0..=4");
+                handle
+            };
+            let mut profiles: Vec<(&str, Option<Vec<u8>>)> = Vec::new();
+            let mut handle: TjHandle = fresh();
+            if handle.decompress_header(&jpeg).is_ok() {
+                profiles.push((
+                    "decompress_header",
+                    handle.icc_profile().map(<[u8]>::to_vec),
+                ));
+            }
+            let mut handle: TjHandle = fresh();
+            if handle.decompress(&jpeg).is_ok() {
+                profiles.push(("decompress", handle.icc_profile().map(<[u8]>::to_vec)));
+            }
+            let mut handle: TjHandle = fresh();
+            if handle.decompress_12bit(&jpeg).is_ok() {
+                profiles.push(("decompress_12bit", handle.icc_profile().map(<[u8]>::to_vec)));
+                compared_precision += 1;
+            }
+            let mut handle: TjHandle = fresh();
+            if handle.decompress_16bit(&jpeg).is_ok() {
+                profiles.push(("decompress_16bit", handle.icc_profile().map(<[u8]>::to_vec)));
+                compared_precision += 1;
+            }
+            for (name, profile) in &profiles[1.min(profiles.len())..] {
+                compared += 1;
+                assert_eq!(
+                    profile, &profiles[0].1,
+                    "{label} @ SAVEMARKERS={level}: `{name}` and `{}` must leave the \
+                     same ICC profile on the handle, or P2's reference replay \
+                     reports a harness bug as a library crash (P4-198 #619)",
+                    profiles[0].0
+                );
+            }
         }
     }
+    assert!(compared > 0, "no two publishers succeeded on any input");
+    assert_eq!(
+        compared_precision, 10,
+        "the 12-bit and the 16-bit input, each at five SAVEMARKERS levels, \
+         must reach a precision entry point — or their half of this proves nothing"
+    );
 }
 
 /// A header the pre-parse cannot read *because of a limit* must be kept out
 /// of the run, not waved through.
 ///
 /// `Decoder::new` refuses a stream whose scan count exceeds its own default of
-/// 8192, and `TjHandle::decompress_12bit` / `decompress_16bit` read nothing
-/// from the handle — they build their own decoder with `DecodeLimits::default()`
-/// (P4-199, #620) — so `TJPARAM_MAXPIXELS` does not reach them at all. Treating
-/// every parse failure as "safe to forward", which the first version did, let a
-/// 16-bit lossless frame of any declared size through the ceiling.
-/// `codex review` found it.
+/// 8192, while a handle with `TJPARAM_SCANLIMIT` unset parses it. When this
+/// was written, `TjHandle::decompress_12bit` / `decompress_16bit` read nothing
+/// from the handle, so `TJPARAM_MAXPIXELS` did not reach them at all, and
+/// treating every parse failure as "safe to forward" — the first version — let
+/// a 16-bit lossless frame of any declared size through the ceiling (`codex
+/// review` found it). P4-199 (#620) made every entry point apply the ceiling;
+/// the blanking stays as the run's own fence, which
+/// `the_handle_ceiling_alone_refuses_an_oversize_precision_frame` shows is no
+/// longer the only one.
 ///
 /// Every *other* parse failure is still forwarded on purpose: a malformed
 /// stream is rejected cheaply by every entry point, and those error paths are
@@ -832,22 +881,65 @@ fn a_handle_built_by_reset_carries_the_same_ceiling_as_the_references() {
         max_pixels: 32,
         prefilter_headers: false,
     };
+    // `DecompressHeader` is not among them: `tj3DecompressHeader` applies no
+    // pixel ceiling (`turbojpeg.c:1872-1927`), and since P4-142 neither does
+    // ours. `Decompress16` is, since P4-199.
     let after_reset = run_program(
         &inputs,
         &[
             Op::Reset,
             Op::Decompress,
             Op::InspectHeader,
-            Op::DecompressHeader,
+            Op::SelectInput {
+                index: FUZZ_INPUT_LOSSLESS16,
+            },
+            Op::Decompress16,
         ],
         &handle_only,
     );
     assert!(!after_reset.skipped_oversize, "the pre-parse is off");
-    assert_eq!(after_reset.executed, 4);
+    assert_eq!(after_reset.executed, 5);
     assert_eq!(
         after_reset.decode_errors, 3,
         "a handle created by Reset must carry the same ceiling as the first \
          one and as every reference"
+    );
+}
+
+/// Issue #620: with the pre-parse off, the handle's `TJPARAM_MAXPIXELS` alone
+/// refuses an over-ceiling frame at 12 and at 16 bits. Before P4-199 both
+/// entry points read nothing from the handle, the two decodes succeeded, and
+/// the pre-parse was the only thing standing between a 16-bit SOF and its
+/// allocation.
+#[test]
+fn the_handle_ceiling_alone_refuses_an_oversize_precision_frame() {
+    let inputs: Vec<&[u8]> = fuzz_inputs(BUILTIN_INPUTS[0]);
+    // Below the 16-bit built-in's 64 pixels and the 12-bit one's 33,823.
+    let handle_only: Limits = Limits {
+        max_pixels: 32,
+        prefilter_headers: false,
+    };
+    let report = run_program(
+        &inputs,
+        &[
+            Op::SelectInput {
+                index: FUZZ_INPUT_LOSSLESS16,
+            },
+            Op::Decompress16,
+            Op::SelectInput {
+                index: FUZZ_INPUT_LOSSY12,
+            },
+            Op::Decompress12,
+            Op::DecompressHeader,
+        ],
+        &handle_only,
+    );
+    assert!(!report.skipped_oversize, "the pre-parse is off");
+    assert_eq!(report.executed, 5);
+    assert_eq!(
+        report.decode_errors, 2,
+        "Decompress16 and Decompress12 must refuse under the handle ceiling; \
+         the header read must not"
     );
 }
 

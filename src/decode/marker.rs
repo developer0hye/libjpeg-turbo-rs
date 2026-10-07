@@ -163,6 +163,9 @@ pub struct MarkerReader<'a> {
     /// Parse-time SOS cap (issue #355): bounds ScanInfo buffering while
     /// markers are read, before any decode-time limit can apply.
     scan_cap: usize,
+    /// Stop at the first SOS whatever the frame type, as `jpeg_read_header`
+    /// does. Off by default: a decode needs every scan located.
+    stop_at_first_sos: bool,
 }
 
 impl<'a> MarkerReader<'a> {
@@ -172,7 +175,16 @@ impl<'a> MarkerReader<'a> {
             pos: 0,
             marker_save_config: MarkerSaveConfig::None,
             scan_cap: DEFAULT_PARSE_SCAN_CAP,
+            stop_at_first_sos: false,
         }
+    }
+
+    /// Stop the walk at the first SOS even for a progressive or
+    /// non-interleaved frame — the header-only read `tj3DecompressHeader`
+    /// performs through `jpeg_read_header` (P4-142). The resulting metadata
+    /// holds one scan and is fit for describing the frame, not for decoding.
+    pub(crate) fn set_stop_at_first_sos(&mut self, stop: bool) {
+        self.stop_at_first_sos = stop;
     }
 
     /// Override the parse-time SOS cap. The default (8192) bounds
@@ -446,8 +458,9 @@ impl<'a> MarkerReader<'a> {
                         && frame
                             .as_ref()
                             .is_some_and(|f| scan_comp_count < f.components.len());
-                    if !is_progressive && !is_non_interleaved_baseline {
-                        // Interleaved baseline: single scan, stop here
+                    if self.stop_at_first_sos || (!is_progressive && !is_non_interleaved_baseline) {
+                        // Interleaved baseline: single scan, stop here. A
+                        // header-only read stops here for every frame type.
                         break;
                     }
 

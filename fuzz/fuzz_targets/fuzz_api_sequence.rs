@@ -39,9 +39,8 @@ use libfuzzer_sys::fuzz_target;
 /// Those targets decode **once** per input, so 1 MP is a sensible per-input
 /// budget for them. This one runs a *program*: with `MAX_OPS = 16`, every
 /// decode-family operation also builds a reference handle and repeats the
-/// call, `Op::DecompressHeader` is a full decode in this port (P4-142) and
-/// `Op::Compress` replays the last publishing decode — so a single input can
-/// ask for well over thirty full decodes. At 1 MP against libFuzzer's
+/// call, and `Op::Compress` replays the last publishing decode — so a single
+/// input can ask for well over thirty full decodes. At 1 MP against libFuzzer's
 /// `-timeout=30` (`.github/workflows/fuzz-smoke.yml`) that is a hang report
 /// whose cause is the harness rather than the library, and the interesting
 /// state here is in the *ordering*, not in the resolution. 256 x 256 keeps

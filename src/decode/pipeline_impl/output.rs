@@ -112,19 +112,13 @@ impl<'a> Decoder<'a> {
         let height: usize = frame.height as usize;
         self.limits.check_frame(width, height)?;
         let total_pixels: u64 = (width as u64) * (height as u64);
-        if self.metadata.scans.len() > self.limits.max_scans {
-            return Err(JpegError::LimitExceeded {
-                what: "scan count",
-                actual: self.metadata.scans.len() as u64,
-                limit: self.limits.max_scans as u64,
-            });
-        }
+        self.limits.check_scans(self.metadata.scans.len())?;
         // Estimated decode memory: output buffer + component planes.
         // Enforced here so the sizing and raw paths share it (stop-gate
         // review on #355); the estimate intentionally includes the
         // packed-output term even for decode_raw — one conservative
         // model, one enforcement point.
-        if let Some(max_mem) = self.limits.max_memory {
+        if self.limits.max_memory.is_some() {
             let nc = frame.components.len();
             let out_bpp = self
                 .output_format
@@ -183,13 +177,7 @@ impl<'a> Decoder<'a> {
             let total_estimated: u64 = total_pixels
                 * (out_bpp as u64 + nc as u64 + upsample_expansion_planes as u64)
                 + coeff_bytes;
-            if total_estimated > max_mem {
-                return Err(JpegError::LimitExceeded {
-                    what: "estimated decode memory",
-                    actual: total_estimated,
-                    limit: max_mem,
-                });
-            }
+            self.limits.check_memory(total_estimated)?;
         }
         Ok(())
     }

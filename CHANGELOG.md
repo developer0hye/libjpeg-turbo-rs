@@ -17,6 +17,18 @@ and `git log` between tags.
   `decode`, `encode`, `simd` and `transform` module paths are outside the
   supported API and will be narrowed (`docs/PUBLIC_API_REVIEW.md`).
 
+- **`precision::decompress_12bit_with_limits` and
+  `decompress_16bit_with_limits`** decode under a caller's `DecodeLimits`
+  (P4-199, #620). `max_scans` bounds the header walk; the width, height and
+  pixel caps are checked against the SOF; `max_memory` is checked against the
+  path's own planes and output before the first is allocated. Until now a
+  Rust caller had no way to give a 12- or 16-bit decode a budget.
+  `decompress_12bit` / `decompress_16bit` keep `DecodeLimits::default()`.
+- **`docs/STABILITY.md` "Limits and how they are applied" / "What the memory
+  budget covers"** document every limit and exactly which allocations the
+  `max_memory` / `TJPARAM_MAXMEMORY` estimate counts on each decode path and
+  which it does not; README "Resource limits" points there (#635).
+
 - **`Decoder::icc_profile`, `exif_data`, `xmp_data` and `iptc_data`** read
   metadata from the parsed header without decoding pixels, returning the same
   bytes a decode reports (#637).
@@ -243,6 +255,49 @@ and `git log` between tags.
   never public API, and the gap never shipped: published 0.8.0 exposed the
   unchecked kernel more broadly, which the P4-135 row of
   `docs/security/AFFECTED_VERSIONS.md` already covers.
+
+- **Breaking (behaviour): every TurboJPEG decompress publishes what
+  `setDecompParameters` publishes** (P4-199 #620, P4-200 #621, P4-203 #625).
+  `TjHandle::decompress` / `tj3Decompress8` published eight parameters and the
+  12/16-bit entry points three; all of them, and `decompress_header` /
+  `tj3DecompressHeader`, now publish the thirteen upstream writes
+  (`turbojpeg.c:514-536`) with the frame's values (the YUV decompressors
+  still publish nothing, P4-225), cross-validated against
+  stock TurboJPEG 3.2.0 (`crates/libjpeg-turbo-rs-capi/tests/capi_decomp_parameters.rs`).
+  Callers see: `TJPARAM_PROGRESSIVE`, `ARITHMETIC`, `LOSSLESS`, `LOSSLESSPSV`
+  and `LOSSLESSPT` set from the stream — `LOSSLESSPT` is the first scan's
+  `Al`, 1 for a default progressive script — so a compress that follows on the
+  same handle inherits them, as upstream's does; `JPEGWIDTH` / `JPEGHEIGHT`
+  are the SOF's, not the scaled or cropped output's; `PRECISION` is the SOF's
+  (12 for a 12-bit frame decoded to 8 bits, so routing on it picks
+  `tj3Decompress12`); `SUBSAMP` follows upstream's `getSubsamp`; an
+  unclassifiable colour space publishes `TJCS_DEFAULT` (-1) instead of YCbCr;
+  a fresh handle reports `JPEGWIDTH` = `JPEGHEIGHT` = -1 instead of 0. The
+  parameters and the ICC profile are published right after the header parse,
+  so a decode refused afterwards — by `TJPARAM_MAXPIXELS`, a crop, or corrupt
+  data — has published them, as upstream's has. `tj3Decompress8` no longer
+  overwrites the published `TJPARAM_COLORSPACE` with the caller's previous
+  value.
+- **Breaking (behaviour): `tj3Decompress12` / `tj3Decompress16` honour the
+  handle's limits** (P4-199, #620). `TJPARAM_MAXPIXELS`, `TJPARAM_MAXMEMORY`
+  and `TJPARAM_SCANLIMIT` did not reach `TjHandle::decompress_12bit` /
+  `decompress_16bit`, which decoded under `DecodeLimits::default()`; a 16-bit
+  lossless SOF of 65500 x 32000 was a 4 GB allocation any sane
+  `TJPARAM_MAXPIXELS` was meant to exclude. Both now refuse with
+  `JpegError::LimitExceeded`, as upstream's shared decompress body does.
+- **Breaking (behaviour): `tj3DecompressHeader` reads only the header**
+  (P4-142). `TjHandle::decompress_header` decoded the whole image and threw it
+  away. It now parses markers up to the first SOS and no further, like
+  `jpeg_read_header`: it succeeds on a stream whose entropy data is corrupt
+  or whose later scans are missing, reads a 16-bit lossless header (which the
+  8-bit decode it used to run refused), applies neither `TJPARAM_MAXPIXELS`
+  nor `TJPARAM_SCANLIMIT` (upstream's applies neither; the decompress that
+  follows does), and refuses — publishing nothing — a frame libjpeg refuses
+  inside `jpeg_read_header` (a dimension above 65,500, a lossy precision
+  other than 8 or 12), and, after publishing, one whose colour space
+  TurboJPEG cannot name, as upstream's does. Every decompress entry point
+  reads the header the same way first, so a stream over `TJPARAM_SCANLIMIT`
+  is now refused after publishing, as upstream's is.
 - An allocator refusal during a decode is reported as
   `JpegError::AllocationFailed` instead of aborting the process (P4-209,
   #632). `decompress` / `Decoder::decode_image` allocated their destination

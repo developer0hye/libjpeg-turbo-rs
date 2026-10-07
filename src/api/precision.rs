@@ -5,7 +5,7 @@
 ///   used in medical imaging (DICOM).
 /// - 16-bit (J16SAMPLE / u16): lossless-only (SOF3) with values 0-65535.
 use crate::common::error::{JpegError, Result};
-use crate::common::types::Subsampling;
+use crate::common::types::{DecodeLimits, Subsampling};
 use crate::decode::bitstream::BitReader;
 use crate::decode::huffman;
 use crate::decode::lossless;
@@ -842,21 +842,73 @@ fn fancy_upsample_12bit(
     }
 }
 
-/// Decompress JPEG to 12-bit sample data.
+/// Bytes [`decompress_12bit_with_limits`] allocates from the frame geometry:
+/// one `i16` plane per component at its padded iMCU size, one full-size
+/// `i16` plane per component after upsampling, and the interleaved `i16`
+/// result. Per-block scratch and the compressed input are not counted.
+fn estimated_12bit_decode_bytes(
+    width: usize,
+    height: usize,
+    plane_widths: &[usize],
+    plane_heights: &[usize],
+) -> u64 {
+    // Plain `u64` arithmetic cannot overflow here: the SOF's dimensions are
+    // `u16`, a plane is at most four iMCUs (32 samples) wider and taller, and
+    // there are at most four components — about 2^39 bytes at the extreme.
+    let sample_bytes: u64 = core::mem::size_of::<i16>() as u64;
+    let component_planes: u64 = plane_widths
+        .iter()
+        .zip(plane_heights)
+        .map(|(&w, &h)| w as u64 * h as u64)
+        .sum();
+    let full_plane: u64 = width as u64 * height as u64;
+    let components: u64 = plane_widths.len() as u64;
+    // Upsampled planes plus the interleaved result: two full-size images.
+    (component_planes + 2 * full_plane * components) * sample_bytes
+}
+
+/// Bytes [`decompress_16bit_with_limits`] allocates from the frame geometry:
+/// the `u16` output, plus — for more than one component — one full-size
+/// `u16` plane per component it is interleaved from. Per-row scratch and the
+/// compressed input are not counted.
+fn estimated_16bit_decode_bytes(width: usize, height: usize, components: usize) -> u64 {
+    // As above: `u16` dimensions and at most four components fit `u64` easily.
+    let sample_bytes: u64 = core::mem::size_of::<u16>() as u64;
+    let image_samples: u64 = width as u64 * height as u64 * components as u64;
+    let planes: u64 = if components > 1 { image_samples } else { 0 };
+    (image_samples + planes) * sample_bytes
+}
+
 /// Decompress a 12-bit JPEG (SOF1 extended sequential) to i16 samples.
 ///
 /// Handles arbitrary chroma subsampling (4:4:4, 4:2:2, 4:2:0, etc.)
 /// by decoding at component resolution and upsampling to full size.
+///
+/// Applies [`DecodeLimits::default`]; use [`decompress_12bit_with_limits`]
+/// to bound the decode with a caller's budget.
 pub fn decompress_12bit(data: &[u8]) -> Result<Image12> {
+    decompress_12bit_with_limits(data, &DecodeLimits::default())
+}
+
+/// [`decompress_12bit`] under a caller's [`DecodeLimits`] (P4-199, #620).
+///
+/// `max_scans` bounds the header walk itself; `max_width`, `max_height` and
+/// `max_pixels` are checked against the SOF before anything is sized from
+/// it; `max_memory` is checked against the component planes, the upsampled
+/// planes and the interleaved result — two bytes a sample each — before the
+/// first of them is allocated. Exceeding any of them is
+/// [`JpegError::LimitExceeded`].
+pub fn decompress_12bit_with_limits(data: &[u8], limits: &DecodeLimits) -> Result<Image12> {
     let mut reader = MarkerReader::new(data);
+    reader.set_scan_cap(limits.max_scans);
     let metadata = reader.read_markers()?;
-    // Default frame-dimension guard (issue #355 review HIGH-1): this
-    // entry point has no limits API, so the permissive defaults bound
-    // the header bomb before block buffers are sized from the SOF.
-    crate::common::types::DecodeLimits::default().check_frame(
+    // Frame-dimension guard (issue #355 review HIGH-1): bounds the header
+    // bomb before block buffers are sized from the SOF.
+    limits.check_frame(
         metadata.frame.width as usize,
         metadata.frame.height as usize,
     )?;
+    limits.check_scans(metadata.scans.len())?;
 
     let frame = &metadata.frame;
     let width: usize = frame.width as usize;
@@ -970,6 +1022,13 @@ pub fn decompress_12bit(data: &[u8]) -> Result<Image12> {
         .collect();
     let comp_plane_w: Vec<usize> = comp_h_samp.iter().map(|&h| mcus_x * h * 8).collect();
     let comp_plane_h: Vec<usize> = comp_v_samp.iter().map(|&v| mcus_y * v * 8).collect();
+    // Every buffer below is sized from the SOF; refuse before the first.
+    limits.check_memory(estimated_12bit_decode_bytes(
+        width,
+        height,
+        &comp_plane_w,
+        &comp_plane_h,
+    ))?;
     let entropy_data: &[u8] = &data[metadata.entropy_data_offset..];
     let mut bit_reader: BitReader<'_> = BitReader::new(entropy_data);
     let level_shift: i32 = 2048;
@@ -1429,16 +1488,29 @@ fn lossless_dc_tables<'a>(
 }
 
 /// Decompress lossless JPEG to 16-bit sample data.
+///
+/// Applies [`DecodeLimits::default`]; use [`decompress_16bit_with_limits`]
+/// to bound the decode with a caller's budget.
 pub fn decompress_16bit(data: &[u8]) -> Result<Image16> {
+    decompress_16bit_with_limits(data, &DecodeLimits::default())
+}
+
+/// [`decompress_16bit`] under a caller's [`DecodeLimits`] (P4-199, #620).
+///
+/// Same checks, in the same order, as [`decompress_12bit_with_limits`];
+/// `max_memory` is checked against the `u16` output and, for a
+/// multi-component frame, the planes it is interleaved from.
+pub fn decompress_16bit_with_limits(data: &[u8], limits: &DecodeLimits) -> Result<Image16> {
     let mut reader = MarkerReader::new(data);
+    reader.set_scan_cap(limits.max_scans);
     let metadata = reader.read_markers()?;
-    // Default frame-dimension guard (issue #355 review HIGH-1): this
-    // entry point has no limits API, so the permissive defaults bound
-    // the header bomb before block buffers are sized from the SOF.
-    crate::common::types::DecodeLimits::default().check_frame(
+    // Frame-dimension guard (issue #355 review HIGH-1): bounds the header
+    // bomb before block buffers are sized from the SOF.
+    limits.check_frame(
         metadata.frame.width as usize,
         metadata.frame.height as usize,
     )?;
+    limits.check_scans(metadata.scans.len())?;
 
     let frame = &metadata.frame;
     let width = frame.width as usize;
@@ -1465,6 +1537,8 @@ pub fn decompress_16bit(data: &[u8]) -> Result<Image16> {
         )));
     }
     let dc_tables = lossless_dc_tables(scan, &metadata.dc_huffman_tables, nc)?;
+    // Every buffer below is sized from the SOF; refuse before the first.
+    limits.check_memory(estimated_16bit_decode_bytes(width, height, nc))?;
     let entropy = &data[metadata.entropy_data_offset..];
     let mut br = BitReader::new(entropy);
     if nc == 1 {

@@ -16,9 +16,9 @@
 //!
 //! Behavior contract:
 //! - Returns 0 on success, -1 on failure.
-//! - On success the handle's `Width`/`Height`/`Precision`/`ColorSpace`/
-//!   `Subsampling` get/set read values are updated to reflect the just-
-//!   decoded image.
+//! - Once the header is read — on success, and on a failure after it — the
+//!   handle holds the thirteen parameters upstream's `setDecompParameters`
+//!   publishes (`turbojpeg.c:514-536`), all of them the frame header's.
 
 use std::ffi::{c_int, c_void};
 
@@ -89,36 +89,20 @@ pub unsafe extern "C" fn tj3Decompress8(
             let jpeg: &[u8] = unsafe { std::slice::from_raw_parts(jpeg_buf, jpeg_size) };
 
             // The Rust-side `decompress` returns an `Image` with a dense row-
-            // major data buffer in the caller-requested pixel format. It also
-            // updates the handle's `Width`/`Height`/etc. as `tj3Decompress*` must.
-            //
-            // We mirror the C contract by overriding the handle's ColorSpace so
-            // the Rust decoder yields the requested `PixelFormat`.
-            let requested_cs: i32 = match pf {
-                PixelFormat::Grayscale => 2, // TJCS_GRAY
-                PixelFormat::Cmyk => 3,
-                _ => 0, // TJCS_RGB for all RGB/BGR/... variants
-            };
-            // Preserve the caller's existing ColorSpace setting to restore later.
-            let saved_cs: i32 = inst.inner.get(libjpeg_turbo_rs::tj3::TjParam::ColorSpace);
-            let _ = inst
-                .inner
-                .set(libjpeg_turbo_rs::tj3::TjParam::ColorSpace, requested_cs);
-
+            // major data buffer, and publishes the thirteen header parameters
+            // `setDecompParameters` writes (`turbojpeg.c:514-536`), the JPEG
+            // colour space among them. It does not read TJPARAM_COLORSPACE, so
+            // nothing is overridden around the call: an earlier version set it
+            // to the requested format's and restored the caller's value
+            // afterwards, which overwrote the published colour space with a
+            // stale one (P4-199, #620).
             let img = match inst.inner.decompress(jpeg) {
                 Ok(i) => i,
                 Err(e) => {
-                    // Restore color space before returning.
-                    let _ = inst
-                        .inner
-                        .set(libjpeg_turbo_rs::tj3::TjParam::ColorSpace, saved_cs);
                     inst.set_error(format!("tj3Decompress8: {e}"), TJERR_FATAL);
                     return -1;
                 }
             };
-            let _ = inst
-                .inner
-                .set(libjpeg_turbo_rs::tj3::TjParam::ColorSpace, saved_cs);
 
             // Reconcile the decoder's output pixel format with the caller's
             // request. The Rust `decompress()` selects based on ColorSpace, but
