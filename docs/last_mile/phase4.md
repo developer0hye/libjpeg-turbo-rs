@@ -13807,11 +13807,19 @@ ignored too by the probe that measured this item, and fixed with the same
 code (`turbojpeg.c:3029-3037`). A transform still publishes nothing, as
 upstream's does not call `setDecompParameters`.
 
-The precedence work exposed one more divergence, fixed here: the core
+The precedence work exposed two more divergences in the core transform,
+fixed here because `tj3Transform` cannot match stock without them.
 `TransformOptions::perfect` tested both edges for every rotation, so
 `-perfect -rotate 90` on a frame whose width alone is ragged was refused
-where jpegtran and `tj3Transform` accept it. It now follows
-`jtransform_perfect_transform`, with an 8x8 iMCU for a one-component output.
+where jpegtran and `tj3Transform` accept it; it now follows
+`jtransform_perfect_transform`, with an 8x8 iMCU for a one-component output
+(grayscale forced only on a YCbCr source, classified from the header). And a
+`restart_interval` of 0 copied the source's DRI into the output, contrary to
+the field's own documentation and to both `jpegtran` and `tj3Transform`,
+which drop it (`jpeg_copy_critical_parameters` does not copy
+`restart_interval`; measured on `photo_640x480_420_rst.jpg`). A crop region
+`jtransform_request_workspace` refuses is reported as "Invalid crop request"
+before the memory and scan limits, as upstream reports it.
 
 Proof: `examples/transform_parameters_oracle.c` traces 16 cases per fixture
 plus 14 `TJPARAM_MAXMEMORY` boundary cases on a 1024x1024 4:4:4 source
@@ -13823,7 +13831,11 @@ matches stock 3.2.0 verbatim
 `transform_honours_maxpixels_and_scanlimit`, `transform_honours_maxmemory`
 and `transform_honours_the_output_parameters` fail on the previous code.
 `tests/transform_perfect_c_parity.rs` compares all seven `-perfect`
-operations, with and without `-grayscale`, against `jpegtran` byte for byte.
+operations, with and without `-grayscale`, against `jpegtran` byte for byte,
+plus the RGB-colour-space grayscale case;
+`transform_drops_the_source_restart_interval` and
+`an_invalid_crop_outranks_maxmemory` pin the last two (the oracle's `rst`
+label also traces the DRI drop byte-exact).
 
 Not covered here: the handle's `TJPARAM_SAVEMARKERS` level and ICC profile,
 filed as [P4-235](#p4-235-tj3transform-ignores-tjparam_savemarkers-levels-013-and-the-handles-icc-profile--open).

@@ -19,12 +19,12 @@ mod helpers;
 
 use libjpeg_turbo_rs_capi::inner::{compress, PixelFormat, Subsampling};
 use libjpeg_turbo_rs_capi::transform::{
-    tj3Transform, TjTransform, TJXOPT_ARITHMETIC, TJXOPT_GRAY, TJXOPT_PERFECT, TJXOPT_PROGRESSIVE,
-    TJXOP_HFLIP, TJXOP_NONE, TJXOP_ROT180, TJXOP_ROT90, TJXOP_TRANSPOSE, TJXOP_TRANSVERSE,
-    TJXOP_VFLIP,
+    tj3Transform, TjTransform, TJXOPT_ARITHMETIC, TJXOPT_CROP, TJXOPT_GRAY, TJXOPT_PERFECT,
+    TJXOPT_PROGRESSIVE, TJXOP_HFLIP, TJXOP_NONE, TJXOP_ROT180, TJXOP_ROT90, TJXOP_TRANSPOSE,
+    TJXOP_TRANSVERSE, TJXOP_VFLIP,
 };
 use libjpeg_turbo_rs_capi::{
-    tj3DecompressHeader, tj3Destroy, tj3Free, tj3Get, tj3Init, tj3Set, TjRegion,
+    tj3DecompressHeader, tj3Destroy, tj3Free, tj3Get, tj3GetErrorStr, tj3Init, tj3Set, TjRegion,
 };
 
 const TJINIT_DECOMPRESS: c_int = 1;
@@ -44,7 +44,7 @@ const TJPARAM_MAXPIXELS: c_int = 24;
 /// No parameter: `run`'s `param < 0`.
 const NONE: (c_int, c_int) = (-1, 0);
 
-const FIXTURES: [(&str, &[u8]); 3] = [
+const FIXTURES: [(&str, &[u8]); 4] = [
     (
         "base",
         include_bytes!("../../../tests/fixtures/photo_64x64_420.jpg"),
@@ -56,6 +56,11 @@ const FIXTURES: [(&str, &[u8]); 3] = [
     (
         "gray",
         include_bytes!("../../../tests/fixtures/gray_8x8.jpg"),
+    ),
+    // Carries a DRI of 200 MCUs, which no transform output inherits.
+    (
+        "rst",
+        include_bytes!("../../../tests/fixtures/photo_640x480_420_rst.jpg"),
     ),
 ];
 
@@ -360,7 +365,7 @@ fn transform_applies_what_stock_turbojpeg_applies() {
 #[test]
 fn transform_honours_maxpixels_and_scanlimit() {
     let trace: String = our_trace();
-    for label in ["base", "prog", "gray", "big"] {
+    for label in ["base", "prog", "gray", "rst", "big"] {
         assert_eq!(rc_of(line_for(&trace, label, "maxpixels_under")), "rc=-1");
         assert_eq!(rc_of(line_for(&trace, label, "maxpixels_at")), "rc=0");
         assert_eq!(rc_of(line_for(&trace, label, "maxpixels_perfect")), "rc=-1");
@@ -420,6 +425,106 @@ fn transform_honours_the_output_parameters() {
     assert_eq!(output("arithmetic_optimize"), output("arithmetic"));
     for case_name in ["optimize", "restartblocks"] {
         assert_ne!(output(case_name), output("plain"), "{case_name}");
+    }
+}
+
+/// Issue #655 (codex review): a transform's output has a restart interval
+/// only when the handle asks for one. `jpeg_copy_critical_parameters` does
+/// not copy `restart_interval`, so stock drops the source's DRI; the port
+/// kept it.
+#[test]
+fn transform_drops_the_source_restart_interval() {
+    let source: &[u8] = FIXTURES[3].1;
+    let restart_interval = |jpeg: &[u8]| -> Option<u16> {
+        let mut at: usize = 2;
+        while at + 4 < jpeg.len() && jpeg[at] == 0xFF && jpeg[at + 1] != 0xDA {
+            let length: usize = usize::from(jpeg[at + 2]) << 8 | usize::from(jpeg[at + 3]);
+            if jpeg[at + 1] == 0xDD {
+                return Some(u16::from(jpeg[at + 4]) << 8 | u16::from(jpeg[at + 5]));
+            }
+            at += 2 + length;
+        }
+        None
+    };
+    assert_eq!(restart_interval(source), Some(200));
+    for (blocks, expected) in [(0, None), (4, Some(4))] {
+        let output: Vec<u8> = transform_once(source, TJPARAM_RESTARTBLOCKS, blocks, no_crop())
+            .expect("the transform succeeds");
+        assert_eq!(
+            restart_interval(&output),
+            expected,
+            "RESTARTBLOCKS={blocks}"
+        );
+    }
+}
+
+/// Issue #655 (codex review): a crop region `jtransform_request_workspace`
+/// refuses is reported before `TJPARAM_MAXMEMORY`, as upstream validates it
+/// before `jpeg_read_coefficients` realizes the arrays the budget bounds.
+#[test]
+fn an_invalid_crop_outranks_maxmemory() {
+    let crop: TjTransform = TjTransform {
+        r: TjRegion {
+            x: 1024,
+            y: 0,
+            w: 16,
+            h: 16,
+        },
+        options: TJXOPT_CROP,
+        ..no_crop()
+    };
+    let message: String = transform_once(&big(), TJPARAM_MAXMEMORY, 1, crop).expect_err("refused");
+    assert_eq!(message, "Invalid crop request");
+}
+
+fn no_crop() -> TjTransform {
+    TjTransform {
+        r: TjRegion {
+            x: 0,
+            y: 0,
+            w: 0,
+            h: 0,
+        },
+        op: TJXOP_NONE,
+        options: 0,
+        data: std::ptr::null_mut(),
+        custom_filter: None,
+    }
+}
+
+/// One `tj3Transform` with one parameter set: the output, or the error string.
+fn transform_once(
+    jpeg: &[u8],
+    param: c_int,
+    value: c_int,
+    transform: TjTransform,
+) -> Result<Vec<u8>, String> {
+    let handle: *mut c_void = tj3Init(TJINIT_TRANSFORM);
+    assert!(!handle.is_null());
+    let mut dst: *mut u8 = std::ptr::null_mut();
+    let mut dst_size: usize = 0;
+    // SAFETY: live handle; one transform, one output slot, freed below.
+    unsafe {
+        tj3Set(handle, param, value);
+        let rc: c_int = tj3Transform(
+            handle,
+            jpeg.as_ptr(),
+            jpeg.len(),
+            1,
+            &mut dst,
+            &mut dst_size,
+            &transform,
+        );
+        let result: Result<Vec<u8>, String> = if rc == 0 {
+            Ok(std::slice::from_raw_parts(dst, dst_size).to_vec())
+        } else {
+            Err(std::ffi::CStr::from_ptr(tj3GetErrorStr(handle))
+                .to_string_lossy()
+                .into_owned())
+        };
+        tj3Free(dst.cast::<c_void>());
+        tj3Destroy(handle);
+        result
     }
 }
 

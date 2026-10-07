@@ -376,6 +376,33 @@ fn is_perfect(op: TransformOp, width: usize, height: usize, imcu: (usize, usize)
     }
 }
 
+/// Whether `jtransform_request_workspace` refuses `opts`' crop region for a
+/// `width` x `height` source (`transupp.c:1705-1757`). The region is in the
+/// transformed frame. Extending past the frame is allowed only for
+/// `TJXOP_NONE`, and only when the offset leaves the original image inside it.
+fn crop_is_refused(opts: &TransformOptions, width: usize, height: usize) -> bool {
+    let Some(crop) = opts.crop else {
+        return false;
+    };
+    let transposed: bool = matches!(
+        opts.op,
+        TransformOp::Transpose | TransformOp::Transverse | TransformOp::Rot90 | TransformOp::Rot270
+    );
+    let (out_width, out_height): (usize, usize) = if transposed {
+        (height, width)
+    } else {
+        (width, height)
+    };
+    let axis_refused = |offset: usize, extent: usize, frame: usize| -> bool {
+        if extent > frame {
+            opts.op != TransformOp::None || offset >= extent || offset > extent - frame
+        } else {
+            offset >= frame || extent == 0 || offset > frame - extent
+        }
+    };
+    axis_refused(crop.x, crop.width, out_width) || axis_refused(crop.y, crop.height, out_height)
+}
+
 /// Bytes in one whole-image coefficient array: `blocks_wide` x `blocks_high`
 /// `JBLOCK`s of 64 `JCOEF`s.
 fn coefficient_bytes(blocks_wide: usize, blocks_high: usize) -> u64 {
@@ -544,6 +571,16 @@ fn source_refusal(
         if !is_perfect(opts.op, width, height, imcu) {
             return Some(String::from("tj3Transform(): Transform is not perfect"));
         }
+    }
+    // `jtransform_request_workspace` also validates each crop against the
+    // transformed frame before `jpeg_read_coefficients` runs
+    // (`transupp.c:1705-1757`, `JERR_BAD_CROP_SPEC`), so a crop it refuses
+    // outranks the memory and scan limits below.
+    if batch
+        .iter()
+        .any(|opts| crop_is_refused(opts, width, height))
+    {
+        return Some(String::from("Invalid crop request"));
     }
 
     let max_memory: c_int = inst.inner.get(TjParam::MaxMemory);

@@ -690,3 +690,34 @@ fn oracle_source_is_present() {
         source.display()
     );
 }
+
+/// FNV-1a over `bytes`, as the probe that measured the stock values below.
+fn fnv1a(bytes: &[u8]) -> u64 {
+    bytes
+        .iter()
+        .fold(14_695_981_039_346_656_037, |hash: u64, &byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(1_099_511_628_211)
+        })
+}
+
+/// P4-225 review: the YUV path takes `TJPARAM_FASTDCT` from the handle, as
+/// upstream's planar body sets `dct_method` from it (`turbojpeg.c:2285`). The
+/// two digests are stock 3.2.0's for the packed 4:2:0 planes of
+/// `photo_64x64_420.jpg` at align 1, in a zeroed 8192-byte buffer.
+#[test]
+fn the_yuv_decompressors_honour_fastdct() {
+    const TJPARAM_FASTDCT: c_int = 10;
+    let photo: &[u8] = include_bytes!("../../../tests/fixtures/photo_64x64_420.jpg");
+    for (fast, digest) in [(0, 0x661c_dcec_9778_cb4e_u64), (1, 0x87da_26b1_10e2_320c)] {
+        let handle: *mut c_void = instance();
+        let mut yuv: Vec<u8> = vec![0; 8192];
+        // SAFETY: live handle; 8192 bytes hold the 6144-byte packed planes.
+        let rc: c_int = unsafe {
+            tj3Set(handle, TJPARAM_FASTDCT, fast);
+            tj3DecompressToYUV8(handle, photo.as_ptr(), photo.len(), yuv.as_mut_ptr(), 1)
+        };
+        destroy(handle);
+        assert_eq!(rc, 0);
+        assert_eq!(fnv1a(&yuv), digest, "FASTDCT={fast}");
+    }
+}

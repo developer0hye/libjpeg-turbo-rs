@@ -341,7 +341,9 @@ and `git log` between tags.
   incompatible"). `tj3DecompressToYUVPlanes8` now refuses a NULL
   `dstPlanes[0]` at entry, before the header read, as upstream does. New
   Rust API: `TjHandle::decompress_header_info` and
-  `TjHandle::decompress_to_yuv_planes`, which refuses a frame of more than
+  `TjHandle::decompress_to_yuv_planes`, which also applies
+  `TJPARAM_FASTDCT` (byte-exact against stock) and
+  `TJPARAM_STOPONWARNING`, which refuses a frame of more than
   three components where the handle-free `yuv::decompress_to_yuv_planes`
   returns four planes.
 - **Breaking (behaviour): `tj3Transform` applies the handle's limits and
@@ -358,8 +360,14 @@ and `git log` between tags.
   Every transform's arguments are now validated before any output is
   produced. `TransformOptions::perfect` follows
   `jtransform_perfect_transform`: a 90- or 270-degree rotation needs only the
-  edge it moves to be whole iMCUs, and a grayscale output uses an 8x8 iMCU,
-  so `-perfect` transforms jpegtran accepts are no longer refused.
+  edge it moves to be whole iMCUs, and a grayscale output of a YCbCr source
+  uses an 8x8 iMCU, so `-perfect` transforms jpegtran accepts are no longer
+  refused. `transform_jpeg_with_options` with `restart_interval` 0 no longer
+  copies the source's DRI into the output — its own documentation said 0
+  disables restart markers, and `jpegtran` (without `-restart`) and
+  `tj3Transform` both drop it, because `jpeg_copy_critical_parameters` does not
+  copy `restart_interval`. A crop region upstream refuses is reported as
+  "Invalid crop request" before any limit.
 - An allocator refusal during a decode is reported as
   `JpegError::AllocationFailed` instead of aborting the process (P4-209,
   #632). `decompress` / `Decoder::decode_image` allocated their destination

@@ -780,11 +780,19 @@ pub fn transform_jpeg_with_options(data: &[u8], options: &TransformOptions) -> R
     // below keeps its own, wider alignment flags. Testing those here refused
     // `-perfect -rotate 90` on a frame whose width alone was ragged, which
     // jpegtran and tj3Transform accept (P4-227). Upstream forces one component
-    // only for a YCbCr source; `JpegCoefficients` does not record the colour
-    // space, so a three-component source under `grayscale` is taken as YCbCr.
+    // only for a YCbCr source (`force_grayscale && jpeg_color_space ==
+    // JCS_YCbCr`), classified from the header as libjpeg classifies it.
     if options.perfect {
-        let one_component: bool =
-            coeffs.components.len() == 1 || (options.grayscale && coeffs.components.len() == 3);
+        let forces_one_component: bool = options.grayscale
+            && coeffs.components.len() == 3
+            && crate::decode::pipeline::Decoder::new_header_only(
+                data,
+                crate::common::types::DecodeLimits::default(),
+            )
+            .is_ok_and(|header| {
+                header.jpeg_color_space() == crate::common::types::ColorSpace::YCbCr
+            });
+        let one_component: bool = coeffs.components.len() == 1 || forces_one_component;
         let (perfect_imcu_w, perfect_imcu_h): (usize, usize) = if one_component {
             (8, 8)
         } else {
@@ -1197,9 +1205,13 @@ pub fn transform_jpeg_with_options(data: &[u8], options: &TransformOptions) -> R
         return Ok(Vec::new());
     }
 
-    // Apply restart interval: preserve source RI unless user explicitly overrides.
-    // Matches C jpegtran behavior — source restart interval flows through
-    // transforms unchanged. Only overwrite when explicitly requested.
+    // Apply restart interval: the output has one only when asked for. The
+    // source's never carries over — `jpeg_copy_critical_parameters` does not
+    // copy `restart_interval`, so `jpegtran` without `-restart` and
+    // `tj3Transform` with `TJPARAM_RESTART*` at 0 both drop a source DRI
+    // (measured on `photo_640x480_420_rst.jpg`, DRI 200, against stock 3.2.0
+    // and 3.1.4; P4-227). This used to preserve it, on the belief that
+    // jpegtran did.
     //
     // When `restart_in_rows == true`, the user-supplied value is in MCU rows.
     // For sequential/optimized writers the DRI is a single scan-wide value,
@@ -1229,18 +1241,7 @@ pub fn transform_jpeg_with_options(data: &[u8], options: &TransformOptions) -> R
         } else {
             coeffs.restart_interval = options.restart_interval;
         }
-    }
-    // Source RI carried over from the input JPEG can become invalid after
-    // dimension-swapping transforms with trim, since the output MCU grid is
-    // fundamentally different. Clear to avoid producing truncated entropy data.
-    let swaps_dimensions: bool = matches!(
-        options.op,
-        crate::transform::TransformOp::Rot90
-            | crate::transform::TransformOp::Rot270
-            | crate::transform::TransformOp::Transpose
-            | crate::transform::TransformOp::Transverse
-    );
-    if swaps_dimensions && options.trim && options.restart_interval == 0 {
+    } else {
         coeffs.restart_interval = 0;
     }
 

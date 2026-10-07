@@ -1261,7 +1261,12 @@ impl TjHandle {
                 self.scaling_factor.denom()
             )));
         }
-        let decoder: Decoder<'_> = Decoder::new_with_limits(data, limits)?;
+        let mut decoder: Decoder<'_> = Decoder::new_with_limits(data, limits)?;
+        // Upstream sets `dct_method` from TJPARAM_FASTDCT here too
+        // (`turbojpeg.c:2285`).
+        if self.fast_dct != 0 {
+            decoder.set_fast_dct(true);
+        }
         // What stock's raw-data path refuses once `jpeg_start_decompress` has
         // absorbed the scans: a lossless frame has no DCT blocks to emit
         // (`JERR_NOTIMPL`) and an 8-bit build reads no wider sample
@@ -1272,7 +1277,19 @@ impl TjHandle {
             )));
         }
         Self::refuse_precision_above_8(decoder.header())?;
-        crate::api::yuv::yuv_planes_from_raw(decoder.decode_raw()?)
+        let (raw, warnings) = decoder.decode_raw_with_warnings()?;
+        // Under TJPARAM_STOPONWARNING upstream's warning handler aborts the
+        // decode. The raw decode is strict, so corrupt or truncated entropy
+        // data is already an error here rather than a warning; this refuses
+        // whatever it does recover from, as the pixel path does.
+        if self.stop_on_warning != 0 {
+            if let Some(warning) = warnings.first() {
+                return Err(JpegError::CorruptData(format!(
+                    "stop_on_warning: {warning:?}"
+                )));
+            }
+        }
+        crate::api::yuv::yuv_planes_from_raw(raw)
     }
 
     /// Decompress JPEG data using current handle parameters (like
