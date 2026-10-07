@@ -376,6 +376,17 @@ while decoder.output_scanline() < height {
 let img = decoder.finish()?;
 ```
 
+### Resource limits
+
+Decode untrusted input under an explicit budget: `Decoder::new_with_limits`
+(or `set_max_pixels`, `set_max_memory`, `set_scan_limit`) for the 8-bit
+pipeline, `precision::decompress_12bit_with_limits` /
+`decompress_16bit_with_limits` for 12- and 16-bit frames, and
+`TJPARAM_MAXPIXELS` / `TJPARAM_MAXMEMORY` / `TJPARAM_SCANLIMIT` on a
+`TjHandle`. What each limit bounds, and exactly which allocations the memory
+budget counts, is in
+[`docs/STABILITY.md`](docs/STABILITY.md#what-the-memory-budget-covers).
+
 ## Features
 
 ### Codec Support
