@@ -9,6 +9,18 @@ impl<'a> Decoder<'a> {
     /// resolution, without performing color conversion or upsampling.
     /// This matches libjpeg-turbo's `jpeg_read_raw_data()` functionality.
     pub fn decode_raw(self) -> Result<crate::api::raw_data::RawImage> {
+        self.decode_raw_with_warnings().map(|(raw, _warnings)| raw)
+    }
+
+    /// [`Self::decode_raw`], also returning the warnings the entropy decode
+    /// recovered from, for a caller that must act on them —
+    /// `TjHandle::decompress_to_yuv_planes` under `TJPARAM_STOPONWARNING`.
+    pub(crate) fn decode_raw_with_warnings(
+        self,
+    ) -> Result<(
+        crate::api::raw_data::RawImage,
+        Vec<crate::common::error::DecodeWarning>,
+    )> {
         self.check_header_limits()?;
         let frame = &self.metadata.frame;
         let width: usize = frame.width as usize;
@@ -53,7 +65,7 @@ impl<'a> Decoder<'a> {
                     })
             })
             .collect::<Result<Vec<_>>>()?;
-        let (component_planes, _warnings) = if self.metadata.is_arithmetic && frame.is_progressive {
+        let (component_planes, warnings) = if self.metadata.is_arithmetic && frame.is_progressive {
             self.decode_arithmetic_progressive_planes(
                 frame,
                 &quant_tables,
@@ -101,13 +113,16 @@ impl<'a> Decoder<'a> {
             plane_widths.push(mcus_x * comp.horizontal_sampling as usize * comp_block_sizes[ci]);
             plane_heights.push(mcus_y * comp.vertical_sampling as usize * comp_block_sizes[ci]);
         }
-        Ok(crate::api::raw_data::RawImage {
-            planes: component_planes,
-            plane_widths,
-            plane_heights,
-            width,
-            height,
-            num_components,
-        })
+        Ok((
+            crate::api::raw_data::RawImage {
+                planes: component_planes,
+                plane_widths,
+                plane_heights,
+                width,
+                height,
+                num_components,
+            },
+            warnings,
+        ))
     }
 }

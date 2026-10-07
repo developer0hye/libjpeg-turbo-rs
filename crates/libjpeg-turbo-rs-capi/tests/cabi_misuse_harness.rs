@@ -78,6 +78,7 @@ const CASES: &[&str] = &[
     "alloc_ownership",
     "precision12",
     "cropping_region",
+    "yuv_overrun",
 ];
 
 /// Cases that exercise the harness's own instrumentation rather than the
@@ -141,6 +142,19 @@ const KNOWN_DIVERGENCES: &[KnownDivergence] = &[
         case: "undersized_output",
         key: "norealloc_exact_bytes",
         item: "P4-206 (#628)",
+    },
+    // P4-234 (#667): at a scaling factor other than 1/1 the YUV decompressors
+    // refuse, writing nothing, where stock emits the scaled planes. Refusing is
+    // the overrun fix; emitting scaled planes is the item's open half.
+    KnownDivergence {
+        case: "yuv_overrun",
+        key: "scaled_packed_rc",
+        item: "P4-234 (#667)",
+    },
+    KnownDivergence {
+        case: "yuv_overrun",
+        key: "scaled_planar_rc",
+        item: "P4-234 (#667)",
     },
 ];
 
@@ -889,6 +903,30 @@ fn twelve_bit_round_trip_crosses_the_boundary() {
 /// to the edge (`:2102-2105`) and anything past the *scaled* image is refused
 /// (`:2106-2109`). The error strings carry upstream's `"%s(): "` THROW prefix
 /// (`:279-291`), with the divisibility message's newline printed as `\n`.
+/// Issue #667 (P4-234): YUV decompression into buffers sized as `turbojpeg.h`
+/// documents, each flush against a guard page, so an overrun faults this child
+/// (and is an ASan report in `sanitizers.yml`'s `c_boundary_asan` leg). At
+/// scaling factor 1/2 the port wrote the unscaled planes into the scaled
+/// buffer — against `origin/main` before the fix this case died by `SIGBUS` on
+/// its first call. A luma stride shorter than the plane (`turbojpeg.c:2253-2254`)
+/// and an alignment whose padded planes pass `INT_MAX` (`:2435-2439`) are
+/// refused by both libraries, writing nothing.
+#[test]
+fn yuv_decompression_cannot_overrun_a_documented_buffer() {
+    let outcome: Run = run_ours("yuv_overrun");
+    assert_values(
+        &outcome,
+        "yuv_overrun",
+        &[
+            ("yuv_header_rc", "0"),
+            ("scaled_packed_rc", "-1"),
+            ("scaled_planar_rc", "-1"),
+            ("short_stride_rc", "-1"),
+            ("huge_align_rc", "-1"),
+        ],
+    );
+}
+
 #[test]
 fn cropping_region_rules_cross_the_boundary() {
     let outcome: Run = run_ours("cropping_region");

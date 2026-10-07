@@ -65,7 +65,10 @@
 //!   resource limits, the cropping region (which they refuse) and
 //!   `SAVEMARKERS` (for the handle's ICC profile) — since
 //!   [P4-199](https://github.com/developer0hye/libjpeg-turbo-rs/issues/620)
-//!   closed, nothing else.
+//!   closed, nothing else. `DecompressToYuv` reads the resource limits,
+//!   the scaling factor (which it refuses unless 1/1, P4-234), `FASTDCT`,
+//!   `STOPONWARNING` and `SAVEMARKERS`, and publishes what the others publish
+//!   ([P4-225](https://github.com/developer0hye/libjpeg-turbo-rs/issues/652)).
 //! * **P2, compress depends on the configuration and the most recent
 //!   published header, and on nothing else.** `tj3DecompressHeader` and every
 //!   `tj3Decompress*` deliberately publish header facts into the handle — the
@@ -166,7 +169,7 @@ const OP_RECORD_LEN: usize = 4;
 /// round-trip program in `tests/api_sequence_state.rs`: leaving it here would
 /// make [`encode_op`] emit a code `op_from_record` folds back onto `Op::Set`,
 /// and that round-trip test is the only thing that would notice.
-const OPCODE_COUNT: u8 = 13;
+const OPCODE_COUNT: u8 = 14;
 
 /// The parameters a program may write.
 ///
@@ -387,6 +390,9 @@ pub enum Op {
     Decompress12,
     /// `tj3Decompress16`.
     Decompress16,
+    /// `tj3DecompressToYUVPlanes8` — publishes the same thirteen as the
+    /// pixel decompressors (`turbojpeg.c:2227`; P4-225, #652).
+    DecompressToYuv,
     /// `tj3Compress8` over a synthetic image of the given size and format.
     Compress { width: u8, height: u8, format: u8 },
     /// `tj3Transform`.
@@ -439,7 +445,11 @@ impl Op {
     pub fn publishes_for_compress(&self) -> bool {
         matches!(
             self,
-            Op::DecompressHeader | Op::Decompress | Op::Decompress12 | Op::Decompress16
+            Op::DecompressHeader
+                | Op::Decompress
+                | Op::Decompress12
+                | Op::Decompress16
+                | Op::DecompressToYuv
         )
     }
 }
@@ -615,6 +625,7 @@ pub fn encode_op(op: &Op) -> Option<[u8; 4]> {
         Op::Transform { op, flags } => Some([10, *op, *flags, 0]),
         Op::SelectInput { index } => Some([11, *index, 0, 0]),
         Op::Reset => Some([12, 0, 0, 0]),
+        Op::DecompressToYuv => Some([13, 0, 0, 0]),
     }
 }
 
@@ -678,6 +689,9 @@ fn op_from_record(record: &[u8]) -> Op {
         },
         10 => Op::Transform { op: a, flags: b },
         11 => Op::SelectInput { index: a },
+        // After `Reset`, so every code an earlier seed could hold — all
+        // below 13 — still decodes to the operation it was written as.
+        13 => Op::DecompressToYuv,
         _ => Op::Reset,
     }
 }
@@ -770,7 +784,8 @@ pub fn run_program_with(
             | Op::InspectHeader
             | Op::Decompress
             | Op::Decompress12
-            | Op::Decompress16 => {
+            | Op::Decompress16
+            | Op::DecompressToYuv => {
                 // P1.
                 let mut reference: TjHandle =
                     build_reference(&configuration_of(&prefix), &inputs, limits, policy);
@@ -1011,6 +1026,8 @@ pub enum Outcome {
     Pixels12(Result<(String, Vec<i16>), String>),
     /// A 16-bit decode.
     Pixels16(Result<(String, Vec<u16>), String>),
+    /// A decode to YUV planes: the geometry, then every plane concatenated.
+    Planes(Result<(String, Vec<u8>), String>),
     /// A compress or transform: the whole JPEG stream, or the error.
     Bytes(Result<Vec<u8>, String>),
 }
@@ -1043,6 +1060,7 @@ impl Outcome {
             Outcome::Pixels8(result) => result.is_ok(),
             Outcome::Pixels12(result) => result.is_ok(),
             Outcome::Pixels16(result) => result.is_ok(),
+            Outcome::Planes(result) => result.is_ok(),
             Outcome::Bytes(result) => result.is_ok(),
         }
     }
@@ -1082,6 +1100,13 @@ impl core::fmt::Debug for Outcome {
                 digest_u16(data)
             ),
             Outcome::Pixels16(Err(message)) => write!(f, "Pixels16(err: {message})"),
+            Outcome::Planes(Ok((meta, data))) => write!(
+                f,
+                "Planes({meta}, {} bytes, {:#018x})",
+                data.len(),
+                digest_u8(data)
+            ),
+            Outcome::Planes(Err(message)) => write!(f, "Planes(err: {message})"),
             Outcome::Bytes(Ok(data)) => {
                 write!(f, "Bytes({} bytes, {:#018x})", data.len(), digest_u8(data))
             }
@@ -1173,6 +1198,17 @@ fn apply(handle: &mut TjHandle, op: &Op, jpeg: &[u8], limits: &Limits) -> Outcom
                             image.width, image.height, image.num_components, image.precision
                         ),
                         image.data,
+                    )
+                })
+                .map_err(|e| format!("{e:?}")),
+        ),
+        Op::DecompressToYuv => Outcome::Planes(
+            handle
+                .decompress_to_yuv_planes(jpeg)
+                .map(|(planes, width, height, subsampling)| {
+                    (
+                        format!("{width}x{height} {subsampling:?} planes={}", planes.len()),
+                        planes.concat(),
                     )
                 })
                 .map_err(|e| format!("{e:?}")),

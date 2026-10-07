@@ -556,3 +556,173 @@ fn a_frame_libjpeg_refuses_in_the_header_publishes_nothing() {
         assert_eq!(published(&decode), fresh, "{label}: decompress published");
     }
 }
+
+/// Issue #653: `TjHandle::decompress` models `tj3Decompress8`, whose 8-bit
+/// body refuses any frame above 8 bits (`jdapistd.c:328-341`) — after
+/// publishing, so the published `PRECISION` routes the caller to
+/// `decompress_12bit` / `decompress_16bit`. `Decoder` still downscales a
+/// 12-bit frame; only the TurboJPEG-shaped entry point refuses.
+#[test]
+fn decompress_refuses_a_frame_above_8_bits_after_publishing() {
+    for (jpeg, precision, expected) in [
+        (LOSSY12, 12, [2, 227, 149, 12, 1, 0, 0, 0, 0, 0, 1, 1, 0]),
+        (LOSSLESS16, 16, [3, 8, 8, 16, 2, 0, 0, 1, 1, 0, 1, 1, 0]),
+    ] {
+        let mut handle: TjHandle = TjHandle::new();
+        let error: JpegError = handle
+            .decompress(jpeg)
+            .expect_err("an 8-bit decompress of a wider frame");
+        assert!(
+            error
+                .to_string()
+                .contains(&format!("Unsupported JPEG data precision {precision}")),
+            "{error}"
+        );
+        assert_eq!(published(&handle), expected);
+    }
+    libjpeg_turbo_rs::Decoder::new(LOSSY12)
+        .expect("header")
+        .decode_image()
+        .expect("the Rust decoder still downscales a 12-bit frame");
+}
+
+/// Issue #653 (P4-226 criterion 2): a two-component frame is libjpeg's
+/// JCS_UNKNOWN. Stock publishes `TJCS_DEFAULT` for it, refuses the header
+/// read and refuses every decompress; measured against stock 3.2.0.
+#[test]
+fn a_two_component_frame_publishes_tjcs_default_and_is_refused() {
+    const UNKNOWN2: &[u8] = include_bytes!("inputs/p4226_two_component_unknown_16x16.jpg");
+    let expected: [i32; 13] = [-1, 16, 16, 8, -1, 0, 0, 0, 0, 0, 1, 1, 0];
+
+    let mut handle: TjHandle = TjHandle::new();
+    let error: JpegError = handle
+        .decompress_header(UNKNOWN2)
+        .expect_err("stock refuses the header");
+    assert!(
+        error
+            .to_string()
+            .contains("Could not determine colorspace of JPEG image"),
+        "{error}"
+    );
+    assert_eq!(published(&handle), expected);
+
+    for decode in [
+        |handle: &mut TjHandle| handle.decompress(UNKNOWN2).map(|_| ()),
+        |handle: &mut TjHandle| handle.decompress_12bit(UNKNOWN2).map(|_| ()),
+        |handle: &mut TjHandle| handle.decompress_16bit(UNKNOWN2).map(|_| ()),
+    ] {
+        let mut handle: TjHandle = TjHandle::new();
+        let error: JpegError = decode(&mut handle).expect_err("no conversion exists");
+        assert!(
+            error
+                .to_string()
+                .contains("Unsupported color conversion request"),
+            "{error}"
+        );
+        assert_eq!(published(&handle), expected);
+    }
+}
+
+/// Issue #652: `decompress_to_yuv_planes` — `tj3DecompressToYUVPlanes8` —
+/// publishes the thirteen on every frame, the ones it then refuses (12/16-bit,
+/// lossless, CMYK) included, and refuses a frame over `TJPARAM_MAXPIXELS`
+/// having published. `inspect_header` still writes nothing.
+#[test]
+fn the_yuv_decompress_publishes_the_thirteen() {
+    for (label, jpeg, expected) in EXPECTED {
+        let mut handle: TjHandle = TjHandle::new();
+        let decoded: bool = handle.decompress_to_yuv_planes(jpeg).is_ok();
+        assert_eq!(published(&handle), expected, "{label}");
+        // Stock 3.2.0 decodes exactly the 8-bit lossy frames of at most three
+        // components to YUV.
+        let decodable: bool = expected[3] == 8 && expected[7] == 0 && expected[4] != 4;
+        assert_eq!(decoded, decodable, "{label}");
+
+        let mut limited: TjHandle = TjHandle::new();
+        limited.set(TjParam::MaxPixels, 1).expect("MAXPIXELS");
+        assert!(matches!(
+            limited.decompress_to_yuv_planes(jpeg),
+            Err(JpegError::LimitExceeded { .. })
+        ));
+        assert_eq!(published(&limited), expected, "{label} under MAXPIXELS");
+
+        let fresh: [i32; 13] = published(&TjHandle::new());
+        let inspector: TjHandle = TjHandle::new();
+        let _ = inspector.inspect_header(jpeg);
+        assert_eq!(published(&inspector), fresh, "{label}: inspect_header");
+    }
+}
+
+/// Issue #653 (codex review): a two-component frame is refused for its colour
+/// space before the scan walk can refuse it for `TJPARAM_SCANLIMIT`: stock's
+/// `jpeg_start_decompress` selects the colour converter before it absorbs the
+/// scans, and reports "Unsupported color conversion request" for this
+/// progressive stream under a limit of 2 (measured, 3.2.0).
+#[test]
+fn an_unconvertible_frame_is_refused_before_the_scan_limit() {
+    const UNKNOWN2_PROGRESSIVE: &[u8] =
+        include_bytes!("inputs/p4226_two_component_progressive_16x16.jpg");
+    let mut handle: TjHandle = TjHandle::new();
+    handle.set(TjParam::ScanLimit, 2).expect("SCANLIMIT");
+    let error: JpegError = handle
+        .decompress(UNKNOWN2_PROGRESSIVE)
+        .expect_err("no conversion exists");
+    assert!(
+        error
+            .to_string()
+            .contains("Unsupported color conversion request"),
+        "{error}"
+    );
+    assert_eq!(handle.get(TjParam::Progressive), 1);
+}
+
+/// Codex review of #655: `TJPARAM_RESTARTBLOCKS` and `TJPARAM_RESTARTROWS`
+/// spell one setting — a nonzero value of either clears the other, as
+/// upstream's `tj3Set` does (`turbojpeg.c:819-830`) — so the interval in force
+/// is the last one set.
+#[test]
+fn the_restart_parameters_clear_each_other() {
+    let mut handle: TjHandle = TjHandle::new();
+    handle.set(TjParam::RestartRows, 1).expect("RESTARTROWS");
+    handle
+        .set(TjParam::RestartBlocks, 4)
+        .expect("RESTARTBLOCKS");
+    assert_eq!(
+        (
+            handle.get(TjParam::RestartBlocks),
+            handle.get(TjParam::RestartRows)
+        ),
+        (4, 0)
+    );
+    handle.set(TjParam::RestartRows, 2).expect("RESTARTROWS");
+    assert_eq!(
+        (
+            handle.get(TjParam::RestartBlocks),
+            handle.get(TjParam::RestartRows)
+        ),
+        (0, 2)
+    );
+    // Zero clears only itself.
+    handle
+        .set(TjParam::RestartBlocks, 0)
+        .expect("RESTARTBLOCKS");
+    assert_eq!(handle.get(TjParam::RestartRows), 2);
+}
+
+/// Codex review of #655: the restart parameters take 0-65535, as upstream's
+/// `SET_PARAM(…, 0, 65535)` does; 65536 used to be stored and wrapped to 0
+/// (no restart markers) when narrowed to the DRI field.
+#[test]
+fn the_restart_parameters_refuse_values_outside_sixteen_bits() {
+    for param in [TjParam::RestartBlocks, TjParam::RestartRows] {
+        let mut handle: TjHandle = TjHandle::new();
+        handle.set(param, 65_535).expect("the maximum");
+        assert!(handle.set(param, 65_536).is_err(), "{param:?}");
+        assert!(handle.set(param, -1).is_err(), "{param:?}");
+        assert_eq!(
+            handle.get(param),
+            65_535,
+            "{param:?}: a refused set changes nothing"
+        );
+    }
+}

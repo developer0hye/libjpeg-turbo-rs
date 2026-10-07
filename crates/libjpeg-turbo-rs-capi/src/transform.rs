@@ -169,24 +169,18 @@ pub unsafe extern "C" fn tj3Transform(
             let txforms: &[TjTransform] =
                 unsafe { std::slice::from_raw_parts(transforms, n as usize) };
 
-            // Upstream registers marker processors before reading the header
-            // whenever any transform in the batch saves markers
-            // (`jcopy_markers_setup` with the handle's saveMarkers option,
-            // `turbojpeg.c:2988-2992`); registration is per-handle and
-            // permanent. Recorded so the legacy NOREALLOC bridge can tell a
-            // cold handle — where upstream's capacity pre-read starves marker
-            // saving, the P4-156 ordering quirk — from a warm one
-            // (P4-156, #544).
-            if txforms
-                .iter()
-                .any(|t: &TjTransform| (t.options & TJXOPT_COPYNONE) == 0)
-                && inst.inner.get(libjpeg_turbo_rs::tj3::TjParam::SaveMarkers) != 0
-            {
-                inst.transform_markers_registered = true;
+            // Every transform's arguments are validated before the header is
+            // read, as upstream's first loop does (`turbojpeg.c:2963-2988`): a
+            // bad entry anywhere in the batch is refused before any output is
+            // produced or any limit is consulted.
+            // Fallibly, as upstream checks its `malloc` of `xinfo`
+            // (`turbojpeg.c:2953-2955`): `n` is the caller's, and an
+            // infallible reservation that fails aborts the process.
+            let mut batch: Vec<TransformOptions> = Vec::new();
+            if batch.try_reserve_exact(txforms.len()).is_err() {
+                inst.set_error("tj3Transform(): Memory allocation failure", TJERR_FATAL);
+                return -1;
             }
-
-            // Process each transform independently. libjpeg-turbo does this in a
-            // loop too; there's no shared decode state across transforms.
             for (i, t) in txforms.iter().enumerate() {
                 let op: TransformOp = match op_from_c(t.op) {
                     Some(o) => o,
@@ -245,8 +239,37 @@ pub unsafe extern "C" fn tj3Transform(
                         height: t.r.h as usize,
                     });
                 }
+                apply_output_parameters(inst, &mut opts);
+                batch.push(opts);
+            }
 
-                let out: Vec<u8> = match transform_jpeg_with_options(jpeg, &opts) {
+            // Upstream registers marker processors before reading the header
+            // whenever any transform in the batch saves markers
+            // (`jcopy_markers_setup` with the handle's saveMarkers option,
+            // `turbojpeg.c:2988-2992`); registration is per-handle and
+            // permanent. Recorded so the legacy NOREALLOC bridge can tell a
+            // cold handle — where upstream's capacity pre-read starves marker
+            // saving, the P4-156 ordering quirk — from a warm one
+            // (P4-156, #544).
+            if txforms
+                .iter()
+                .any(|t: &TjTransform| (t.options & TJXOPT_COPYNONE) == 0)
+                && inst.inner.get(libjpeg_turbo_rs::tj3::TjParam::SaveMarkers) != 0
+            {
+                inst.transform_markers_registered = true;
+            }
+
+            // The handle's limits, against the source, in upstream's order
+            // (P4-227, #655).
+            if let Some(refusal) = source_refusal(inst, jpeg, txforms, &batch) {
+                inst.set_error(refusal, TJERR_FATAL);
+                return -1;
+            }
+
+            // Process each transform independently. libjpeg-turbo does this in a
+            // loop too; there's no shared decode state across transforms.
+            for (i, (t, opts)) in txforms.iter().zip(batch.iter()).enumerate() {
+                let out: Vec<u8> = match transform_jpeg_with_options(jpeg, opts) {
                     Ok(v) => v,
                     Err(e) => {
                         inst.set_error(format!("tj3Transform[{i}]: {e}"), TJERR_FATAL);
@@ -321,6 +344,390 @@ pub unsafe extern "C" fn tj3Transform(
         // and exclusivity per its contract.
         unsafe { with_handle(handle, body) }.unwrap_or(-1)
     })
+}
+
+/// Fold the handle's output parameters into one transform's options, as
+/// upstream does for every transform in the batch (`turbojpeg.c:3029-3037`):
+/// `TJPARAM_PROGRESSIVE`, `TJPARAM_ARITHMETIC` and `TJPARAM_OPTIMIZE` are
+/// OR-ed with their `TJXOPT_*` twins, and the restart interval comes from
+/// `TJPARAM_RESTARTROWS` when set, else `TJPARAM_RESTARTBLOCKS` — the
+/// precedence `jcmaster.c` gives `restart_in_rows` (P4-227, #655).
+/// `TransformOptions` already drops `optimize` under `arithmetic`, as
+/// upstream's `optimize_coding = FALSE` does.
+fn apply_output_parameters(inst: &crate::tj3::TjInstance, opts: &mut TransformOptions) {
+    use libjpeg_turbo_rs::tj3::TjParam;
+    opts.progressive |= inst.inner.get(TjParam::Progressive) != 0;
+    opts.arithmetic |= inst.inner.get(TjParam::Arithmetic) != 0;
+    opts.optimize |= inst.inner.get(TjParam::Optimize) != 0;
+    let rows: c_int = inst.inner.get(TjParam::RestartRows);
+    let blocks: c_int = inst.inner.get(TjParam::RestartBlocks);
+    if rows > 0 {
+        opts.restart_interval = rows as u16;
+        opts.restart_in_rows = true;
+    } else if blocks > 0 {
+        opts.restart_interval = blocks as u16;
+        opts.restart_in_rows = false;
+    }
+}
+
+/// `tjMCUWidth` / `tjMCUHeight` (`turbojpeg.h`), indexed by `TJSAMP_*`.
+const TJ_MCU_WIDTH: [usize; 9] = [8, 16, 16, 8, 8, 32, 8, 32, 16];
+const TJ_MCU_HEIGHT: [usize; 9] = [8, 8, 16, 8, 16, 8, 32, 16, 32];
+
+/// `jtransform_perfect_transform` (`transupp.c:2415-2450`): which edges must
+/// be whole iMCUs for `op` to lose nothing.
+fn is_perfect(op: TransformOp, width: usize, height: usize, imcu: (usize, usize)) -> bool {
+    let width_whole: bool = width.is_multiple_of(imcu.0);
+    let height_whole: bool = height.is_multiple_of(imcu.1);
+    match op {
+        TransformOp::HFlip | TransformOp::Rot270 => width_whole,
+        TransformOp::VFlip | TransformOp::Rot90 => height_whole,
+        TransformOp::Transverse | TransformOp::Rot180 => width_whole && height_whole,
+        _ => true,
+    }
+}
+
+/// Whether `jtransform_request_workspace` refuses `opts`' crop region for a
+/// `width` x `height` source (`transupp.c:1705-1757`). The region is in the
+/// transformed frame. Extending past the frame is allowed only for
+/// `TJXOP_NONE`, and only when the offset leaves the original image inside it.
+fn crop_is_refused(opts: &TransformOptions, width: usize, height: usize) -> bool {
+    let Some(crop) = opts.crop else {
+        return false;
+    };
+    let transposed: bool = matches!(
+        opts.op,
+        TransformOp::Transpose | TransformOp::Transverse | TransformOp::Rot90 | TransformOp::Rot270
+    );
+    let (out_width, out_height): (usize, usize) = if transposed {
+        (height, width)
+    } else {
+        (width, height)
+    };
+    let axis_refused = |offset: usize, extent: usize, frame: usize| -> bool {
+        if extent > frame {
+            opts.op != TransformOp::None || offset >= extent || offset > extent - frame
+        } else {
+            offset >= frame || extent == 0 || offset > frame - extent
+        }
+    };
+    axis_refused(crop.x, crop.width, out_width) || axis_refused(crop.y, crop.height, out_height)
+}
+
+/// What libjpeg's memory manager holds for the markers `jcopy_markers_setup`
+/// saves under copy option `option` (`TJSM_*` / `JCOPYOPT_*`,
+/// `transupp.c:2460-2483`) by the time `jpeg_read_coefficients` realizes its
+/// arrays: COM unless NONE or ICC-only, every APPn for ALL, all but APP2 for
+/// ALL-EXCEPT-ICC, APP2 alone for ICC. Each saved marker is one `alloc_large`
+/// of `sizeof(struct jpeg_marker_struct) + length` (`jdmarker.c:783-784`),
+/// which the large pool charges with its header and `ALIGN_SIZE - 1` of slack
+/// (`jmemmgr.c`): 32 + 32 + 31 bytes on an LP64 SIMD build. Measured: 32
+/// 64 KiB APP5 segments push a 6 MiB source from "accepted at 8 MiB" to
+/// "refused at 8, accepted at 9", as on stock 3.2.0.
+fn retained_marker_bytes(jpeg: &[u8], option: c_int) -> u64 {
+    const PER_MARKER_OVERHEAD: u64 = 32 + 32 + 31;
+    const COMMENTS: c_int = 1;
+    const ALL: c_int = 2;
+    const ALL_EXCEPT_ICC: c_int = 3;
+    const ICC: c_int = 4;
+    let saves = |code: u8| -> bool {
+        match code {
+            0xFE => option == COMMENTS || option == ALL || option == ALL_EXCEPT_ICC,
+            0xE2 => option == ALL || option == ICC,
+            0xE0..=0xEF => option == ALL || option == ALL_EXCEPT_ICC,
+            _ => false,
+        }
+    };
+    let mut total: u64 = 0;
+    let mut at: usize = 2;
+    // Marker segments from SOI to the first SOS; anything malformed ends the
+    // walk, as the header parse has already accepted the stream.
+    while at + 4 <= jpeg.len() && jpeg[at] == 0xFF {
+        let code: u8 = jpeg[at + 1];
+        if code == 0xDA {
+            break;
+        }
+        let length: usize = usize::from(jpeg[at + 2]) << 8 | usize::from(jpeg[at + 3]);
+        if length < 2 {
+            break;
+        }
+        if saves(code) {
+            total = total.saturating_add((length - 2) as u64 + PER_MARKER_OVERHEAD);
+        }
+        at += 2 + length;
+    }
+    total
+}
+
+/// Bytes in one whole-image coefficient array: `blocks_wide` x `blocks_high`
+/// `JBLOCK`s of 64 `JCOEF`s.
+fn coefficient_bytes(blocks_wide: usize, blocks_high: usize) -> u64 {
+    (blocks_wide as u64)
+        .saturating_mul(blocks_high as u64)
+        .saturating_mul(128)
+}
+
+/// What `tj3Transform` asks of libjpeg's memory manager before reading a
+/// single scan: the source's whole-image coefficient arrays
+/// (`jinit_d_coef_controller`, each component padded to its sampling factor)
+/// plus every transform's workspace (`jtransform_request_workspace`,
+/// `transupp.c:1855-1960`), all realized together by
+/// `jpeg_read_coefficients`. Stock refuses when this does not fit in
+/// `TJPARAM_MAXMEMORY` MiB less what its pools already hold; that overhead is
+/// a few KiB and is not modelled, so the estimate refuses at
+/// `estimate >= budget` — measured equal to stock at the 6/7 and 12/13 MiB
+/// boundaries of a 6 MiB source. A trimmed transform is estimated untrimmed,
+/// and a crop by its requested region, so near the boundary those may refuse
+/// a little earlier than stock.
+///
+/// This is upstream's accounting, not this port's: the transform here holds
+/// the source coefficients and its own working copies in `Vec`s whose sizes
+/// differ from libjpeg's virtual arrays. `TJPARAM_MAXMEMORY` is applied as
+/// stock applies it, so the same sources are refused; it is not a ceiling on
+/// what the Rust transform allocates.
+fn transform_memory_estimate(
+    decoder: &libjpeg_turbo_rs::Decoder<'_>,
+    batch: &[TransformOptions],
+    retained_markers: u64,
+) -> u64 {
+    let frame = decoder.header();
+    let (width, height): (usize, usize) = (frame.width(), frame.height());
+    let max_h: usize = frame
+        .components
+        .iter()
+        .map(|c| usize::from(c.horizontal_sampling))
+        .max()
+        .unwrap_or(1);
+    let max_v: usize = frame
+        .components
+        .iter()
+        .map(|c| usize::from(c.vertical_sampling))
+        .max()
+        .unwrap_or(1);
+    let mut estimate: u64 = frame
+        .components
+        .iter()
+        .map(|c| {
+            let (h, v): (usize, usize) = (
+                usize::from(c.horizontal_sampling),
+                usize::from(c.vertical_sampling),
+            );
+            let blocks_wide: usize = (width * h).div_ceil(max_h * 8).next_multiple_of(h);
+            let blocks_high: usize = (height * v).div_ceil(max_v * 8).next_multiple_of(v);
+            coefficient_bytes(blocks_wide, blocks_high)
+        })
+        .fold(retained_markers, u64::saturating_add);
+    for opts in batch {
+        let gray_only: bool = opts.grayscale
+            && frame.components.len() == 3
+            && decoder.jpeg_color_space() == libjpeg_turbo_rs::ColorSpace::YCbCr;
+        let transposed: bool = matches!(
+            opts.op,
+            TransformOp::Transpose
+                | TransformOp::Transverse
+                | TransformOp::Rot90
+                | TransformOp::Rot270
+        );
+        let crop_offset: (usize, usize) = opts.crop.map_or((0, 0), |c| (c.x, c.y));
+        // A crop larger than the frame — legal only without a transform — is
+        // an expansion, which needs a workspace of the expanded size.
+        let expands: bool = opts
+            .crop
+            .is_some_and(|c| c.width > width || c.height > height);
+        let needs_workspace: bool = match opts.op {
+            TransformOp::None => crop_offset != (0, 0) || expands,
+            // `slow_hflip` is set for any batch of more than one transform.
+            TransformOp::HFlip => crop_offset.1 != 0 || batch.len() != 1,
+            _ => true,
+        };
+        if !needs_workspace {
+            continue;
+        }
+        let (mut out_width, mut out_height): (usize, usize) = if transposed {
+            (height, width)
+        } else {
+            (width, height)
+        };
+        if let Some(crop) = opts.crop {
+            out_width = if crop.width > out_width {
+                crop.width
+            } else {
+                crop.width.min(out_width.saturating_sub(crop.x))
+            };
+            out_height = if crop.height > out_height {
+                crop.height
+            } else {
+                crop.height.min(out_height.saturating_sub(crop.y))
+            };
+        }
+        let components: usize = if gray_only { 1 } else { frame.components.len() };
+        let (imcu_width, imcu_height): (usize, usize) = match (components, transposed) {
+            (1, _) => (8, 8),
+            (_, true) => (max_v * 8, max_h * 8),
+            (_, false) => (max_h * 8, max_v * 8),
+        };
+        let (imcus_wide, imcus_high): (usize, usize) = (
+            out_width.div_ceil(imcu_width),
+            out_height.div_ceil(imcu_height),
+        );
+        for c in frame.components.iter().take(components) {
+            let (h, v): (usize, usize) = match (components, transposed) {
+                (1, _) => (1, 1),
+                (_, true) => (
+                    usize::from(c.vertical_sampling),
+                    usize::from(c.horizontal_sampling),
+                ),
+                (_, false) => (
+                    usize::from(c.horizontal_sampling),
+                    usize::from(c.vertical_sampling),
+                ),
+            };
+            estimate = estimate.saturating_add(coefficient_bytes(
+                imcus_wide.saturating_mul(h),
+                imcus_high.saturating_mul(v),
+            ));
+        }
+    }
+    estimate
+}
+
+/// The handle's limits against the source, in the order upstream's
+/// `tj3Transform` applies them (P4-227, #655): `TJPARAM_MAXPIXELS` right
+/// after the header read (`turbojpeg.c:2995-2998`), then each transform's
+/// `TJXOPT_PERFECT` test (`jtransform_request_workspace`, `:3002-3004`), then,
+/// inside `jpeg_read_coefficients`, `TJPARAM_MAXMEMORY` when the coefficient
+/// arrays are realized and `TJPARAM_SCANLIMIT` as each scan is read
+/// (`:2943-2951`). Messages are upstream's.
+///
+/// `None` when nothing is refused — including a header that does not parse,
+/// which the transform itself goes on to report, as it always has.
+fn source_refusal(
+    inst: &crate::tj3::TjInstance,
+    jpeg: &[u8],
+    txforms: &[TjTransform],
+    batch: &[TransformOptions],
+) -> Option<String> {
+    use libjpeg_turbo_rs::tj3::TjParam;
+    use libjpeg_turbo_rs::{ColorSpace, DecodeLimits, Decoder};
+
+    // No cap but libjpeg's own `JPEG_MAX_DIMENSION`: the handle's limits are
+    // applied below, each where upstream applies it.
+    let header_limits: DecodeLimits = DecodeLimits {
+        max_width: 65_500,
+        max_height: 65_500,
+        max_pixels: u64::MAX,
+        max_scans: usize::MAX,
+        max_memory: None,
+    };
+    // Markers up to the first SOS only, as `jpeg_read_header` reads them: the
+    // pixel cap must refuse an oversized progressive source before any of its
+    // later scans is walked.
+    let decoder: Decoder<'_> = Decoder::new_header_only(jpeg, header_limits).ok()?;
+    let frame = decoder.header();
+    let (width, height): (usize, usize) = (frame.width(), frame.height());
+
+    let max_pixels: c_int = inst.inner.get(TjParam::MaxPixels);
+    if max_pixels > 0 && (width as u64) * (height as u64) > max_pixels as u64 {
+        return Some(String::from("tj3Transform(): Image is too large"));
+    }
+
+    let max_h: usize = frame
+        .components
+        .iter()
+        .map(|c| usize::from(c.horizontal_sampling))
+        .max()
+        .unwrap_or(1);
+    let max_v: usize = frame
+        .components
+        .iter()
+        .map(|c| usize::from(c.vertical_sampling))
+        .max()
+        .unwrap_or(1);
+    // The source's `getSubsamp`, which the crop alignment below is checked
+    // against, read the way every TurboJPEG entry point reads it.
+    let source_subsamp: c_int = {
+        let mut probe: libjpeg_turbo_rs::tj3::TjHandle = libjpeg_turbo_rs::tj3::TjHandle::new();
+        probe.decompress_header_info(jpeg).ok()?;
+        probe.get(TjParam::Subsampling)
+    };
+    // Per transform, in upstream's order (`turbojpeg.c:3000-3016`):
+    // `jtransform_request_workspace`'s PERFECT test and crop validation
+    // (`transupp.c:1661-1757`, `JERR_BAD_CROP_SPEC`), then tj3Transform's
+    // own crop alignment against the destination subsampling — all before
+    // `jpeg_read_coefficients`, so before the memory and scan limits below.
+    for (transform, opts) in txforms.iter().zip(batch) {
+        if opts.perfect {
+            let one_component: bool = frame.components.len() == 1
+                || (opts.grayscale
+                    && frame.components.len() == 3
+                    && decoder.jpeg_color_space() == ColorSpace::YCbCr);
+            let imcu: (usize, usize) = if one_component {
+                (8, 8)
+            } else {
+                (max_h * 8, max_v * 8)
+            };
+            if !is_perfect(opts.op, width, height, imcu) {
+                return Some(String::from("tj3Transform(): Transform is not perfect"));
+            }
+        }
+        if crop_is_refused(opts, width, height) {
+            return Some(String::from("Invalid crop request"));
+        }
+        if let Some(crop) = opts.crop {
+            let (_, _, dst_subsamp) = transformed_specs(0, 0, source_subsamp, transform);
+            let Some(&mcu_width) = usize::try_from(dst_subsamp)
+                .ok()
+                .and_then(|index| TJ_MCU_WIDTH.get(index))
+            else {
+                return Some(String::from(
+                    "tj3Transform(): Could not determine subsampling level of destination image",
+                ));
+            };
+            let mcu_height: usize = TJ_MCU_HEIGHT[dst_subsamp as usize];
+            if crop.x % mcu_width != 0 || crop.y % mcu_height != 0 {
+                return Some(format!(
+                    "tj3Transform(): To crop this JPEG image, x must be a multiple of \
+                     {mcu_width}\nand y must be a multiple of {mcu_height}."
+                ));
+            }
+        }
+    }
+
+    let max_memory: c_int = inst.inner.get(TjParam::MaxMemory);
+    // The markers `jcopy_markers_setup` saved while the header was read sit
+    // in the same pools, so they count against the same budget.
+    let copy_option: c_int = if batch
+        .iter()
+        .any(|opts| opts.copy_markers != MarkerCopyMode::None)
+    {
+        inst.inner.get(TjParam::SaveMarkers)
+    } else {
+        0
+    };
+    if max_memory > 0
+        && transform_memory_estimate(&decoder, batch, retained_marker_bytes(jpeg, copy_option))
+            >= max_memory as u64 * 1_048_576
+    {
+        return Some(String::from("Memory limit exceeded"));
+    }
+
+    let scan_limit: c_int = inst.inner.get(TjParam::ScanLimit);
+    if scan_limit > 0 {
+        let scan_capped: DecodeLimits = DecodeLimits {
+            max_scans: scan_limit as usize,
+            ..header_limits
+        };
+        if let Err(libjpeg_turbo_rs::JpegError::LimitExceeded { what, .. }) =
+            Decoder::new_with_limits(jpeg, scan_capped)
+        {
+            if what.starts_with("scan count") {
+                return Some(format!(
+                    "Progressive JPEG image has more than {scan_limit} scans"
+                ));
+            }
+        }
+    }
+    None
 }
 
 /// Geometry of the image a transform produces, from geometry alone.

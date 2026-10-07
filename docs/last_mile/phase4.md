@@ -12219,8 +12219,8 @@ refuse, as upstream's call precedes its refusals. Per criterion:
 Filed on the way: [P4-223](#p4-223-12-bit-decodes-read-only-the-first-scan-so-progressive-and-multi-scan-12-bit-streams-decode-to-wrong-pixels-with-ok--open)
 (12-bit progressive and multi-scan streams decode wrongly),
 [P4-224](#p4-224-decoders-memory-estimate-does-not-count-the-12-bit-staging-when-it-decodes-a-12-bit-frame--open),
-[P4-225](#p4-225-tj3decompresstoyuv8--tj3decompresstoyuvplanes8-publish-nothing-where-upstream-calls-setdecompparameters--open)
-and [P4-226](#p4-226-tj3decompress8-decodes-a-12-bit-frame-that-stock-turbojpeg-refuses--open).
+[P4-225](#p4-225-tj3decompresstoyuv8--tj3decompresstoyuvplanes8-publish-nothing-where-upstream-calls-setdecompparameters--closed-2026-10-08)
+and [P4-226](#p4-226-tj3decompress8-decodes-a-12-bit-frame-that-stock-turbojpeg-refuses--closed-2026-10-07).
 
 ## P4-200. `JPEGWIDTH` / `JPEGHEIGHT` Publish the Scaled and Cropped Output Dimensions Where Upstream Publishes the SOF's — **CLOSED 2026-10-07**
 
@@ -13642,7 +13642,7 @@ threads the caller's `max_scans` into the inner parse. (2) A test sizes a
 callers see on 12-bit input, which is a behaviour change of its own; P4-199
 was about the TurboJPEG entry points.
 
-## P4-225. `tj3DecompressToYUV8` / `tj3DecompressToYUVPlanes8` Publish Nothing, Where Upstream Calls `setDecompParameters` — **OPEN**
+## P4-225. `tj3DecompressToYUV8` / `tj3DecompressToYUVPlanes8` Publish Nothing, Where Upstream Calls `setDecompParameters` — **CLOSED 2026-10-08**
 
 **Found 2026-10-07** while closing P4-199 (#620). GitHub: [#652](https://github.com/developer0hye/libjpeg-turbo-rs/issues/652).
 
@@ -13669,7 +13669,43 @@ only (found by the P4-199 docs audit).
 oracle extension; P4-199's scope was the pixel decompress entry points its
 harness drives.
 
-## P4-226. `tj3Decompress8` Decodes a 12-Bit Frame That Stock TurboJPEG Refuses — **OPEN**
+**Status (2026-10-08): closed.** Both entry points read the header through
+the new `TjHandle::decompress_header_info` — `read_header`, so the thirteen
+and the ICC profile are published exactly as by the other entry points — and
+decode through the new `TjHandle::decompress_to_yuv_planes`, which re-reads
+the header (upstream's planar delegate calls `setDecompParameters` a second
+time), applies `TJPARAM_MAXPIXELS`, and decodes under the handle's
+`DecodeLimits`, so `TJPARAM_SCANLIMIT` and `TJPARAM_MAXMEMORY` both reach the
+raw decode (criterion 4) — the handle-less `decompress_to_yuv_planes` they
+called before decoded under the defaults. The C entry points keep upstream's
+refusal order: the packed wrapper refuses `TJSAMP_UNKNOWN` before
+`TJPARAM_MAXPIXELS` and the planar body after it (`turbojpeg.c:2417-2418`
+vs `:2228-2233`), with upstream's messages for both; a frame stock's raw
+path refuses after the scan walk — lossless ("Requested features are
+incompatible") or above 8 bits ("Unsupported JPEG data precision N") — is
+refused there too. `inspect_header` keeps writing nothing.
+
+Proof: `examples/decomp_parameters_oracle.c` traces both entry points per
+fixture — fresh, under `TJPARAM_MAXPIXELS` 1 and `TJPARAM_SCANLIMIT` 2, and
+on the long-lived handle — verbatim against stock 3.2.0
+(`decompress_publishes_what_stock_turbojpeg_publishes`); without the oracle,
+`the_yuv_decompressors_publish_the_thirteen` (capi) and
+`the_yuv_decompress_publishes_the_thirteen` (`tests/tj3_decomp_parameters.rs`);
+`TJPARAM_MAXMEMORY` by `the_yuv_decompressors_honour_maxmemory`
+(`crates/libjpeg-turbo-rs-capi/tests/yuv_decompress_overrun_guard.rs`: 5 MiB
+refuses and 6 MiB decodes a 1024x1024 4:4:4 frame, the raw path's measured
+estimate; stock's budget reaches other allocations, so this is not traced).
+Criterion 3: the P4-141 harness gains `Op::DecompressToYuv` (wire code 13,
+after `Reset`, so no committed seed changes meaning); it publishes for P2,
+joins `published_parameters_do_not_survive_a_change_of_image`, the wire
+round trip and `every_publishing_operation_leaves_the_same_icc_profile`, and
+a mutation that stops it publishing fails two of those tests.
+
+Filed on the way: [P4-234](#p4-234-tj3decompresstoyuv8--tj3decompresstoyuvplanes8-ignore-the-scaling-factor-and-short-strides-overrunning-a-correctly-sized-buffer--partial-overruns-refused-scaled-output-not-implemented)
+(the same entry points overran a correctly sized buffer) and
+[P4-235](#p4-235-tj3transform-ignores-tjparam_savemarkers-levels-013-and-the-handles-icc-profile--open).
+
+## P4-226. `tj3Decompress8` Decodes a 12-Bit Frame That Stock TurboJPEG Refuses — **CLOSED 2026-10-07**
 
 **Found 2026-10-07** while building P4-199's C oracle (#620), whose header
 comment lists it as one of the cases the trace leaves out. GitHub: [#653](https://github.com/developer0hye/libjpeg-turbo-rs/issues/653).
@@ -13700,7 +13736,44 @@ deliberate divergence.
 callers that rely on it, and needs its own decision; P4-199 was about what a
 decompress publishes, not which frames it accepts.
 
-## P4-227. `tj3Transform` Ignores the Handle's MAXPIXELS/SCANLIMIT/MAXMEMORY and Its PROGRESSIVE/ARITHMETIC Parameters — **OPEN**
+**Status (2026-10-07): closed.** `TjHandle::decompress` (and so
+`tj3Decompress8`) refuses any frame above 8 bits — lossy 12-bit and lossless
+9-to-16-bit alike, as stock's 8-bit `_jpeg_read_scanlines` does
+(`jdapistd.c:328-341`) — with "Unsupported JPEG data precision N", after
+publishing, after `TJPARAM_MAXPIXELS` and after the scan walk that applies
+`TJPARAM_SCANLIMIT` (stock's `jpeg_start_decompress` absorbs a multi-scan
+stream before its precision check). `Decoder` / `decompress()` still
+downscale a 12-bit frame.
+
+Criterion 2, measured against stock 3.2.0 on a two-component frame written
+through libjpeg's API (`tests/inputs/p4226_two_component_unknown_16x16.jpg`):
+stock publishes `TJCS_DEFAULT` and `TJSAMP_UNKNOWN`, refuses
+`tj3DecompressHeader` ("Could not determine colorspace of JPEG image") and
+refuses `tj3Decompress8/12/16` ("Unsupported color conversion request"). The
+port already refused the decompresses (with other messages) but published
+`COLORSPACE` = 1 and accepted the header: `Decoder::jpeg_color_space` folds
+libjpeg's JCS_UNKNOWN into YCbCr for the decoder's own fallback, so the
+P4-199 publisher's `Unknown` arm was dead. `publish_decomp_parameters` now
+publishes `TJCS_DEFAULT` for any component count other than 1, 3 or 4 —
+`default_decompress_parms`' default arm — and all three entry points refuse
+that frame with stock's message — before the scan walk, since stock selects
+its colour converter before absorbing the scans
+(`an_unconvertible_frame_is_refused_before_the_scan_limit`, on a progressive
+two-component fixture measured against stock). Fixed the same way, not
+recorded as a divergence.
+
+Proof: `examples/decomp_parameters_oracle.c` traces a `dec8` case
+(`tj3Decompress8` regardless of precision) for every fixture plus the
+two-component fixture, verbatim against stock
+(`decompress_publishes_what_stock_turbojpeg_publishes`); without the oracle,
+`decompress8_refuses_a_12_bit_frame_after_publishing` and
+`a_two_component_frame_publishes_tjcs_default_and_is_refused` in
+`crates/libjpeg-turbo-rs-capi/tests/capi_decomp_parameters.rs`, and
+`decompress_refuses_a_frame_above_8_bits_after_publishing` /
+`a_two_component_frame_publishes_tjcs_default_and_is_refused` in
+`tests/tj3_decomp_parameters.rs`.
+
+## P4-227. `tj3Transform` Ignores the Handle's MAXPIXELS/SCANLIMIT/MAXMEMORY and Its PROGRESSIVE/ARITHMETIC Parameters — **CLOSED 2026-10-08**
 
 **GitHub:** [#655](https://github.com/developer0hye/libjpeg-turbo-rs/issues/655) — found 2026-10-07 by the docs-drift audit of the P4-199 fix.
 
@@ -13718,6 +13791,90 @@ way upstream does, with upstream's messages. (2) It honours
 `TJPARAM_PROGRESSIVE` and `TJPARAM_ARITHMETIC` for the output as upstream
 does. (3) Cross-validated against stock 3.2.0 `tj3Transform` with an oracle
 trace in the shape of `capi_decomp_parameters`.
+
+**Status (2026-10-08): closed.** `tj3Transform` now validates every
+transform's arguments before the header read, then applies the handle's
+limits to the source in upstream's order with upstream's messages:
+`TJPARAM_MAXPIXELS` ("tj3Transform(): Image is too large"), each transform's
+`TJXOPT_PERFECT` test ("tj3Transform(): Transform is not perfect"),
+`TJPARAM_MAXMEMORY` ("Memory limit exceeded") and `TJPARAM_SCANLIMIT`
+("Progressive JPEG image has more than N scans"). The memory estimate counts
+what stock's memory manager realizes before the first scan — the source's
+whole-image coefficient arrays plus every transform's workspace, following
+`jtransform_request_workspace`'s rules — and refuses at `estimate >= budget`;
+stock's few KiB of pool overhead is not modelled. Every transform's output
+takes the handle's `TJPARAM_PROGRESSIVE`, `TJPARAM_ARITHMETIC` and
+`TJPARAM_OPTIMIZE` (OR-ed with the `TJXOPT_*` twins) and its restart interval
+(`TJPARAM_RESTARTROWS` over `TJPARAM_RESTARTBLOCKS`) — the last two found
+ignored too by the probe that measured this item, and fixed with the same
+code (`turbojpeg.c:3029-3037`). A transform still publishes nothing, as
+upstream's does not call `setDecompParameters`.
+
+The precedence work exposed two more divergences in the core transform,
+fixed here because `tj3Transform` cannot match stock without them.
+`TransformOptions::perfect` tested both edges for every rotation, so
+`-perfect -rotate 90` on a frame whose width alone is ragged was refused
+where jpegtran and `tj3Transform` accept it; it now follows
+`jtransform_perfect_transform`, with an 8x8 iMCU for a one-component output
+(grayscale forced only on a YCbCr source, classified from the header); a
+one-component source whose SOF declares a sampling factor above 1 is now
+re-laid as 1x1 before anything else, as upstream treats it and jpegtran
+writes it, which keeps the PERFECT check and the spatial transform on the
+same one-block iMCU (`a_two_by_two_sampled_grayscale_frame_transforms_as_jpegtran_does`,
+all eight operations with and without `-perfect`, byte-exact); and `-trim`
+uses the grayscale output's one-block iMCU as PERFECT does
+(`trim_uses_the_grayscale_imcu`, 42 cases byte-exact against jpegtran — it
+trimmed a 72-wide 4:2:0 frame to 64 where jpegtran keeps 72). And a
+`restart_interval` of 0 copied the source's DRI into the output, contrary to
+the field's own documentation and to both `jpegtran` and `tj3Transform`,
+which drop it (`jpeg_copy_critical_parameters` does not copy
+`restart_interval`; measured on `photo_640x480_420_rst.jpg`). A crop region
+`jtransform_request_workspace` refuses is reported as "Invalid crop request"
+before the memory and scan limits, as upstream reports it. The source checks
+read the header only (`Decoder::new_header_only`, exposed `#[doc(hidden)]`
+for the capi crate, not as supported API), so
+`TJPARAM_MAXPIXELS` refuses before any later scan is walked, and
+`TJPARAM_RESTARTBLOCKS` / `TJPARAM_RESTARTROWS` now clear each other when
+set nonzero and refuse values outside 0-65535, as upstream's `tj3Set` does
+(`turbojpeg.c:819-830`), so the interval applied is the last one set. The memory estimate also counts the
+markers `jcopy_markers_setup` saves for the handle's `TJPARAM_SAVEMARKERS`
+level, with libjpeg's per-marker allocation overhead
+(`saved_markers_count_against_maxmemory`: 32 64 KiB APP5 segments move the
+boundary from 7 to 9 MiB, as on stock), and the batch is reserved fallibly
+("Memory allocation failure", as upstream checks its `xinfo` `malloc`). Each
+transform's crop is checked, in upstream's order and before the limits,
+against `jtransform_request_workspace`'s rules and then against
+`tjMCUWidth` / `tjMCUHeight` of the destination subsampling (`:3007-3015`,
+"To crop this JPEG image, x must be a multiple of …"); a misaligned crop used
+to be aligned down silently. A crop that enlarges the frame counts its
+expanded workspace in the memory estimate (12/13 MiB boundary measured equal
+to stock); the expanded *output* itself is not produced — that is
+[P4-173](#p4-173-jpegtran-32-crop-expansion--roll-and-the-flattenreflect-refusal-are-unported--open).
+
+Proof: `examples/transform_parameters_oracle.c` traces 17 cases per fixture
+plus 14 `TJPARAM_MAXMEMORY` boundary cases on a 1024x1024 4:4:4 source
+(6/7 MiB in place, 12/13 MiB with a workspace, 8/9 MiB for a grayscale
+rotation), printing each output's SOF marker, size and FNV-1a hash; the port
+matches stock 3.2.0 verbatim
+(`crates/libjpeg-turbo-rs-capi/tests/capi_transform_parameters.rs`,
+`transform_applies_what_stock_turbojpeg_applies`), and the oracle-free
+`transform_honours_maxpixels_and_scanlimit`, `transform_honours_maxmemory`
+and `transform_honours_the_output_parameters` fail on the previous code.
+`tests/transform_perfect_c_parity.rs` compares all seven `-perfect`
+operations, with and without `-grayscale`, against `jpegtran` byte for byte,
+plus the RGB-colour-space grayscale case;
+`transform_drops_the_source_restart_interval` and
+`an_invalid_crop_outranks_maxmemory` pin the last two (the oracle's `rst`
+label also traces the DRI drop byte-exact);
+`maxpixels_is_applied_before_any_later_scan_is_read`, the oracle's
+`restartrows_then_blocks` case, `the_restart_parameters_clear_each_other`,
+`the_restart_parameters_refuse_values_outside_sixteen_bits`
+(`tests/tj3_decomp_parameters.rs`) and
+`crop_alignment_and_expansion_meet_the_memory_limit_as_stock_does` pin the
+rest.
+
+Not covered here: the handle's `TJPARAM_SAVEMARKERS` level and ICC profile,
+filed as [P4-235](#p4-235-tj3transform-ignores-tjparam_savemarkers-levels-013-and-the-handles-icc-profile--open).
 
 ## P4-228. Fresh Decode of Large Images Is 2–5 % Slower Than 0.8.0 — **CLOSED 2026-10-07**
 
@@ -13884,6 +14041,88 @@ comparability check.
 then has to be regenerated with three new dispatches. Do them together, at
 the next deliberate reference refresh.
 
+## P4-234. `tj3DecompressToYUV8` / `tj3DecompressToYUVPlanes8` Ignore the Scaling Factor and Short Strides, Overrunning a Correctly Sized Buffer — **PARTIAL: overruns refused; scaled output not implemented**
+
+**GitHub:** [#667](https://github.com/developer0hye/libjpeg-turbo-rs/issues/667) — found 2026-10-07 while closing P4-225 (#652).
+
+**What was wrong.** Upstream emits YUV planes at the *scaled* size
+(`TJSCALED` in the packed wrapper, `jpeg_calc_output_dimensions` and
+`dctsize` in the planar body, `turbojpeg.c:2241-2262`, `:2420-2421`), so a
+caller following `turbojpeg.h` sizes its buffer with
+`tj3YUVBufSize(TJSCALED(w), align, TJSCALED(h), subsamp)`. Both entry points
+decoded at full size whatever the handle's scaling factor and wrote the
+unscaled planes into that buffer: a **heap overflow** from documented-correct
+use. Measured on `tests/fixtures/photo_64x64_420.jpg` at 1/2 into a
+sentinel-filled buffer: stock 3.2.0 writes 1536 bytes, the port wrote 6144.
+The legacy `tjDecompressToYUV2` / `tjDecompressToYUVPlanes` are not exported
+(P4-18), but upstream's own body for them — and so the shim
+`docs/ABI_COMPATIBILITY.md` tells their callers to write — is exactly this
+call: choose the factor that fits the requested size, `tj3SetScalingFactor`,
+then the TJ3 entry point. Separately, `tj3DecompressToYUVPlanes8` honoured a
+`strides[i]` shorter than its plane's width and read a negative one as "the
+default", where upstream refuses both (`:2253-2254`): a short stride runs the
+last row `pw - stride` bytes past a buffer sized `stride * ph`. Present in
+every published capi (0.1.0-0.1.2).
+
+**Acceptance criteria.** (1) No YUV decompress writes past a buffer sized
+per the documented contract at any scaling factor or stride. (2) Scaled YUV
+decompression emits upstream's scaled planes, byte-exact against stock at
+every `tj3GetScalingFactors` factor.
+
+**Status (2026-10-08): partial — criterion 1 met.**
+`TjHandle::decompress_to_yuv_planes` refuses a scaling factor other than
+1/1 after publishing and before decoding, so both C entry points return -1
+having written nothing, and `tj3DecompressToYUVPlanes8` refuses a stride
+shorter than its plane's width, or negative, as upstream does, before
+writing. Pinned by `crates/libjpeg-turbo-rs-capi/tests/yuv_decompress_overrun_guard.rs`
+(`a_scaled_yuv_decompress_writes_nothing_past_the_scaled_buffer`,
+`a_stride_shorter_than_the_plane_is_refused`,
+`the_legacy_decompress_to_yuv2_shim_cannot_overrun` — upstream's legacy body
+replayed through the TJ3 calls), each checking an 8 KiB sentinel band past
+the caller's buffer; all three fail on the previous code. The sanitizers
+workflow's ASan job runs the file too, where a write beyond the band is also
+reported. The C-boundary misuse harness gains a `yuv_overrun` case
+(`examples/cabi_misuse_harness.c`, `yuv_decompression_cannot_overrun_a_documented_buffer`):
+every destination is sized as `turbojpeg.h` documents and flush against a
+`PROT_NONE` page, so an overrun faults the child — against `origin/main` it
+died by `SIGBUS` on its first call — and `sanitizers.yml`'s `c_boundary_asan`
+leg runs it against an ASan-instrumented cdylib; the scaled cases are
+`KNOWN_DIVERGENCES` keyed to this item. The same pass closed a related abort:
+`tj3DecompressToYUV8` grew its packed planes infallibly from the caller's
+`align`, so 2^30 aborted the process; it now refuses padded planes past
+`INT_MAX` with upstream's "Image or row alignment is too large"
+(`turbojpeg.c:2435-2439`) and reserves the packed buffer fallibly.
+
+**Still open (criterion 2).** A scaled decode is refused where stock
+succeeds. Emitting scaled planes needs the raw-data decode to run the scaled
+IDCTs per component, including upstream's override that keeps 4:2:0 /
+4:1:0 / 2:4 chroma at its subsampled size (`turbojpeg.c:2299-2316`);
+`Decoder::decode_raw` always runs the 8x8 IDCT today.
+
+## P4-235. `tj3Transform` Ignores `TJPARAM_SAVEMARKERS` Levels 0/1/3 and the Handle's ICC Profile — **OPEN**
+
+**GitHub:** [#668](https://github.com/developer0hye/libjpeg-turbo-rs/issues/668) — found 2026-10-07 while working P4-227 (#655).
+
+Upstream uses the handle's `TJPARAM_SAVEMARKERS` as the copy option
+(`turbojpeg.c:2991-2992`, `:3039-3041`) and writes the profile set with
+`tj3SetICCProfile` whenever that option is neither `JCOPYOPT_ALL` nor
+`JCOPYOPT_ICC` (`:3044-3046`). `crates/libjpeg-turbo-rs-capi/src/transform.rs`
+maps only `TJXOPT_COPYNONE` (to `MarkerCopyMode::None`) and otherwise copies
+everything; it never writes the handle's profile. Measured against stock
+3.2.0 on a 16x16 JFIF + ICC source, identity transform: at levels 0, 1 and 3
+stock drops the source ICC (and writes the handle's when one is set); the
+port copies the source ICC at every level.
+
+**Acceptance criteria.** (1) `tj3Transform` copies exactly the markers
+upstream's `jcopy_markers_execute` copies for each level 0-4, and writes the
+handle's ICC profile under the same condition upstream does, byte-exact
+against stock `tj3Transform` for every level with and without a handle
+profile. (2) The legacy NOREALLOC bridge's P4-156 quirk keeps holding.
+
+**Why deferred.** `MarkerCopyMode` has no COM-only or all-but-ICC variant and
+the transform writer has no ICC injection path; both are core-crate API
+work outside P4-227's limits and output parameters.
+
 ## P4-239. On Zen 4, 4:2:0 Encode Is 5 % Slower Than 0.8.0 — **OPEN**
 
 **GitHub:** [#665](https://github.com/developer0hye/libjpeg-turbo-rs/issues/665) — child of #635 Milestone C.
@@ -13914,4 +14153,33 @@ band of 0.8.0.
 
 **Why deferred.** No Zen 4 machine is available locally, and hosted runners
 land on Zen 4 only some of the time.
+
+## P4-240. `tj3Transform` Refuses a Zero Crop Width or Height, and the Rust Transform Clamps Crops jpegtran Refuses — **OPEN**
+
+**GitHub:** [#675](https://github.com/developer0hye/libjpeg-turbo-rs/issues/675) — found 2026-10-08 by the review of P4-227 (#655, PR #674).
+
+1. Upstream treats a zero `tjtransform.r.w` / `r.h` as `JCROP_UNSET` — "to the
+   edge" (`turbojpeg.c:2979-2986`, `transupp.c:1711-1717`) — and so does this
+   crate's `transformed_specs`, which sizes `tj3TransformBufSize`.
+   `crates/libjpeg-turbo-rs-capi/src/transform.rs` refuses `w <= 0 || h <= 0`
+   as an invalid region. Measured on `photo_64x64_420.jpg`, region
+   `{16, 16, 0, 0}`: stock 3.2.0 returns 0 (1828 bytes), the port -1.
+2. `transform_jpeg_with_options` clamps a region that runs past the transformed
+   frame (`src/api/coefficient.rs`, the `(crop.width + remainder_x).min(…)`
+   arithmetic), where `jtransform_request_workspace` raises
+   `JERR_BAD_CROP_SPEC` ("Invalid crop request"): stock
+   `jpegtran -crop 32x32+48+0` on a 64x64 frame and
+   `jpegtran -rotate 90 -crop 100x100+0+0` both fail. Since #674 `tj3Transform`
+   refuses such regions itself before the core runs, so the gap is the Rust
+   API's alone. Aligning an off-grid `x`/`y` down to the iMCU is jpegtran's own
+   behaviour and not part of this item.
+
+**Acceptance criteria.** (1) `tj3Transform` treats a zero `r.w` / `r.h` as "to
+the edge", byte-exact against stock `tj3Transform`. (2)
+`transform_jpeg_with_options` refuses every region `jtransform_request_workspace`
+refuses, cross-validated against `jpegtran -crop`. Crop *expansion* stays with
+[P4-173](#p4-173-jpegtran-32-crop-expansion--roll-and-the-flattenreflect-refusal-are-unported--open).
+
+**Why deferred.** Both are behaviour changes outside P4-227's limits and output
+parameters; (2) changes what the Rust API accepts.
 

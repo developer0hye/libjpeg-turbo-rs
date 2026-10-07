@@ -658,6 +658,37 @@ pub fn write_coefficients(coeffs: &JpegCoefficients) -> Result<Vec<u8>> {
     Ok(output)
 }
 
+/// Re-lay component 0 of `coeffs` as a plain 1x1-sampled raster of
+/// `ceil(width / 8)` x `ceil(height / 8)` blocks, dropping the MCU padding a
+/// larger sampling factor left around it. A no-op when it is already 1x1.
+fn normalize_to_one_by_one(coeffs: &mut JpegCoefficients) -> Result<()> {
+    let component = &mut coeffs.components[0];
+    if component.h_sampling == 1 && component.v_sampling == 1 {
+        return Ok(());
+    }
+    let target_bx: usize = (coeffs.width as usize).div_ceil(8);
+    let target_by: usize = (coeffs.height as usize).div_ceil(8);
+    if component.blocks_x < target_bx || component.blocks_y < target_by {
+        return Err(JpegError::CorruptData(format!(
+            "component grid {}x{} does not cover the {}x{}-block image",
+            component.blocks_x, component.blocks_y, target_bx, target_by
+        )));
+    }
+    if component.blocks_x != target_bx || component.blocks_y != target_by {
+        let mut blocks: Vec<[i16; 64]> = Vec::with_capacity(target_bx * target_by);
+        for by in 0..target_by {
+            let row: usize = by * component.blocks_x;
+            blocks.extend_from_slice(&component.blocks[row..row + target_bx]);
+        }
+        component.blocks = blocks;
+        component.blocks_x = target_bx;
+        component.blocks_y = target_by;
+    }
+    component.h_sampling = 1;
+    component.v_sampling = 1;
+    Ok(())
+}
+
 /// Apply a lossless transform to a JPEG image.
 ///
 /// Delegates to [`transform_jpeg_with_options`] with default options, so
@@ -726,6 +757,16 @@ pub fn transform_jpeg_with_options(data: &[u8], options: &TransformOptions) -> R
     let mut coeffs = read_coefficients(data)?;
     let op: TransformOp = options.op;
 
+    // A one-component frame is transformed as 1x1-sampled, whatever its SOF
+    // says: its iMCU is one block (`jtransform_request_workspace`,
+    // transupp.c:1650-1652) and jpegtran writes it back 1x1. Keeping the SOF's
+    // 2x2 here made the PERFECT check (8x8) and the spatial transform (16x16)
+    // disagree, so a 24-pixel-wide frame flipped only two of its three block
+    // columns (P4-227 review).
+    if coeffs.components.len() == 1 {
+        normalize_to_one_by_one(&mut coeffs)?;
+    }
+
     // Determine iMCU dimensions from the coefficient data.
     let max_h: usize = coeffs
         .components
@@ -739,8 +780,23 @@ pub fn transform_jpeg_with_options(data: &[u8], options: &TransformOptions) -> R
         .map(|c| c.v_sampling as usize)
         .max()
         .unwrap_or(1);
-    let imcu_w: usize = max_h * 8;
-    let imcu_h: usize = max_v * 8;
+    // `-grayscale` on a YCbCr source makes the output one component, whose
+    // iMCU is one block (`jtransform_request_workspace`, transupp.c:1631-1655)
+    // — for PERFECT and TRIM alike. Upstream forces one component only for a
+    // YCbCr source (`force_grayscale && jpeg_color_space == JCS_YCbCr`),
+    // classified from the header as libjpeg classifies it.
+    let forces_one_component: bool = options.grayscale
+        && coeffs.components.len() == 3
+        && crate::decode::pipeline::Decoder::new_header_only(
+            data,
+            crate::common::types::DecodeLimits::default(),
+        )
+        .is_ok_and(|header| header.jpeg_color_space() == crate::common::types::ColorSpace::YCbCr);
+    let (imcu_w, imcu_h): (usize, usize) = if forces_one_component {
+        (8, 8)
+    } else {
+        (max_h * 8, max_v * 8)
+    };
 
     // For transforms that swap dimensions, use swapped iMCU sizes for alignment checks.
     let swaps_dims: bool = matches!(
@@ -772,12 +828,29 @@ pub fn transform_jpeg_with_options(data: &[u8], options: &TransformOptions) -> R
     let has_partial_width: bool = needs_width_aligned && !width_aligned;
     let has_partial_height: bool = needs_height_aligned && !height_aligned;
 
-    // PERFECT: fail if partial iMCU blocks exist for this transform.
-    if options.perfect && (has_partial_width || has_partial_height) {
-        return Err(JpegError::CorruptData(format!(
-            "perfect transform requested but image {}x{} is not iMCU-aligned (iMCU={}x{})",
-            coeffs.width, coeffs.height, imcu_w, imcu_h
-        )));
+    // PERFECT: upstream's `jtransform_perfect_transform` (transupp.c:2415-2450),
+    // which tests only the edges `op` moves — the right edge for HFlip and
+    // Rot270, the bottom for VFlip and Rot90, both for Transverse and Rot180 —
+    // against the output's iMCU (above). The trim logic below keeps its own,
+    // wider alignment flags. Testing those here refused `-perfect -rotate 90`
+    // on a frame whose width alone was ragged, which jpegtran and
+    // tj3Transform accept (P4-227).
+    if options.perfect {
+        let (perfect_imcu_w, perfect_imcu_h): (usize, usize) = (imcu_w, imcu_h);
+        let width_whole: bool = (coeffs.width as usize).is_multiple_of(perfect_imcu_w);
+        let height_whole: bool = (coeffs.height as usize).is_multiple_of(perfect_imcu_h);
+        let is_perfect: bool = match op {
+            TransformOp::HFlip | TransformOp::Rot270 => width_whole,
+            TransformOp::VFlip | TransformOp::Rot90 => height_whole,
+            TransformOp::Transverse | TransformOp::Rot180 => width_whole && height_whole,
+            TransformOp::None | TransformOp::Transpose => true,
+        };
+        if !is_perfect {
+            return Err(JpegError::CorruptData(format!(
+                "perfect transform requested but image {}x{} is not iMCU-aligned (iMCU={}x{})",
+                coeffs.width, coeffs.height, perfect_imcu_w, perfect_imcu_h
+            )));
+        }
     }
 
     // TRIM: discard partial iMCU blocks at edges.
@@ -1171,9 +1244,13 @@ pub fn transform_jpeg_with_options(data: &[u8], options: &TransformOptions) -> R
         return Ok(Vec::new());
     }
 
-    // Apply restart interval: preserve source RI unless user explicitly overrides.
-    // Matches C jpegtran behavior — source restart interval flows through
-    // transforms unchanged. Only overwrite when explicitly requested.
+    // Apply restart interval: the output has one only when asked for. The
+    // source's never carries over — `jpeg_copy_critical_parameters` does not
+    // copy `restart_interval`, so `jpegtran` without `-restart` and
+    // `tj3Transform` with `TJPARAM_RESTART*` at 0 both drop a source DRI
+    // (measured on `photo_640x480_420_rst.jpg`, DRI 200, against stock 3.2.0
+    // and 3.1.4; P4-227). This used to preserve it, on the belief that
+    // jpegtran did.
     //
     // When `restart_in_rows == true`, the user-supplied value is in MCU rows.
     // For sequential/optimized writers the DRI is a single scan-wide value,
@@ -1203,18 +1280,7 @@ pub fn transform_jpeg_with_options(data: &[u8], options: &TransformOptions) -> R
         } else {
             coeffs.restart_interval = options.restart_interval;
         }
-    }
-    // Source RI carried over from the input JPEG can become invalid after
-    // dimension-swapping transforms with trim, since the output MCU grid is
-    // fundamentally different. Clear to avoid producing truncated entropy data.
-    let swaps_dimensions: bool = matches!(
-        options.op,
-        crate::transform::TransformOp::Rot90
-            | crate::transform::TransformOp::Rot270
-            | crate::transform::TransformOp::Transpose
-            | crate::transform::TransformOp::Transverse
-    );
-    if swaps_dimensions && options.trim && options.restart_interval == 0 {
+    } else {
         coeffs.restart_interval = 0;
     }
 

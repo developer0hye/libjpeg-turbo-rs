@@ -131,8 +131,8 @@ Our `libturbojpeg.so.0` cdylib exports the full **TurboJPEG 3** API (`tj3*`) and
 | `tjDecompressHeader(...)` | `tjDecompressHeader3(...)` (wired) → `tj3DecompressHeader(...)` | Both 1.x and 2.x header-only variants are subsumed by the v3 form, which is wired. |
 | `tjDecompressHeader2(...)` | `tjDecompressHeader3(...)` (wired) → `tj3DecompressHeader(...)` | Same as `tjDecompressHeader`. |
 | `tjDecompressToYUV(...)` | `tj3DecompressToYUV8(...)` | Allocate output via `tj3YUVBufSize()` first. |
-| `tjDecompressToYUV2(...)` | `tj3DecompressToYUV8(...)` | Same as `tjDecompressToYUV`. |
-| `tjDecompressToYUVPlanes(...)` | `tj3DecompressToYUVPlanes8(...)` | Plane sizes via `tj3YUVPlaneSize()`. |
+| `tjDecompressToYUV2(...)` | `tj3DecompressToYUV8(...)` | Upstream's body picks the scaling factor that fits the requested `width` x `height` and calls `tj3SetScalingFactor` first. This library refuses any factor but 1/1 for YUV output (-1, nothing written, P4-234 / #667), so a shim gets output only when that factor is 1/1: a request no smaller than the full size and too small for 9/8 (0 counts as the full size). |
+| `tjDecompressToYUVPlanes(...)` | `tj3DecompressToYUVPlanes8(...)` | Plane sizes via `tj3YUVPlaneSize()`. Same scaling caveat as `tjDecompressToYUV2` (P4-234). |
 | `tjEncodeYUV(...)` | `tjEncodeYUV3(...)` (wired) → `tj3EncodeYUV8(...)` | The v3 form is wired in `legacy.rs`. |
 | `tjEncodeYUV2(...)` | `tjEncodeYUV3(...)` (wired) → `tj3EncodeYUV8(...)` | Same as `tjEncodeYUV`. |
 | `tjEncodeYUVPlanes(...)` | `tj3EncodeYUVPlanes8(...)` | Planar variant. |

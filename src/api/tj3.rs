@@ -87,7 +87,8 @@ pub enum TjParam {
 
 /// Frame facts determined by the JPEG header alone.
 ///
-/// Returned by [`TjHandle::inspect_header`], which reads them without decoding
+/// Returned by [`TjHandle::inspect_header`] and
+/// [`TjHandle::decompress_header_info`], which read them without decoding
 /// pixel data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameInfo {
@@ -482,11 +483,22 @@ impl TjHandle {
                 }
                 self.lossless_pt = value;
             }
+            // The two spell one setting: a nonzero value of either clears the
+            // other, as upstream's `tj3Set` does (`turbojpeg.c:819-830`), so
+            // the interval in force is always the last one set.
             TjParam::RestartBlocks => {
+                Self::check_restart_interval(value)?;
                 self.restart_blocks = value;
+                if value != 0 {
+                    self.restart_rows = 0;
+                }
             }
             TjParam::RestartRows => {
+                Self::check_restart_interval(value)?;
                 self.restart_rows = value;
+                if value != 0 {
+                    self.restart_blocks = 0;
+                }
             }
             TjParam::XDensity => {
                 self.x_density = value;
@@ -991,7 +1003,7 @@ impl TjHandle {
     /// Refuses, after publishing, a frame whose colour space TurboJPEG cannot
     /// name ("Could not determine colorspace of JPEG image", `:1919-1920`).
     pub fn decompress_header(&mut self, data: &[u8]) -> Result<()> {
-        self.read_header(data)?;
+        let _header: Decoder<'_> = self.read_header(data)?;
         if self.color_space == TJCS_DEFAULT {
             return Err(JpegError::Unsupported(alloc::string::String::from(
                 "Could not determine colorspace of JPEG image",
@@ -1010,10 +1022,11 @@ impl TjHandle {
     /// Only the first SOS is read, so a stream whose later scans are
     /// truncated, or exceed `TJPARAM_SCANLIMIT`, still publishes before the
     /// decode that follows refuses it — upstream's order too.
-    fn read_header(&mut self, data: &[u8]) -> Result<()> {
-        let header: Decoder<'_> = Decoder::new_header_only(data, self.decode_limits())?;
+    fn read_header<'data>(&mut self, data: &'data [u8]) -> Result<Decoder<'data>> {
+        let header: Decoder<'data> = Decoder::new_header_only(data, self.decode_limits())?;
         Self::check_frame_like_initial_setup(header.header())?;
-        self.publish_header(&header)
+        self.publish_header(&header)?;
+        Ok(header)
     }
 
     /// The frame checks libjpeg makes while `jpeg_read_header` runs, before
@@ -1104,7 +1117,13 @@ impl TjHandle {
         self.width = i32::from(frame.width);
         self.height = i32::from(frame.height);
         self.precision = i32::from(frame.precision);
+        // libjpeg's `default_decompress_parms` names a colour space only for
+        // one, three or four components and says JCS_UNKNOWN otherwise
+        // (P4-226). `jpeg_color_space` folds that case into YCbCr for the
+        // decoder's own fallback, so the count is checked here.
+        let names_a_color_space: bool = matches!(frame.components.len(), 1 | 3 | 4);
         self.color_space = match decoder.jpeg_color_space() {
+            _ if !names_a_color_space => TJCS_DEFAULT,
             ColorSpace::Grayscale => 2,
             ColorSpace::Rgb => 0,
             ColorSpace::YCbCr => 1,
@@ -1164,10 +1183,11 @@ impl TjHandle {
     /// including `TJPARAM_MAXPIXELS`, which is enforced here rather than left to
     /// the decode that may never happen.
     ///
-    /// This exists so C-ABI entry points can apply upstream's header-time
-    /// validation order (`turbojpeg.c:2223-2239`) instead of decoding first and
-    /// rejecting after. The free functions `decompress_to_yuv_planes` and
-    /// friends take no handle, so they cannot see these limits at all (P4-127).
+    /// It publishes nothing — it takes `&self` — so it is *not* what any
+    /// TurboJPEG entry point does: every upstream decompressor publishes the
+    /// thirteen `setDecompParameters` parameters first. The YUV
+    /// decompressors use [`Self::decompress_header_info`] and
+    /// [`Self::decompress_to_yuv_planes`] instead (P4-225, #652).
     pub fn inspect_header(&self, data: &[u8]) -> Result<FrameInfo> {
         let decoder = Decoder::new_with_limits(data, self.decode_limits())?;
         let frame = decoder.header();
@@ -1183,21 +1203,132 @@ impl TjHandle {
         })
     }
 
+    /// The header read the TurboJPEG YUV decompressors begin with
+    /// (`turbojpeg.c:2223-2227`, `:2412-2416`): parse up to the first SOS and
+    /// publish the thirteen `setDecompParameters` parameters and the ICC
+    /// profile, exactly as [`Self::decompress_header`] does, then return the
+    /// frame facts the caller validates its buffers against.
+    ///
+    /// Unlike `decompress_header` it does not refuse a frame whose colour
+    /// space TurboJPEG cannot name — the YUV paths refuse an unknown
+    /// *subsampling* instead, at a point that differs between the packed and
+    /// planar entry points — and it applies no limit: `TJPARAM_MAXPIXELS`
+    /// belongs to [`Self::decompress_to_yuv_planes`], which re-reads the
+    /// header, as upstream's planar delegate calls `setDecompParameters` a
+    /// second time.
+    pub fn decompress_header_info(&mut self, data: &[u8]) -> Result<FrameInfo> {
+        let header: Decoder<'_> = self.read_header(data)?;
+        let frame: &FrameHeader = header.header();
+        Ok(FrameInfo {
+            width: frame.width(),
+            height: frame.height(),
+            num_components: frame.components.len(),
+            subsampling: header.jpeg_subsampling(),
+        })
+    }
+
+    /// Decompress to unconverted Y/Cb/Cr planes under this handle's
+    /// parameters (like `tj3DecompressToYUVPlanes8`), one plane per
+    /// component, each `yuv_plane_width` x `yuv_plane_height`.
+    ///
+    /// In upstream's order (`turbojpeg.c:2219-2288`): publishes the thirteen
+    /// header parameters first, then applies `TJPARAM_MAXPIXELS`, then
+    /// `TJPARAM_SCANLIMIT` and `TJPARAM_MAXMEMORY` to the decode (P4-225,
+    /// #652) — so a refused decode has published, as upstream's has.
+    ///
+    /// Like upstream, and unlike the handle-free
+    /// [`crate::api::yuv::decompress_to_yuv_planes`], it refuses a frame of
+    /// more than three components and one whose subsampling TurboJPEG cannot
+    /// name.
+    ///
+    /// A scaling factor other than 1/1 is refused: upstream emits planes at
+    /// the scaled size, which the raw decode here cannot produce yet, and
+    /// planes at the unscaled size would overrun a buffer sized for the
+    /// scaled image (P4-234).
+    #[allow(clippy::type_complexity)]
+    pub fn decompress_to_yuv_planes(
+        &mut self,
+        data: &[u8],
+    ) -> Result<(Vec<Vec<u8>>, usize, usize, Subsampling)> {
+        let header: Decoder<'_> = self.read_header(data)?;
+        let limits: crate::common::types::DecodeLimits = self.decode_limits();
+        limits.check_frame(self.width as usize, self.height as usize)?;
+        // `turbojpeg.c:2232-2239`: a frame no TurboJPEG subsampling describes
+        // (`TJSAMP_UNKNOWN`, -1), and one with a fourth plane `dstPlanes`
+        // has no room for.
+        if self.subsampling == -1 {
+            return Err(JpegError::Unsupported(alloc::string::String::from(
+                "Could not determine subsampling level of JPEG image",
+            )));
+        }
+        if header.header().components.len() > 3 {
+            return Err(JpegError::Unsupported(alloc::string::String::from(
+                "JPEG image must have 3 or fewer components",
+            )));
+        }
+        if self.scaling_factor != ScalingFactor::default() {
+            return Err(JpegError::Unsupported(format!(
+                "decompression to YUV at scaling factor {}/{} (P4-234)",
+                self.scaling_factor.num(),
+                self.scaling_factor.denom()
+            )));
+        }
+        let mut decoder: Decoder<'_> = Decoder::new_with_limits(data, limits)?;
+        // Upstream sets `dct_method` from TJPARAM_FASTDCT here too
+        // (`turbojpeg.c:2285`).
+        if self.fast_dct != 0 {
+            decoder.set_fast_dct(true);
+        }
+        // What stock's raw-data path refuses once `jpeg_start_decompress` has
+        // absorbed the scans, in `_jpeg_read_raw_data`'s order
+        // (`jdapistd.c:695-698`): an 8-bit build reads no wider sample
+        // (`JERR_BAD_PRECISION`), and a lossless frame has no DCT blocks to
+        // emit (`JERR_NOTIMPL`).
+        Self::refuse_precision_above_8(decoder.header())?;
+        if self.lossless != 0 {
+            return Err(JpegError::Unsupported(alloc::string::String::from(
+                "Requested features are incompatible",
+            )));
+        }
+        let (raw, warnings) = decoder.decode_raw_with_warnings()?;
+        // Under TJPARAM_STOPONWARNING upstream's warning handler aborts the
+        // decode. The raw decode is strict, so corrupt or truncated entropy
+        // data is already an error here rather than a warning; this refuses
+        // whatever it does recover from, as the pixel path does.
+        if self.stop_on_warning != 0 {
+            if let Some(warning) = warnings.first() {
+                return Err(JpegError::CorruptData(format!(
+                    "stop_on_warning: {warning:?}"
+                )));
+            }
+        }
+        crate::api::yuv::yuv_planes_from_raw(raw)
+    }
+
     /// Decompress JPEG data using current handle parameters (like
     /// `tj3Decompress8`).
     ///
     /// Publishes the thirteen header parameters first — see
     /// [`Self::decompress_header`] — then applies `TJPARAM_MAXPIXELS` to the
-    /// frame, then locates every scan under `TJPARAM_SCANLIMIT`, then applies
-    /// the scaling factor and cropping region, then decodes.
+    /// frame, then refuses a frame with no nameable colour space, then
+    /// locates every scan under `TJPARAM_SCANLIMIT`, then refuses a frame
+    /// above 8 bits (P4-226; each where stock's 8-bit body raises it), then
+    /// applies the scaling factor and cropping region, then decodes.
     pub fn decompress(&mut self, data: &[u8]) -> Result<Image> {
-        self.read_header(data)?;
+        let _header: Decoder<'_> = self.read_header(data)?;
         let limits: crate::common::types::DecodeLimits = self.decode_limits();
         // Upstream's maxPixels test sits right after setDecompParameters and
         // before scaling or cropping is consulted (`turbojpeg-mp.c:195-198`).
         limits.check_frame(self.width as usize, self.height as usize)?;
+        // `jpeg_start_decompress` selects the colour converter before it
+        // absorbs a multi-scan stream, so a frame with no conversion is
+        // refused before the scan walk below can (P4-226, #653).
+        self.refuse_unconvertible_color_space()?;
         // The full walk, which the decode needs and the header read skipped.
         let mut decoder = Decoder::new_with_limits(data, limits)?;
+        // The precision is refused only by `_jpeg_read_scanlines`, after
+        // `jpeg_start_decompress` has absorbed the scans (P4-226, #653).
+        Self::refuse_precision_above_8(decoder.header())?;
 
         // Apply scaling
         if self.scaling_factor != ScalingFactor::default() {
@@ -1358,16 +1489,60 @@ impl TjHandle {
 
     /// The shared head of the 12/16-bit paths, in upstream's order: read the
     /// header and publish, then apply `TJPARAM_MAXPIXELS`
-    /// (`turbojpeg-mp.c:190`, `:195-198`). Returns the limits the decode
-    /// itself must honour, `TJPARAM_SCANLIMIT` among them.
+    /// (`turbojpeg-mp.c:190`, `:195-198`), then refuse a frame with no
+    /// colour space to convert from. Returns the limits the decode itself
+    /// must honour, `TJPARAM_SCANLIMIT` among them.
     fn prepare_precision_decode(
         &mut self,
         data: &[u8],
     ) -> Result<crate::common::types::DecodeLimits> {
-        self.read_header(data)?;
+        let _header: Decoder<'_> = self.read_header(data)?;
         let limits: crate::common::types::DecodeLimits = self.decode_limits();
         limits.check_frame(self.width as usize, self.height as usize)?;
+        self.refuse_unconvertible_color_space()?;
         Ok(limits)
+    }
+
+    /// `TJPARAM_RESTARTBLOCKS` / `TJPARAM_RESTARTROWS` range: upstream's
+    /// `SET_PARAM(…, 0, 65535)` (`turbojpeg.c:822`, `:828`). A wider value
+    /// would wrap when narrowed to the 16-bit DRI field.
+    fn check_restart_interval(value: i32) -> Result<()> {
+        if !(0..=65_535).contains(&value) {
+            return Err(JpegError::CorruptData(format!(
+                "restart interval must be 0-65535, got {value}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// A frame whose colour space TurboJPEG publishes as `TJCS_DEFAULT`
+    /// (libjpeg's JCS_UNKNOWN: two components) has no conversion to any
+    /// `TJPF_*`, so stock's `jpeg_start_decompress` refuses it
+    /// (`jdcolor.c`, `JERR_CONVERSION_NOTIMPL`) at every precision. Measured
+    /// against stock 3.2.0 (P4-226).
+    fn refuse_unconvertible_color_space(&self) -> Result<()> {
+        if self.color_space == TJCS_DEFAULT {
+            return Err(JpegError::Unsupported(alloc::string::String::from(
+                "Unsupported color conversion request",
+            )));
+        }
+        Ok(())
+    }
+
+    /// `tj3Decompress8` is the 8-bit build of `turbojpeg-mp.c`, whose
+    /// `_jpeg_read_scanlines` refuses any frame above 8 bits
+    /// (`jdapistd.c:328-341`, `JERR_BAD_PRECISION`): a lossy 12-bit frame
+    /// and a lossless 9-to-16-bit one alike (P4-226, #653). [`Decoder`]
+    /// downscales a 12-bit frame on purpose — a Rust-API feature this
+    /// handle, which models the C entry point, does not inherit.
+    fn refuse_precision_above_8(frame: &FrameHeader) -> Result<()> {
+        if frame.precision > 8 {
+            return Err(JpegError::Unsupported(format!(
+                "Unsupported JPEG data precision {}",
+                frame.precision
+            )));
+        }
+        Ok(())
     }
 }
 
