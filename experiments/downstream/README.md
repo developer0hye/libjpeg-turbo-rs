@@ -177,8 +177,10 @@ it `report/corpus/`, plus a 2.7 MB binary).
 
 `run.sh --check` stops after step 4. Instead of benchmarking, it runs
 `cargo fmt --check`, `cargo clippy --locked --release --all-targets -- -D
-warnings` and `cargo test --locked --release` on the copied consumer. The
-workflow runs this first, in a separate work dir.
+warnings` and `cargo test --locked --release` on the copied consumer.
+`downstream-bench.yml` runs this first, in a separate work dir, and `ci.yml`'s
+`downstream-consumer` job runs it on every PR so a candidate API change that
+breaks the consumer fails there rather than at the next dispatch.
 
 Build variants are separate, labelled runs. The default is the stock profile.
 
@@ -282,5 +284,4 @@ claim made from runner data needs either a quiet local machine or repeated
 dispatches that agree.
 
 GitHub does not register a dispatch-only workflow until the file exists on
-the default branch. The job therefore becomes runnable after this lands on
-`main`.
+the default branch, so a branch can dispatch it only once `main` has it.

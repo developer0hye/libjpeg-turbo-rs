@@ -249,6 +249,13 @@ and `git log` between tags.
   runs system/Rust bidirectional cross-decodes.
 
 ### Fixed
+- The crate-private AVX2 merged H2V2 colour-conversion wrapper now checks
+  both rows of each pair (it checked only the first) and falls back to the
+  scalar path otherwise (P4-191). Its only caller passes valid rows, it was
+  never public API, and the gap never shipped: published 0.8.0 exposed the
+  unchecked kernel more broadly, which the P4-135 row of
+  `docs/security/AFFECTED_VERSIONS.md` already covers.
+
 - **Breaking (behaviour): every TurboJPEG decompress publishes what
   `setDecompParameters` publishes** (P4-199 #620, P4-200 #621, P4-203 #625).
   `TjHandle::decompress` / `tj3Decompress8` published eight parameters and the
