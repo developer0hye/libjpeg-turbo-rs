@@ -685,6 +685,70 @@ fn a_zero_crop_extent_runs_to_the_edge() {
     assert_eq!(bound, expected, "a 48x48 4:2:0 destination");
 }
 
+/// Issue #675 (codex review): `tj3TransformBufSize` validates the crop as
+/// upstream's `getTransformedSpecs` does (`turbojpeg.c:2847-2869`) — a zero
+/// extent runs to the edge, a region past the destination returns 0 with
+/// upstream's message. Every value below is stock 3.2.0's for
+/// `photo_64x64_420.jpg`.
+#[test]
+fn transform_buf_size_validates_the_crop_as_stock_does() {
+    let photo: &[u8] = FIXTURES[0].1;
+    let exceeds: &str =
+        "tj3TransformBufSize(): The cropping region exceeds the destination image dimensions";
+    let cases: [(c_int, (c_int, c_int, c_int, c_int), usize, &str); 9] = [
+        (TJXOP_NONE, (16, 16, 0, 0), 8960, ""),
+        (TJXOP_NONE, (64, 0, 0, 0), 0, exceeds),
+        (TJXOP_NONE, (0, 64, 0, 16), 0, exceeds),
+        (TJXOP_NONE, (48, 0, 32, 32), 0, exceeds),
+        (
+            TJXOP_NONE,
+            (8, 0, 16, 16),
+            0,
+            "tj3TransformBufSize(): To crop this JPEG image, x must be a multiple of 16\n\
+             and y must be a multiple of 16.",
+        ),
+        (TJXOP_ROT90, (16, 0, 0, 0), 11264, ""),
+        (
+            TJXOP_NONE,
+            (-1, 0, 0, 0),
+            0,
+            "tj3TransformBufSize(): Invalid cropping region",
+        ),
+        (TJXOP_NONE, (0, 0, 64, 64), 14336, ""),
+        (TJXOP_NONE, (0, 0, 0, 0), 14336, ""),
+    ];
+    let handle: *mut c_void = tj3Init(TJINIT_TRANSFORM);
+    // SAFETY: live handle; `photo` is a live slice.
+    unsafe { assert_eq!(tj3DecompressHeader(handle, photo.as_ptr(), photo.len()), 0) };
+    for (op, (x, y, w, h), expected, message) in cases {
+        let transform: TjTransform = TjTransform {
+            r: TjRegion { x, y, w, h },
+            op,
+            options: TJXOPT_CROP,
+            ..no_crop()
+        };
+        // SAFETY: live handle; `transform` outlives the call.
+        let (bound, error): (usize, String) = unsafe {
+            let bound: usize =
+                libjpeg_turbo_rs_capi::transform::tj3TransformBufSize(handle, &transform);
+            let error: String = std::ffi::CStr::from_ptr(tj3GetErrorStr(handle))
+                .to_string_lossy()
+                .into_owned();
+            (bound, error)
+        };
+        assert_eq!(bound, expected, "op {op} region {:?}", (x, y, w, h));
+        if expected == 0 {
+            assert_eq!(error, message, "op {op} region {:?}", (x, y, w, h));
+        }
+    }
+    destroy_handle(handle);
+}
+
+fn destroy_handle(handle: *mut c_void) {
+    // SAFETY: `handle` came from `tj3Init` and is not used again.
+    unsafe { tj3Destroy(handle) };
+}
+
 #[test]
 fn oracle_source_is_present() {
     let source: PathBuf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))

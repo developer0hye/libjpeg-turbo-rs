@@ -406,7 +406,8 @@ and `git log` between tags.
   untransformed image) is still clamped (P4-173). `tj3Transform` accepts a
   zero `r.w` / `r.h` as "to the edge" (it returned -1), and
   `tj3TransformBufSize` sizes that region as upstream does (it sized the
-  whole frame). Byte-exact against `jpegtran -crop` and stock `tj3Transform`.
+  whole frame) and, like upstream's `getTransformedSpecs`, returns 0 with
+  upstream's message for a region it refuses. Byte-exact against `jpegtran -crop` and stock `tj3Transform`.
 - An allocator refusal during a decode is reported as
   `JpegError::AllocationFailed` instead of aborting the process (P4-209,
   #632). `decompress` / `Decoder::decode_image` allocated their destination

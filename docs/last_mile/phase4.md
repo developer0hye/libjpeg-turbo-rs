@@ -14223,8 +14223,11 @@ with P4-173. `tj3Transform` accepts a zero `r.w` / `r.h` (only a negative
 field is "Invalid cropping region"), its pre-limit crop check treats a zero
 extent as unset, its memory estimate sizes such a region to the edge, and
 `tj3TransformBufSize` sizes it as `getTransformedSpecs` does
-(`turbojpeg.c:2862-2865`) instead of as the whole frame. The field doc now
-states the rules.
+(`turbojpeg.c:2862-2865`) instead of as the whole frame, and applies that
+function's crop checks (`:2847-2869`) — 0 with upstream's message for a
+negative field, an off-grid origin, or a region past the destination
+(`transform_buf_size_validates_the_crop_as_stock_does`, stock's values). The
+field doc now states the rules.
 
 Proof: `tests/transform_crop_c_parity.rs` (twelve regions under none, flip,
 transpose and rotations — zero extents, unaligned origins, and the five jpegtran
