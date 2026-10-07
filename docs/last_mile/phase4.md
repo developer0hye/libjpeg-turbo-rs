@@ -13701,7 +13701,7 @@ joins `published_parameters_do_not_survive_a_change_of_image`, the wire
 round trip and `every_publishing_operation_leaves_the_same_icc_profile`, and
 a mutation that stops it publishing fails two of those tests.
 
-Filed on the way: [P4-234](#p4-234-tj3decompresstoyuv8--tj3decompresstoyuvplanes8-ignore-the-scaling-factor-and-short-strides-overrunning-a-correctly-sized-buffer--partial-overruns-refused-scaled-output-not-implemented)
+Filed on the way: [P4-234](#p4-234-tj3decompresstoyuv8--tj3decompresstoyuvplanes8-ignore-the-scaling-factor-and-short-strides-overrunning-a-correctly-sized-buffer--closed-2026-10-08)
 (the same entry points overran a correctly sized buffer) and
 [P4-235](#p4-235-tj3transform-ignores-tjparam_savemarkers-levels-013-and-the-handles-icc-profile--open).
 
@@ -14041,7 +14041,7 @@ comparability check.
 then has to be regenerated with three new dispatches. Do them together, at
 the next deliberate reference refresh.
 
-## P4-234. `tj3DecompressToYUV8` / `tj3DecompressToYUVPlanes8` Ignore the Scaling Factor and Short Strides, Overrunning a Correctly Sized Buffer — **PARTIAL: overruns refused; scaled output not implemented**
+## P4-234. `tj3DecompressToYUV8` / `tj3DecompressToYUVPlanes8` Ignore the Scaling Factor and Short Strides, Overrunning a Correctly Sized Buffer — **CLOSED 2026-10-08**
 
 **GitHub:** [#667](https://github.com/developer0hye/libjpeg-turbo-rs/issues/667) — found 2026-10-07 while closing P4-225 (#652).
 
@@ -14086,18 +14086,45 @@ reported. The C-boundary misuse harness gains a `yuv_overrun` case
 every destination is sized as `turbojpeg.h` documents and flush against a
 `PROT_NONE` page, so an overrun faults the child — against `origin/main` it
 died by `SIGBUS` on its first call — and `sanitizers.yml`'s `c_boundary_asan`
-leg runs it against an ASan-instrumented cdylib; the scaled cases are
-`KNOWN_DIVERGENCES` keyed to this item. The same pass closed a related abort:
+leg runs it against an ASan-instrumented cdylib. The same pass closed a related abort:
 `tj3DecompressToYUV8` grew its packed planes infallibly from the caller's
 `align`, so 2^30 aborted the process; it now refuses padded planes past
 `INT_MAX` with upstream's "Image or row alignment is too large"
 (`turbojpeg.c:2435-2439`) and reserves the packed buffer fallibly.
 
-**Still open (criterion 2).** A scaled decode is refused where stock
-succeeds. Emitting scaled planes needs the raw-data decode to run the scaled
-IDCTs per component, including upstream's override that keeps 4:2:0 /
-4:1:0 / 2:4 chroma at its subsampled size (`turbojpeg.c:2299-2316`);
-`Decoder::decode_raw` always runs the 8x8 IDCT today.
+**Status (2026-10-08): closed — criterion 2.** The scaled planes are now
+decoded rather than refused. `Decoder::decode_raw_with_warnings` takes a
+block size and reconstructs every component with the scaled IDCT of size
+`dctsize = 8 * num / denom` — one size for all components, which is what
+upstream's raw path amounts to: `jpeg_calc_output_dimensions` would give a
+component a larger IDCT only when it is subsampled both ways, and for exactly
+those subsamplings (4:2:0, 4:1:0, 2:4) `tj3DecompressToYUVPlanes8` forces it
+back (`turbojpeg.c:2299-2316`). `api::yuv::turbojpeg_yuv_planes` then lays
+the planes out as upstream's scratch-buffer copy does
+(`turbojpeg.c:2241-2367`), including two effects outside the image that stock
+writes: a plane wider than its scratch row (`width_in_blocks * dctsize` odd
+under a two-sample padding) continues into the next scratch row, and a
+padding row on the last iMCU row receives the previous iMCU row's samples,
+because libjpeg writes only the block rows a component has. (Past the last
+component's last scratch row upstream reads beyond its allocation; those
+bytes are undefined there and zero here. No case in the matrix below reaches
+them.) Measured byte-identical to stock 3.2.0's `tj3DecompressToYUV8` at all
+sixteen scaling factors over 78 streams — 4:4:4, 4:2:2, 4:2:0, 4:4:0, 4:1:1,
+4:4:1, 4:1:0, 2:4, progressive, arithmetic, restart and grayscale at
+227x149, 35x27, 17x9, 1x1, 9x33 and 64x48, plus the committed photos — 1248
+decodes, none differing. Pinned by
+`crates/libjpeg-turbo-rs-capi/tests/capi_scaled_yuv.rs` with
+`examples/scaled_yuv_oracle.c` — 36 encoded streams (every subsampling at
+227x149, 35x27 and 17x9, plus progressive, arithmetic, restart and grayscale)
+at all sixteen factors, packed and planar, digests compared verbatim against
+stock — and by
+`a_scaled_yuv_decompress_writes_the_scaled_planes_and_nothing_past_them`
+(stock digests at 1/2, 3/8 and 15/8, packed and planar, with the sentinel
+band), `the_legacy_decompress_to_yuv2_shim_cannot_overrun` (both requests now
+decode into exactly the legacy buffer),
+`the_yuv_decompress_honours_the_scaling_factor` (`tests/tj3_decomp_parameters.rs`),
+the oracle's `yuv_half` case, and the misuse harness's `yuv_overrun`, whose
+scaled digests the stock comparison holds equal.
 
 ## P4-235. `tj3Transform` Ignores `TJPARAM_SAVEMARKERS` Levels 0/1/3 and the Handle's ICC Profile — **OPEN**
 

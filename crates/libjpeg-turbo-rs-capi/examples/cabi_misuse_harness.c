@@ -1445,9 +1445,8 @@ static int case_precision12(void) {
  *
  *   - At scaling factor 1/2 a caller sizes the buffer from the scaled frame
  *     (`TJSCALED` in the packed wrapper, `turbojpeg.c:2420-2421`). The port
- *     wrote the unscaled planes into it; it now refuses the call (stock
- *     decodes it: the scaled rc lines are a KNOWN_DIVERGENCE until scaled
- *     output lands).
+ *     wrote the unscaled planes into it; it now writes the scaled planes, and
+ *     their digest is compared against stock's.
  *   - A luma stride shorter than the plane is "Invalid argument" upstream
  *     (`:2253-2254`); the port honoured it and ran the last row past a
  *     `stride * height` buffer.
@@ -1491,9 +1490,12 @@ static int case_yuv_overrun(const unsigned char *jpeg, size_t jpeg_len) {
             rc = api.decompress_to_yuv8(handle, jpeg, jpeg_len, planes[0].data, 1);
         }
         printf("%s=%d\n", planar ? "scaled_planar_rc" : "scaled_packed_rc", rc);
+        require(rc == 0, "a scaled YUV decode succeeds");
+        uint64_t digest = 0;
+        for (int i = 0; i < count; i++) digest ^= fnv1a(planes[i].data, planes[i].len) + (uint64_t)i;
+        printf("%s=%016llx\n", planar ? "scaled_planar_bytes" : "scaled_packed_bytes",
+               (unsigned long long)digest);
         for (int i = 0; i < count; i++) {
-            if (rc != 0) require(fully_poisoned(&planes[i]),
-                                 "a refused scaled decode writes nothing");
             intact &= canary_intact(&planes[i]);
             guarded_free(&planes[i]);
         }

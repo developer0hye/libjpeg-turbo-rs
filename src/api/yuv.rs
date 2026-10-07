@@ -539,6 +539,124 @@ pub(crate) fn yuv_planes_from_raw(
     Ok((planes, width, height, subsampling))
 }
 
+/// The geometry of one component in [`turbojpeg_yuv_planes`]: its sampling
+/// factors.
+pub(crate) type ComponentSampling = (usize, usize);
+
+/// YUV planes exactly as `tj3DecompressToYUVPlanes8` writes them
+/// (`turbojpeg.c:2241-2367`), from a raw decode whose blocks were
+/// reconstructed at `block` x `block` samples (the scaled IDCT size,
+/// `dctsize`).
+///
+/// Each plane is `yuv_plane_width` x `yuv_plane_height` of the scaled frame
+/// (`out_width` x `out_height`). Upstream decodes one iMCU row at a time into
+/// a scratch buffer holding, for each component in turn, `v_samp * dctsize`
+/// rows of `width_in_blocks * dctsize` samples, and copies `pw` bytes from
+/// each scratch row into the plane. Two consequences fall outside the image
+/// and are reproduced here because they are what stock writes:
+///
+/// - When `pw` exceeds the scratch row (an odd `width_in_blocks * dctsize`
+///   under a two-sample plane padding), the copy runs on into the next
+///   scratch row — of the same component, or of the next one after its last
+///   row. Past the last component's last row upstream reads beyond its own
+///   allocation; those bytes are undefined there and zero here.
+/// - libjpeg writes only the block rows the component has
+///   (`height_in_blocks`), so on the last iMCU row the remaining scratch rows
+///   still hold the previous iMCU row's samples, and that is what a padding
+///   row receives.
+///
+/// Every sample of the scaled image itself is the plain IDCT output.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn turbojpeg_yuv_planes(
+    raw: &crate::api::raw_data::RawImage,
+    sampling: &[ComponentSampling],
+    image_width: usize,
+    image_height: usize,
+    block: usize,
+    out_width: usize,
+    out_height: usize,
+    subsampling: Subsampling,
+) -> Result<Vec<Vec<u8>>> {
+    let max_h: usize = sampling.iter().map(|&(h, _)| h).max().unwrap_or(1);
+    let max_v: usize = sampling.iter().map(|&(_, v)| v).max().unwrap_or(1);
+    let components: usize = sampling.len();
+    // Per component: scratch row width, scratch rows per iMCU row, block rows,
+    // plane width, plane height, offset of its scratch rows.
+    let mut layout: Vec<(usize, usize, usize, usize, usize, usize)> =
+        Vec::with_capacity(components);
+    let mut scratch_len: usize = 0;
+    for (component, &(h, v)) in sampling.iter().enumerate() {
+        let width_in_blocks: usize = (image_width * h).div_ceil(max_h * 8);
+        let height_in_blocks: usize = (image_height * v).div_ceil(max_v * 8);
+        let scratch_width: usize = width_in_blocks * block;
+        let scratch_rows: usize = v * block;
+        let dim_component: usize = if component >= 3 { 0 } else { component };
+        let plane_width: usize = yuv_plane_width(dim_component, out_width, subsampling);
+        let plane_height: usize = yuv_plane_height(dim_component, out_height, subsampling);
+        if raw.plane_widths[component] < scratch_width {
+            return Err(JpegError::CorruptData(format!(
+                "raw plane {component} is {} samples wide, the component needs {scratch_width}",
+                raw.plane_widths[component]
+            )));
+        }
+        layout.push((
+            scratch_width,
+            scratch_rows,
+            height_in_blocks,
+            plane_width,
+            plane_height,
+            scratch_len,
+        ));
+        scratch_len = scratch_len
+            .checked_add(scratch_width * scratch_rows)
+            .ok_or_else(|| JpegError::CorruptData("YUV scratch size overflows".to_string()))?;
+    }
+    // Upstream's scratch is `malloc`ed and never cleared; a row read before
+    // libjpeg first writes it is undefined there and zero here.
+    let mut scratch: Vec<u8> = vec![0u8; scratch_len];
+    let mut planes: Vec<Vec<u8>> = layout
+        .iter()
+        .map(|&(_, _, _, plane_width, plane_height, _)| vec![0u8; plane_width * plane_height])
+        .collect();
+    let imcu_rows: usize = out_height.div_ceil(max_v * block);
+    for imcu_row in 0..imcu_rows {
+        // What `jpeg_read_raw_data` writes into the scratch: the component's
+        // existing block rows only.
+        for (component, &(scratch_width, scratch_rows, height_in_blocks, _, _, offset)) in
+            layout.iter().enumerate()
+        {
+            let raw_width: usize = raw.plane_widths[component];
+            let raw_plane: &[u8] = &raw.planes[component];
+            for row in 0..scratch_rows {
+                let block_row: usize = imcu_row * sampling[component].1 + row / block;
+                if block_row >= height_in_blocks {
+                    continue;
+                }
+                let source: usize = (imcu_row * scratch_rows + row) * raw_width;
+                let target: usize = offset + row * scratch_width;
+                scratch[target..target + scratch_width]
+                    .copy_from_slice(&raw_plane[source..source + scratch_width]);
+            }
+        }
+        // The copy into the planes: `pw` bytes from each scratch row, for the
+        // rows the plane still has.
+        for (component, &(scratch_width, scratch_rows, _, plane_width, plane_height, offset)) in
+            layout.iter().enumerate()
+        {
+            let first_row: usize = imcu_row * scratch_rows;
+            let rows: usize = scratch_rows.min(plane_height.saturating_sub(first_row));
+            for row in 0..rows {
+                let source: usize = offset + row * scratch_width;
+                let available: usize = scratch_len.saturating_sub(source).min(plane_width);
+                let target: usize = (first_row + row) * plane_width;
+                planes[component][target..target + available]
+                    .copy_from_slice(&scratch[source..source + available]);
+            }
+        }
+    }
+    Ok(planes)
+}
+
 /// Detect chroma subsampling from raw plane dimensions.
 fn detect_subsampling(raw: &crate::api::raw_data::RawImage) -> Result<Subsampling> {
     if raw.num_components == 1 {

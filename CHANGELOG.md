@@ -89,10 +89,11 @@ and `git log` between tags.
   also honoured a stride shorter than its plane, running the last row past
   a buffer sized `stride * height`, and `tj3DecompressToYUV8` grew its packed
   planes infallibly from the caller's `align`, so an alignment of 2^30 aborted
-  the process. **Breaking (behaviour):** a YUV
-  decompress at any scaling factor other than 1/1 now returns -1 having
-  written nothing (stock decodes it; scaled YUV output is still open under
-  P4-234), and a stride shorter than its plane's width, or negative, is
+  the process. Both now decode the planes of the *scaled* frame, writing
+  exactly the `tj3YUVBufSize(TJSCALED(w), align, TJSCALED(h), subsamp)`
+  bytes, byte-identical to stock 3.2.0 at all sixteen scaling factors.
+  **Breaking (behaviour):** a stride shorter than its plane's width, or
+  negative, is
   refused with "Invalid argument" as upstream refuses it, and padded planes
   past `INT_MAX` are refused with "Image or row alignment is too large", as
   upstream refuses them. The overruns are pinned in the C-boundary misuse
