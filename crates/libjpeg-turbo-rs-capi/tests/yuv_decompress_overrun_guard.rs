@@ -80,7 +80,10 @@ fn a_scaled_yuv_decompress_writes_nothing_past_the_scaled_buffer() {
                 )
             }
         };
-        assert_eq!(rc, -1, "planar={planar}: refused until P4-234 lands");
+        assert_eq!(
+            rc, -1,
+            "planar={planar}: refused until P4-234's scaled output lands"
+        );
         assert!(
             buffer[SCALED_SIZE..].iter().all(|&byte| byte == SENTINEL),
             "planar={planar}: wrote past the {SCALED_SIZE}-byte scaled buffer"

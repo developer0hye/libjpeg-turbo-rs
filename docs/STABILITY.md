@@ -126,11 +126,11 @@ Untrusted input should be decoded under an explicit budget.
 pipeline, `precision::decompress_12bit_with_limits` /
 `decompress_16bit_with_limits` to the 12- and 16-bit decoders, and a
 `TjHandle` builds one from `TJPARAM_MAXPIXELS`, `TJPARAM_MAXMEMORY` (in
-megabytes) and `TJPARAM_SCANLIMIT` for `decompress`, `decompress_12bit` and
-`decompress_16bit`. The C ABI's `tj3DecompressToYUV8` /
-`tj3DecompressToYUVPlanes8` apply `TJPARAM_MAXPIXELS` and `TJPARAM_SCANLIMIT`
-through `TjHandle::inspect_header`, not `TJPARAM_MAXMEMORY`: they decode
-through the handle-free `decompress_to_yuv_planes`. Every refusal is
+megabytes) and `TJPARAM_SCANLIMIT` for `decompress`, `decompress_12bit`,
+`decompress_16bit` and `decompress_to_yuv_planes` — the last is what the C
+ABI's `tj3DecompressToYUV8` / `tj3DecompressToYUVPlanes8` decode through
+(P4-225). The C ABI's `tj3Transform` applies all three to its source and
+refuses with upstream's messages (P4-227). Otherwise every refusal is
 `JpegError::LimitExceeded`, raised before any buffer is sized from the
 header: `max_scans` during the header walk when the limits are given before
 it (`Decoder::new_with_limits`, the `_with_limits` functions, a `TjHandle`),

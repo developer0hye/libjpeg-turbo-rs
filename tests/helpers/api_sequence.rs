@@ -65,9 +65,9 @@
 //!   resource limits, the cropping region (which they refuse) and
 //!   `SAVEMARKERS` (for the handle's ICC profile) — since
 //!   [P4-199](https://github.com/developer0hye/libjpeg-turbo-rs/issues/620)
-//!   closed, nothing else. `DecompressToYuv` reads the resource limits and
-//!   the scaling factor (which it refuses unless 1/1, P4-234) and
-//!   `SAVEMARKERS`, and publishes what the others publish
+//!   closed, nothing else. `DecompressToYuv` reads the resource limits,
+//!   the scaling factor (which it refuses unless 1/1, P4-234), `FASTDCT`,
+//!   `STOPONWARNING` and `SAVEMARKERS`, and publishes what the others publish
 //!   ([P4-225](https://github.com/developer0hye/libjpeg-turbo-rs/issues/652)).
 //! * **P2, compress depends on the configuration and the most recent
 //!   published header, and on nothing else.** `tj3DecompressHeader` and every

@@ -254,7 +254,7 @@ pub unsafe extern "C" fn tj3Transform(
 
             // The handle's limits, against the source, in upstream's order
             // (P4-227, #655).
-            if let Some(refusal) = source_refusal(inst, jpeg, &batch) {
+            if let Some(refusal) = source_refusal(inst, jpeg, txforms, &batch) {
                 inst.set_error(refusal, TJERR_FATAL);
                 return -1;
             }
@@ -363,6 +363,10 @@ fn apply_output_parameters(inst: &crate::tj3::TjInstance, opts: &mut TransformOp
     }
 }
 
+/// `tjMCUWidth` / `tjMCUHeight` (`turbojpeg.h`), indexed by `TJSAMP_*`.
+const TJ_MCU_WIDTH: [usize; 9] = [8, 16, 16, 8, 8, 32, 8, 32, 16];
+const TJ_MCU_HEIGHT: [usize; 9] = [8, 8, 16, 8, 16, 8, 32, 16, 32];
+
 /// `jtransform_perfect_transform` (`transupp.c:2415-2450`): which edges must
 /// be whole iMCUs for `op` to lose nothing.
 fn is_perfect(op: TransformOp, width: usize, height: usize, imcu: (usize, usize)) -> bool {
@@ -464,8 +468,13 @@ fn transform_memory_estimate(
                 | TransformOp::Rot270
         );
         let crop_offset: (usize, usize) = opts.crop.map_or((0, 0), |c| (c.x, c.y));
+        // A crop larger than the frame — legal only without a transform — is
+        // an expansion, which needs a workspace of the expanded size.
+        let expands: bool = opts
+            .crop
+            .is_some_and(|c| c.width > width || c.height > height);
         let needs_workspace: bool = match opts.op {
-            TransformOp::None => crop_offset != (0, 0),
+            TransformOp::None => crop_offset != (0, 0) || expands,
             // `slow_hflip` is set for any batch of more than one transform.
             TransformOp::HFlip => crop_offset.1 != 0 || batch.len() != 1,
             _ => true,
@@ -479,8 +488,16 @@ fn transform_memory_estimate(
             (width, height)
         };
         if let Some(crop) = opts.crop {
-            out_width = crop.width.min(out_width.saturating_sub(crop.x));
-            out_height = crop.height.min(out_height.saturating_sub(crop.y));
+            out_width = if crop.width > out_width {
+                crop.width
+            } else {
+                crop.width.min(out_width.saturating_sub(crop.x))
+            };
+            out_height = if crop.height > out_height {
+                crop.height
+            } else {
+                crop.height.min(out_height.saturating_sub(crop.y))
+            };
         }
         let components: usize = if gray_only { 1 } else { frame.components.len() };
         let (imcu_width, imcu_height): (usize, usize) = match (components, transposed) {
@@ -523,6 +540,7 @@ fn transform_memory_estimate(
 fn source_refusal(
     inst: &crate::tj3::TjInstance,
     jpeg: &[u8],
+    txforms: &[TjTransform],
     batch: &[TransformOptions],
 ) -> Option<String> {
     use libjpeg_turbo_rs::tj3::TjParam;
@@ -561,29 +579,54 @@ fn source_refusal(
         .map(|c| usize::from(c.vertical_sampling))
         .max()
         .unwrap_or(1);
-    for opts in batch.iter().filter(|opts| opts.perfect) {
-        let one_component: bool = frame.components.len() == 1
-            || (opts.grayscale
-                && frame.components.len() == 3
-                && decoder.jpeg_color_space() == ColorSpace::YCbCr);
-        let imcu: (usize, usize) = if one_component {
-            (8, 8)
-        } else {
-            (max_h * 8, max_v * 8)
-        };
-        if !is_perfect(opts.op, width, height, imcu) {
-            return Some(String::from("tj3Transform(): Transform is not perfect"));
+    // The source's `getSubsamp`, which the crop alignment below is checked
+    // against, read the way every TurboJPEG entry point reads it.
+    let source_subsamp: c_int = {
+        let mut probe: libjpeg_turbo_rs::tj3::TjHandle = libjpeg_turbo_rs::tj3::TjHandle::new();
+        probe.decompress_header_info(jpeg).ok()?;
+        probe.get(TjParam::Subsampling)
+    };
+    // Per transform, in upstream's order (`turbojpeg.c:3000-3016`):
+    // `jtransform_request_workspace`'s PERFECT test and crop validation
+    // (`transupp.c:1661-1757`, `JERR_BAD_CROP_SPEC`), then tj3Transform's
+    // own crop alignment against the destination subsampling — all before
+    // `jpeg_read_coefficients`, so before the memory and scan limits below.
+    for (transform, opts) in txforms.iter().zip(batch) {
+        if opts.perfect {
+            let one_component: bool = frame.components.len() == 1
+                || (opts.grayscale
+                    && frame.components.len() == 3
+                    && decoder.jpeg_color_space() == ColorSpace::YCbCr);
+            let imcu: (usize, usize) = if one_component {
+                (8, 8)
+            } else {
+                (max_h * 8, max_v * 8)
+            };
+            if !is_perfect(opts.op, width, height, imcu) {
+                return Some(String::from("tj3Transform(): Transform is not perfect"));
+            }
         }
-    }
-    // `jtransform_request_workspace` also validates each crop against the
-    // transformed frame before `jpeg_read_coefficients` runs
-    // (`transupp.c:1705-1757`, `JERR_BAD_CROP_SPEC`), so a crop it refuses
-    // outranks the memory and scan limits below.
-    if batch
-        .iter()
-        .any(|opts| crop_is_refused(opts, width, height))
-    {
-        return Some(String::from("Invalid crop request"));
+        if crop_is_refused(opts, width, height) {
+            return Some(String::from("Invalid crop request"));
+        }
+        if let Some(crop) = opts.crop {
+            let (_, _, dst_subsamp) = transformed_specs(0, 0, source_subsamp, transform);
+            let Some(&mcu_width) = usize::try_from(dst_subsamp)
+                .ok()
+                .and_then(|index| TJ_MCU_WIDTH.get(index))
+            else {
+                return Some(String::from(
+                    "tj3Transform(): Could not determine subsampling level of destination image",
+                ));
+            };
+            let mcu_height: usize = TJ_MCU_HEIGHT[dst_subsamp as usize];
+            if crop.x % mcu_width != 0 || crop.y % mcu_height != 0 {
+                return Some(format!(
+                    "tj3Transform(): To crop this JPEG image, x must be a multiple of \
+                     {mcu_width}\nand y must be a multiple of {mcu_height}."
+                ));
+            }
+        }
     }
 
     let max_memory: c_int = inst.inner.get(TjParam::MaxMemory);

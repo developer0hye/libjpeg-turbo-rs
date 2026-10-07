@@ -1034,7 +1034,7 @@ pub unsafe extern "C" fn tj3DecompressToYUVPlanes8(
         // blocks stay meaningful rather than nesting inside a blanket one.
         let body = |inst: &mut TjInstance| -> c_int {
             // `!dstPlanes || !dstPlanes[0]` is an argument error at entry,
-            // before the header is read (`turbojpeg.c:2207-2208`).
+            // before the header is read (`turbojpeg.c:2208-2209`).
             if jpeg_buf.is_null()
                 || dst_planes.is_null()
                 || jpeg_size < 2

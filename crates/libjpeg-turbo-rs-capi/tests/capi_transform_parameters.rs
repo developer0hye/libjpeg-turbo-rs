@@ -555,6 +555,38 @@ fn maxpixels_is_applied_before_any_later_scan_is_read() {
     assert_eq!(message, "tj3Transform(): Image is too large");
 }
 
+/// Codex review of #655: tj3Transform's own crop-alignment refusal
+/// (`turbojpeg.c:3007-3015`) also precedes the memory limit, and a crop that
+/// enlarges the frame — legal without a transform — counts its expanded
+/// workspace: stock refuses the 1100x1100 expansion of the 1024x1024 source
+/// at 12 MiB and accepts it at 13 MiB (measured), as does the estimate.
+#[test]
+fn crop_alignment_and_expansion_meet_the_memory_limit_as_stock_does() {
+    let source: Vec<u8> = big();
+    let crop = |x: usize, w: usize| -> TjTransform {
+        TjTransform {
+            r: TjRegion {
+                x: x as c_int,
+                y: 0,
+                w: w as c_int,
+                h: w as c_int,
+            },
+            options: TJXOPT_CROP,
+            ..no_crop()
+        }
+    };
+    assert_eq!(
+        transform_once(&source, TJPARAM_MAXMEMORY, 1, crop(4, 16)).expect_err("refused"),
+        "tj3Transform(): To crop this JPEG image, x must be a multiple of 8\n\
+         and y must be a multiple of 8."
+    );
+    assert_eq!(
+        transform_once(&source, TJPARAM_MAXMEMORY, 12, crop(0, 1100)).expect_err("refused"),
+        "Memory limit exceeded"
+    );
+    assert!(transform_once(&source, TJPARAM_MAXMEMORY, 13, crop(0, 1100)).is_ok());
+}
+
 #[test]
 fn oracle_source_is_present() {
     let source: PathBuf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))

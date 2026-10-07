@@ -371,8 +371,11 @@ and `git log` between tags.
   disables restart markers, and `jpegtran` (without `-restart`) and
   `tj3Transform` both drop it, because `jpeg_copy_critical_parameters` does not
   copy `restart_interval`. A crop region upstream refuses is reported as
-  "Invalid crop request" before any limit. `TJPARAM_RESTARTBLOCKS` and
-  `TJPARAM_RESTARTROWS` now clear each other when set nonzero, as upstream's
+  "Invalid crop request" before any limit, and a crop whose `x` / `y` is not
+  a multiple of the destination iMCU is refused with upstream's "To crop this
+  JPEG image, x must be a multiple of …" — it used to be aligned down
+  silently. `TJPARAM_RESTARTBLOCKS` and `TJPARAM_RESTARTROWS` now clear each
+  other when set nonzero and refuse values outside 0-65535, as upstream's
   `tj3Set` does, so `tj3Get` and every compress or transform see the
   interval set last.
 - An allocator refusal during a decode is reported as

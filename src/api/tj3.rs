@@ -87,7 +87,8 @@ pub enum TjParam {
 
 /// Frame facts determined by the JPEG header alone.
 ///
-/// Returned by [`TjHandle::inspect_header`], which reads them without decoding
+/// Returned by [`TjHandle::inspect_header`] and
+/// [`TjHandle::decompress_header_info`], which read them without decoding
 /// pixel data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameInfo {
@@ -486,12 +487,14 @@ impl TjHandle {
             // other, as upstream's `tj3Set` does (`turbojpeg.c:819-830`), so
             // the interval in force is always the last one set.
             TjParam::RestartBlocks => {
+                Self::check_restart_interval(value)?;
                 self.restart_blocks = value;
                 if value != 0 {
                     self.restart_rows = 0;
                 }
             }
             TjParam::RestartRows => {
+                Self::check_restart_interval(value)?;
                 self.restart_rows = value;
                 if value != 0 {
                     self.restart_blocks = 0;
@@ -1497,6 +1500,18 @@ impl TjHandle {
         limits.check_frame(self.width as usize, self.height as usize)?;
         self.refuse_unconvertible_color_space()?;
         Ok(limits)
+    }
+
+    /// `TJPARAM_RESTARTBLOCKS` / `TJPARAM_RESTARTROWS` range: upstream's
+    /// `SET_PARAM(…, 0, 65535)` (`turbojpeg.c:822`, `:828`). A wider value
+    /// would wrap when narrowed to the 16-bit DRI field.
+    fn check_restart_interval(value: i32) -> Result<()> {
+        if !(0..=65_535).contains(&value) {
+            return Err(JpegError::CorruptData(format!(
+                "restart interval must be 0-65535, got {value}"
+            )));
+        }
+        Ok(())
     }
 
     /// A frame whose colour space TurboJPEG publishes as `TJCS_DEFAULT`

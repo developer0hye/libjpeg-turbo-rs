@@ -126,6 +126,6 @@ All rows below were introduced before the `v0.6.0` tag (2026-04-18/19 unless sta
     - Also not assessed: the npm `libjpeg-turbo-rs-wasm` package beyond its API surface, and `git`-dependency users of the unpublished `v0.6.0` capi tree.
 
 13. **Severity ordering for disclosure.**
-    - The C-ABI rows driven by *file input* or *standard API use* (P4-125, P4-195, P4-165, P4-145(b), P4-108) carry the most real-world risk, and every published capi version is affected with no fixed release.
+    - The C-ABI rows driven by *file input* or *standard API use* (P4-125, P4-195, P4-165, P4-145(b), P4-108, P4-234) carry the most real-world risk, and every published capi version is affected with no fixed release.
     - Among safe-Rust rows, P4-41 is the only one with a fixed published version (upgrade to ≥ 0.7.0 resolves it). P4-135, P4-136 and P4-192 affect every current release.
     - A release carrying the merged fixes would let advisories name a "patched" version. From `main` the root crate must be 0.9.0, not 0.8.1: `main` fails the API check for a patch bump (`docs/RELEASE.md`), so a 0.8.1 would have to be a backport onto `v0.8.0` (`SECURITY.md`). The capi version is set by the same check. Today, every advisory except P4-41 (patched in core 0.7.0) and the capi-0.1.0-only exposures of P4-4 and P4-3 (patched in capi 0.1.1) would have to say "no patched version".

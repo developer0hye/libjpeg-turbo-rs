@@ -708,3 +708,21 @@ fn the_restart_parameters_clear_each_other() {
         .expect("RESTARTBLOCKS");
     assert_eq!(handle.get(TjParam::RestartRows), 2);
 }
+
+/// Codex review of #655: the restart parameters take 0-65535, as upstream's
+/// `SET_PARAM(…, 0, 65535)` does; 65536 used to be stored and wrapped to 0
+/// (no restart markers) when narrowed to the DRI field.
+#[test]
+fn the_restart_parameters_refuse_values_outside_sixteen_bits() {
+    for param in [TjParam::RestartBlocks, TjParam::RestartRows] {
+        let mut handle: TjHandle = TjHandle::new();
+        handle.set(param, 65_535).expect("the maximum");
+        assert!(handle.set(param, 65_536).is_err(), "{param:?}");
+        assert!(handle.set(param, -1).is_err(), "{param:?}");
+        assert_eq!(
+            handle.get(param),
+            65_535,
+            "{param:?}: a refused set changes nothing"
+        );
+    }
+}

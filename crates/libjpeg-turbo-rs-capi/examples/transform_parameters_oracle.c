@@ -1,7 +1,7 @@
 /*
  * P4-227 C oracle: which handle parameters tj3Transform applies.
  *
- * Upstream's tj3Transform reads five handle parameters a caller may not
+ * Upstream's tj3Transform reads eight handle parameters a caller may not
  * expect a lossless transform to read (`turbojpeg.c:2920-3086`):
  *
  *   - TJPARAM_MAXPIXELS against the source, right after the header read and
@@ -25,7 +25,8 @@
  * The TJPARAM_MAXMEMORY cases run only on the `big` label (a 1024x1024 4:4:4
  * frame, 6 MiB of coefficients), at budgets on both sides of the boundary
  * stock's arrays set: 6/7 MiB for an in-place transform, 12/13 MiB for one
- * that needs a workspace. Stock also counts its small pool allocations, which
+ * that needs a workspace, 8/9 MiB for a TJXOPT_GRAY rotation (luma
+ * workspace only). Stock also counts its small pool allocations, which
  * the port's estimate does not model; at these budgets the difference never
  * decides the outcome.
  *

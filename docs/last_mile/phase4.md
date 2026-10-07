@@ -13826,10 +13826,18 @@ before the memory and scan limits, as upstream reports it. The source checks
 read the header only (`Decoder::new_header_only`, now public), so
 `TJPARAM_MAXPIXELS` refuses before any later scan is walked, and
 `TJPARAM_RESTARTBLOCKS` / `TJPARAM_RESTARTROWS` now clear each other when
-set nonzero, as upstream's `tj3Set` does (`turbojpeg.c:819-830`), so the
-interval applied is the last one set.
+set nonzero and refuse values outside 0-65535, as upstream's `tj3Set` does
+(`turbojpeg.c:819-830`), so the interval applied is the last one set. Each
+transform's crop is checked, in upstream's order and before the limits,
+against `jtransform_request_workspace`'s rules and then against
+`tjMCUWidth` / `tjMCUHeight` of the destination subsampling (`:3007-3015`,
+"To crop this JPEG image, x must be a multiple of …"); a misaligned crop used
+to be aligned down silently. A crop that enlarges the frame counts its
+expanded workspace in the memory estimate (12/13 MiB boundary measured equal
+to stock); the expanded *output* itself is not produced — that is
+[P4-173](#p4-173-jpegtran-32-crop-expansion--roll-and-the-flattenreflect-refusal-are-unported--open).
 
-Proof: `examples/transform_parameters_oracle.c` traces 16 cases per fixture
+Proof: `examples/transform_parameters_oracle.c` traces 17 cases per fixture
 plus 14 `TJPARAM_MAXMEMORY` boundary cases on a 1024x1024 4:4:4 source
 (6/7 MiB in place, 12/13 MiB with a workspace, 8/9 MiB for a grayscale
 rotation), printing each output's SOF marker, size and FNV-1a hash; the port
@@ -13845,8 +13853,11 @@ plus the RGB-colour-space grayscale case;
 `an_invalid_crop_outranks_maxmemory` pin the last two (the oracle's `rst`
 label also traces the DRI drop byte-exact);
 `maxpixels_is_applied_before_any_later_scan_is_read`, the oracle's
-`restartrows_then_blocks` case and `the_restart_parameters_clear_each_other`
-(`tests/tj3_decomp_parameters.rs`) pin the rest.
+`restartrows_then_blocks` case, `the_restart_parameters_clear_each_other`,
+`the_restart_parameters_refuse_values_outside_sixteen_bits`
+(`tests/tj3_decomp_parameters.rs`) and
+`crop_alignment_and_expansion_meet_the_memory_limit_as_stock_does` pin the
+rest.
 
 Not covered here: the handle's `TJPARAM_SAVEMARKERS` level and ICC profile,
 filed as [P4-235](#p4-235-tj3transform-ignores-tjparam_savemarkers-levels-013-and-the-handles-icc-profile--open).
@@ -13994,7 +14005,7 @@ the next deliberate reference refresh.
 
 **What was wrong.** Upstream emits YUV planes at the *scaled* size
 (`TJSCALED` in the packed wrapper, `jpeg_calc_output_dimensions` and
-`dctsize` in the planar body, `turbojpeg.c:2241-2262`, `:2421-2422`), so a
+`dctsize` in the planar body, `turbojpeg.c:2241-2262`, `:2420-2421`), so a
 caller following `turbojpeg.h` sizes its buffer with
 `tj3YUVBufSize(TJSCALED(w), align, TJSCALED(h), subsamp)`. Both entry points
 decoded at full size whatever the handle's scaling factor and wrote the
@@ -14033,7 +14044,7 @@ reported.
 **Still open (criterion 2).** A scaled decode is refused where stock
 succeeds. Emitting scaled planes needs the raw-data decode to run the scaled
 IDCTs per component, including upstream's override that keeps 4:2:0 /
-4:1:0 / 2:4 chroma at its subsampled size (`turbojpeg.c:2304-2320`);
+4:1:0 / 2:4 chroma at its subsampled size (`turbojpeg.c:2299-2316`);
 `Decoder::decode_raw` always runs the 8x8 IDCT today.
 
 ## P4-235. `tj3Transform` Ignores `TJPARAM_SAVEMARKERS` Levels 0/1/3 and the Handle's ICC Profile — **OPEN**
