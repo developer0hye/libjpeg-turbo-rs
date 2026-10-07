@@ -686,7 +686,7 @@ fn a_zero_crop_extent_runs_to_the_edge() {
 }
 
 /// Issue #675 (codex review): `tj3TransformBufSize` validates the crop as
-/// upstream's `getTransformedSpecs` does (`turbojpeg.c:2847-2869`) — a zero
+/// upstream's `getTransformedSpecs` does (`turbojpeg.c:2848-2869`) — a zero
 /// extent runs to the edge, a region past the destination returns 0 with
 /// upstream's message. Every value below is stock 3.2.0's for
 /// `photo_64x64_420.jpg`.

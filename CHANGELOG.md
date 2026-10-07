@@ -403,7 +403,9 @@ and `git log` between tags.
   — an origin outside the transformed image, or a region running past it —
   is now `JpegError::InvalidCropRegion("Invalid crop request")` instead of
   being clamped to the image; crop *expansion* (legal in jpegtran 3.2 for an
-  untransformed image) is still clamped (P4-173). `tj3Transform` accepts a
+  untransformed image) is still clamped, or refused with
+  `JpegError::Unsupported` when its origin lies outside the image (P4-173).
+  `tj3Transform` accepts a
   zero `r.w` / `r.h` as "to the edge" (it returned -1), and
   `tj3TransformBufSize` sizes that region as upstream does (it sized the
   whole frame) and, like upstream's `getTransformedSpecs`, returns 0 with

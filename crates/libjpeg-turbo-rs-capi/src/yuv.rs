@@ -921,7 +921,7 @@ fn scaled_frame(inst: &TjInstance) -> (c_int, c_int) {
     )
 }
 
-/// Upstream's `INT_MAX` guard on the packed planes (`turbojpeg.c:2433-2438`):
+/// Upstream's `INT_MAX` guard on the packed planes (`turbojpeg.c:2435-2439`):
 /// a chroma-carrying subsampling whose luma or chroma plane, padded to
 /// `align`, is larger than `INT_MAX` bytes. Upstream applies it to the
 /// non-grayscale branch only; a grayscale plane that large is caught by

@@ -1290,7 +1290,7 @@ impl TjHandle {
             )));
         }
         // Every supported factor is N/8, so the IDCT size is a whole number
-        // of samples: `dctsize = DCTSIZE * num / denom` (`turbojpeg.c:2246`).
+        // of samples: `dctsize = DCTSIZE * num / denom` (`turbojpeg.c:2245`).
         let (num, denom): (usize, usize) = (
             self.scaling_factor.num() as usize,
             self.scaling_factor.denom() as usize,
@@ -1304,6 +1304,22 @@ impl TjHandle {
             .collect();
         let (image_width, image_height): (usize, usize) =
             (decoder.header().width(), decoder.header().height());
+        let (out_width, out_height): (usize, usize) = (
+            (image_width * num).div_ceil(denom),
+            (image_height * num).div_ceil(denom),
+        );
+        let subsampling: Subsampling = Self::plane_geometry(self.subsampling);
+        // `Decoder`'s own estimate is the 1/1 frame's; the scaled raw planes,
+        // scratch and output planes are checked here before any is sized.
+        limits.check_memory(crate::api::yuv::turbojpeg_yuv_estimate(
+            &sampling,
+            image_width,
+            image_height,
+            block_size,
+            out_width,
+            out_height,
+            subsampling,
+        ))?;
         let (raw, warnings) = decoder.decode_raw_with_warnings(block_size)?;
         // Under TJPARAM_STOPONWARNING upstream's warning handler aborts the
         // decode. The raw decode is strict, so corrupt or truncated entropy
@@ -1318,11 +1334,6 @@ impl TjHandle {
         }
         // The planes describe the scaled frame (`jpeg_calc_output_dimensions`'
         // `output_width`, which TJSCALED reproduces).
-        let (out_width, out_height): (usize, usize) = (
-            (image_width * num).div_ceil(denom),
-            (image_height * num).div_ceil(denom),
-        );
-        let subsampling: Subsampling = Self::plane_geometry(self.subsampling);
         let planes: Vec<Vec<u8>> = crate::api::yuv::turbojpeg_yuv_planes(
             &raw,
             &sampling,

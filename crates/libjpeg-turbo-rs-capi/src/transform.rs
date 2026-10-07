@@ -222,7 +222,7 @@ pub unsafe extern "C" fn tj3Transform(
                 };
 
                 if (t.options & TJXOPT_CROP) != 0 {
-                    // Only a negative field is invalid (`turbojpeg.c:2970-2971`);
+                    // Only a negative field is invalid (`turbojpeg.c:2975-2976`);
                     // a zero width or height is `JCROP_UNSET`, "to the edge"
                     // (`:2979-2986`), resolved against the transformed frame
                     // once the header is read (P4-240, #675).
@@ -785,7 +785,7 @@ pub(crate) fn transformed_specs(
             other => other,
         };
     }
-    // Crop: upstream's `getTransformedSpecs` (`turbojpeg.c:2847-2870`) takes
+    // Crop: upstream's `getTransformedSpecs` (`turbojpeg.c:2848-2870`) takes
     // `r.w` / `r.h`, and a zero one as the remainder past `r.x` / `r.y`
     // (`JCROP_UNSET`, P4-240). Its range checks are not repeated here: a
     // region `tj3Transform` would refuse never reaches an output.
@@ -804,7 +804,7 @@ pub(crate) fn transformed_specs(
     (w, h, subsamp)
 }
 
-/// `getTransformedSpecs`' crop checks (`turbojpeg.c:2847-2869`), in its
+/// `getTransformedSpecs`' crop checks (`turbojpeg.c:2848-2869`), in its
 /// order, against the transformed frame: a negative field, an unknown
 /// destination subsampling, an origin off the destination iMCU grid, and a
 /// region — a zero extent running to the edge — past the frame. `None` when

@@ -175,9 +175,11 @@ fn a_stride_shorter_than_the_plane_is_refused() {
 }
 
 /// Issue #652: the YUV decompressors apply the handle's `TJPARAM_MAXMEMORY`,
-/// which they ignored. A 1024x1024 4:4:4 frame's raw-decode estimate is
-/// 6 MiB (`check_header_limits`: three component planes plus the packed
-/// output term it counts on every path), so 5 MiB refuses and 6 MiB decodes —
+/// which they ignored, and (#667) count what a scaled decode allocates: the
+/// MCU-padded raw planes at the scaled IDCT size, the scratch rows and the
+/// output planes (`turbojpeg_yuv_estimate`). For a 1024x1024 4:4:4 frame that
+/// is 3 MiB + 24 KiB + 3 MiB at 1/1, so 6 MiB refuses and 7 MiB decodes, and
+/// 12 MiB + 96 KiB + 12 MiB at 2/1, so 24 MiB refuses and 25 MiB decodes —
 /// measured. Stock's budget reaches only its whole-image arrays and refuses
 /// a different set of frames, which is why this is not in the C trace.
 #[test]
@@ -193,13 +195,19 @@ fn the_yuv_decompressors_honour_maxmemory() {
         Subsampling::S444,
     )
     .expect("encode");
-    let mut yuv: Vec<u8> = vec![0; width * height * 3];
-    for (megabytes, expected) in [(5, -1), (6, 0)] {
+    let mut yuv: Vec<u8> = vec![0; width * height * 3 * 4];
+    for (num, megabytes, expected) in [(1, 6, -1), (1, 7, 0), (2, 24, -1), (2, 25, 0)] {
+        let (width, height): (usize, usize) = (width * num as usize, height * num as usize);
         for planar in [false, true] {
             let handle: *mut c_void = instance();
-            // SAFETY: live handle; `yuv` holds three 1024x1024 planes.
+            // SAFETY: live handle; `yuv` holds three planes of the frame at
+            // either scale.
             let rc: c_int = unsafe {
                 assert_eq!(tj3Set(handle, TJPARAM_MAXMEMORY, megabytes), 0);
+                assert_eq!(
+                    tj3SetScalingFactor(handle, TjScalingFactor { num, denom: 1 }),
+                    0
+                );
                 if planar {
                     let base: *mut u8 = yuv.as_mut_ptr();
                     let mut planes: [*mut u8; 3] =
@@ -216,7 +224,10 @@ fn the_yuv_decompressors_honour_maxmemory() {
                 }
             };
             destroy(handle);
-            assert_eq!(rc, expected, "MAXMEMORY={megabytes} planar={planar}");
+            assert_eq!(
+                rc, expected,
+                "{num}/1 MAXMEMORY={megabytes} planar={planar}"
+            );
         }
     }
 }

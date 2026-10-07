@@ -543,8 +543,44 @@ pub(crate) fn yuv_planes_from_raw(
 /// factors.
 pub(crate) type ComponentSampling = (usize, usize);
 
+/// Bytes [`turbojpeg_yuv_planes`] and the raw decode feeding it allocate for
+/// a frame at IDCT size `block`: the MCU-padded raw component planes, the
+/// scratch rows and the output planes. A scaled decode outgrows the 1/1
+/// estimate `Decoder` checks (4x at 2/1), so the YUV path checks this one too.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn turbojpeg_yuv_estimate(
+    sampling: &[ComponentSampling],
+    image_width: usize,
+    image_height: usize,
+    block: usize,
+    out_width: usize,
+    out_height: usize,
+    subsampling: Subsampling,
+) -> u64 {
+    let max_h: usize = sampling.iter().map(|&(h, _)| h).max().unwrap_or(1);
+    let max_v: usize = sampling.iter().map(|&(_, v)| v).max().unwrap_or(1);
+    let mcus_x: u64 = image_width.div_ceil(max_h * 8) as u64;
+    let mcus_y: u64 = image_height.div_ceil(max_v * 8) as u64;
+    let block: u64 = block as u64;
+    sampling
+        .iter()
+        .enumerate()
+        .fold(0u64, |total: u64, (component, &(h, v))| {
+            let raw: u64 = (mcus_x * h as u64 * block).saturating_mul(mcus_y * v as u64 * block);
+            let scratch: u64 = ((image_width * h).div_ceil(max_h * 8) as u64 * block)
+                .saturating_mul(v as u64 * block);
+            let dim_component: usize = if component >= 3 { 0 } else { component };
+            let plane: u64 = (yuv_plane_width(dim_component, out_width, subsampling) as u64)
+                .saturating_mul(yuv_plane_height(dim_component, out_height, subsampling) as u64);
+            total
+                .saturating_add(raw)
+                .saturating_add(scratch)
+                .saturating_add(plane)
+        })
+}
+
 /// YUV planes exactly as `tj3DecompressToYUVPlanes8` writes them
-/// (`turbojpeg.c:2241-2367`), from a raw decode whose blocks were
+/// (`turbojpeg.c:2241-2344`), from a raw decode whose blocks were
 /// reconstructed at `block` x `block` samples (the scaled IDCT size,
 /// `dctsize`).
 ///
