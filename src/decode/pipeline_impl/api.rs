@@ -221,8 +221,13 @@ impl<'a> Decoder<'a> {
     /// and no further, whatever the frame type (P4-142). For describing a
     /// frame — `TjHandle`'s header read publishes from it — never for
     /// decoding: a progressive or multi-scan frame's later scans are not
-    /// located, so `max_scans` cannot fire either. `tj3Transform` applies
-    /// `TJPARAM_MAXPIXELS` from it before walking any scan (P4-227).
+    /// located, so `max_scans` cannot fire either.
+    ///
+    /// Workspace-internal, not supported API: `pub` only so the capi crate's
+    /// `tj3Transform` can apply `TJPARAM_MAXPIXELS` before walking any scan
+    /// (P4-227). Hidden from the docs and may change or disappear in any
+    /// release (docs/PUBLIC_API_REVIEW.md, P4-222).
+    #[doc(hidden)]
     pub fn new_header_only(data: &'a [u8], limits: DecodeLimits) -> Result<Self> {
         Self::parse(data, limits, true)
     }

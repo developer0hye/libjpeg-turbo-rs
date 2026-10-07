@@ -13816,14 +13816,20 @@ fixed here because `tj3Transform` cannot match stock without them.
 `-perfect -rotate 90` on a frame whose width alone is ragged was refused
 where jpegtran and `tj3Transform` accept it; it now follows
 `jtransform_perfect_transform`, with an 8x8 iMCU for a one-component output
-(grayscale forced only on a YCbCr source, classified from the header). And a
+(grayscale forced only on a YCbCr source, classified from the header); a
+one-component source whose SOF declares a sampling factor above 1 is now
+re-laid as 1x1 before anything else, as upstream treats it and jpegtran
+writes it, which keeps the PERFECT check and the spatial transform on the
+same one-block iMCU (`a_two_by_two_sampled_grayscale_frame_transforms_as_jpegtran_does`,
+all eight operations with and without `-perfect`, byte-exact). And a
 `restart_interval` of 0 copied the source's DRI into the output, contrary to
 the field's own documentation and to both `jpegtran` and `tj3Transform`,
 which drop it (`jpeg_copy_critical_parameters` does not copy
 `restart_interval`; measured on `photo_640x480_420_rst.jpg`). A crop region
 `jtransform_request_workspace` refuses is reported as "Invalid crop request"
 before the memory and scan limits, as upstream reports it. The source checks
-read the header only (`Decoder::new_header_only`, now public), so
+read the header only (`Decoder::new_header_only`, exposed `#[doc(hidden)]`
+for the capi crate, not as supported API), so
 `TJPARAM_MAXPIXELS` refuses before any later scan is walked, and
 `TJPARAM_RESTARTBLOCKS` / `TJPARAM_RESTARTROWS` now clear each other when
 set nonzero and refuse values outside 0-65535, as upstream's `tj3Set` does
@@ -14067,7 +14073,17 @@ writing. Pinned by `crates/libjpeg-turbo-rs-capi/tests/yuv_decompress_overrun_gu
 replayed through the TJ3 calls), each checking an 8 KiB sentinel band past
 the caller's buffer; all three fail on the previous code. The sanitizers
 workflow's ASan job runs the file too, where a write beyond the band is also
-reported.
+reported. The C-boundary misuse harness gains a `yuv_overrun` case
+(`examples/cabi_misuse_harness.c`, `yuv_decompression_cannot_overrun_a_documented_buffer`):
+every destination is sized as `turbojpeg.h` documents and flush against a
+`PROT_NONE` page, so an overrun faults the child — against `origin/main` it
+died by `SIGBUS` on its first call — and `sanitizers.yml`'s `c_boundary_asan`
+leg runs it against an ASan-instrumented cdylib; the scaled cases are
+`KNOWN_DIVERGENCES` keyed to this item. The same pass closed a related abort:
+`tj3DecompressToYUV8` grew its packed planes infallibly from the caller's
+`align`, so 2^30 aborted the process; it now refuses padded planes past
+`INT_MAX` with upstream's "Image or row alignment is too large"
+(`turbojpeg.c:2435-2439`) and reserves the packed buffer fallibly.
 
 **Still open (criterion 2).** A scaled decode is refused where stock
 succeeds. Emitting scaled planes needs the raw-data decode to run the scaled
@@ -14129,4 +14145,33 @@ band of 0.8.0.
 
 **Why deferred.** No Zen 4 machine is available locally, and hosted runners
 land on Zen 4 only some of the time.
+
+## P4-240. `tj3Transform` Refuses a Zero Crop Width or Height, and the Rust Transform Clamps Crops jpegtran Refuses — **OPEN**
+
+**GitHub:** [#675](https://github.com/developer0hye/libjpeg-turbo-rs/issues/675) — found 2026-10-08 by the review of P4-227 (#655, PR #674).
+
+1. Upstream treats a zero `tjtransform.r.w` / `r.h` as `JCROP_UNSET` — "to the
+   edge" (`turbojpeg.c:2979-2986`, `transupp.c:1711-1717`) — and so does this
+   crate's `transformed_specs`, which sizes `tj3TransformBufSize`.
+   `crates/libjpeg-turbo-rs-capi/src/transform.rs` refuses `w <= 0 || h <= 0`
+   as an invalid region. Measured on `photo_64x64_420.jpg`, region
+   `{16, 16, 0, 0}`: stock 3.2.0 returns 0 (1828 bytes), the port -1.
+2. `transform_jpeg_with_options` clamps a region that runs past the transformed
+   frame (`src/api/coefficient.rs`, the `(crop.width + remainder_x).min(…)`
+   arithmetic), where `jtransform_request_workspace` raises
+   `JERR_BAD_CROP_SPEC` ("Invalid crop request"): stock
+   `jpegtran -crop 32x32+48+0` on a 64x64 frame and
+   `jpegtran -rotate 90 -crop 100x100+0+0` both fail. Since #674 `tj3Transform`
+   refuses such regions itself before the core runs, so the gap is the Rust
+   API's alone. Aligning an off-grid `x`/`y` down to the iMCU is jpegtran's own
+   behaviour and not part of this item.
+
+**Acceptance criteria.** (1) `tj3Transform` treats a zero `r.w` / `r.h` as "to
+the edge", byte-exact against stock `tj3Transform`. (2)
+`transform_jpeg_with_options` refuses every region `jtransform_request_workspace`
+refuses, cross-validated against `jpegtran -crop`. Crop *expansion* stays with
+[P4-173](#p4-173-jpegtran-32-crop-expansion--roll-and-the-flattenreflect-refusal-are-unported--open).
+
+**Why deferred.** Both are behaviour changes outside P4-227's limits and output
+parameters; (2) changes what the Rust API accepts.
 

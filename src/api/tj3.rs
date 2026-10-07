@@ -1280,15 +1280,16 @@ impl TjHandle {
             decoder.set_fast_dct(true);
         }
         // What stock's raw-data path refuses once `jpeg_start_decompress` has
-        // absorbed the scans: a lossless frame has no DCT blocks to emit
-        // (`JERR_NOTIMPL`) and an 8-bit build reads no wider sample
-        // (`jdapistd.c:695-696`, `JERR_BAD_PRECISION`).
+        // absorbed the scans, in `_jpeg_read_raw_data`'s order
+        // (`jdapistd.c:695-698`): an 8-bit build reads no wider sample
+        // (`JERR_BAD_PRECISION`), and a lossless frame has no DCT blocks to
+        // emit (`JERR_NOTIMPL`).
+        Self::refuse_precision_above_8(decoder.header())?;
         if self.lossless != 0 {
             return Err(JpegError::Unsupported(alloc::string::String::from(
                 "Requested features are incompatible",
             )));
         }
-        Self::refuse_precision_above_8(decoder.header())?;
         let (raw, warnings) = decoder.decode_raw_with_warnings()?;
         // Under TJPARAM_STOPONWARNING upstream's warning handler aborts the
         // decode. The raw decode is strict, so corrupt or truncated entropy

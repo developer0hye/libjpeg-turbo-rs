@@ -141,3 +141,62 @@ fn perfect_grayscale_shrinks_the_imcu_only_for_ycbcr() {
         assert_eq!(ours.is_ok(), accepted, "{label}: ours {ours:?}");
     }
 }
+
+/// P4-227 review: a one-component frame whose SOF declares 2x2 sampling has a
+/// one-block iMCU, and jpegtran transforms and writes it as 1x1. The port's
+/// PERFECT check used 8x8 while the spatial transform used the SOF's 16x16, so
+/// `-perfect -flip horizontal` on this 24-pixel-wide frame was accepted and
+/// mirrored only two of its three block columns. Every operation, with and
+/// without `-perfect`, must now equal jpegtran's bytes.
+#[test]
+fn a_two_by_two_sampled_grayscale_frame_transforms_as_jpegtran_does() {
+    let jpegtran = require_c_tool!("jpegtran");
+    let jpeg: &[u8] = include_bytes!("inputs/p4227_gray_2x2_sampled_24x16.jpg");
+    let input = helpers::TempFile::new("p4227_gray22_in.jpg");
+    input.write_bytes(jpeg);
+    let ops: [(TransformOp, &[&str]); 8] = [
+        (TransformOp::None, &[]),
+        (TransformOp::HFlip, &["-flip", "horizontal"]),
+        (TransformOp::VFlip, &["-flip", "vertical"]),
+        (TransformOp::Rot90, &["-rotate", "90"]),
+        (TransformOp::Rot180, &["-rotate", "180"]),
+        (TransformOp::Rot270, &["-rotate", "270"]),
+        (TransformOp::Transpose, &["-transpose"]),
+        (TransformOp::Transverse, &["-transverse"]),
+    ];
+    for (op, op_args) in ops {
+        for perfect in [false, true] {
+            let ours: Vec<u8> = transform_jpeg_with_options(
+                jpeg,
+                &TransformOptions {
+                    op,
+                    perfect,
+                    ..TransformOptions::default()
+                },
+            )
+            .unwrap_or_else(|error| panic!("{op:?} perfect={perfect}: {error}"));
+            let mut args: Vec<&str> = vec!["-copy", "all"];
+            if perfect {
+                args.push("-perfect");
+            }
+            args.extend_from_slice(op_args);
+            let output = helpers::TempFile::new("p4227_gray22_out.jpg");
+            let status = std::process::Command::new(&jpegtran)
+                .args(&args)
+                .arg("-outfile")
+                .arg(output.path())
+                .arg(input.path())
+                .output()
+                .expect("run jpegtran");
+            assert!(
+                status.status.success(),
+                "{op:?} perfect={perfect}: jpegtran refused"
+            );
+            let c_bytes: Vec<u8> = std::fs::read(output.path()).expect("jpegtran output");
+            assert!(
+                ours == c_bytes,
+                "{op:?} perfect={perfect}: bytes differ from jpegtran"
+            );
+        }
+    }
+}

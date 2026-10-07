@@ -55,6 +55,12 @@ crates/libjpeg-turbo-rs-capi/src/memmgr.rs	1	counter	self.total_space_allocated 
 crates/libjpeg-turbo-rs-capi/src/memmgr.rs	2	bounds-check	if start_row.saturating_add(num_rows) > ctrl_ref.rows_in_array {
 crates/libjpeg-turbo-rs-capi/src/transform.rs	1	clamped-difference	crop.height.min(out_height.saturating_sub(crop.y))
 crates/libjpeg-turbo-rs-capi/src/transform.rs	1	clamped-difference	crop.width.min(out_width.saturating_sub(crop.x))
+crates/libjpeg-turbo-rs-capi/src/transform.rs	1	bounds-check	.fold(0, u64::saturating_add);
+crates/libjpeg-turbo-rs-capi/src/transform.rs	1	bounds-check	.saturating_mul(128)
+crates/libjpeg-turbo-rs-capi/src/transform.rs	1	bounds-check	.saturating_mul(blocks_high as u64)
+crates/libjpeg-turbo-rs-capi/src/transform.rs	1	bounds-check	estimate = estimate.saturating_add(coefficient_bytes(
+crates/libjpeg-turbo-rs-capi/src/transform.rs	1	bounds-check	imcus_high.saturating_mul(v),
+crates/libjpeg-turbo-rs-capi/src/transform.rs	1	bounds-check	imcus_wide.saturating_mul(h),
 crates/libjpeg-turbo-rs-capi/src/yuv.rs	1	clamped-difference	out.extend(std::iter::repeat_n(0u8, stride.saturating_sub(pw)));
 src/api/encoder.rs	1	geometry-count	n.saturating_mul(mcus_x)
 src/api/high_level.rs	1	clamped-difference	let h: usize = region.height.min(img_h.saturating_sub(y));

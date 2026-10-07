@@ -119,6 +119,21 @@ typedef int (*fn_tj3SetScalingFactor)(tj_handle_t handle,
                                       tj_scaling_factor_t scalingFactor);
 typedef int (*fn_tj3SetCroppingRegion)(tj_handle_t handle,
                                        tj_region_t croppingRegion);
+typedef int (*fn_tj3DecompressToYUV8)(tj_handle_t handle,
+                                      const unsigned char *jpegBuf,
+                                      size_t jpegSize, unsigned char *dstBuf,
+                                      int align);
+typedef int (*fn_tj3DecompressToYUVPlanes8)(tj_handle_t handle,
+                                            const unsigned char *jpegBuf,
+                                            size_t jpegSize,
+                                            unsigned char **dstPlanes,
+                                            int *strides);
+typedef size_t (*fn_tj3YUVBufSize)(int width, int align, int height,
+                                   int subsamp);
+typedef size_t (*fn_tj3YUVPlaneSize)(int componentID, int width, int stride,
+                                     int height, int subsamp);
+typedef int (*fn_tj3YUVPlaneWidth)(int componentID, int width, int subsamp);
+typedef int (*fn_tj3YUVPlaneHeight)(int componentID, int height, int subsamp);
 
 /* enum TJINIT (turbojpeg.h) */
 #define TJINIT_COMPRESS   0
@@ -188,6 +203,12 @@ struct tj_api {
     fn_tj3Free free;
     fn_tj3SetScalingFactor set_scaling_factor;
     fn_tj3SetCroppingRegion set_cropping_region;
+    fn_tj3DecompressToYUV8 decompress_to_yuv8;
+    fn_tj3DecompressToYUVPlanes8 decompress_to_yuv_planes8;
+    fn_tj3YUVBufSize yuv_buf_size;
+    fn_tj3YUVPlaneSize yuv_plane_size;
+    fn_tj3YUVPlaneWidth yuv_plane_width;
+    fn_tj3YUVPlaneHeight yuv_plane_height;
 };
 
 static struct tj_api api;
@@ -228,6 +249,13 @@ static void load_api(void *lib) {
     RESOLVE(set_scaling_factor, fn_tj3SetScalingFactor, "tj3SetScalingFactor");
     RESOLVE(set_cropping_region, fn_tj3SetCroppingRegion,
             "tj3SetCroppingRegion");
+    RESOLVE(decompress_to_yuv8, fn_tj3DecompressToYUV8, "tj3DecompressToYUV8");
+    RESOLVE(decompress_to_yuv_planes8, fn_tj3DecompressToYUVPlanes8,
+            "tj3DecompressToYUVPlanes8");
+    RESOLVE(yuv_buf_size, fn_tj3YUVBufSize, "tj3YUVBufSize");
+    RESOLVE(yuv_plane_size, fn_tj3YUVPlaneSize, "tj3YUVPlaneSize");
+    RESOLVE(yuv_plane_width, fn_tj3YUVPlaneWidth, "tj3YUVPlaneWidth");
+    RESOLVE(yuv_plane_height, fn_tj3YUVPlaneHeight, "tj3YUVPlaneHeight");
 }
 
 /* -------------------------------------------------------- guarded buffers -- */
@@ -1410,6 +1438,114 @@ static int case_precision12(void) {
 /* Proof that the trailing guard page is armed.  The runner requires this case
  * to die by a signal; if the mapping ever stopped being protected, every
  * overrun check above would pass while measuring nothing. */
+/* P4-234 (#667): YUV decompression into buffers sized exactly as
+ * `turbojpeg.h` documents, each flush against a PROT_NONE page — so a write
+ * past the documented size faults here, and is an ASan report in the sanitizer
+ * leg, rather than being a size the test has to remember to compare.
+ *
+ *   - At scaling factor 1/2 a caller sizes the buffer from the scaled frame
+ *     (`TJSCALED` in the packed wrapper, `turbojpeg.c:2420-2421`). The port
+ *     wrote the unscaled planes into it; it now refuses the call (stock
+ *     decodes it: the scaled rc lines are a KNOWN_DIVERGENCE until scaled
+ *     output lands).
+ *   - A luma stride shorter than the plane is "Invalid argument" upstream
+ *     (`:2253-2254`); the port honoured it and ran the last row past a
+ *     `stride * height` buffer.
+ *   - A row alignment whose padded planes exceed INT_MAX is refused before any
+ *     write (`:2435-2439`); the port tried to allocate them.
+ *
+ * Every refusal must leave its destination untouched. */
+static int case_yuv_overrun(const unsigned char *jpeg, size_t jpeg_len) {
+    tj_handle_t probe = api.init(TJINIT_DECOMPRESS);
+    if (!probe) return 2;
+    int hrc = api.decompress_header(probe, jpeg, jpeg_len);
+    int width = api.get(probe, TJPARAM_JPEGWIDTH);
+    int height = api.get(probe, TJPARAM_JPEGHEIGHT);
+    int subsamp = api.get(probe, TJPARAM_SUBSAMP);
+    api.destroy(probe);
+    printf("yuv_header_rc=%d\n", hrc);
+    if (hrc != 0 || subsamp == TJSAMP_GRAY) return 2;
+    int intact = 1;
+
+    /* Scaled 1/2: TJSCALED(dim, 1/2) = (dim + 1) / 2. */
+    tj_scaling_factor_t half = { 1, 2 };
+    int scaled_width = (width + 1) / 2, scaled_height = (height + 1) / 2;
+    for (int planar = 0; planar < 2; planar++) {
+        tj_handle_t handle = api.init(TJINIT_DECOMPRESS);
+        if (!handle) return 2;
+        require(api.set_scaling_factor(handle, half) == 0, "scaling factor 1/2");
+        guarded_buf planes[3];
+        int count = planar ? 3 : 1, rc;
+        for (int i = 0; i < count; i++) {
+            size_t len = planar
+                ? api.yuv_plane_size(i, scaled_width, 0, scaled_height, subsamp)
+                : api.yuv_buf_size(scaled_width, 1, scaled_height, subsamp);
+            if (guarded_alloc(&planes[i], len, "scaled YUV destination") != 0)
+                return 2;
+        }
+        if (planar) {
+            unsigned char *dst[3] = { planes[0].data, planes[1].data,
+                                      planes[2].data };
+            rc = api.decompress_to_yuv_planes8(handle, jpeg, jpeg_len, dst, NULL);
+        } else {
+            rc = api.decompress_to_yuv8(handle, jpeg, jpeg_len, planes[0].data, 1);
+        }
+        printf("%s=%d\n", planar ? "scaled_planar_rc" : "scaled_packed_rc", rc);
+        for (int i = 0; i < count; i++) {
+            if (rc != 0) require(fully_poisoned(&planes[i]),
+                                 "a refused scaled decode writes nothing");
+            intact &= canary_intact(&planes[i]);
+            guarded_free(&planes[i]);
+        }
+        api.destroy(handle);
+    }
+
+    /* A luma stride half the plane width, the buffer sized for that stride. */
+    {
+        tj_handle_t handle = api.init(TJINIT_DECOMPRESS);
+        if (!handle) return 2;
+        int luma_width = api.yuv_plane_width(0, width, subsamp);
+        int luma_height = api.yuv_plane_height(0, height, subsamp);
+        int strides[3] = { luma_width / 2, 0, 0 };
+        guarded_buf planes[3];
+        size_t lens[3] = {
+            (size_t)strides[0] * (size_t)luma_height,
+            api.yuv_plane_size(1, width, 0, height, subsamp),
+            api.yuv_plane_size(2, width, 0, height, subsamp)
+        };
+        for (int i = 0; i < 3; i++) {
+            if (guarded_alloc(&planes[i], lens[i], "short-stride plane") != 0)
+                return 2;
+        }
+        unsigned char *dst[3] = { planes[0].data, planes[1].data, planes[2].data };
+        int rc = api.decompress_to_yuv_planes8(handle, jpeg, jpeg_len, dst, strides);
+        printf("short_stride_rc=%d\n", rc);
+        require(rc == -1, "a stride shorter than its plane is refused");
+        for (int i = 0; i < 3; i++) {
+            require(fully_poisoned(&planes[i]), "a refused short-stride decode writes nothing");
+            intact &= canary_intact(&planes[i]);
+            guarded_free(&planes[i]);
+        }
+        api.destroy(handle);
+    }
+
+    /* align = 2^30: every padded row is a GiB, so the planes exceed INT_MAX. */
+    {
+        tj_handle_t handle = api.init(TJINIT_DECOMPRESS);
+        if (!handle) return 2;
+        guarded_buf dst;
+        if (guarded_alloc(&dst, 4096, "huge-align destination") != 0) return 2;
+        int rc = api.decompress_to_yuv8(handle, jpeg, jpeg_len, dst.data, 1 << 30);
+        printf("huge_align_rc=%d\n", rc);
+        require(rc == -1, "padded planes past INT_MAX are refused");
+        require(fully_poisoned(&dst), "a refused huge-align decode writes nothing");
+        intact &= canary_intact(&dst);
+        guarded_free(&dst);
+        api.destroy(handle);
+    }
+    return intact ? 0 : 2;
+}
+
 static int case_selftest_guard_page(void) {
     guarded_buf g;
     if (guarded_alloc(&g, 128, "selftest overrun target") != 0) return 2;
@@ -1475,7 +1611,7 @@ int main(int argc, char **argv) {
     /* A deadlock is exactly the class of defect `concurrent_handles` exists to
      * find, and an unbounded one would hang this child forever: the Rust
      * runner blocks on `Command::output()` until EOF and the sanitizer job's
-     * `timeout-minutes` covers all eleven cases at once, so a wedge would surface
+     * `timeout-minutes` covers all twelve cases at once, so a wedge would surface
      * as an unattributed job timeout — the opposite of one case per process.
      * Every case runs in well under a second, ASan included; a minute is two
      * orders of magnitude of headroom, and blowing it reads as `killed by
@@ -1499,7 +1635,8 @@ int main(int argc, char **argv) {
         strcmp(case_name, "max_dimensions") == 0 ||
         strcmp(case_name, "concurrent_handles") == 0 ||
         strcmp(case_name, "alloc_ownership") == 0 ||
-        strcmp(case_name, "cropping_region") == 0;
+        strcmp(case_name, "cropping_region") == 0 ||
+        strcmp(case_name, "yuv_overrun") == 0;
     if (needs_fixture && !jpeg) {
         fprintf(stderr, "case %s needs a fixture path\n", case_name);
         return 3;
@@ -1526,6 +1663,8 @@ int main(int argc, char **argv) {
         rc = case_alloc_ownership(jpeg, jpeg_len);
     } else if (strcmp(case_name, "cropping_region") == 0) {
         rc = case_cropping_region(jpeg, jpeg_len);
+    } else if (strcmp(case_name, "yuv_overrun") == 0) {
+        rc = case_yuv_overrun(jpeg, jpeg_len);
     } else if (strcmp(case_name, "precision12") == 0) {
         rc = case_precision12();
     } else if (strcmp(case_name, "selftest_guard_page") == 0) {

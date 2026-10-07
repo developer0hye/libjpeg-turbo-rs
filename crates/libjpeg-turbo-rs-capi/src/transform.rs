@@ -410,7 +410,9 @@ fn crop_is_refused(opts: &TransformOptions, width: usize, height: usize) -> bool
 /// Bytes in one whole-image coefficient array: `blocks_wide` x `blocks_high`
 /// `JBLOCK`s of 64 `JCOEF`s.
 fn coefficient_bytes(blocks_wide: usize, blocks_high: usize) -> u64 {
-    (blocks_wide as u64) * (blocks_high as u64) * 128
+    (blocks_wide as u64)
+        .saturating_mul(blocks_high as u64)
+        .saturating_mul(128)
 }
 
 /// What `tj3Transform` asks of libjpeg's memory manager before reading a
@@ -425,6 +427,12 @@ fn coefficient_bytes(blocks_wide: usize, blocks_high: usize) -> u64 {
 /// boundaries of a 6 MiB source. A trimmed transform is estimated untrimmed,
 /// and a crop by its requested region, so near the boundary those may refuse
 /// a little earlier than stock.
+///
+/// This is upstream's accounting, not this port's: the transform here holds
+/// the source coefficients and its own working copies in `Vec`s whose sizes
+/// differ from libjpeg's virtual arrays. `TJPARAM_MAXMEMORY` is applied as
+/// stock applies it, so the same sources are refused; it is not a ceiling on
+/// what the Rust transform allocates.
 fn transform_memory_estimate(
     decoder: &libjpeg_turbo_rs::Decoder<'_>,
     batch: &[TransformOptions],
@@ -455,7 +463,7 @@ fn transform_memory_estimate(
             let blocks_high: usize = (height * v).div_ceil(max_v * 8).next_multiple_of(v);
             coefficient_bytes(blocks_wide, blocks_high)
         })
-        .sum();
+        .fold(0, u64::saturating_add);
     for opts in batch {
         let gray_only: bool = opts.grayscale
             && frame.components.len() == 3
@@ -521,7 +529,10 @@ fn transform_memory_estimate(
                     usize::from(c.vertical_sampling),
                 ),
             };
-            estimate += coefficient_bytes(imcus_wide * h, imcus_high * v);
+            estimate = estimate.saturating_add(coefficient_bytes(
+                imcus_wide.saturating_mul(h),
+                imcus_high.saturating_mul(v),
+            ));
         }
     }
     estimate

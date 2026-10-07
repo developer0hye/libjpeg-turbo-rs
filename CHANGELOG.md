@@ -24,10 +24,6 @@ and `git log` between tags.
   path's own planes and output before the first is allocated. Until now a
   Rust caller had no way to give a 12- or 16-bit decode a budget.
   `decompress_12bit` / `decompress_16bit` keep `DecodeLimits::default()`.
-- **`Decoder::new_header_only`** is public: the frame as `jpeg_read_header`
-  sees it, markers up to the first SOS and no later scan located. Not for
-  decoding. `tj3Transform` applies `TJPARAM_MAXPIXELS` from it before walking
-  any scan (P4-227).
 - **`docs/STABILITY.md` "Limits and how they are applied" / "What the memory
   budget covers"** document every limit and exactly which allocations the
   `max_memory` / `TJPARAM_MAXMEMORY` estimate counts on each decode path and
@@ -91,11 +87,17 @@ and `git log` between tags.
   `tjDecompressToYUV2` / `tjDecompressToYUVPlanes` shim recipe in
   `docs/ABI_COMPATIBILITY.md` reaches the same call. `tj3DecompressToYUVPlanes8`
   also honoured a stride shorter than its plane, running the last row past
-  a buffer sized `stride * height`. **Breaking (behaviour):** a YUV
+  a buffer sized `stride * height`, and `tj3DecompressToYUV8` grew its packed
+  planes infallibly from the caller's `align`, so an alignment of 2^30 aborted
+  the process. **Breaking (behaviour):** a YUV
   decompress at any scaling factor other than 1/1 now returns -1 having
   written nothing (stock decodes it; scaled YUV output is still open under
   P4-234), and a stride shorter than its plane's width, or negative, is
-  refused with "Invalid argument" as upstream refuses it.
+  refused with "Invalid argument" as upstream refuses it, and padded planes
+  past `INT_MAX` are refused with "Image or row alignment is too large", as
+  upstream refuses them. The overruns are pinned in the C-boundary misuse
+  harness (`yuv_overrun`), which the sanitizer workflow runs under ASan with
+  every buffer flush against a guard page.
 
 ### Changed
 
@@ -372,7 +374,10 @@ and `git log` between tags.
   produced. `TransformOptions::perfect` follows
   `jtransform_perfect_transform`: a 90- or 270-degree rotation needs only the
   edge it moves to be whole iMCUs, and a grayscale output of a YCbCr source
-  uses an 8x8 iMCU, so `-perfect` transforms jpegtran accepts are no longer
+  uses an 8x8 iMCU; a one-component source whose SOF declares 2x2 (or any)
+  sampling is transformed and written as 1x1, as jpegtran does — it used to
+  keep the SOF's iMCU, so a non-perfect flip left a ragged block column
+  unmirrored and the output differed from jpegtran's, so `-perfect` transforms jpegtran accepts are no longer
   refused. `transform_jpeg_with_options` with `restart_interval` 0 no longer
   copies the source's DRI into the output — its own documentation said 0
   disables restart markers, and `jpegtran` (without `-restart`) and

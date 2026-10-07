@@ -658,6 +658,37 @@ pub fn write_coefficients(coeffs: &JpegCoefficients) -> Result<Vec<u8>> {
     Ok(output)
 }
 
+/// Re-lay component 0 of `coeffs` as a plain 1x1-sampled raster of
+/// `ceil(width / 8)` x `ceil(height / 8)` blocks, dropping the MCU padding a
+/// larger sampling factor left around it. A no-op when it is already 1x1.
+fn normalize_to_one_by_one(coeffs: &mut JpegCoefficients) -> Result<()> {
+    let component = &mut coeffs.components[0];
+    if component.h_sampling == 1 && component.v_sampling == 1 {
+        return Ok(());
+    }
+    let target_bx: usize = (coeffs.width as usize).div_ceil(8);
+    let target_by: usize = (coeffs.height as usize).div_ceil(8);
+    if component.blocks_x < target_bx || component.blocks_y < target_by {
+        return Err(JpegError::CorruptData(format!(
+            "component grid {}x{} does not cover the {}x{}-block image",
+            component.blocks_x, component.blocks_y, target_bx, target_by
+        )));
+    }
+    if component.blocks_x != target_bx || component.blocks_y != target_by {
+        let mut blocks: Vec<[i16; 64]> = Vec::with_capacity(target_bx * target_by);
+        for by in 0..target_by {
+            let row: usize = by * component.blocks_x;
+            blocks.extend_from_slice(&component.blocks[row..row + target_bx]);
+        }
+        component.blocks = blocks;
+        component.blocks_x = target_bx;
+        component.blocks_y = target_by;
+    }
+    component.h_sampling = 1;
+    component.v_sampling = 1;
+    Ok(())
+}
+
 /// Apply a lossless transform to a JPEG image.
 ///
 /// Delegates to [`transform_jpeg_with_options`] with default options, so
@@ -725,6 +756,16 @@ pub fn transform_jpeg_with_options(data: &[u8], options: &TransformOptions) -> R
 
     let mut coeffs = read_coefficients(data)?;
     let op: TransformOp = options.op;
+
+    // A one-component frame is transformed as 1x1-sampled, whatever its SOF
+    // says: its iMCU is one block (`jtransform_request_workspace`,
+    // transupp.c:1650-1652) and jpegtran writes it back 1x1. Keeping the SOF's
+    // 2x2 here made the PERFECT check (8x8) and the spatial transform (16x16)
+    // disagree, so a 24-pixel-wide frame flipped only two of its three block
+    // columns (P4-227 review).
+    if coeffs.components.len() == 1 {
+        normalize_to_one_by_one(&mut coeffs)?;
+    }
 
     // Determine iMCU dimensions from the coefficient data.
     let max_h: usize = coeffs

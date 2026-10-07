@@ -390,7 +390,7 @@ jobs:
           CASES="lifecycle handle_defaults parameter_applicability \
                  null_handle pitch_boundaries undersized_output \
                  max_dimensions concurrent_handles alloc_ownership \
-                 precision12 cropping_region"
+                 precision12 cropping_region yuv_overrun"
           ran=0
           for case in $CASES; do
             echo "--- $case"
@@ -400,7 +400,7 @@ jobs:
             }
             ran=$((ran + 1))
           done
-          # The driver dispatches these eleven plus two selftests. A mismatch
+          # The driver dispatches these twelve plus two selftests. A mismatch
           # means the harness grew a case this loop does not run. Counting
           # distinct names rather than matching lines: the fixture-requirement
           # block tests some of the same names a second time.
