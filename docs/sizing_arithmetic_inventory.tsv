@@ -53,8 +53,8 @@ crates/libjpeg-turbo-rs-capi/src/memmgr.rs	1	clamped-difference	budget.saturatin
 crates/libjpeg-turbo-rs-capi/src/memmgr.rs	1	counter	.saturating_sub(block.layout.size());
 crates/libjpeg-turbo-rs-capi/src/memmgr.rs	1	counter	self.total_space_allocated = self.total_space_allocated.saturating_add(size);
 crates/libjpeg-turbo-rs-capi/src/memmgr.rs	2	bounds-check	if start_row.saturating_add(num_rows) > ctrl_ref.rows_in_array {
-crates/libjpeg-turbo-rs-capi/src/transform.rs	1	clamped-difference	out_height = crop.height.min(out_height.saturating_sub(crop.y));
-crates/libjpeg-turbo-rs-capi/src/transform.rs	1	clamped-difference	out_width = crop.width.min(out_width.saturating_sub(crop.x));
+crates/libjpeg-turbo-rs-capi/src/transform.rs	1	clamped-difference	crop.height.min(out_height.saturating_sub(crop.y))
+crates/libjpeg-turbo-rs-capi/src/transform.rs	1	clamped-difference	crop.width.min(out_width.saturating_sub(crop.x))
 crates/libjpeg-turbo-rs-capi/src/yuv.rs	1	clamped-difference	out.extend(std::iter::repeat_n(0u8, stride.saturating_sub(pw)));
 src/api/encoder.rs	1	geometry-count	n.saturating_mul(mcus_x)
 src/api/high_level.rs	1	clamped-difference	let h: usize = region.height.min(img_h.saturating_sub(y));
