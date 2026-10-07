@@ -13461,7 +13461,7 @@ of one consumer build on one CPU model, AMD EPYC 7763: runs 37548314633,
   memory" #635 asks for.
 - **Losing cases.** BUDGETS.md lists every case the candidate loses. Three
   were filed:
-  - [P4-228](#p4-228-fresh-decode-of-large-images-is-25--slower-than-080--open):
+  - [P4-228](#p4-228-fresh-decode-of-large-images-is-25--slower-than-080--closed-2026-10-07):
     8K fresh decode at 1.024–1.050× 0.8.0 in eight runs, and concurrent
     fresh decode at 1.02–1.06×.
   - [P4-229](#p4-229-the-downstream-harness-records-machine-load-but-never-acts-on-it-and-the-hosted-macos-runner-was-saturated--open):
@@ -13761,7 +13761,7 @@ way upstream does, with upstream's messages. (2) It honours
 does. (3) Cross-validated against stock 3.2.0 `tj3Transform` with an oracle
 trace in the shape of `capi_decomp_parameters`.
 
-## P4-228. Fresh Decode of Large Images Is 2–5 % Slower Than 0.8.0 — **OPEN**
+## P4-228. Fresh Decode of Large Images Is 2–5 % Slower Than 0.8.0 — **CLOSED 2026-10-07**
 
 **GitHub:** [#659](https://github.com/developer0hye/libjpeg-turbo-rs/issues/659) — child of #635 Milestone C.
 
@@ -13813,6 +13813,34 @@ reference runs, whose band for it is 7.0 %; 1.042 on Zen 4) is within noise.
 
 **Why deferred.** It needs a quiet-machine measurement. The local machine was
 loaded, and hosted runners cannot resolve a 3 % gap on their own.
+
+**Status (2026-10-07): closed.** The zero-fill was the cause. `try_zeroed_bytes`
+(`src/common/try_alloc.rs`) is the fallible counterpart of `vec![0u8; n]`:
+it allocates through `alloc_zeroed`, reports a null return as
+`AllocationFailed`, and adopts the block with `Vec::from_raw_parts`. Every
+non-test `try_filled_vec(n, 0u8, …)` site in `src/` now uses it.
+`tests/decode_output_lazily_zeroed.rs` pins the mechanism: the owned output
+arrives through `alloc_zeroed` and never through plain `alloc`.
+
+Criterion 1 was met with a hosted A/B instead of a quiet local machine. The
+consumer sources are identical to the reference set's
+(`consumer_source_sha256` `aac5b6b3…`), so `budgets.py` scores the fix
+branch against that set directly. Two Zen 3 dispatches of the fix (runs
+37638508820 and 37638519240) gave:
+
+| row | reference (3 runs) | fix, run 1 | fix, run 2 |
+|---|---:|---:|---:|
+| 8K `candidate-fresh / baseline-fresh` | 1.028 / 1.028 / 1.032 | 1.008 | 1.000 |
+| concurrent `candidate-fresh / baseline-fresh` | 1.057 / 1.059 / 1.023 | 0.997 | 1.002 |
+| thumbnail `candidate / baseline` | 1.010 / 1.002 / 1.014 | 0.951 | 0.954 |
+
+Both rows are back within band of 0.8.0 in both dispatches (criterion 3). The
+Zen 4 dispatch (37638529184) moved the same rows, 8K fresh from 1.050 to
+1.041 and concurrent fresh from 1.059 to 1.013. Its encode rows stayed
+behind; that is a separate item,
+[P4-239](#p4-239-on-zen-4-420-encode-is-5--slower-than-080--open).
+`experiments/pipeline.tsv` records the result.
+
 
 ## P4-229. The Downstream Harness Records Machine Load but Never Acts on It, and the Hosted macOS Runner Was Saturated — **OPEN**
 
@@ -13938,8 +13966,8 @@ mode (`write_coefficients`, `_optimized`, `_progressive`, `_arithmetic`,
 builder's resolved quantisation tables.
 
 Changes in what `encode` returns:
-- `lossless(true)` ignores the factors as `jcmaster.c` does. That includes a
-  grayscale frame, whose SOF used to be patched to the requested factor after
+- `lossless(true)` ignores the factors as `jcmaster.c` does, for RGB-direct
+  output too. That includes a grayscale frame, whose SOF used to be patched to the requested factor after
   encoding (found here; it affected `subsampling(S420)` too).
 - Factor sets C refuses are refused with `CorruptData`:
   - more than 10 blocks in an interleaved MCU (`JERR_BAD_MCU_SIZE`);
@@ -14000,3 +14028,34 @@ here. (2) There is a test per combination, in the shape of
 
 **Why deferred.** Each needs encoder work beyond P4-236's acceptance criteria,
 which asked that no option be silently dropped.
+
+## P4-239. On Zen 4, 4:2:0 Encode Is 5 % Slower Than 0.8.0 — **OPEN**
+
+**GitHub:** [#665](https://github.com/developer0hye/libjpeg-turbo-rs/issues/665) — child of #635 Milestone C.
+
+**Found 2026-10-07** in the two downstream dispatches that landed on an AMD
+EPYC 9V74 (Zen 4), runs 37548326976 and 37638529184. The same-run ratio
+`candidate / baseline` on the 4:2:0 encode rows was:
+
+| run | 64x64 | 1920x1080 | 4032x3024 |
+|---|---:|---:|---:|
+| 37548326976 | 1.053 | 1.069 | 1.071 |
+| 37638529184 | 1.053 | 1.051 | 1.054 |
+
+On Zen 3 (EPYC 7763) the same rows are 0.99–1.00 in every run, and the
+4:4:4 encode rows are at parity on both. The encoded output has the same
+size and PSNR as 0.8.0's; byte equality is not shown, because these hosted
+reports ran without C
+([P4-231](#p4-231-three-downstream-harness-checks-are-weaker-than-their-names-suggest--open)).
+The gap is therefore code speed on one microarchitecture, in the
+4:2:0 path: downsampling, or a dispatch tier such as the BMI2/LZCNT AC tier
+(P4-133), which both CPUs report.
+
+**Acceptance criteria.** (1) Profile the 4:2:0 encode on a Zen 4 machine (a
+hosted runner that reports EPYC 9V74 will do) and attribute the difference to
+a function. (2) Fix it, or record why the current code is the better trade
+on other CPUs. (3) Two Zen 4 dispatches show the 4:2:0 encode rows within
+band of 0.8.0.
+
+**Why deferred.** No Zen 4 machine is available locally, and hosted runners
+land on Zen 4 only some of the time.

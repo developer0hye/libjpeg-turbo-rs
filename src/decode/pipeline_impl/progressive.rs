@@ -4,7 +4,7 @@ use crate::common::error::{DecodeWarning, JpegError, Result};
 use crate::common::huffman_table::HuffmanTable;
 use crate::common::layout::checked_span;
 use crate::common::quant_table::QuantTable;
-use crate::common::try_alloc::try_filled_vec;
+use crate::common::try_alloc::{try_filled_vec, try_zeroed_bytes};
 use crate::common::types::{FrameHeader, ScanComponentSelector};
 use crate::decode::bitstream::BitReader;
 use crate::decode::marker::ScanInfo;
@@ -78,7 +78,7 @@ impl<'a> Decoder<'a> {
             .map(|ci| {
                 let blocks: usize =
                     checked_span(&[ci.blocks_x, ci.blocks_y], "progressive AC-max buffer")?;
-                try_filled_vec(blocks, 0u8, "progressive AC-max buffer")
+                try_zeroed_bytes(blocks, "progressive AC-max buffer")
             })
             .collect::<Result<Vec<Vec<u8>>>>()?;
 
@@ -167,7 +167,7 @@ impl<'a> Decoder<'a> {
                     &[ci.comp_w, ci.blocks_y, ci.block_size],
                     "progressive component plane",
                 )?;
-                try_filled_vec(size, 0u8, "progressive component plane")
+                try_zeroed_bytes(size, "progressive component plane")
             })
             .collect::<Result<Vec<Vec<u8>>>>()?;
 

@@ -2,7 +2,7 @@ use super::Decoder;
 use crate::common::error::{DecodeWarning, JpegError, Result, MAX_DECODE_WARNINGS};
 use crate::common::huffman_table::HuffmanTable;
 use crate::common::quant_table::QuantTable;
-use crate::common::try_alloc::try_filled_vec;
+use crate::common::try_alloc::{try_filled_vec, try_zeroed_bytes};
 use crate::common::types::FrameHeader;
 use crate::decode::bitstream::BitReader;
 use crate::decode::entropy::{self, McuDecoder};
@@ -128,7 +128,7 @@ impl<'a> Decoder<'a> {
                 let comp_h = mcus_y * comp.vertical_sampling as usize * comp_block_sizes[ci];
                 let size: usize = comp_w * comp_h;
                 // P4-209: frame-geometry sized, so refusal must be an error.
-                try_filled_vec(size, 0u8, "baseline component plane")
+                try_zeroed_bytes(size, "baseline component plane")
             })
             .collect::<Result<Vec<Vec<u8>>>>()?;
 
