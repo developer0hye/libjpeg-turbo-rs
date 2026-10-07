@@ -780,8 +780,23 @@ pub fn transform_jpeg_with_options(data: &[u8], options: &TransformOptions) -> R
         .map(|c| c.v_sampling as usize)
         .max()
         .unwrap_or(1);
-    let imcu_w: usize = max_h * 8;
-    let imcu_h: usize = max_v * 8;
+    // `-grayscale` on a YCbCr source makes the output one component, whose
+    // iMCU is one block (`jtransform_request_workspace`, transupp.c:1631-1655)
+    // — for PERFECT and TRIM alike. Upstream forces one component only for a
+    // YCbCr source (`force_grayscale && jpeg_color_space == JCS_YCbCr`),
+    // classified from the header as libjpeg classifies it.
+    let forces_one_component: bool = options.grayscale
+        && coeffs.components.len() == 3
+        && crate::decode::pipeline::Decoder::new_header_only(
+            data,
+            crate::common::types::DecodeLimits::default(),
+        )
+        .is_ok_and(|header| header.jpeg_color_space() == crate::common::types::ColorSpace::YCbCr);
+    let (imcu_w, imcu_h): (usize, usize) = if forces_one_component {
+        (8, 8)
+    } else {
+        (max_h * 8, max_v * 8)
+    };
 
     // For transforms that swap dimensions, use swapped iMCU sizes for alignment checks.
     let swaps_dims: bool = matches!(
@@ -816,29 +831,12 @@ pub fn transform_jpeg_with_options(data: &[u8], options: &TransformOptions) -> R
     // PERFECT: upstream's `jtransform_perfect_transform` (transupp.c:2415-2450),
     // which tests only the edges `op` moves — the right edge for HFlip and
     // Rot270, the bottom for VFlip and Rot90, both for Transverse and Rot180 —
-    // against an 8x8 iMCU when the output has one component
-    // (`jtransform_request_workspace`, transupp.c:1631-1655). The trim logic
-    // below keeps its own, wider alignment flags. Testing those here refused
-    // `-perfect -rotate 90` on a frame whose width alone was ragged, which
-    // jpegtran and tj3Transform accept (P4-227). Upstream forces one component
-    // only for a YCbCr source (`force_grayscale && jpeg_color_space ==
-    // JCS_YCbCr`), classified from the header as libjpeg classifies it.
+    // against the output's iMCU (above). The trim logic below keeps its own,
+    // wider alignment flags. Testing those here refused `-perfect -rotate 90`
+    // on a frame whose width alone was ragged, which jpegtran and
+    // tj3Transform accept (P4-227).
     if options.perfect {
-        let forces_one_component: bool = options.grayscale
-            && coeffs.components.len() == 3
-            && crate::decode::pipeline::Decoder::new_header_only(
-                data,
-                crate::common::types::DecodeLimits::default(),
-            )
-            .is_ok_and(|header| {
-                header.jpeg_color_space() == crate::common::types::ColorSpace::YCbCr
-            });
-        let one_component: bool = coeffs.components.len() == 1 || forces_one_component;
-        let (perfect_imcu_w, perfect_imcu_h): (usize, usize) = if one_component {
-            (8, 8)
-        } else {
-            (imcu_w, imcu_h)
-        };
+        let (perfect_imcu_w, perfect_imcu_h): (usize, usize) = (imcu_w, imcu_h);
         let width_whole: bool = (coeffs.width as usize).is_multiple_of(perfect_imcu_w);
         let height_whole: bool = (coeffs.height as usize).is_multiple_of(perfect_imcu_h);
         let is_perfect: bool = match op {

@@ -173,7 +173,14 @@ pub unsafe extern "C" fn tj3Transform(
             // read, as upstream's first loop does (`turbojpeg.c:2963-2988`): a
             // bad entry anywhere in the batch is refused before any output is
             // produced or any limit is consulted.
-            let mut batch: Vec<TransformOptions> = Vec::with_capacity(txforms.len());
+            // Fallibly, as upstream checks its `malloc` of `xinfo`
+            // (`turbojpeg.c:2953-2955`): `n` is the caller's, and an
+            // infallible reservation that fails aborts the process.
+            let mut batch: Vec<TransformOptions> = Vec::new();
+            if batch.try_reserve_exact(txforms.len()).is_err() {
+                inst.set_error("tj3Transform(): Memory allocation failure", TJERR_FATAL);
+                return -1;
+            }
             for (i, t) in txforms.iter().enumerate() {
                 let op: TransformOp = match op_from_c(t.op) {
                     Some(o) => o,
@@ -407,6 +414,51 @@ fn crop_is_refused(opts: &TransformOptions, width: usize, height: usize) -> bool
     axis_refused(crop.x, crop.width, out_width) || axis_refused(crop.y, crop.height, out_height)
 }
 
+/// What libjpeg's memory manager holds for the markers `jcopy_markers_setup`
+/// saves under copy option `option` (`TJSM_*` / `JCOPYOPT_*`,
+/// `transupp.c:2460-2483`) by the time `jpeg_read_coefficients` realizes its
+/// arrays: COM unless NONE or ICC-only, every APPn for ALL, all but APP2 for
+/// ALL-EXCEPT-ICC, APP2 alone for ICC. Each saved marker is one `alloc_large`
+/// of `sizeof(struct jpeg_marker_struct) + length` (`jdmarker.c:783-784`),
+/// which the large pool charges with its header and `ALIGN_SIZE - 1` of slack
+/// (`jmemmgr.c`): 32 + 32 + 31 bytes on an LP64 SIMD build. Measured: 32
+/// 64 KiB APP5 segments push a 6 MiB source from "accepted at 8 MiB" to
+/// "refused at 8, accepted at 9", as on stock 3.2.0.
+fn retained_marker_bytes(jpeg: &[u8], option: c_int) -> u64 {
+    const PER_MARKER_OVERHEAD: u64 = 32 + 32 + 31;
+    const COMMENTS: c_int = 1;
+    const ALL: c_int = 2;
+    const ALL_EXCEPT_ICC: c_int = 3;
+    const ICC: c_int = 4;
+    let saves = |code: u8| -> bool {
+        match code {
+            0xFE => option == COMMENTS || option == ALL || option == ALL_EXCEPT_ICC,
+            0xE2 => option == ALL || option == ICC,
+            0xE0..=0xEF => option == ALL || option == ALL_EXCEPT_ICC,
+            _ => false,
+        }
+    };
+    let mut total: u64 = 0;
+    let mut at: usize = 2;
+    // Marker segments from SOI to the first SOS; anything malformed ends the
+    // walk, as the header parse has already accepted the stream.
+    while at + 4 <= jpeg.len() && jpeg[at] == 0xFF {
+        let code: u8 = jpeg[at + 1];
+        if code == 0xDA {
+            break;
+        }
+        let length: usize = usize::from(jpeg[at + 2]) << 8 | usize::from(jpeg[at + 3]);
+        if length < 2 {
+            break;
+        }
+        if saves(code) {
+            total = total.saturating_add((length - 2) as u64 + PER_MARKER_OVERHEAD);
+        }
+        at += 2 + length;
+    }
+    total
+}
+
 /// Bytes in one whole-image coefficient array: `blocks_wide` x `blocks_high`
 /// `JBLOCK`s of 64 `JCOEF`s.
 fn coefficient_bytes(blocks_wide: usize, blocks_high: usize) -> u64 {
@@ -436,6 +488,7 @@ fn coefficient_bytes(blocks_wide: usize, blocks_high: usize) -> u64 {
 fn transform_memory_estimate(
     decoder: &libjpeg_turbo_rs::Decoder<'_>,
     batch: &[TransformOptions],
+    retained_markers: u64,
 ) -> u64 {
     let frame = decoder.header();
     let (width, height): (usize, usize) = (frame.width(), frame.height());
@@ -463,7 +516,7 @@ fn transform_memory_estimate(
             let blocks_high: usize = (height * v).div_ceil(max_v * 8).next_multiple_of(v);
             coefficient_bytes(blocks_wide, blocks_high)
         })
-        .fold(0, u64::saturating_add);
+        .fold(retained_markers, u64::saturating_add);
     for opts in batch {
         let gray_only: bool = opts.grayscale
             && frame.components.len() == 3
@@ -641,7 +694,19 @@ fn source_refusal(
     }
 
     let max_memory: c_int = inst.inner.get(TjParam::MaxMemory);
-    if max_memory > 0 && transform_memory_estimate(&decoder, batch) >= max_memory as u64 * 1_048_576
+    // The markers `jcopy_markers_setup` saved while the header was read sit
+    // in the same pools, so they count against the same budget.
+    let copy_option: c_int = if batch
+        .iter()
+        .any(|opts| opts.copy_markers != MarkerCopyMode::None)
+    {
+        inst.inner.get(TjParam::SaveMarkers)
+    } else {
+        0
+    };
+    if max_memory > 0
+        && transform_memory_estimate(&decoder, batch, retained_marker_bytes(jpeg, copy_option))
+            >= max_memory as u64 * 1_048_576
     {
         return Some(String::from("Memory limit exceeded"));
     }

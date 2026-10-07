@@ -365,7 +365,8 @@ and `git log` between tags.
   over `TJPARAM_MAXMEMORY` ("Memory limit exceeded": the source's
   coefficient arrays plus each transform's workspace, as stock counts them)
   or with more scans than `TJPARAM_SCANLIMIT` ("Progressive JPEG image has
-  more than N scans"), and its output takes the handle's
+  more than N scans") — the memory estimate also counts the markers
+  upstream saves for copying — and its output takes the handle's
   `TJPARAM_PROGRESSIVE`, `TJPARAM_ARITHMETIC`, `TJPARAM_OPTIMIZE`,
   `TJPARAM_RESTARTBLOCKS` and `TJPARAM_RESTARTROWS`, so a decompress that
   published `PROGRESSIVE` = 1 on the same handle now makes the transform's
@@ -377,7 +378,9 @@ and `git log` between tags.
   uses an 8x8 iMCU; a one-component source whose SOF declares 2x2 (or any)
   sampling is transformed and written as 1x1, as jpegtran does — it used to
   keep the SOF's iMCU, so a non-perfect flip left a ragged block column
-  unmirrored and the output differed from jpegtran's, so `-perfect` transforms jpegtran accepts are no longer
+  unmirrored and the output differed from jpegtran's; `-trim` on a grayscale
+  output of a YCbCr source uses the one-block iMCU too (it trimmed a 72-wide
+  4:2:0 frame to 64 where jpegtran keeps 72), so `-perfect` transforms jpegtran accepts are no longer
   refused. `transform_jpeg_with_options` with `restart_interval` 0 no longer
   copies the source's DRI into the output — its own documentation said 0
   disables restart markers, and `jpegtran` (without `-restart`) and

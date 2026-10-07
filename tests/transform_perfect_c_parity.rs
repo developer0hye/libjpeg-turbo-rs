@@ -200,3 +200,63 @@ fn a_two_by_two_sampled_grayscale_frame_transforms_as_jpegtran_does() {
         }
     }
 }
+
+/// P4-227 codex review: `-grayscale` on a YCbCr source shrinks the iMCU to one
+/// block for `-trim` as well as for `-perfect`. Trimming at the source's
+/// 16-pixel iMCU cut a 72-wide 4:2:0 frame to 64 where jpegtran keeps 72.
+/// Every operation, trimmed, with and without `-perfect`, must equal
+/// jpegtran's bytes (or both refuse).
+#[test]
+fn trim_uses_the_grayscale_imcu() {
+    let jpegtran = require_c_tool!("jpegtran");
+    let ops: [(TransformOp, &[&str]); 7] = [
+        (TransformOp::HFlip, &["-flip", "horizontal"]),
+        (TransformOp::VFlip, &["-flip", "vertical"]),
+        (TransformOp::Rot90, &["-rotate", "90"]),
+        (TransformOp::Rot180, &["-rotate", "180"]),
+        (TransformOp::Rot270, &["-rotate", "270"]),
+        (TransformOp::Transpose, &["-transpose"]),
+        (TransformOp::Transverse, &["-transverse"]),
+    ];
+    let mut accepted: usize = 0;
+    for (width, height) in [(72, 64), (64, 72), (76, 68)] {
+        let jpeg: Vec<u8> = source(width, height, Subsampling::S420);
+        let input = helpers::TempFile::new("p4227_gray_trim_in.jpg");
+        input.write_bytes(&jpeg);
+        for (op, op_args) in ops {
+            for perfect in [false, true] {
+                let ours = transform_jpeg_with_options(
+                    &jpeg,
+                    &TransformOptions {
+                        op,
+                        perfect,
+                        trim: true,
+                        grayscale: true,
+                        ..TransformOptions::default()
+                    },
+                );
+                let mut args: Vec<&str> = vec!["-copy", "all", "-trim", "-grayscale"];
+                if perfect {
+                    args.push("-perfect");
+                }
+                args.extend_from_slice(op_args);
+                let output = helpers::TempFile::new("p4227_gray_trim_out.jpg");
+                let status = std::process::Command::new(&jpegtran)
+                    .args(&args)
+                    .arg("-outfile")
+                    .arg(output.path())
+                    .arg(input.path())
+                    .output()
+                    .expect("run jpegtran");
+                let case: String = format!("{width}x{height} {op:?} perfect={perfect}");
+                assert_eq!(ours.is_ok(), status.status.success(), "{case}");
+                if let Ok(bytes) = ours {
+                    let c_bytes: Vec<u8> = std::fs::read(output.path()).expect("jpegtran output");
+                    assert!(bytes == c_bytes, "{case}: bytes differ from jpegtran");
+                    accepted += 1;
+                }
+            }
+        }
+    }
+    assert!(accepted > 0);
+}

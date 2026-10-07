@@ -587,6 +587,32 @@ fn crop_alignment_and_expansion_meet_the_memory_limit_as_stock_does() {
     assert!(transform_once(&source, TJPARAM_MAXMEMORY, 13, crop(0, 1100)).is_ok());
 }
 
+/// Codex review of #655: the markers upstream saves for copying sit in the
+/// pools the memory budget covers. With 32 64 KiB APP5 segments in front of
+/// the 6 MiB source, stock 3.2.0 refuses an identity transform at 8 MiB and
+/// accepts it at 9; with `TJXOPT_COPYNONE` nothing is saved and 7 MiB is
+/// enough (measured).
+#[test]
+fn saved_markers_count_against_maxmemory() {
+    let source: Vec<u8> = big();
+    let mut with_markers: Vec<u8> = source[..2].to_vec();
+    for _ in 0..32 {
+        with_markers.extend_from_slice(&[0xFF, 0xE5, 0xFF, 0xFF]);
+        with_markers.extend(std::iter::repeat_n(0u8, 65_533));
+    }
+    with_markers.extend_from_slice(&source[2..]);
+    let copy_none: TjTransform = TjTransform {
+        options: libjpeg_turbo_rs_capi::transform::TJXOPT_COPYNONE,
+        ..no_crop()
+    };
+    assert_eq!(
+        transform_once(&with_markers, TJPARAM_MAXMEMORY, 8, no_crop()).expect_err("refused"),
+        "Memory limit exceeded"
+    );
+    assert!(transform_once(&with_markers, TJPARAM_MAXMEMORY, 9, no_crop()).is_ok());
+    assert!(transform_once(&with_markers, TJPARAM_MAXMEMORY, 7, copy_none).is_ok());
+}
+
 #[test]
 fn oracle_source_is_present() {
     let source: PathBuf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))

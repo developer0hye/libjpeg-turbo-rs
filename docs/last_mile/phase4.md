@@ -13821,7 +13821,10 @@ one-component source whose SOF declares a sampling factor above 1 is now
 re-laid as 1x1 before anything else, as upstream treats it and jpegtran
 writes it, which keeps the PERFECT check and the spatial transform on the
 same one-block iMCU (`a_two_by_two_sampled_grayscale_frame_transforms_as_jpegtran_does`,
-all eight operations with and without `-perfect`, byte-exact). And a
+all eight operations with and without `-perfect`, byte-exact); and `-trim`
+uses the grayscale output's one-block iMCU as PERFECT does
+(`trim_uses_the_grayscale_imcu`, 42 cases byte-exact against jpegtran — it
+trimmed a 72-wide 4:2:0 frame to 64 where jpegtran keeps 72). And a
 `restart_interval` of 0 copied the source's DRI into the output, contrary to
 the field's own documentation and to both `jpegtran` and `tj3Transform`,
 which drop it (`jpeg_copy_critical_parameters` does not copy
@@ -13833,7 +13836,12 @@ for the capi crate, not as supported API), so
 `TJPARAM_MAXPIXELS` refuses before any later scan is walked, and
 `TJPARAM_RESTARTBLOCKS` / `TJPARAM_RESTARTROWS` now clear each other when
 set nonzero and refuse values outside 0-65535, as upstream's `tj3Set` does
-(`turbojpeg.c:819-830`), so the interval applied is the last one set. Each
+(`turbojpeg.c:819-830`), so the interval applied is the last one set. The memory estimate also counts the
+markers `jcopy_markers_setup` saves for the handle's `TJPARAM_SAVEMARKERS`
+level, with libjpeg's per-marker allocation overhead
+(`saved_markers_count_against_maxmemory`: 32 64 KiB APP5 segments move the
+boundary from 7 to 9 MiB, as on stock), and the batch is reserved fallibly
+("Memory allocation failure", as upstream checks its `xinfo` `malloc`). Each
 transform's crop is checked, in upstream's order and before the limits,
 against `jtransform_request_workspace`'s rules and then against
 `tjMCUWidth` / `tjMCUHeight` of the destination subsampling (`:3007-3015`,
