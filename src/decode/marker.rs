@@ -738,8 +738,6 @@ impl<'a> MarkerReader<'a> {
                 self.pos += 2;
             } else {
                 // Real marker — leave pos at 0xFF so read_marker can find it
-                // read_marker skips 0xFF prefix bytes, so point to the 0xFF
-                self.pos += 1; // skip past 0xFF, read_marker will read the marker byte
                 return;
             }
         }
@@ -758,19 +756,26 @@ impl<'a> MarkerReader<'a> {
         Ok(())
     }
 
+    /// The next marker, as C jdmarker.c `next_marker` finds it: bytes that are not 0xFF before it
+    /// are skipped (C warns JWRN_EXTRANEOUS_DATA), so are the 0xFF fill bytes, and so is a stuffed
+    /// 0xFF 0x00.
     fn read_marker(&mut self) -> Result<u8> {
-        while self.pos < self.data.len() && self.data[self.pos] == 0xFF {
+        loop {
+            while self.pos < self.data.len() && self.data[self.pos] != 0xFF {
+                self.pos += 1;
+            }
+            while self.pos < self.data.len() && self.data[self.pos] == 0xFF {
+                self.pos += 1;
+            }
+            if self.pos >= self.data.len() {
+                return Err(JpegError::UnexpectedEof);
+            }
+            let marker = self.data[self.pos];
             self.pos += 1;
+            if marker != 0x00 {
+                return Ok(marker);
+            }
         }
-        if self.pos >= self.data.len() {
-            return Err(JpegError::UnexpectedEof);
-        }
-        let marker = self.data[self.pos];
-        self.pos += 1;
-        if marker == 0x00 {
-            return Err(JpegError::InvalidMarker(0x00));
-        }
-        Ok(marker)
     }
 
     fn read_u8(&mut self) -> Result<u8> {

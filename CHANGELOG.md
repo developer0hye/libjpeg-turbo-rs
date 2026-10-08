@@ -256,6 +256,11 @@ and `git log` between tags.
   runs system/Rust bidirectional cross-decodes.
 
 ### Fixed
+- The marker reader skips bytes that are not 0xFF before a marker, as
+  `next_marker` (`jdmarker.c`) does with its `JWRN_EXTRANEOUS_DATA` warning.
+  A JPEG with stray bytes between two segments decoded with `djpeg` and failed
+  here with `InvalidMarker` or `UnexpectedEof`; it now decodes pixel-identical
+  to `djpeg` (`tests/marker_stray_bytes.rs`).
 - The crate-private AVX2 merged H2V2 colour-conversion wrapper now checks
   both rows of each pair (it checked only the first) and falls back to the
   scalar path otherwise (P4-191). Its only caller passes valid rows, it was
