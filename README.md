@@ -431,6 +431,7 @@ All SIMD routines have scalar fallbacks. SIMD is enabled by default via the `sim
 - Crop decoding (MCU-aligned)
 - Color quantization with dithering
 - Error recovery mode
+- Explicit per-component sampling (`Encoder::sampling_factors`), including custom progressive scans, RGB/CMYK, grayscale conversion and C-compatible smoothing
 - Custom Huffman/quantization tables
 - Restart markers (DRI)
 - Progress callbacks
