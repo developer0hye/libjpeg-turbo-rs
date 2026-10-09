@@ -175,10 +175,22 @@ pub fn tables_only_c_oracle() -> Option<PathBuf> {
     build_libjpeg_oracle("tables_only_c_oracle")
 }
 
+/// Locate the arbitrary-sampling and installed-table oracle for issue #673.
+pub fn custom_sampling_c_oracle() -> Option<PathBuf> {
+    build_libjpeg_oracle("custom_sampling_c_oracle")
+}
+
 /// Shared build-and-cache for the `libjpeg`-linked oracles under `examples/`.
 fn build_libjpeg_oracle(stem: &str) -> Option<PathBuf> {
     let artifact_dir: PathBuf = artifact_dir()?;
-    let oracle: PathBuf = artifact_dir.join(stem);
+    // Different pinned releases must never share a cached executable.
+    use std::hash::{Hash, Hasher};
+    let install: LibjpegDevInstall = find_libjpeg_dev()?;
+    let mut key = std::collections::hash_map::DefaultHasher::new();
+    install.include_dir.hash(&mut key);
+    install.lib_dir.hash(&mut key);
+    let cache_name = format!("{stem}-{:x}", key.finish());
+    let oracle: PathBuf = artifact_dir.join(&cache_name);
     let _guard = BUILD_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -189,12 +201,16 @@ fn build_libjpeg_oracle(stem: &str) -> Option<PathBuf> {
     if !source.exists() {
         return None;
     }
-    if is_newer(&oracle, &source) {
+    let headers = install.include_dir.join("jpeglib.h");
+    let library = ["libjpeg.a", "libjpeg.so", "libjpeg.dylib"]
+        .iter()
+        .map(|name| install.lib_dir.join(name))
+        .find(|path| path.exists())?;
+    if is_newer(&oracle, &source) && is_newer(&oracle, &headers) && is_newer(&oracle, &library) {
         return Some(oracle);
     }
 
-    let install: LibjpegDevInstall = find_libjpeg_dev()?;
-    let staging: PathBuf = artifact_dir.join(format!("{stem}.{}.tmp", std::process::id()));
+    let staging: PathBuf = artifact_dir.join(format!("{cache_name}.{}.tmp", std::process::id()));
     let compiler: String = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
     let output = Command::new(&compiler)
         .arg("-O2")

@@ -1510,20 +1510,25 @@ fn direct_rgb_vertical_subsampling_bottom_padding_matches_c() {
 }
 
 #[test]
-fn direct_rgb_nonstandard_sampling_is_rejected_instead_of_ignored() {
-    let (width, height): (usize, usize) = (16, 16);
-    let pixels: Vec<u8> = generate_rgb_pattern(width, height);
-    let error = Encoder::new(&pixels, width, height, PixelFormat::Rgb)
+fn direct_rgb_nonstandard_sampling_matches_cjpeg() {
+    let cjpeg = require_c_tool!("cjpeg");
+    let (width, height) = (16, 16);
+    let pixels = generate_rgb_pattern(width, height);
+    let jpeg = Encoder::new(&pixels, width, height, PixelFormat::Rgb)
         .colorspace(libjpeg_turbo_rs::ColorSpace::Rgb)
         .sampling_factors(vec![(3, 2), (1, 1), (1, 1)])
         .encode()
-        .expect_err("unsupported direct-RGB sampling must not silently use S420");
-    assert!(
-        error
-            .to_string()
-            .contains("direct-RGB encoding requires sampling factors"),
-        "unexpected validation error: {error}"
+        .expect("issue #673: direct-RGB custom sampling");
+    let input = helpers::TempFile::new("direct-custom.ppm");
+    let output = helpers::TempFile::new("direct-custom.jpg");
+    helpers::write_ppm_file(input.path(), width, height, &pixels);
+    helpers::run_c_cjpeg(
+        &cjpeg,
+        &["-quality", "75", "-rgb", "-sample", "3x2,1x1,1x1"],
+        input.path(),
+        output.path(),
     );
+    assert_eq!(jpeg, std::fs::read(output.path()).unwrap());
 }
 
 #[test]

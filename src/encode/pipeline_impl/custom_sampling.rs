@@ -4,7 +4,7 @@ use super::{
     Result, ToString, Vec,
 };
 use crate::api::coefficient::{
-    write_coefficients_from, CoefficientBlockSource, ComponentCoefficients, JpegCoefficients,
+    write_coefficients_from_custom, CoefficientBlockSource, ComponentCoefficients, JpegCoefficients,
 };
 
 /// `C_MAX_BLOCKS_IN_MCU` (`jpegint.h`): the most data units one interleaved
@@ -46,8 +46,11 @@ pub fn compress_custom_sampling(
         quality,
         None,
         DctMethod::IsLow,
+        false,
+        0,
+        None,
     )?
-    .write_sequential(0)
+    .write_sequential(0, None, None)
 }
 
 /// One component's geometry under non-standard sampling.
@@ -71,6 +74,9 @@ struct ComponentGeometry {
 /// buffers the frame's coefficients, as C's multi-pass controller does.
 pub(crate) struct CustomSamplingFrame {
     planes: Vec<Vec<u8>>,
+    rgb_direct: bool,
+    cmyk: bool,
+    smoothing: u8,
     width: usize,
     height: usize,
     max_h: usize,
@@ -99,6 +105,9 @@ impl CustomSamplingFrame {
         quality: u8,
         custom_quant: Option<&[Option<[u16; 64]>; 4]>,
         dct_method: DctMethod,
+        rgb_direct: bool,
+        smoothing: u8,
+        script: Option<&[crate::ScanScript]>,
     ) -> Result<Self> {
         if width == 0 || height == 0 {
             return Err(JpegError::CorruptData(
@@ -123,12 +132,25 @@ impl CustomSamplingFrame {
         }
 
         let is_grayscale: bool = pixel_format == PixelFormat::Grayscale;
-        let num_components: usize = if is_grayscale { 1 } else { 3 };
+        let cmyk = pixel_format == PixelFormat::Cmyk;
+        let num_components: usize = if is_grayscale {
+            1
+        } else if cmyk {
+            4
+        } else {
+            3
+        };
         if factors.len() != num_components {
             return Err(JpegError::CorruptData(format!(
                 "expected {} sampling factors for {}, got {}",
                 num_components,
-                if is_grayscale { "grayscale" } else { "YCbCr" },
+                if is_grayscale {
+                    "grayscale"
+                } else if cmyk {
+                    "CMYK"
+                } else {
+                    "color"
+                },
                 factors.len()
             )));
         }
@@ -154,15 +176,24 @@ impl CustomSamplingFrame {
         }
         // jcmaster.c `per_scan_setup`, JERR_BAD_MCU_SIZE. A single-component
         // scan is non-interleaved: one block per MCU whatever the factors.
-        let blocks_in_mcu: usize = factors
-            .iter()
-            .map(|&(h, v)| usize::from(h) * usize::from(v))
-            .sum();
-        if num_components > 1 && blocks_in_mcu > MAX_BLOCKS_IN_MCU {
-            return Err(JpegError::CorruptData(format!(
-                "sampling factors too large for an interleaved scan: {} blocks per MCU, at most {}",
-                blocks_in_mcu, MAX_BLOCKS_IN_MCU
-            )));
+        let scan_components: Vec<Vec<usize>> = if let Some(script) = script {
+            crate::encode::progressive::scans_from_script(script, pixel_format)?
+                .into_iter()
+                .map(|s| s.component_indices)
+                .collect()
+        } else {
+            vec![(0..num_components).collect()]
+        };
+        for components in scan_components {
+            let blocks_in_mcu: usize = components
+                .iter()
+                .map(|&ci| usize::from(factors[ci].0) * usize::from(factors[ci].1))
+                .sum();
+            if components.len() > 1 && blocks_in_mcu > MAX_BLOCKS_IN_MCU {
+                return Err(JpegError::CorruptData(format!(
+                    "sampling factors too large for an interleaved scan: {blocks_in_mcu} blocks per MCU, at most {MAX_BLOCKS_IN_MCU}"
+                )));
+            }
         }
 
         let (luma_quant, chroma_quant): ([u16; 64], [u16; 64]) =
@@ -185,18 +216,29 @@ impl CustomSamplingFrame {
             DctMethod::Float => enc_simd.fdct_float_quantize,
         };
 
-        let (y_plane, cb_plane, cr_plane) = convert_to_ycbcr(
-            pixels,
-            width,
-            height,
-            pixel_format,
-            enc_simd.rgb_to_ycbcr_row,
-        )?;
-        let mut planes: Vec<Vec<u8>> = vec![y_plane];
-        if !is_grayscale {
-            planes.push(cb_plane);
-            planes.push(cr_plane);
-        }
+        let planes: Vec<Vec<u8>> = if rgb_direct || cmyk {
+            (0..num_components)
+                .map(|ci| {
+                    pixels[..expected_size]
+                        .chunks_exact(bpp)
+                        .map(|pixel| pixel[ci])
+                        .collect()
+                })
+                .collect()
+        } else {
+            let (y, cb, cr) = convert_to_ycbcr(
+                pixels,
+                width,
+                height,
+                pixel_format,
+                enc_simd.rgb_to_ycbcr_row,
+            )?;
+            if is_grayscale {
+                vec![y]
+            } else {
+                vec![y, cb, cr]
+            }
+        };
 
         let components: Vec<ComponentGeometry> = factors
             .iter()
@@ -213,6 +255,9 @@ impl CustomSamplingFrame {
 
         Ok(Self {
             planes,
+            rgb_direct,
+            cmyk,
+            smoothing,
             width,
             height,
             max_h,
@@ -246,11 +291,17 @@ impl CustomSamplingFrame {
                     blocks_y: self.mcus_y * geometry.v,
                     h_sampling: geometry.h as u8,
                     v_sampling: geometry.v as u8,
-                    quant_table_index: u8::from(ci != 0),
-                    component_id: ci as u8 + 1,
+                    quant_table_index: u8::from(ci != 0 && !self.rgb_direct && !self.cmyk),
+                    component_id: if self.rgb_direct {
+                        b"RGB"[ci]
+                    } else if self.cmyk {
+                        b"CMYK"[ci]
+                    } else {
+                        ci as u8 + 1
+                    },
                 })
                 .collect(),
-            quant_tables: if self.components.len() == 1 {
+            quant_tables: if self.components.len() == 1 || self.rgb_direct || self.cmyk {
                 vec![self.luma_quant]
             } else {
                 vec![self.luma_quant, self.chroma_quant]
@@ -260,8 +311,12 @@ impl CustomSamplingFrame {
             density_unit: 0,
             x_density: 1,
             y_density: 1,
-            saw_jfif_marker: true,
-            adobe_transform: None,
+            saw_jfif_marker: !self.rgb_direct && !self.cmyk,
+            adobe_transform: if self.rgb_direct || self.cmyk {
+                Some(0)
+            } else {
+                None
+            },
         }
     }
 
@@ -286,7 +341,18 @@ impl CustomSamplingFrame {
         let band_height: usize = v * 8;
         band.clear();
         band.resize(band_width * band_height, 0);
-        let real_rows: usize = self.height.div_ceil(self.max_v) * v;
+        // Context smoothing pads raw input all the way to the iMCU boundary;
+        // the no-context controller instead repeats the last downsampled row.
+        let needs_context = self.smoothing > 0
+            && self.components.iter().any(|c| {
+                (c.h == self.max_h && c.v == self.max_v)
+                    || (c.h * 2 == self.max_h && c.v * 2 == self.max_v)
+            });
+        let real_rows: usize = if needs_context {
+            self.mcus_y * band_height
+        } else {
+            self.height.div_ceil(self.max_v) * v
+        };
         for band_row in 0..band_height {
             downsample_row(
                 &self.planes[ci],
@@ -295,10 +361,11 @@ impl CustomSamplingFrame {
                 (self.max_h / h, self.max_v / v),
                 (mcu_y * band_height + band_row).min(real_rows - 1),
                 &mut band[band_row * band_width..(band_row + 1) * band_width],
+                self.smoothing,
             );
         }
 
-        let divisors: &QuantDivisors = if ci == 0 {
+        let divisors: &QuantDivisors = if ci == 0 || self.rgb_direct || self.cmyk {
             &self.luma_divisors
         } else {
             &self.chroma_divisors
@@ -348,10 +415,15 @@ impl CustomSamplingFrame {
         coefficients
     }
 
-    /// Code the frame as sequential Huffman with the standard tables,
+    /// Code the frame as sequential Huffman with standard or installed tables,
     /// quantizing one iMCU row at a time as the entropy coder asks for it
     /// instead of buffering the frame's coefficients.
-    pub(crate) fn write_sequential(&self, restart_interval: u16) -> Result<Vec<u8>> {
+    pub(crate) fn write_sequential(
+        &self,
+        restart_interval: u16,
+        dc: Option<&[Option<crate::HuffmanTableDef>; 4]>,
+        ac: Option<&[Option<crate::HuffmanTableDef>; 4]>,
+    ) -> Result<Vec<u8>> {
         let mut header: JpegCoefficients = self.header();
         header.restart_interval = restart_interval;
         let mut source: ImcuRowSource<'_> = ImcuRowSource {
@@ -365,11 +437,11 @@ impl CustomSamplingFrame {
             band: Vec::new(),
             frame: self,
         };
-        write_coefficients_from(&header, &mut source)
+        write_coefficients_from_custom(&header, &mut source, dc, ac)
     }
 }
 
-/// Feeds [`write_coefficients_from`] one iMCU row of quantized blocks per
+/// Feeds [`write_coefficients_from_custom`] one iMCU row of quantized blocks per
 /// component, quantizing the next row when the entropy coder first asks for
 /// it.
 struct ImcuRowSource<'a> {
@@ -420,6 +492,7 @@ fn downsample_row(
     (h_ratio, v_ratio): (usize, usize),
     out_row: usize,
     out: &mut [u8],
+    smoothing: u8,
 ) {
     let numpix: u32 = (h_ratio * v_ratio) as u32;
     let (mut bias, bias_toggle): (u32, u32) = match (h_ratio, v_ratio) {
@@ -428,6 +501,50 @@ fn downsample_row(
         _ => (numpix / 2, 0),
     };
     for (out_col, sample) in out.iter_mut().enumerate() {
+        if smoothing > 0 && matches!((h_ratio, v_ratio), (1, 1) | (2, 2)) {
+            // jcsample.c: smooth only full-size and h2v2 components.
+            // Read context outside the image by replicating the raw edge,
+            // before smoothing, including the padded columns in each block.
+            let sample_at = |x: isize, y: isize| -> i64 {
+                i64::from(
+                    plane[y.clamp(0, height as isize - 1) as usize * width
+                        + x.clamp(0, width as isize - 1) as usize],
+                )
+            };
+            let x = (out_col * h_ratio) as isize;
+            let y = (out_row * v_ratio) as isize;
+            let sf = i64::from(smoothing);
+            let value = if h_ratio == 1 {
+                let center = sample_at(x, y);
+                let mut neighbors = -center;
+                for dy in -1..=1 {
+                    for dx in -1..=1 {
+                        neighbors += sample_at(x + dx, y + dy);
+                    }
+                }
+                center * (65536 - sf * 512) + neighbors * sf * 64
+            } else {
+                let members = sample_at(x, y)
+                    + sample_at(x + 1, y)
+                    + sample_at(x, y + 1)
+                    + sample_at(x + 1, y + 1);
+                let edges = sample_at(x, y - 1)
+                    + sample_at(x + 1, y - 1)
+                    + sample_at(x, y + 2)
+                    + sample_at(x + 1, y + 2)
+                    + sample_at(x - 1, y)
+                    + sample_at(x - 1, y + 1)
+                    + sample_at(x + 2, y)
+                    + sample_at(x + 2, y + 1);
+                let corners = sample_at(x - 1, y - 1)
+                    + sample_at(x + 2, y - 1)
+                    + sample_at(x - 1, y + 2)
+                    + sample_at(x + 2, y + 2);
+                members * (16384 - sf * 80) + (2 * edges + corners) * sf * 16
+            };
+            *sample = ((value + 32768) >> 16) as u8;
+            continue;
+        }
         let mut sum: u32 = 0;
         for dy in 0..v_ratio {
             let source_row: usize = (out_row * v_ratio + dy).min(height - 1);
@@ -472,11 +589,14 @@ mod tests {
                         75,
                         None,
                         DctMethod::IsLow,
+                        false,
+                        0,
+                        None,
                     )
                     .expect("valid frame")
                 };
                 let streamed: Vec<u8> = frame()
-                    .write_sequential(restart_interval)
+                    .write_sequential(restart_interval, None, None)
                     .expect("streamed encode");
                 let mut coefficients: JpegCoefficients = frame().into_coefficients();
                 coefficients.restart_interval = restart_interval;

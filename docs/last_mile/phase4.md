@@ -10956,7 +10956,13 @@ picks a bound.
 
 **GitHub:** [#584](https://github.com/developer0hye/libjpeg-turbo-rs/issues/584) — found 2026-09-07 while holding P4-181's crafted sources byte-exact against `jpegtran`.
 
-**Motivation.** `jpeg_copy_critical_parameters` explicitly does **not** copy the source's Huffman table assignments (`jctrans.c:143-144`: *"instead we rely on jpeg_set_colorspace to have made a suitable choice"*). `jpeg_set_colorspace` (`jcparam.c:333`) puts every component of an RGB, CMYK, grayscale or unknown-colorspace stream on DC/AC slot 0; YCbCr uses 0/1/1; YCCK uses 0/1/1/0. `jpeg_simple_progression` likewise reserves the 10-scan luma/chroma script for 3-component YCbCr and uses the all-purpose `2 + 4·n` script for everything else. Our `coding_table_for_component` / `uses_single_rgb_coding_table` put component 0 on slot 0 and every other component on slot 1, except when the IDs are literally `R`/`G`/`B` *and* every component uses quant table 0 — a partial port keyed on the wrong input, now that `classify_coefficient_colorspace` (P4-181) exists.
+**Motivation.** `jpeg_copy_critical_parameters` explicitly does **not** copy the source's Huffman table assignments (`jctrans.c:143-144`: *"instead we rely on jpeg_set_colorspace to have made a suitable choice"*). `jpeg_set_colorspace` (`jcparam.c:333`) puts every component of an RGB, CMYK, grayscale or unknown-colorspace stream on DC/AC slot 0; YCbCr uses 0/1/1; YCCK uses 0/1/1/0. `jpeg_simple_progression` likewise reserves the 10-scan luma/chroma script for 3-component YCbCr and uses the all-purpose `2 + 4·n` script for everything else. At discovery, `coding_table_for_component` / `uses_single_rgb_coding_table` put component 0 on slot 0 and every other component on slot 1, except when the IDs are literally `R`/`G`/`B` *and* every component uses quant table 0 — a partial port keyed on the wrong input, now that `classify_coefficient_colorspace` (P4-181) exists.
+
+**Update (2026-10-09, P4-237).** The helper is now
+`uses_single_color_coding_table` and also assigns Adobe-0 four-component
+frames whose quant selectors are all 0 to Huffman slot 0. The RGB-ID/quant
+heuristic and YCCK/unknown-colorspace cases remain open; this is not a full
+classification-based fix. The measurements below describe the discovery tree.
 
 **Measured** against `jpegtran -copy all -flip horizontal` (libjpeg-turbo 3.1.4.1), pixels identical in every case:
 
@@ -13006,10 +13012,7 @@ caller's script, validated first through the shared
 The arithmetic path had P4-211's geometry defect too — a non-interleaved DC
 scan walked the frame's MCU grid — and now walks the component's own grid.
 Where no path can follow a script, `encode` returns `JpegError::Unsupported`
-naming `scan_script` instead of ignoring it: custom sampling factors that map
-to no standard subsampling (baseline-only encoder, filed as
-[P4-236](#p4-236-encoder-with-non-standard-sampling_factors-silently-drops-progressive-arithmetic-lossless-and-restart-options--closed-2026-10-08)),
-`progressive(false)` (C's script selects the mode itself; the builder does not
+naming `scan_script` instead of ignoring it: `progressive(false)` (C's script selects the mode itself; the builder does not
 switch modes for the caller), and `lossless(true)`. Proof:
 `tests/scan_script_validation.rs` — `accepted_scripts_match_cjpeg` requires
 byte equality with stock 3.2.0 `cjpeg -scans` for all seven scripts in five
@@ -13020,7 +13023,8 @@ refused entry as `cjpeg` for all 19 refusals in every mode (the two
 grayscale refusals skip the three RGB-direct modes),
 `issue_636_invalid_script_outranks_frame_errors_on_every_path` pins the
 precedence, and `issue_636_scripts_no_path_can_honour_are_refused` pins the
-three refusals. Measured discriminating: with the arithmetic DC geometry fix
+two remaining refusal categories; custom sampling scripts became supported
+in P4-237 on 2026-10-09. Measured discriminating: with the arithmetic DC geometry fix
 disabled the per-component DC script differs (277 vs 266 bytes). Matching the
 stream byte for byte also covers the decoded pixels against `djpeg`.
 
@@ -13976,10 +13980,11 @@ Changes in what `encode` returns:
 - Factor sets C refuses are refused with `CorruptData`:
   - more than 10 blocks in an interleaved MCU (`JERR_BAD_MCU_SIZE`);
   - a fractional ratio (`JERR_FRACT_SAMPLE_NOTIMPL`, as before).
-- `smoothing_factor`, `fancy_downsampling` and custom Huffman tables return
-  `Unsupported` instead of being dropped.
-- The combinations C accepts and Rust still refuses are filed as
-  [P4-237](#p4-237-encoder-refuses-scan_script-smoothing-rgb-direct-cmyk-and-grayscale_from_color-with-non-standard-sampling_factors-that-cjpeg--sample-accepts--open).
+- At P4-236 closure, smoothing, custom Huffman tables and scripts returned
+  `Unsupported`; P4-237 added them on 2026-10-09. Only the Rust-only
+  `fancy_downsampling` prefilter remains refused.
+- The additional C-supported combinations were resolved in
+  [P4-237](#p4-237-encoder-refuses-scan_script-smoothing-rgb-direct-cmyk-and-grayscale_from_color-with-non-standard-sampling_factors-that-cjpeg--sample-accepts--closed-2026-10-09).
 
 Proof: `tests/custom_sampling_modes.rs`.
 - `issue_664_every_mode_matches_cjpeg_for_nonstandard_color_factors` requires
@@ -13998,13 +14003,13 @@ Proof: `tests/custom_sampling_modes.rs`.
 Measured discriminating: with the row-group padding replaced by a clamp to
 the downsampled rows, `1x4,1x2,1x1` differs (2908 vs 2916 bytes).
 
-## P4-237. Encoder Refuses `scan_script`, Smoothing, RGB-Direct, CMYK and `grayscale_from_color` With Non-Standard `sampling_factors` That `cjpeg -sample` Accepts — **OPEN**
+## P4-237. Encoder Refuses `scan_script`, Smoothing, RGB-Direct, CMYK and `grayscale_from_color` With Non-Standard `sampling_factors` That `cjpeg -sample` Accepts — **CLOSED 2026-10-09**
 
 **GitHub:** [#673](https://github.com/developer0hye/libjpeg-turbo-rs/issues/673) — found 2026-10-08 while fixing P4-236 (#664); under #635.
 
 Since P4-236, `Encoder::sampling_factors` with factors that map to no
 standard `Subsampling` composes with every mode switch, byte-identical to
-`cjpeg -sample`. These combinations are still refused with a typed error, and
+`cjpeg -sample`. Before this fix, these combinations were refused with a typed error, although
 stock 3.2.0 `cjpeg` accepts each of them (checked 2026-10-08):
 
 - `scan_script`: `Unsupported`; `cjpeg -scans FILE -sample 3x2,1x1,1x1` encodes.
@@ -14032,6 +14037,29 @@ here. (2) There is a test per combination, in the shape of
 
 **Why deferred.** Each needs encoder work beyond P4-236's acceptance criteria,
 which asked that no option be silently dropped.
+
+**Status (2026-10-09): closed.** The #677 `CustomSamplingFrame` now carries
+RGB/CMYK planes, per-component smoothing and installed Huffman tables. Both
+coefficient progressive writers accept validated scripts and use the component
+block grid for single-component DC first/refinement scans. DC Huffman markers
+follow scan component order and omit tables absent from the scan. MCU-size
+validation is per scan, so non-interleaved scripts can use larger factors.
+Grayscale output takes component 0's factors from a three-factor request.
+
+Proof: `tests/custom_sampling_modes.rs` compares stock 3.2.0 output byte for
+byte for all six combinations, including optimized sequential coding,
+Huffman/arithmetic progressive scripts, restart blocks/rows, smoothing and
+low-quality 16-bit quantization. It includes tiny/odd dimensions, mixed DC
+scan membership, and a four-component frame whose largest factors are on K.
+The public coefficient writer signatures and the streaming sequential path
+are retained. `scan_script` still requires `progressive(true)` and is not a
+lossless/sequential scan API; `fancy_downsampling` remains a Rust-only
+prefilter without an arbitrary-factor counterpart.
+
+**Upstream exception:** default ARM NEON 3.2.0 is itself inconsistent with
+scalar C for h2v2 sampling when the component vertical factor exceeds 1.
+The mixed-scan regression explicitly selects scalar C; this independent
+upstream byte-parity limitation is tracked as P4-241 (#679), not emulated.
 
 ## P4-239. On Zen 4, 4:2:0 Encode Is 5 % Slower Than 0.8.0 — **OPEN**
 
@@ -14063,3 +14091,21 @@ band of 0.8.0.
 
 **Why deferred.** No Zen 4 machine is available locally, and hosted runners
 land on Zen 4 only some of the time.
+
+
+## P4-241. Stock ARM NEON h2v2 Sampling Differs From Scalar C When Component v Exceeds 1 — **OPEN**
+
+**GitHub:** [#679](https://github.com/developer0hye/libjpeg-turbo-rs/issues/679).
+Found while implementing P4-237 on stock libjpeg-turbo 3.2.0, macOS aarch64.
+
+`simd/arm/jcsample-neon.c:143-146` uses source rows `outrow` and `outrow+1`,
+where scalar `src/jcsample.c:282-296` advances `inrow` by two. For component
+v=2 under max_v=4, NEON's second result averages rows 1+2 instead of 2+3.
+A 51x29 RGB mixed-scan reproduction with `2x2,1x4,4x1` produced 870 bytes in
+stock NEON and 877 in Rust/scalar C; `JSIMD_FORCENONE=1` makes C byte-identical
+to Rust. `issue_673_mixed_scans_match_scalar_cjpeg` pins scalar parity.
+
+**Acceptance:** verify an upstream fix with both scalar and fixed-NEON
+regressions, or retain the explicit architecture/version-specific exception.
+No Rust encoding combination is refused for this reason. Copying the upstream
+row-selection defect would make the output architecture-dependent and wrong.
