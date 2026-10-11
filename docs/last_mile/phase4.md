@@ -13935,3 +13935,27 @@ and high-precision strict marker checks. Warnings aggregate all discarded
 marker bytes into one `ExtraneousData` value in constant parser space. The
 high-precision check enforces warning precedence; it does not claim to fix
 pre-existing progressive 12-bit entropy decoding limitations.
+
+
+## P4-243. API-sequence replay treats strict header refusals as publishers — **CLOSED 2026-10-12**
+
+Found in scheduled Fuzz Smoke run [38178419410](https://github.com/developer0hye/libjpeg-turbo-rs/actions/runs/38178419410)
+on 2026-10-12. The P2 oracle probes each input on an unconfigured handle,
+then assumes every decode of that input publishes. With STOPONWARNING set,
+stray marker bytes refuse before publication; dropping the previous publisher
+leaves the fresh compression reference without its subsampling and ICC state.
+This is a harness false positive, reproduced by the downloaded crash seed.
+
+Acceptance: replay the exact seed and all four decode-family publishers with
+strict/permissive warning transitions, including a configured JPEGWIDTH;
+retain P2 comparisons and the existing negative-control tests.
+
+**Status (2026-10-12): closed.** `cargo test --locked --test api_sequence_state`
+passes all 22 tests, including the exact downloaded crash and all four
+publishers across strict/permissive transitions. Both new regressions failed
+before the fix. Failed operations now probe publication with their configured
+reference handle, resetting JPEGWIDTH to -1 before the probe; successful
+operations need no additional parse. P2 comparisons and negative controls
+remain enabled. `cargo test --locked --test marker_stray_bytes` passes all
+seven existing marker regressions, including strict-warning parity and
+pixel-identical C comparisons. No library behavior or public API changes.
