@@ -85,6 +85,8 @@ pub struct ScanInfo {
 /// For progressive: multiple scans with separate offsets and table snapshots.
 #[derive(Debug)]
 pub struct JpegMetadata {
+    /// Total non-padding bytes discarded while finding markers.
+    pub extraneous_bytes: usize,
     pub frame: FrameHeader,
     /// First scan header (used by baseline path).
     pub scan: ScanHeader,
@@ -155,8 +157,26 @@ pub struct JpegMetadata {
     pub saved_markers: Vec<SavedMarker>,
 }
 
+impl JpegMetadata {
+    /// The metadata walk aggregates discarded bytes without per-marker allocation.
+    pub(crate) fn marker_warnings(&self) -> Result<Vec<crate::common::error::DecodeWarning>> {
+        if self.extraneous_bytes == 0 {
+            return Ok(Vec::new());
+        }
+        crate::common::try_alloc::try_filled_vec(
+            1,
+            crate::common::error::DecodeWarning::ExtraneousData {
+                bytes: self.extraneous_bytes,
+            },
+            "marker warning",
+        )
+    }
+}
+
 /// Reads and parses JPEG markers from a byte slice.
 pub struct MarkerReader<'a> {
+    // Aggregate in constant space rather than allocating one warning per marker.
+    extraneous_bytes: usize,
     data: &'a [u8],
     pos: usize,
     marker_save_config: MarkerSaveConfig,
@@ -173,6 +193,7 @@ impl<'a> MarkerReader<'a> {
         Self {
             data,
             pos: 0,
+            extraneous_bytes: 0,
             marker_save_config: MarkerSaveConfig::None,
             scan_cap: DEFAULT_PARSE_SCAN_CAP,
             stop_at_first_sos: false,
@@ -688,6 +709,7 @@ impl<'a> MarkerReader<'a> {
         }
 
         Ok(JpegMetadata {
+            extraneous_bytes: self.extraneous_bytes,
             frame,
             scan: first_scan,
             quant_tables,
@@ -724,18 +746,20 @@ impl<'a> MarkerReader<'a> {
                 self.pos += 1;
                 continue;
             }
-            // Found 0xFF — check next byte
-            if self.pos + 1 >= self.data.len() {
-                self.pos += 1;
+            // Entropy readers accept FF fill before stuffed bytes and restart
+            // markers. Consume the whole run here too, or read_marker would
+            // misclassify the rest of this scan as discarded header bytes.
+            let mut code_pos: usize = self.pos + 1;
+            while code_pos < self.data.len() && self.data[code_pos] == 0xFF {
+                code_pos += 1;
+            }
+            if code_pos == self.data.len() {
+                self.pos = code_pos;
                 return;
             }
-            let next = self.data[self.pos + 1];
-            if next == 0x00 {
-                // Byte-stuffed 0xFF data — skip both bytes
-                self.pos += 2;
-            } else if (0xD0..=0xD7).contains(&next) {
-                // Restart marker — skip it and continue scanning entropy data
-                self.pos += 2;
+            let next: u8 = self.data[code_pos];
+            if next == 0x00 || (0xD0..=0xD7).contains(&next) {
+                self.pos = code_pos + 1;
             } else {
                 // Real marker — leave pos at 0xFF so read_marker can find it
                 return;
@@ -762,6 +786,7 @@ impl<'a> MarkerReader<'a> {
     fn read_marker(&mut self) -> Result<u8> {
         loop {
             while self.pos < self.data.len() && self.data[self.pos] != 0xFF {
+                self.extraneous_bytes += 1;
                 self.pos += 1;
             }
             while self.pos < self.data.len() && self.data[self.pos] == 0xFF {
@@ -775,6 +800,8 @@ impl<'a> MarkerReader<'a> {
             if marker != 0x00 {
                 return Ok(marker);
             }
+            // C counts the stuffed FF/00 pair, but not preceding FF fill bytes.
+            self.extraneous_bytes += 2;
         }
     }
 

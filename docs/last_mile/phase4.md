@@ -13915,3 +13915,23 @@ band of 0.8.0.
 **Why deferred.** No Zen 4 machine is available locally, and hosted runners
 land on Zen 4 only some of the time.
 
+
+
+## P4-242. Stray marker-byte recovery drops warnings and bypasses STOPONWARNING — **CLOSED 2026-10-11**
+
+PR #678 recovers stray bytes like C `jdmarker.c::next_marker` but initially
+lost `JWRN_EXTRANEOUS_DATA`: `Image.warnings` stayed empty and strict native
+and TurboJPEG decodes succeeded. Track the discarded byte count without
+per-marker allocation, expose an aggregate warning, and reject it when
+STOPONWARNING is enabled, including header-only, caller-buffer and raw paths.
+Acceptance: discarded-byte counts and pixels match `djpeg`, legal FF padding stays
+warning-free, and strict rejection matches `djpeg -strict`.
+
+**Status (2026-10-11): closed.** `tests/marker_stray_bytes.rs` passes all seven
+regressions against stock libjpeg-turbo 3.2.0: recovery pixels and byte counts,
+FF padding (including filled stuffed entropy bytes), repeated/caller-buffer output, strict native/raw/TurboJPEG header
+and full decode, later progressive markers, buffered progressive warnings,
+and high-precision strict marker checks. Warnings aggregate all discarded
+marker bytes into one `ExtraneousData` value in constant parser space. The
+high-precision check enforces warning precedence; it does not claim to fix
+pre-existing progressive 12-bit entropy decoding limitations.
