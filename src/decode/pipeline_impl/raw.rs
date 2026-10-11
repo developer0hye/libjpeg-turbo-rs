@@ -9,6 +9,7 @@ impl<'a> Decoder<'a> {
     /// resolution, without performing color conversion or upsampling.
     /// This matches libjpeg-turbo's `jpeg_read_raw_data()` functionality.
     pub fn decode_raw(self) -> Result<crate::api::raw_data::RawImage> {
+        self.check_marker_warnings(self.stop_on_warning)?;
         self.check_header_limits()?;
         let frame = &self.metadata.frame;
         let width: usize = frame.width as usize;

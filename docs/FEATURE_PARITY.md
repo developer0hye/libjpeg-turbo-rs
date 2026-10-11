@@ -213,7 +213,7 @@
 ### Error Handling
 - [x] Lenient / error recovery mode (`decompress_lenient`)
 - [x] `DecodeWarning` list in Image
-- [x] `TJPARAM_STOPONWARNING` — Treat warnings as fatal (`Decoder::set_stop_on_warning()`)
+- [x] `TJPARAM_STOPONWARNING` — Treat warnings as fatal (`Decoder::set_stop_on_warning()`), including recovered stray marker bytes
 - [x] `TJPARAM_SCANLIMIT` — Max progressive scans before error (`Decoder::set_scan_limit()`, `DecodeLimits::max_scans`); every `TjHandle` decompress entry point and `precision::decompress_{12,16}bit_with_limits` ([P4-199](last_mile/phase4.md#p4-199-setdecompparameters-publishes-thirteen-handle-parameters-our-8-bit-decode-publishes-eight-and-the-1216-bit-ones-publish-three-and-ignore-the-handles-limits--closed-2026-10-07), #620)
 - [x] Custom error callbacks — `ErrorHandler` trait
 
@@ -419,7 +419,7 @@
 ## 13. Error Handling
 
 - [x] `Result<T, JpegError>` for all public operations
-- [x] `DecodeWarning` list (HuffmanError, TruncatedData) in lenient mode
+- [x] `DecodeWarning` list: marker recovery (`ExtraneousData`) and lenient entropy warnings (`HuffmanError`, `TruncatedData`, `UnsupportedRecovered`)
 - [x] Custom error handler — `ErrorHandler` trait
 - [ ] Classic codec failures consistently reach `error_exit()` — native typed errors exist; P4-100
 - [x] `emit_message()` callback — `ErrorHandler::emit_warning()` + `ErrorHandler::trace()`

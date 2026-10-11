@@ -355,8 +355,35 @@ impl<'a> Decoder<'a> {
         })
     }
 
+    /// Header-only callers use this before publishing dimensions; pixel/raw callers
+    /// use it before allocating or writing output.
+    pub(crate) fn check_marker_warnings(&self, stop_on_warning: bool) -> Result<()> {
+        if stop_on_warning && self.metadata.extraneous_bytes != 0 {
+            return Err(JpegError::CorruptData(format!(
+                "stop_on_warning: {}",
+                DecodeWarning::ExtraneousData {
+                    bytes: self.metadata.extraneous_bytes
+                }
+            )));
+        }
+        Ok(())
+    }
+
     pub(super) fn decode_image_with_sink(&self, sink: &mut Option<&mut [u8]>) -> Result<Image> {
+        self.check_marker_warnings(self.stop_on_warning)?;
         let mut image: Image = self.decode_image_inner(sink)?;
+        if self.metadata.extraneous_bytes != 0 {
+            image
+                .warnings
+                .try_reserve(1)
+                .map_err(|_| JpegError::AllocationFailed {
+                    what: "marker warning",
+                    bytes: core::mem::size_of::<DecodeWarning>() as u64,
+                })?;
+            image.warnings.push(DecodeWarning::ExtraneousData {
+                bytes: self.metadata.extraneous_bytes,
+            });
+        }
         if !self.marker_processors.is_empty() {
             for marker in &image.saved_markers {
                 if let Some(processor) = self.marker_processors.get(&marker.code) {
@@ -368,6 +395,7 @@ impl<'a> Decoder<'a> {
         if self.stop_on_warning && !image.warnings.is_empty() {
             let first_warning = &image.warnings[0];
             let detail = match first_warning {
+                DecodeWarning::ExtraneousData { .. } => first_warning.to_string(),
                 DecodeWarning::HuffmanError {
                     mcu_x,
                     mcu_y,

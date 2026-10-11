@@ -28,7 +28,7 @@
 
 | TJPARAM | Description | Rust | Status |
 |---|---|---|---|
-| `STOPONWARNING` | Treat warnings as fatal | `Decoder::set_stop_on_warning()` | ✅ |
+| `STOPONWARNING` | Treat warnings as fatal, including stray marker-byte recovery | `Decoder::set_stop_on_warning()` | ✅ |
 | `BOTTOMUP` | Bottom-up row order | `Encoder::bottom_up()` / `ScanlineDecoder::set_bottom_up()` | ✅ |
 | `NOREALLOC` | Disable output buffer realloc | `TjHandle::compress_into(&buf)` honors NOREALLOC, returns `BufferTooSmall{need,got}` on overflow | ✅ |
 | `QUALITY` | Lossy quality 1-100 | `quality: u8` param | ✅ |
