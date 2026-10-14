@@ -13425,7 +13425,7 @@ of one consumer build on one CPU model, AMD EPYC 7763: runs 37548314633,
   - [P4-229](#p4-229-the-downstream-harness-records-machine-load-but-never-acts-on-it-and-the-hosted-macos-runner-was-saturated--open):
     all eight measured hosted macOS legs were saturated, so aarch64 sets no budget
     yet.
-  - [P4-230](#p4-230-the-candidate-adds-1015--more-code-to-a-stock-profile-binary-than-080--open):
+  - [P4-230](#p4-230-the-candidate-adds-1015--more-code-to-a-stock-profile-binary-than-080--closed-2026-10-08):
     binary size +10–15 % vs 0.8.0, unattributed.
 
   [P4-218](#p4-218-the-buffer-reuse-decode-still-allocates-whole-image-component-planes--open)
@@ -13825,7 +13825,7 @@ benchmarked anyway and wrote a report that reads like any other.
 3. An aarch64 budget comes from a run that passes the check: a quiet local
    Apple-silicon run, or a hosted run on a runner that does.
 
-## P4-230. The Candidate Adds 10–15 % More Code to a Stock-Profile Binary Than 0.8.0 — **OPEN**
+## P4-230. The Candidate Adds 10–15 % More Code to a Stock-Profile Binary Than 0.8.0 — **CLOSED 2026-10-08**
 
 **GitHub:** [#661](https://github.com/developer0hye/libjpeg-turbo-rs/issues/661) — child of #635 Milestone C.
 
@@ -13849,6 +13849,46 @@ growth beyond 5 % needs a stated reason.
 attribution in BUDGETS.md, and file or fix anything that is accidental (for
 example monomorphised copies or panic paths that a stock profile no longer
 folds).
+
+**Status (2026-10-08): closed, attributed.** The probes were rebuilt locally
+from `experiments/downstream/consumer`: stock `release` profile, rustc
+1.99.0, candidate `main` plus #669, which does not change code size. Sizes
+come from `llvm-nm -n` symbol address gaps in `__text`, because Mach-O
+records no symbol sizes, and `size -m` per section. No new tool was
+installed: `cargo bloat` is not available here, and adding it would mean
+fetching a new crate.
+
+| target | `__text` 0.8.0 | `__text` candidate | growth |
+|---|---:|---:|---:|
+| aarch64-apple-darwin | 546,732 | 583,760 | +37,028 |
+| x86_64-apple-darwin | 675,312 | 727,248 | +51,936 |
+
+- On aarch64, the other sections add about 6 KB: `__eh_frame` +3,012,
+  `__const` +1,512, `__gcc_except_tab` +700, `__unwind_info` +488 and
+  `__cstring` +414.
+- The remaining file growth there (63.8 KB in all) is the `__TEXT` segment
+  rounding up to 16 KiB pages, 655,360 → 704,512.
+- The hosted Linux x86_64 figure (+92 KB, ELF) includes the same kind of
+  segment and section overhead.
+
+By feature, x86_64 / aarch64:
+
+- **12-bit decode route** (`decompress_12bit_with_limits` +
+  `decode_12bit_as_8bit`): about +25 / +21 KB. P4-199 made the TurboJPEG
+  12/16-bit entry points apply the handle's limits through
+  `precision::decompress_{12,16}bit_with_limits`.
+- **DC-smoothing toggle** (`smooth_with_dc_snapshot`): +6.4 / +4.9 KB.
+- **Grayscale override path**: +6.0 / +4.9 KB.
+- **ICC and extended-XMP reassembly** (P4-144, fallible): about +6.5 /
+  +6.2 KB. This includes two separate slice-sort instantiations, one for
+  `IccChunk` and one for `XmpExtChunk`.
+- **Upsample, lossless, 4-component, parse and SIMD paths**: +1–3 KB each.
+
+Accidental growth is limited to the two sort instantiations, about 3 KB each.
+Sharing one would save that, which is not worth a change on its own. The
+rest is the safety and feature work since 0.8.0. BUDGETS.md's size reference
+stands as measured.
+
 
 ## P4-231. Three Downstream-Harness Checks Are Weaker Than Their Names Suggest — **OPEN**
 
