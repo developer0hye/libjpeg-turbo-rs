@@ -641,9 +641,21 @@ fn smooth_with_dc_snapshot(
 /// Decode with an output colorspace override.
 ///
 /// This public low-level entry point predates `Decoder`'s complete grayscale
-/// conversion path. Its grayscale arm retains the legacy component-0 behavior
-/// for API compatibility; callers that need colorspace-aware RGB-to-gray or
-/// component upsampling should configure [`crate::Decoder`] instead.
+/// and YCbCr conversion paths, and `Decoder` no longer calls it. Both arms
+/// retain their legacy behavior for API compatibility: grayscale copies
+/// component 0, and YCbCr replicates each chroma sample (nearest neighbour)
+/// instead of upsampling it as libjpeg does. Callers that need libjpeg's
+/// output — colorspace-aware RGB-to-gray, or component upsampling — should
+/// configure [`crate::Decoder`] instead (P4-72, P4-244).
+///
+/// Geometry the legacy arms cannot handle is refused with
+/// [`JpegError::Unsupported`], never a panic: for grayscale, a missing or
+/// subsampled component 0 plane, or one that does not cover the output; for
+/// YCbCr, fewer than three
+/// planes, Cb and Cr sampled differently, luma not a whole multiple of
+/// chroma (including chroma denser than luma), a component 0 plane that does
+/// not cover the output, or a chroma plane shorter than one row. A chroma
+/// plane shorter than the output needs repeats its last row.
 #[allow(clippy::too_many_arguments)]
 pub fn decode_with_colorspace_override(
     target_cs: ColorSpace,
@@ -663,6 +675,12 @@ pub fn decode_with_colorspace_override(
     warnings: Vec<DecodeWarning>,
 ) -> Result<Image> {
     if target_cs == ColorSpace::Grayscale {
+        if frame.components.is_empty() || component_planes.is_empty() || comp_block_sizes.is_empty()
+        {
+            return Err(JpegError::Unsupported(
+                "legacy grayscale override requires a component 0 plane".into(),
+            ));
+        }
         let cw: usize =
             mcus_x * frame.components[0].horizontal_sampling as usize * comp_block_sizes[0];
         if cw < out_width || component_planes[0].len() < out_height.saturating_mul(cw) {
@@ -698,27 +716,69 @@ pub fn decode_with_colorspace_override(
             "output colorspace {target_cs:?} not supported"
         )));
     }
-    if frame.components.len() < 3 {
+    if frame.components.len() < 3 || component_planes.len() < 3 || comp_block_sizes.len() < 3 {
         return Err(JpegError::Unsupported(
             "YCbCr output requires 3+ components".into(),
         ));
     }
-    let cw: usize = mcus_x * frame.components[0].horizontal_sampling as usize * comp_block_sizes[0];
-    let cbw: usize =
-        mcus_x * frame.components[1].horizontal_sampling as usize * comp_block_sizes[1];
+    let legacy_refusal = |why: &str| {
+        Err(JpegError::Unsupported(format!(
+            "legacy YCbCr override {why}; use Decoder's YCbCr output instead"
+        )))
+    };
+    // (plane width, rows per MCU row), with per-component IDCT sizes.
+    let geometry = |index: usize| -> (usize, usize) {
+        let component = &frame.components[index];
+        (
+            mcus_x * component.horizontal_sampling as usize * comp_block_sizes[index],
+            component.vertical_sampling as usize * comp_block_sizes[index],
+        )
+    };
+    let (cw, luma_rows): (usize, usize) = geometry(0);
+    let (cbw, cb_rows): (usize, usize) = geometry(1);
+    // Issue #683: Cr used to be read with Cb's geometry, and the factors
+    // below divided by zero when chroma out-sampled luma.
+    if geometry(2) != (cbw, cb_rows) {
+        return legacy_refusal("needs Cb and Cr sampled alike");
+    }
+    if cbw == 0
+        || cb_rows == 0
+        || cw < cbw
+        || luma_rows < cb_rows
+        || !cw.is_multiple_of(cbw)
+        || !luma_rows.is_multiple_of(cb_rows)
+    {
+        return legacy_refusal("needs luma sampled at a whole multiple of chroma");
+    }
     // Effective upsample factors considering per-component IDCT sizes
     let hf: usize = cw / cbw;
-    let vf: usize = (frame.components[0].vertical_sampling as usize * comp_block_sizes[0])
-        / (frame.components[1].vertical_sampling as usize * comp_block_sizes[1]);
-    let mut data: Vec<u8> = crate::common::try_alloc::try_reserved_vec(
-        out_width * out_height * 3,
-        "colorspace override output",
-    )?;
+    let vf: usize = luma_rows / cb_rows;
+    if cw < out_width
+        || out_height
+            .checked_mul(cw)
+            .is_none_or(|needed| component_planes[0].len() < needed)
+    {
+        return legacy_refusal("requires a component 0 plane covering the output");
+    }
+    let chroma_rows: usize = component_planes[1].len().min(component_planes[2].len()) / cbw;
+    if chroma_rows == 0 && out_width > 0 && out_height > 0 {
+        return legacy_refusal("requires chroma planes at least one row long");
+    }
+    let output_len: usize = out_width
+        .checked_mul(out_height)
+        .and_then(|pixels| pixels.checked_mul(3))
+        .ok_or_else(|| {
+            JpegError::Unsupported(format!(
+                "YCbCr output {out_width}x{out_height} overflows usize"
+            ))
+        })?;
+    let mut data: Vec<u8> =
+        crate::common::try_alloc::try_reserved_vec(output_len, "colorspace override output")?;
     for y in 0..out_height {
         for x in 0..out_width {
             data.push(component_planes[0][y * cw + x]);
-            let cx: usize = (x / hf).min(cbw.saturating_sub(1));
-            let cy: usize = (y / vf).min((component_planes[1].len() / cbw).saturating_sub(1));
+            let cx: usize = (x / hf).min(cbw - 1);
+            let cy: usize = (y / vf).min(chroma_rows - 1);
             data.push(component_planes[1][cy * cbw + cx]);
             data.push(component_planes[2][cy * cbw + cx]);
         }

@@ -159,6 +159,18 @@ impl<'a> Decoder<'a> {
                     {
                         usize::from(is_subsampled(&frame.components[0]))
                     }
+                    // YCbCr output upsamples every subsampled component to
+                    // a full-resolution plane before interleaving them
+                    // (P4-244), as direct RGB output does.
+                    ColorSpace::YCbCr
+                        if self.effective_output_colorspace() == Some(ColorSpace::YCbCr) =>
+                    {
+                        frame
+                            .components
+                            .iter()
+                            .filter(|component| is_subsampled(component))
+                            .count()
+                    }
                     _ => 0,
                 }
             } else {
@@ -835,8 +847,10 @@ impl<'a> Decoder<'a> {
             } else {
                 (None, None)
             };
-        // Preserve the uncropped scaled width for filters that need context
-        // outside the requested crop (notably fancy direct-RGB upsampling).
+        // The uncropped scaled width. YCbCr output uses it only for
+        // `jinit_upsampler`'s box-or-fancy choice (P4-244); direct-RGB and
+        // grayscale output still upsample the whole width, which gives their
+        // filters context outside the crop that libjpeg does not (P4-245).
         let uncropped_out_width: usize = out_width;
         // Apply horizontal crop to out_width so all downstream paths use it.
         let out_width: usize = if let Some(cw) = scaled_crop_w {
@@ -890,71 +904,24 @@ impl<'a> Decoder<'a> {
                     "output colorspace {cs:?} not supported"
                 )));
             }
-            // No crop-X shift needed: hand the planes over as-is. The
-            // clone below would double plane memory and blow through a
-            // `set_max_memory` cap the limit check just approved
-            // (codex P1 on #386) — only pay it when an offset exists.
-            if comp_x_offsets.iter().all(|&off| off == 0) {
-                return crate::decode::toggles::decode_with_colorspace_override(
-                    ColorSpace::YCbCr,
-                    &component_planes,
-                    frame,
-                    out_width,
-                    out_height,
-                    mcus_x,
-                    &comp_block_sizes,
-                    icc_profile,
-                    exif_data,
-                    try_clone_opt(&self.metadata.xmp_data, "XMP metadata")?,
-                    try_clone_opt(&self.metadata.iptc_data, "IPTC metadata")?,
-                    try_clone_opt_string(&self.metadata.comment, "COM comment")?,
-                    self.metadata.density,
-                    try_clone_saved_markers(&self.metadata.saved_markers)?,
-                    warnings,
-                );
-            }
-            // Shift component planes by the crop X offset so the override
-            // function reads from the correct horizontal position.
-            let cropped_planes: Vec<Vec<u8>> = component_planes
-                .iter()
-                .enumerate()
-                .map(|(ci, plane)| -> Result<Vec<u8>> {
-                    let comp_w: usize = mcus_x
-                        * frame.components[ci].horizontal_sampling as usize
-                        * comp_block_sizes[ci];
-                    let comp_h: usize = mcus_y
-                        * frame.components[ci].vertical_sampling as usize
-                        * comp_block_sizes[ci];
-                    let off: usize = comp_x_offsets[ci];
-                    if off == 0 {
-                        return try_copy_of(plane, "crop-shifted component plane");
-                    }
-                    // Re-pack rows shifted by `off` pixels
-                    let mut shifted: Vec<u8> =
-                        try_reserved_vec(plane.len(), "crop-shifted component plane")?;
-                    for row in 0..comp_h {
-                        shifted.extend_from_slice(&plane[row * comp_w + off..(row + 1) * comp_w]);
-                        // Pad to maintain stride
-                        shifted.extend(core::iter::repeat_n(0, off));
-                    }
-                    Ok(shifted)
-                })
-                .collect::<Result<Vec<Vec<u8>>>>()?;
-            return crate::decode::toggles::decode_with_colorspace_override(
-                ColorSpace::YCbCr,
-                &cropped_planes,
+            // Issue #683 (P4-244): YCbCr output is libjpeg's RGB pipeline
+            // stopped before the colour transform — every component goes
+            // through the same upsampler, then `null_convert` interleaves.
+            return self.decode_ycbcr_override(
+                &component_planes,
                 frame,
                 out_width,
                 out_height,
+                uncropped_out_width,
+                full_width,
+                full_height,
                 mcus_x,
+                mcus_y,
+                block_size,
                 &comp_block_sizes,
+                scaled_crop_x,
                 icc_profile,
                 exif_data,
-                try_clone_opt(&self.metadata.xmp_data, "XMP metadata")?,
-                try_clone_opt(&self.metadata.iptc_data, "IPTC metadata")?,
-                try_clone_opt_string(&self.metadata.comment, "COM comment")?,
-                self.metadata.density,
-                try_clone_saved_markers(&self.metadata.saved_markers)?,
                 warnings,
             );
         }
