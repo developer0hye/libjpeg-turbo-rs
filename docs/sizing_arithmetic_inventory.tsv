@@ -25,6 +25,7 @@
 #   clamped-difference  a - b floored at 0, where 0 is the correct answer
 #
 # Columns: path	count	classification	source line (trimmed)
+crates/libjpeg-turbo-rs-capi/src/compress.rs	1	geometry-count	(rr as usize).saturating_mul(w).min(usize::from(u16::MAX)) as u16
 crates/libjpeg-turbo-rs-capi/src/imageio.rs	1	clamped-difference	let mut bot: usize = rows.saturating_sub(1);
 crates/libjpeg-turbo-rs-capi/src/jpeglib.rs	1	clamped-difference	*state.outsize = state.bufsize.saturating_sub(free_in_buffer) as std::os::raw::c_ulong;
 crates/libjpeg-turbo-rs-capi/src/jpeglib.rs	1	clamped-difference	let cap_excl_nul: usize = out.len().saturating_sub(1);
