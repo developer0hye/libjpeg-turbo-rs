@@ -77,7 +77,7 @@
 | P4-116 | CLOSED 2026-08-08 (C-parity tests can convert Rust/oracle failures or missing comparisons into a pass) |
 | P4-117 | CLOSED 2026-08-08 (4:4:1 trim rejected images shorter than one iMCU row) |
 | P4-120 | CLOSED 2026-08-13 (`fail_nth_allocation_for_tests` makes both `jpeg_mem_dest` OOM paths reachable, code 56 + `msg_parm.i[0] == 10` asserted) |
-| P4-121 | OPEN (lossless encode accepts a restart interval C refuses to decode) |
+| P4-121 | CLOSED 2026-10-17 (lossless encode refuses a restart interval that is not whole MCU rows, with `JERR_BAD_RESTART`'s text) |
 | P4-122 | OPEN (the Pillow smoke harness substitutes for a v6b library, which its own policy forbids) |
 | P4-125 | CLOSED 2026-08-08 (TurboJPEG YUV decompress entry points emitted one plane per SOF component) |
 | P4-126 | CLOSED 2026-08-09 (`yuv_plane_width`/`yuv_plane_height` accept any component index) |
@@ -1372,6 +1372,8 @@ C expands instead of ignoring: `djpeg -rgb` on a `cjpeg -precision 12` grayscale
 
 **Acceptance criteria.** `undifference_row_16` wraps modulo 0xFFFF like C, with the sample-type truncation left to the output upscale stage (mirroring the P4-38 fix); a crafted wrapping 12-bit lossless fixture cross-validated against `djpeg` (3.x decodes 12-bit lossless); a note in the fix on whether the 12-as-8 route (`decode_12bit_as_8bit`, P4-65) shares the defect.
 
+**Progress (2026-10-17).** Not 12-bit only: `decompress_lossless_arbitrary` masks every precision below 16 the same way, and differential fuzzing against libjpeg-turbo 3.2.0 hit it on 8-bit frames (11 findings in one hour on 20 cores). Because the masked sample predicts its neighbours, one wrapped sum changes later samples too, so the divergence spreads along the row and into later rows. An experimental build that wraps at 0xFFFF and masks only at output matched libjpeg byte for byte on all 11.
+
 ## P4-67. `apply_orientation` Strided Reads Are Cache-Hostile for Orientations 5-8 — **OPEN**
 
 **Motivation.** Filed 2026-07-28 from the #391 code review. `Image::apply_orientation_value` (now `src/decode/pipeline_impl/api.rs`) walks the destination sequentially, so for the axis-swapping orientations (5-8) the source advances by `width * bpp` per inner-loop iteration — on a 4032 px-wide 12 MP phone photo (the feature's headline case) that is a ~12 KB stride at 3 bpp (~16 KB for RGBA), roughly one cache miss per pixel. A tiled transpose (32x32 or 64x64 blocks) is typically 3-6x faster on this shape (review estimate from the general pattern; not measured on this code — the acceptance criteria below require the before/after benchmark). Secondarily, the loop-invariant `match orientation` sits inside the inner loop; hoisting it to a per-orientation strategy would also let 3 degrade to whole-row reversed copies and 4 to row swaps.
@@ -2382,7 +2384,11 @@ upstream code in the message (`JERR_BUFFER_SIZE`, `JERR_BAD_PRECISION`,
 
 Not yet done: the remaining private-string-only
 sites (45 of the original 59 `last_error` assignments still have no
-`error_exit` nearby), criterion (4)'s stock-versus-Rust setjmp harness matrix,
+`error_exit` nearby); encode-backend refusals, which the classic API runs in
+`jpeg_finish_compress` and reports as `JERR_BAD_DCT_COEF` where upstream
+raises the specific code at `jpeg_start_compress` (for example a misaligned
+lossless restart interval, `JERR_BAD_RESTART`, found 2026-10-17 while closing
+P4-121); criterion (4)'s stock-versus-Rust setjmp harness matrix,
 and P4-104's *decompressor* state work, which is separate from the compressor
 states corrected here. `cargo test --workspace --no-fail-fast`: 2466 passed, 0 failed,
 1 ignored (macOS aarch64).
@@ -4521,7 +4527,7 @@ tests failing. `cargo test --workspace --no-fail-fast`: 2458 passed, 0 failed,
 1 ignored. Once this merges, `cross_product_transform`'s trim carve-out
 assertion fired as designed and the carve-out is deleted; trim now reports 78/78.
 
-## P4-121. Lossless Encode Accepts a Restart Interval C Refuses to Decode — **OPEN**
+## P4-121. Lossless Encode Accepts a Restart Interval C Refuses to Decode — **CLOSED 2026-10-17**
 
 **Motivation.** Filed 2026-08-08 while repairing `c_cjpeg_djpeg_tests::
 c_cjpeg_lossless` under P4-116. Asking for a lossless stream with
@@ -4533,7 +4539,7 @@ djpeg: Invalid restart interval 1; must be an integer multiple of the number
 ```
 
 **Root cause.** In lossless mode the restart interval must be a whole number of
-MCU rows. Upstream enforces this **in the encoder**: `jclossls.c:294-296`
+MCU rows. Upstream enforces this **in the encoder**: `jclossls.c:295-297`
 raises `JERR_BAD_RESTART` from `start_pass_lossless` when
 `restart_interval % MCUs_per_row != 0`, so C cannot emit such a stream at all.
 The decoder repeats the check at `jddiffct.c:108`. Our encoder performs
@@ -4558,6 +4564,26 @@ path.
 **Why deferred.** P4-116 is test integrity; this is an encoder validation gap
 it uncovered. The affected call is a misuse that upstream diagnoses, not a
 silent data corruption, so it does not block the test work.
+
+**Status (2026-10-17): closed.** `compress_lossless_extended_precision`, the
+Huffman lossless encoder behind `Encoder`, `tj3Compress8` and the classic
+API, refuses an interval that is not a multiple of the row width with
+`JERR_BAD_RESTART`'s text verbatim: "Invalid restart interval 10; must be an
+integer multiple of the number of MCUs in an MCU row (33)" (criterion 1).
+The classic API encodes in `jpeg_finish_compress`, so it raises the refusal
+there, under the generic `JERR_BAD_DCT_COEF` with that text as the message;
+upstream raises `JERR_BAD_RESTART` itself at `jpeg_start_compress`. That
+code-and-timing gap is recorded under P4-100. `restart_rows(n)` still resolves to whole rows (criterion 2).
+`tests/regression_lossless_restart_intervals.rs::lossless_encoder_restart_intervals_follow_libjpeg`
+asserts the refusal of a 10-block interval and decodes 1- and 2-row
+intervals back to the exact input through `djpeg`, `decompress` and
+`decompress_lossless_arbitrary` (criterion 3). The decoders refuse a
+misaligned `DRI` as `jddiffct.c:107` does (criterion 4, under P4-247).
+Closing it exposed one more mistranslation: for lossless precisions 2..=7,
+`tj3Compress8` passed `TJPARAM_RESTARTROWS` on as an MCU count, so one row
+became a 1-MCU interval. It now converts rows to `rows × width` MCUs, capped
+at 65535, as `jcmaster.c` per_scan_setup does
+(`crates/libjpeg-turbo-rs-capi/tests/capi_lossless_restart_interval.rs`).
 
 ## P4-122. The Pillow Smoke Harness Performs the v6b Substitution Its Own Policy Forbids — **OPEN**
 
@@ -13959,3 +13985,216 @@ operations need no additional parse. P2 comparisons and negative controls
 remain enabled. `cargo test --locked --test marker_stray_bytes` passes all
 seven existing marker regressions, including strict-warning parity and
 pixel-identical C comparisons. No library behavior or public API changes.
+
+## P4-247. Lossless Decode Diverges From libjpeg on Restart Intervals, Subsampled Frames and Multi-Scan Frames — **PARTIAL: restart intervals fixed; subsampled and multi-scan frames remain**
+
+Found by differential testing of `precision::decompress_lossless_arbitrary`
+against libjpeg-turbo 3.2.0 (libjpeg asked for `out_color_space =
+jpeg_color_space`, read through the 8-, 12- or 16-bit API by precision). All
+three are legal T.81 lossless layouts that libjpeg decodes to the source:
+
+1. **Restart intervals are ignored.** The DRI interval is read, but
+   prediction is not reset at each interval (T.81 H.1.2.1; C: `jddiffct.c`
+   `restart_rows_to_go` / `process_restart`). `cjpeg -lossless 1 -restart 1`
+   on a 33×17 greyscale image decodes with 527 of 561 samples different from
+   `djpeg`, and returns `Ok`; without `-restart` all 561 match.
+2. **Subsampled multi-component frames decode wrong.** An interleaved SOF3
+   frame with luma sampled 2×1, 2×2 or 1×2 against 1×1 chroma returns `Ok`
+   with 380–383 of 384 samples wrong on a 16×8 image (C decodes the stored
+   samples and upsamples them). `Decoder` decodes the same three streams
+   with the same counts wrong (checked 2026-10-17).
+3. **A first scan that codes fewer components than the frame is refused.**
+   C decodes the components across their later scans; P4-75 turned this
+   entry point's panic into `CorruptData` ("all 3 must be present in a
+   single interleaved scan"), so it is safe but unsupported.
+
+`cjpeg` cannot write 2 or 3 (it ignores `-sample` in lossless mode); a
+minimal T.81 Process-14 encoder for them is
+`fuzz/scripts/make_c_oracle_diff_seeds.py` in mshunshin/libjpeg-turbo-rs
+(branch `mycardium`).
+
+Acceptance: restart and subsampled frames byte-identical to libjpeg;
+multi-scan frames decoded, or refused as a documented decision.
+
+**Status (2026-10-17): part 1 fixed.**
+`decompress_lossless_arbitrary` and its 16-bit twin `decompress_16bit`,
+which had the same loop, now consume the RSTn marker at the start of each
+restart interval and predict the interval's first row as the scan's first
+row. The three Huffman lossless decoders (these two and `Decoder`) refuse an
+interval that is not a whole number of MCU rows with `JERR_BAD_RESTART`'s
+text, as T.81 H.1.1 requires and `jddiffct.c:107` does. `Decoder` used to
+restart prediction mid-row on such a stream: given a `cjpeg -restart 1`
+stream (markers every 33 MCUs) whose `DRI` was patched to 10, it returned
+`Ok` with 550 of 561 samples wrong, where `djpeg` refuses the `DRI`.
+`tests/regression_lossless_restart_intervals.rs`
+compares 96 `cjpeg` streams with `djpeg` — precisions 2, 8, 12 and 16,
+greyscale and RGB, predictors 1, 4 and 7 (Pt 0 or 1), intervals of 0, 1, 2
+and 20 rows — through `decompress_lossless_arbitrary` and, at 16 bits,
+`decompress_16bit`. Before the fix every one of the 48 streams with a restart
+marker inside the image failed (60 failing decoder results); the 20-row
+interval is longer than the image, so its 24 streams pass either way. It also
+pins the partial-row refusal next to `djpeg`'s. The encoder side closed as
+P4-121; arithmetic-coded (SOF11) restarts are P4-253. Parts 2 and 3 remain.
+Every Huffman lossless decoder still treats each sample position as one MCU,
+so part 2's fix must revisit their restart arithmetic too.
+
+## P4-248. A 0xFF Fill Byte Before a Stuffed Byte Mis-Decodes Baseline 4:4:4, 4:2:2 and 4:1:1 Silently — **OPEN**
+
+Found by differential fuzzing on 2026-10-17. In entropy-coded data a run of
+0xFF bytes followed by 0x00 — fill before a stuffed byte — is read by libjpeg
+as one stuffed 0xFF (`jdhuff.c` `jpeg_fill_bit_buffer` skips the extra 0xFF),
+without a warning. P4-242 (#678) added that recovery, and
+`tests/marker_stray_bytes.rs::entropy_fill_before_stuffed_byte_is_warning_free`
+pins it, but only on a progressive 4:2:0 stream. The test's own recipe — the
+128×128 xorshift noise image, `cjpeg -quality 95`, one extra 0xFF inserted
+before the first `FF 00` after SOS — on **baseline** streams gives, against
+`djpeg -strict` (libjpeg-turbo 3.2.0) at `main` 25d6605c:
+
+| `cjpeg -sample` | baseline | progressive |
+|---|---|---|
+| `2x2` (4:2:0) | identical | identical |
+| `1x1` (4:4:4) | 151 of 49152 bytes differ (max 5) | identical |
+| `2x1` (4:2:2) | 151 differ (max 5) | identical |
+| `4x1` (4:1:1) | 149 differ (max 5) | identical |
+| `1x2` (4:4:0) | identical | identical |
+
+`djpeg -strict` exits 0 for every one; `Decoder` returns `Ok` with no warning
+in strict and lenient mode. On a fuzzed 61×45 4:4:0 stream with a 64-byte fill
+run, `read_coefficients` returned 0 where libjpeg (via `jpegtran -copy none`)
+holds −1 for most AC coefficients of two blocks, and the pixels differed by up
+to 41; any run of two or more 0xFF diverged, a lone `FF 00` did not. The
+baseline Huffman path for these layouts does not skip fill the way the
+progressive path does.
+
+Acceptance: the P4-242 test extended to baseline streams of every standard
+sampling layout, byte-identical to `djpeg -strict`.
+
+## P4-249. `decode_raw` Ignores Block Smoothing, Which libjpeg's Raw Output Applies — **OPEN**
+
+Found by differential fuzzing on 2026-10-17. `Decoder::decode_raw` documents
+itself as libjpeg's `jpeg_read_raw_data()`, but passes `block_smoothing =
+false` to the progressive plane decoder unconditionally
+(`src/decode/pipeline_impl/raw.rs`, "raw data decode: no block smoothing"),
+so `set_block_smoothing(true)` has no effect on it. libjpeg's coefficient
+controller smooths raw output too (`do_block_smoothing` is on by default) for
+progressive scans not refined to the last bit. A reproducer: `cjpeg
+-progressive -scans` with the script below on the 128×128 noise image, so
+every coefficient stops at Al = 1:
+
+```
+0,1,2: 0-0, 0, 1;
+0: 1-63, 0, 1;
+1: 1-63, 0, 1;
+2: 1-63, 0, 1;
+```
+
+Against libjpeg with `raw_data_out = TRUE` (default smoothing), `decode_raw`
+differs on 2474 of the 4:2:0 planes' samples and 6363 of the 4:4:4 planes';
+against libjpeg with `do_block_smoothing = FALSE` it is identical. `djpeg`
+emits no warning.
+
+Related, perhaps deliberate but undocumented: `Decoder` defaults
+`block_smoothing` to off (`api.rs`), where libjpeg defaults it on, so
+`decode_image` of the same streams differs from `djpeg` by 10,329 (4:4:4) and
+10,907 (4:2:0) bytes until `set_block_smoothing(true)` — then it is
+identical.
+`fuzz_decode_diff_c` already turns smoothing on for that reason.
+
+Acceptance: `decode_raw` honours `set_block_smoothing` and, with it on,
+matches `jpeg_read_raw_data` byte for byte; the default (and its rustdoc)
+decided and stated.
+
+## P4-250. Lossless Decode Refuses Tq or Ta Above 3, Which libjpeg Ignores — **OPEN**
+
+Found by differential fuzzing on 2026-10-17. A lossless frame uses neither the
+SOF quantization table selector Tq nor the SOS AC table selector Ta; T.81
+Tables B.2 and B.3 give both as 0 for lossless, and libjpeg neither checks
+nor uses them in lossless mode (`jdinput.c:299-300` skips
+`latch_quant_tables` for lossless; only DC tables are bound). The shared header parser (`src/decode/marker.rs`,
+"quantization table index … out of range (0-3)" and "Huffman table index out
+of range") range-checks them for every frame type, so a lossless frame with
+Tq or Ta of 4 or more is refused as `CorruptData` by both
+`precision::decompress_lossless_arbitrary` and `Decoder::decode_image`.
+Reproducer: `cjpeg -lossless 1` on any greyscale or RGB image, then set every
+component's Tq (or Ta) to 4 — `djpeg` decodes it with no warning. Encoders seen
+in practice write 0–2 (GE Vingmed ultrasound: Tq = 1–2, with Se = 63, which
+this decoder ignores and libjpeg refuses).
+
+Acceptance: SOF3/SOF11 frames accept any Tq and Ta, or the refusal is a
+documented decision.
+
+## P4-251. 12-Bit Decoders Count MCUs in a `u16`: Debug Panic at 65,536 MCUs, Misplaced Restarts in Release — **CLOSED 2026-10-17**
+
+`precision::decompress_12bit` and `raw_data_12::decompress_raw_12` keep their
+MCU counter in a `u16` (`src/api/precision.rs:1041`,
+`src/api/raw_data_12.rs:326`), where every other decoder's counter is `u32`.
+A frame of more than 65,535 MCUs — a 2048×2048 12-bit greyscale image is the
+first square size — overflows it:
+
+- **Debug builds panic** ("attempt to add with overflow",
+  `precision.rs:1097`, `raw_data_12.rs:380`) on every such frame, with or
+  without restart markers. Through `catch_unwind` this surfaces as a
+  `DecoderPanic` for native callers; elsewhere it aborts the decode.
+- **Release builds wrap.** That is harmless without restarts, but the
+  restart check `mcu_count.is_multiple_of(restart_interval)` then runs on the
+  wrapped count, so once a frame passes 65,536 MCUs its restarts land in the
+  wrong place unless the interval divides 65,536. Both functions return `Ok`.
+
+Measured at `main` 25d6605c against `djpeg` (libjpeg-turbo 3.2.0), on
+`cjpeg -precision 12 -quality 95` greyscale images:
+
+| Frame | debug | release |
+|---|---|---|
+| 2048×2048 (65,536 MCUs) | panic | identical |
+| 2048×2048, `-restart 1` (256 MCUs, divides 65,536) | panic | identical |
+| 2056×2056 (66,049 MCUs) | panic | identical |
+| 2056×2056, `-restart 1` (257 MCUs) | panic | 16,448 of 4,227,136 samples differ — one MCU row |
+
+Acceptance: both counters `u32` like the rest of the decoders, and a
+regression test decoding a 2056×2056 12-bit frame with a 257-MCU restart
+interval byte-identical to `djpeg` in a debug build.
+
+**Status (2026-10-17): closed.** Both counters are `u32`, the restart check
+compares against `u32::from(restart_interval)`. `cargo test --test
+twelve_bit_mcu_counter` decodes the 2056×2056 frame (66,049 MCUs, one
+restart per 257-MCU row) through `decompress_12bit` and `decompress_raw_12`
+identically to `djpeg` (libjpeg-turbo 3.2.0) in debug and release builds;
+before the fix it panicked in debug and differed on 16,448 samples in release.
+
+## P4-252. 12- and 16-Bit TurboJPEG Compression Drops the Restart Interval — **OPEN**
+
+Found on 2026-10-17 while closing P4-121. With `TJPARAM_RESTARTROWS` set to
+1, `tj3Compress12` (lossy and lossless) and `tj3Compress16` (lossless) return
+success and write no `DRI` segment. `tj3Compress8` on the same 33×17
+greyscale source writes `DRI` 5 (lossy) and 33 (lossless). Upstream applies
+the handle's restart parameters at every precision (`turbojpeg.c`
+`setCompDefaults`, then `jcmaster.c` `per_scan_setup`); `cjpeg -precision 12`
+and `cjpeg -precision 16 -lossless` with `-restart 1` write restart markers.
+
+The cause, by reading: `TjHandle::compress_12bit*` and `compress_16bit*` call
+`precision::compress_12bit_with_precision` and
+`compress_16bit_with_precision`, which take no restart argument, so
+`TJPARAM_RESTARTBLOCKS` is dropped the same way. The stream is valid, just
+without restart markers: the option is lost silently, as in P4-39.
+
+Acceptance: the 12- and 16-bit paths honour both restart parameters with the
+interval upstream computes (lossless: whole MCU rows only, as P4-121), pinned
+by a test against TurboJPEG or `cjpeg`.
+
+## P4-253. Arithmetic-Coded (SOF11) Lossless Decode Ignores Restart Intervals — **OPEN**
+
+Found by reading on 2026-10-17, while fixing P4-247 part 1:
+`Decoder::decode_lossless_arithmetic` never resets the arithmetic decoder's
+statistics or the prediction at a restart interval. T.81 H.1.1: "When the
+encoder is reset in the restart interval control procedure (see E.1.4), the
+prediction is reset to a default value. If arithmetic coding is used, the
+statistics are also reset."
+
+Not reproduced, and there is no libjpeg oracle: libjpeg-turbo 3.2.0 has no
+arithmetic-coded lossless mode (`jdmaster.c:673-674` and `jcinit.c:74-75`
+raise `JERR_ARITH_NOTIMPL`), and our own SOF11 lossless encoder writes no
+restart interval.
+
+Acceptance: SOF11 lossless restart intervals decode per T.81 H.1.1 and
+H.1.2.1, proven by a hand-built stream, or SOF11 lossless decode is refused
+like libjpeg's, as a documented decision.

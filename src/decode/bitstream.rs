@@ -277,9 +277,9 @@ impl<'a> BitReader<'a> {
     /// next restart marker.
     ///
     /// # Precondition
-    /// Only valid to call at a restart-interval boundary (every caller guards
-    /// it with `restart_interval > 0 && mcu_count % restart_interval == 0`),
-    /// where a `0xFF 0xDn` marker is expected ahead. It scans forward from the
+    /// Only valid to call at a restart-interval boundary (every caller calls
+    /// it only there, counting MCUs or, in lossless decoding, rows), where a
+    /// `0xFF 0xDn` marker is expected ahead. It scans forward from the
     /// current position and **may consume intervening bytes** to reach that
     /// marker; do not call it expecting a "consume only if the marker is exactly
     /// at `pos`" semantics.

@@ -265,12 +265,30 @@ and `git log` between tags.
   raw decode, and TurboJPEG header/full-image paths. **Source compatibility:**
   exhaustive matches on `DecodeWarning` need an `ExtraneousData` arm; callers
   constructing low-level `JpegMetadata` literals must initialize `extraneous_bytes`.
+- `precision::decompress_12bit` and `raw_data_12::decompress_raw_12` counted
+  MCUs in a `u16` (P4-251). A frame of more than 65,535 MCUs (2048×2048
+  12-bit greyscale) panicked with an overflow in debug builds; release builds
+  wrapped the count and misplaced restarts whose interval does not divide
+  65,536, decoding wrong samples with `Ok`. Both counters are now `u32`.
 - The crate-private AVX2 merged H2V2 colour-conversion wrapper now checks
   both rows of each pair (it checked only the first) and falls back to the
   scalar path otherwise (P4-191). Its only caller passes valid rows, it was
   never public API, and the gap never shipped: published 0.8.0 exposed the
   unchecked kernel more broadly, which the P4-135 row of
   `docs/security/AFFECTED_VERSIONS.md` already covers.
+- **Breaking (behaviour): lossless restart intervals follow T.81 and
+  libjpeg** (P4-247 part 1, P4-121).
+  `precision::decompress_lossless_arbitrary` and `precision::decompress_16bit`
+  ignored them: they neither consumed the RSTn markers nor restarted
+  prediction, so a stream with restarts (`cjpeg -lossless 1 -restart 1`)
+  decoded wrong samples with `Ok`, or failed with an invalid Huffman code.
+  T.81 H.1.1 requires a lossless interval to be a whole number of MCU rows.
+  These decoders and `Decoder` now refuse any other with libjpeg's
+  `JERR_BAD_RESTART` text (`Decoder` returned `Ok` with wrong samples), and
+  the lossless encoder now returns that error instead of writing a stream
+  `djpeg` refuses, as `cjpeg` does. `tj3Compress8` at lossless precisions
+  2–7 passed `TJPARAM_RESTARTROWS` on as an MCU count; it now converts rows
+  to MCUs as `jcmaster.c` does.
 
 - **Breaking (behaviour): every TurboJPEG decompress publishes what
   `setDecompParameters` publishes** (P4-199 #620, P4-200 #621, P4-203 #625).
