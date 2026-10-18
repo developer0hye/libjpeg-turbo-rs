@@ -14210,7 +14210,7 @@ this decoder ignores and libjpeg refuses).
 Acceptance: SOF3/SOF11 frames accept any Tq and Ta, or the refusal is a
 documented decision.
 
-## P4-251. 12-Bit Decoders Count MCUs in a `u16`: Debug Panic at 65,536 MCUs, Misplaced Restarts in Release — **OPEN**
+## P4-251. 12-Bit Decoders Count MCUs in a `u16`: Debug Panic at 65,536 MCUs, Misplaced Restarts in Release — **CLOSED 2026-10-17**
 
 `precision::decompress_12bit` and `raw_data_12::decompress_raw_12` keep their
 MCU counter in a `u16` (`src/api/precision.rs:1041`,
@@ -14240,4 +14240,11 @@ Measured at `main` 25d6605c against `djpeg` (libjpeg-turbo 3.2.0), on
 Acceptance: both counters `u32` like the rest of the decoders, and a
 regression test decoding a 2056×2056 12-bit frame with a 257-MCU restart
 interval byte-identical to `djpeg` in a debug build.
+
+**Status (2026-10-17): closed.** Both counters are `u32`, the restart check
+compares against `u32::from(restart_interval)`. `cargo test --test
+twelve_bit_mcu_counter` decodes the 2056×2056 frame (66,049 MCUs, one
+restart per 257-MCU row) through `decompress_12bit` and `decompress_raw_12`
+identically to `djpeg` (libjpeg-turbo 3.2.0) in debug and release builds;
+before the fix it panicked in debug and differed on 16,448 samples in release.
 

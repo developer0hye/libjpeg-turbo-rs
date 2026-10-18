@@ -1038,13 +1038,18 @@ pub fn decompress_12bit_with_limits(data: &[u8], limits: &DecodeLimits) -> Resul
         .map(|c| vec![0i16; comp_plane_w[c] * comp_plane_h[c]])
         .collect();
     let mut prev_dc: Vec<i32> = vec![0i32; num_components];
-    let mut mcu_count: u16 = 0;
+    // u32 like every other decoder's counter: a u16 overflows past 65,535
+    // MCUs (a 2048x2048 12-bit frame), panicking in debug builds and, once
+    // wrapped, misplacing restarts in release builds (P4-251). A u32 cannot:
+    // SOF dimensions are 16-bit and an MCU is at least 8x8, so a frame has at
+    // most 8192 x 8192 = 67,108,864 MCUs.
+    let mut mcu_count: u32 = 0;
     for mcu_row in 0..mcus_y {
         for mcu_col in 0..mcus_x {
             // Handle restart intervals.
             if metadata.restart_interval > 0
                 && mcu_count > 0
-                && mcu_count.is_multiple_of(metadata.restart_interval)
+                && mcu_count.is_multiple_of(u32::from(metadata.restart_interval))
             {
                 bit_reader.reset();
                 prev_dc.fill(0);

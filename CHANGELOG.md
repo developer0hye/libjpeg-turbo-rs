@@ -280,6 +280,11 @@ and `git log` between tags.
   raw decode, and TurboJPEG header/full-image paths. **Source compatibility:**
   exhaustive matches on `DecodeWarning` need an `ExtraneousData` arm; callers
   constructing low-level `JpegMetadata` literals must initialize `extraneous_bytes`.
+- `precision::decompress_12bit` and `raw_data_12::decompress_raw_12` counted
+  MCUs in a `u16` (P4-251). A frame of more than 65,535 MCUs (2048×2048
+  12-bit greyscale) panicked with an overflow in debug builds; release builds
+  wrapped the count and misplaced restarts whose interval does not divide
+  65,536, decoding wrong samples with `Ok`. Both counters are now `u32`.
 - The crate-private AVX2 merged H2V2 colour-conversion wrapper now checks
   both rows of each pair (it checked only the first) and falls back to the
   scalar path otherwise (P4-191). Its only caller passes valid rows, it was
