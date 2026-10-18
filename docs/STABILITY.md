@@ -152,7 +152,7 @@ with what the allocator reports. Each decode path estimates its own buffers:
 
 | path | counted |
 |---|---|
-| 8-bit `Decoder` / `decompress*` / `TjHandle::decompress` | the output buffer (width × height × output bytes per pixel, owned or caller-supplied); one byte per pixel per component for the component planes; one more full-size plane per subsampled component of an RGB-colour-space frame, or for a subsampled luma plane when YCbCr is decoded to grayscale; for a progressive frame, the coefficient buffer (two bytes per pixel per component plus one byte per 8×8 block) |
+| 8-bit `Decoder` / `decompress*` / `TjHandle::decompress` | the output buffer (width × height × output bytes per pixel, owned or caller-supplied); one byte per pixel per component for the component planes; one more full-size plane per subsampled component of an RGB-colour-space frame or of a YCbCr frame decoded to YCbCr, or for a subsampled luma plane when YCbCr is decoded to grayscale; for a progressive frame, the coefficient buffer (two bytes per pixel per component plus one byte per 8×8 block) |
 | `decompress_12bit_with_limits`, `TjHandle::decompress_12bit` | the per-component planes at their padded iMCU size, the upsampled full-size planes and the interleaved result, two bytes a sample each |
 | `decompress_16bit_with_limits`, `TjHandle::decompress_16bit` | the output, plus for a multi-component frame the full-size planes it is interleaved from, two bytes a sample each |
 

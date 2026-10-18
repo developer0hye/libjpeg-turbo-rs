@@ -1534,6 +1534,8 @@ So **(D) enable the target feature and let the compiler vectorise** joins the li
 
 **Acceptance criteria.** Decide the intended status of the public `decode` internals: (A) deprecate the low-level helper and make the module crate-private in the next semver-major release, with a downstream source scan and migration note; or (B) add a metadata- and policy-aware public companion, migrate callers, and make the legacy function delegate wherever its inputs are sufficient. In either case, rustdoc must state the exact behavior, source compatibility must be tested for the supported release line, and the legacy path must never panic on short or subsampled planes.
 
+**Progress (2026-10-17, P4-244).** `Decoder` no longer calls this function: YCbCr output, its last production caller, now upsamples through `decode_ycbcr_override`. Both arms keep their legacy behaviour and now return `Unsupported` instead of panicking on input they cannot handle — for grayscale, a missing component 0; for YCbCr, fewer than three planes, Cb and Cr sampled differently, luma not a whole multiple of chroma (including chroma denser than luma), a component 0 plane that does not cover the output, or a chroma plane shorter than one row (a shorter one still repeats its last row) (`tests/regression_issue_683_ycbcr_output.rs::legacy_ycbcr_override_refuses_unsupported_geometry_without_panicking`). Rustdoc states both arms' behaviour. The deprecate-or-companion decision remains.
+
 ## P4-81. Linux cdylib Omits GNU `LIBJPEG_8.0` Symbol Versions — **PARTIAL: nodes emitted and tested; downstream re-verification pending**
 
 **Motivation.** Filed 2026-08-02 by the real OpenCV replacement experiment.
@@ -13959,3 +13961,136 @@ operations need no additional parse. P2 comparisons and negative controls
 remain enabled. `cargo test --locked --test marker_stray_bytes` passes all
 seven existing marker regressions, including strict-warning parity and
 pixel-identical C comparisons. No library behavior or public API changes.
+
+
+## P4-244. YCbCr Output Bypasses the Upsampler: Replicated Chroma, and Panics on Two Legal Layouts — **CLOSED 2026-10-17**
+
+Filed from [#683](https://github.com/developer0hye/libjpeg-turbo-rs/issues/683).
+`Decoder::set_output_colorspace(ColorSpace::YCbCr)` returned through the
+public low-level `decode::toggles::decode_with_colorspace_override`, which
+copied each chroma sample to its neighbours instead of upsampling it. In
+libjpeg, `out_color_space = JCS_YCbCr` is the RGB pipeline stopped before the
+colour transform: `jdsample.c::jinit_upsampler` picks the method from the
+component geometry and `do_fancy_upsampling` alone, and `jdcolor.c` then
+applies `null_convert`. Four defects followed (figures from #683's 64×48
+reproduction):
+
+1. Chroma was replicated, so 4:2:2, 4:2:0 and 4:4:0 frames differed from
+   libjpeg on 85–95 % of chroma samples (up to 53 levels), and scaled decodes
+   differed wherever libjpeg interpolates.
+2. The factors were integer quotients. When a chroma component out-samples
+   luma (legal in T.81; `cjpeg -sample 1x1,2x2,2x2` writes it), one is 0 and
+   the decode panicked with `attempt to divide by zero`, in release builds
+   too.
+3. Cr was indexed with Cb's geometry. When Cr is sampled more coarsely than
+   Cb (`-sample 2x2,2x1,1x1`) that read out of bounds and panicked, or at
+   scale 1/2 returned Cr up to 125 levels wrong; other Cb ≠ Cr layouts
+   (`2x2,1x2,2x1`) returned wrong Cr.
+4. YCbCr output was accepted from RGB and CMYK/YCCK sources and returned
+   their samples unconverted; libjpeg refuses any non-null conversion into
+   `JCS_YCbCr` with `JERR_CONVERSION_NOTIMPL`. (A grayscale source was
+   already refused, with an error that did not name it.)
+
+The defects date from `5fd2b19` (2026-03-22) and are in every published core
+version. `decompress()`, the image adapter, TurboJPEG and the C ABI never
+request YCbCr output, so only safe-Rust callers of `Decoder`,
+`ScanlineDecoder` or the low-level function reach them
+(`docs/security/AFFECTED_VERSIONS.md`).
+
+Acceptance, for 8-bit DCT frames: YCbCr output byte-identical to libjpeg's
+`JCS_YCbCr` output for every sampling layout, every supported scale, fancy
+and box upsampling, and horizontal and vertical crops; no panic on any legal
+layout; strict decodes keep P4-21's refusal where chroma out-samples luma;
+non-YCbCr sources refused as C refuses them; the memory estimate counts the
+upsampled planes. (12-bit and lossless frames ignore the request: P4-246.)
+
+**Status (2026-10-17): closed.** `Decoder` now routes YCbCr output to
+`decode_ycbcr_override` (`src/decode/pipeline_impl/color.rs`), which upsamples
+each component with `upsample_component_window` — the windowed form of the
+`upsample_component_plane` helper RGB and grayscale output share — and
+interleaves the planes. Under a horizontal crop the window treats the
+iMCU-aligned crop as the image, as `jpeg_crop_scanline` does: it narrows
+every `downsampled_width`, so the fancy filters replicate the edge sample at
+both crop edges. A 2:1 component picks box or fancy from its uncropped width,
+unless some component's cropped width falls below two samples; then
+`jpeg_crop_scanline` re-runs `jinit_upsampler` and every component picks from
+its cropped width (`crop_reinitialises_upsampler`), so a crop leaving a 2:1
+component two samples wide keeps the fancy filter only when nothing narrowed
+further. The reference is a new oracle, `examples/ycbcr_decode_c_oracle.c`,
+because neither `djpeg` nor TurboJPEG can request `JCS_YCbCr`.
+`tests/regression_issue_683_ycbcr_output.rs` compares nine strict layouts
+(including 3:1 and two Cb ≠ Cr layouts) at all 16 scales with fancy and box
+upsampling (288 cases), three chroma-out-samples-luma layouts in lenient mode
+(96 cases, plus the strict refusal), and 252 crop cases over seven layouts
+(including `4x1,2x1,1x1` and `4x1,1x1,2x1`, where only the re-initialisation
+rule matches), all byte-identical to libjpeg-turbo 3.2.0 with and without
+`JSIMD_FORCENONE=1`. A wider sweep — 19 layouts, 10 scales, both upsamplers,
+about 43 crops each, 16,454 cases — also matched. RGB, grayscale, CMYK and
+YCCK sources are refused with `Unsupported` naming
+`JERR_CONVERSION_NOTIMPL`, as libjpeg refuses them. `check_header_limits`
+counts one full-size plane per subsampled component
+(`tests/memory_limits.rs::max_memory_accounts_for_ycbcr_output_upsampling_buffers`).
+The low-level function keeps its replicating behaviour for API compatibility
+(P4-80) but returns `Unsupported` instead of panicking on geometry it cannot
+replicate. `Image::pixel_format` stays `Rgb`, the three-sample label this
+override has always used: `PixelFormat` is exhaustive, so a YCbCr variant is
+a semver-major change.
+
+## P4-245. Horizontal Crops Give Some Upsampled Planes Context From Outside the Crop — **OPEN**
+
+Found while closing P4-244. `jpeg_crop_scanline` (`jdapistd.c`) narrows each
+component's `downsampled_width` to the iMCU-aligned crop, so libjpeg upsamples
+the crop as if it were the whole image: the fancy filters replicate the edge
+sample at the crop's left and right edges. A 2:1 component keeps the method
+`jinit_upsampler` chose from its uncropped width — fancy above two samples —
+unless some component narrows below two samples, which re-runs
+`jinit_upsampler` for every component with the cropped widths. Three Rust
+paths disagree with `djpeg -crop` on a 61×45 image (`-quality 92`):
+
+1. **Direct-RGB sources** (`cjpeg -rgb -sample 2x1` / `2x2`) through
+   `Decoder` RGB output: 40–59 bytes differ for crops `30x22+8+9` and
+   `40x30+21+15`, and 2–4 for `1x1` crops. The path upsamples with the
+   uncropped width (`uncropped_out_width`), so the filters read real
+   neighbours outside the crop.
+2. **Grayscale output** from `-sample 1x1,2x2,1x1` (lenient) and from
+   `-rgb -sample 2x1`: 21–26 bytes differ for the same crops and 1–2 for
+   `1x1` crops, for the same reason.
+3. **YCbCr sources to RGB** (`-sample 2x1` / `2x2`): crop `1x45+2+0` leaves
+   the chroma two samples wide, and 237 / 351 bytes differ. The path's gates
+   test the cropped chroma width (`actual_cb_w > 2` before the row-streaming
+   H2V1/H2V2 paths, `nearest_eligible`, and the plane path's
+   `use_box_filter`) and send a two-sample crop to box replication, where
+   libjpeg keeps the fancy filter. Relaxing the gates is not enough: the row
+   kernels' two-sample branches (`decode::upsample::fancy_h2v1`,
+   `fancy_h2v2_row`) are not libjpeg's fancy filter either — the first
+   replicates, the second is box horizontally and triangular vertically.
+   Wider crops of these sources match.
+
+Acceptance: each path byte-identical to `djpeg -crop` (and `-grayscale`) for
+crops that start past the first iMCU column, end before the right edge, and
+narrow a 2:1 component to one and two samples — including layouts such as
+`4x1,2x1,1x1` where one component's narrowing re-initialises the others — at
+full and reduced scale. For 1 and 2 the fix is to call
+`upsample_component_window` with the crop and `crop_reinitialises_upsampler`,
+as YCbCr output does (P4-244).
+
+## P4-246. 12-Bit and Lossless Decodes Ignore `set_output_colorspace` — **OPEN**
+
+Found while closing P4-244. `decode_image_with_sink`
+(`src/decode/pipeline_impl/output.rs`) returns through
+`decode_12bit_as_8bit` for a 12-bit frame and `decode_lossless_image` for a
+lossless one before it reaches the output-colourspace dispatch, and neither
+reads `output_colorspace`. A YCbCr request on a 12-bit 4:2:0 YCbCr frame
+(`cjpeg -precision 12 -sample 2x2`) therefore returns `Ok` with that path's
+RGB output, labelled `PixelFormat::Rgb`, so a caller cannot tell it from
+YCbCr; a Grayscale request returns RGB too. `cjpeg -lossless` writes an
+RGB-coded frame (Adobe transform 0, component IDs R, G, B), and a YCbCr
+request on it returns the RGB decode, byte-identical to `djpeg`, where
+libjpeg refuses the conversion (`JERR_CONVERSION_NOTIMPL`; checked with
+`examples/ycbcr_decode_c_oracle.c` against libjpeg-turbo 3.2.0).
+
+Acceptance: on 12-bit and lossless frames, `set_output_colorspace` either
+produces libjpeg's output for that `out_color_space` (`jpeg12_*` for 12-bit,
+compared against a 12-bit-capable oracle) or is refused with `Unsupported`;
+never silently ignored. The `set_output_colorspace` rustdoc drops its
+"12-bit and lossless frames ignore this" caveat.
