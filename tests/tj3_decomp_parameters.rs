@@ -726,3 +726,28 @@ fn the_restart_parameters_refuse_values_outside_sixteen_bits() {
         );
     }
 }
+
+/// Issue #667: `decompress_to_yuv_planes` emits the planes of the scaled
+/// frame, byte-identical to stock 3.2.0's `tj3DecompressToYUV8` (the digest is
+/// stock's for the packed planes of `photo_64x64_420.jpg` at 1/2, align 1).
+#[test]
+fn the_yuv_decompress_honours_the_scaling_factor() {
+    const PHOTO: &[u8] = include_bytes!("fixtures/photo_64x64_420.jpg");
+    let mut handle: TjHandle = TjHandle::new();
+    handle.set_scaling_factor(1, 2).expect("1/2");
+    let (planes, width, height, subsampling) = handle
+        .decompress_to_yuv_planes(PHOTO)
+        .expect("a scaled YUV decode");
+    assert_eq!((width, height, subsampling), (32, 32, Subsampling::S420));
+    assert_eq!(
+        planes.iter().map(Vec::len).collect::<Vec<usize>>(),
+        [1024, 256, 256]
+    );
+    let digest: u64 = planes
+        .concat()
+        .iter()
+        .fold(14_695_981_039_346_656_037, |hash: u64, &byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(1_099_511_628_211)
+        });
+    assert_eq!(digest, 0x1b8d_29b6_b6c7_3607);
+}

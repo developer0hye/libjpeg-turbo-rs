@@ -115,8 +115,17 @@ pub struct TransformOptions {
     /// Discard partial iMCU blocks at image edges before transforming.
     /// Corresponds to TJXOPT_TRIM.
     pub trim: bool,
-    /// Crop to the specified region (in MCU-aligned coordinates).
-    /// Corresponds to TJXOPT_CROP.
+    /// Crop to the specified region, in the coordinates of the transformed
+    /// image. Corresponds to TJXOPT_CROP and `jpegtran -crop WxH+X+Y`.
+    ///
+    /// As in jpegtran, `x` / `y` are aligned down to the iMCU grid and the
+    /// region widened to keep its right and bottom edges; a `width` or
+    /// `height` of 0 means "to the edge" (jpegtran's omitted `W` / `H`,
+    /// libjpeg's `JCROP_UNSET`). A region `jtransform_request_workspace`
+    /// refuses — an origin outside the image, or a region running past it
+    /// (except jpegtran's crop expansion, which needs `TransformOp::None` and
+    /// is not implemented: P4-173) — is refused with
+    /// `JpegError::InvalidCropRegion("Invalid crop request")`.
     pub crop: Option<CropRegion>,
     /// Drop chroma components, producing a grayscale JPEG.
     /// Corresponds to TJXOPT_GRAY.

@@ -324,6 +324,15 @@ fn trace_label(label: &str, jpeg: &[u8], sequence: *mut c_void) -> String {
         let rc: c_int = yuv_decompress(sequence, jpeg, &mut yuv, plane_size, planar);
         trace.push_str(&emit(label, names[3], rc, sequence));
     }
+    let handle: *mut c_void = instance();
+    // SAFETY: live handle; `yuv` is sized for the unscaled planes, so for the
+    // half-scaled ones too.
+    let rc: c_int = unsafe {
+        tj3SetScalingFactor(handle, TjScalingFactor { num: 1, denom: 2 });
+        yuv_decompress(handle, jpeg, &mut yuv, plane_size, false)
+    };
+    trace.push_str(&emit(label, "yuv_half", rc, handle));
+    destroy(handle);
 
     if precision == 8 && lossless == 0 {
         let handle: *mut c_void = instance();

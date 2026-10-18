@@ -127,8 +127,8 @@
 
 | C Function | Description | Rust | Status |
 |---|---|---|---|
-| `tj3DecompressToYUV8(handle, jpeg, size, dst, align)` | JPEG → packed YUV | `TjHandle::decompress_to_yuv_planes()` publishes the thirteen and applies the handle's limits (P4-225, #652); `yuv::decompress_to_yuv()` is the handle-free form and not interchangeable: the C entry point rejects 4-component CMYK/YCCK frames (P4-125), the Rust function packs all four planes. A scaling factor other than 1/1 is refused where stock emits scaled planes (P4-234, #667) | 🔶 |
-| `tj3DecompressToYUVPlanes8(handle, jpeg, size, planes, strides)` | JPEG → planar YUV | `TjHandle::decompress_to_yuv_planes()` (P4-225, #652); `yuv::decompress_to_yuv_planes()` — same divergence; the Rust function returns one plane per SOF component, so four for CMYK/YCCK. Scaled decode refused (P4-234); a stride shorter than its plane is refused as upstream does | 🔶 |
+| `tj3DecompressToYUV8(handle, jpeg, size, dst, align)` | JPEG → packed YUV | `TjHandle::decompress_to_yuv_planes()` publishes the thirteen and applies the handle's limits (P4-225, #652); `yuv::decompress_to_yuv()` is the handle-free form and not interchangeable: the C entry point rejects 4-component CMYK/YCCK frames (P4-125), the Rust function packs all four planes. Honours `tj3SetScalingFactor`: the scaled planes, byte-identical to stock at all sixteen factors (P4-234, #667) | ✅ |
+| `tj3DecompressToYUVPlanes8(handle, jpeg, size, planes, strides)` | JPEG → planar YUV | `TjHandle::decompress_to_yuv_planes()` (P4-225, #652); `yuv::decompress_to_yuv_planes()` — same divergence; the Rust function returns one plane per SOF component, so four for CMYK/YCCK. Scaled planes as stock writes them (P4-234); a stride shorter than its plane is refused as upstream does | ✅ |
 
 ### Color Decode (YUV → RGB, no JPEG)
 
@@ -141,7 +141,7 @@
 
 | C Function | Description | Rust | Status |
 |---|---|---|---|
-| `tj3Transform(handle, jpeg, size, n, &dstBufs, &dstSizes, transforms)` | Lossless transform with options | `transform_jpeg()` / `transform_jpeg_with_options()` (all ops + all TJXOPT flags, including arithmetic/progressive output, + custom filter). The C entry point applies the handle's `TJPARAM_MAXPIXELS` / `SCANLIMIT` / `MAXMEMORY` to the source and its `PROGRESSIVE` / `ARITHMETIC` / `OPTIMIZE` / `RESTARTBLOCKS` / `RESTARTROWS` to the output, byte-exact vs stock (P4-227, #655); the handle's `SAVEMARKERS` level and ICC profile are not applied (P4-235, #668) | 🔶 |
+| `tj3Transform(handle, jpeg, size, n, &dstBufs, &dstSizes, transforms)` | Lossless transform with options | `transform_jpeg()` / `transform_jpeg_with_options()` (all ops + all TJXOPT flags, including arithmetic/progressive output, + custom filter). The C entry point applies the handle's `TJPARAM_MAXPIXELS` / `SCANLIMIT` / `MAXMEMORY` to the source and its `PROGRESSIVE` / `ARITHMETIC` / `OPTIMIZE` / `RESTARTBLOCKS` / `RESTARTROWS` to the output, byte-exact vs stock (P4-227, #655); the handle's `SAVEMARKERS` level and ICC profile are not applied (P4-235, #668). Crop regions follow `jtransform_request_workspace`'s rules — a zero `r.w` / `r.h` runs to the edge, an out-of-range region is "Invalid crop request" (P4-240, #675) | 🔶 |
 | `tj3TransformBufSize(handle, transform)` | Estimate output buffer size | `transform_buf_size()` | ✅ |
 
 ### Error Handling

@@ -35,8 +35,8 @@
  * Both YUV decompressors call setDecompParameters too
  * (`turbojpeg.c:2227`, `:2416`) before their own TJPARAM_MAXPIXELS refusal
  * (`:2228-2231`), so every label traces them as well -- fresh, under
- * TJPARAM_MAXPIXELS and TJPARAM_SCANLIMIT, and on the long-lived handle
- * (P4-225).
+ * TJPARAM_MAXPIXELS and TJPARAM_SCANLIMIT, on the long-lived handle (P4-225),
+ * and at scaling factor 1/2 (P4-234).
  *
  * Cases deliberately absent, because the two implementations diverge on them
  * by design or under another item, and printing them would make this gate
@@ -44,9 +44,6 @@
  *
  *   - tj3Decompress12 on an 8-bit frame (stock promotes `data_precision` to
  *     12 at `turbojpeg-mp.c:191-194`; the port refuses, P4-171);
- *   - a YUV decompress at a scaling factor other than 1/1 (stock emits
- *     scaled planes; the port refuses rather than emit unscaled planes into
- *     a buffer sized for scaled ones -- P4-234);
  *   - TJPARAM_MAXMEMORY refusals (stock's budget reaches only its
  *     whole-image arrays, the port's a header-time estimate that includes the
  *     output buffer, so the two refuse different frames by design).
@@ -295,6 +292,15 @@ static int run_label(const char *workdir, const char *label,
 
     rc = yuv_decompress(sequence, jpeg, size, yuv, plane_size, planar);
     emit(label, names[3][planar], rc, sequence);
+  }
+  {
+    tjscalingfactor half = { 1, 2 };
+
+    handle = tj3Init(TJINIT_DECOMPRESS);
+    tj3SetScalingFactor(handle, half);
+    rc = yuv_decompress(handle, jpeg, size, yuv, plane_size, 0);
+    emit(label, "yuv_half", rc, handle);
+    tj3Destroy(handle);
   }
 
   /* 6-7. Scaled and cropped 8-bit lossy decodes publish the SOF's dimensions,

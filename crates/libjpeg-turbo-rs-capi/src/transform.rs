@@ -222,7 +222,11 @@ pub unsafe extern "C" fn tj3Transform(
                 };
 
                 if (t.options & TJXOPT_CROP) != 0 {
-                    if t.r.x < 0 || t.r.y < 0 || t.r.w <= 0 || t.r.h <= 0 {
+                    // Only a negative field is invalid (`turbojpeg.c:2975-2976`);
+                    // a zero width or height is `JCROP_UNSET`, "to the edge"
+                    // (`:2979-2986`), resolved against the transformed frame
+                    // once the header is read (P4-240, #675).
+                    if t.r.x < 0 || t.r.y < 0 || t.r.w < 0 || t.r.h < 0 {
                         inst.set_error(
                             format!(
                                 "tj3Transform[{i}]: invalid crop region {{x={},y={},w={},h={}}}",
@@ -405,10 +409,14 @@ fn crop_is_refused(opts: &TransformOptions, width: usize, height: usize) -> bool
         (width, height)
     };
     let axis_refused = |offset: usize, extent: usize, frame: usize| -> bool {
+        if extent == 0 {
+            // `JCROP_UNSET`: to the edge, refused only for an origin outside.
+            return offset >= frame;
+        }
         if extent > frame {
             opts.op != TransformOp::None || offset >= extent || offset > extent - frame
         } else {
-            offset >= frame || extent == 0 || offset > frame - extent
+            offset >= frame || offset > frame - extent
         }
     };
     axis_refused(crop.x, crop.width, out_width) || axis_refused(crop.y, crop.height, out_height)
@@ -549,16 +557,18 @@ fn transform_memory_estimate(
             (width, height)
         };
         if let Some(crop) = opts.crop {
-            out_width = if crop.width > out_width {
-                crop.width
-            } else {
-                crop.width.min(out_width.saturating_sub(crop.x))
+            // A zero extent runs to the edge (`JCROP_UNSET`).
+            let extent = |extent: usize, offset: usize, frame: usize| -> usize {
+                if extent == 0 {
+                    frame.saturating_sub(offset)
+                } else if extent > frame {
+                    extent
+                } else {
+                    extent.min(frame.saturating_sub(offset))
+                }
             };
-            out_height = if crop.height > out_height {
-                crop.height
-            } else {
-                crop.height.min(out_height.saturating_sub(crop.y))
-            };
+            out_width = extent(crop.width, crop.x, out_width);
+            out_height = extent(crop.height, crop.y, out_height);
         }
         let components: usize = if gray_only { 1 } else { frame.components.len() };
         let (imcu_width, imcu_height): (usize, usize) = match (components, transposed) {
@@ -775,20 +785,88 @@ pub(crate) fn transformed_specs(
             other => other,
         };
     }
-    // Crop detection: upstream gates on `TJXOPT_CROP` and treats `r.w == 0`
-    // as "remainder of width post-x". `tjbench` only takes the `IS_CROPPED`
-    // path when at least one of x/y/w/h is non-zero, so the simpler "any of
-    // r.{w,h} positive" heuristic matches its usage; a stricter caller that
-    // wants the remainder-mode behaviour can pass an explicit `r.w` / `r.h`.
+    // Crop: upstream's `getTransformedSpecs` (`turbojpeg.c:2848-2870`) takes
+    // `r.w` / `r.h`, and a zero one as the remainder past `r.x` / `r.y`
+    // (`JCROP_UNSET`, P4-240). Its range checks are not repeated here: a
+    // region `tj3Transform` would refuse never reaches an output.
     if (xform.options & TJXOPT_CROP) != 0 {
-        if xform.r.w > 0 {
-            w = xform.r.w;
-        }
-        if xform.r.h > 0 {
-            h = xform.r.h;
-        }
+        w = if xform.r.w > 0 {
+            xform.r.w
+        } else {
+            (w - xform.r.x.max(0)).max(1)
+        };
+        h = if xform.r.h > 0 {
+            xform.r.h
+        } else {
+            (h - xform.r.y.max(0)).max(1)
+        };
     }
     (w, h, subsamp)
+}
+
+/// `getTransformedSpecs`' crop checks (`turbojpeg.c:2848-2869`), in its
+/// order, against the transformed frame: a negative field, an unknown
+/// destination subsampling, an origin off the destination iMCU grid, and a
+/// region — a zero extent running to the edge — past the frame. `None` when
+/// the transform crops nothing or the region is valid.
+fn crop_spec_refusal(
+    width: c_int,
+    height: c_int,
+    subsamp: c_int,
+    xform: &TjTransform,
+) -> Option<String> {
+    if (xform.options & TJXOPT_CROP) == 0 {
+        return None;
+    }
+    let r = &xform.r;
+    if r.x < 0 || r.y < 0 || r.w < 0 || r.h < 0 {
+        return Some(String::from(
+            "tj3TransformBufSize(): Invalid cropping region",
+        ));
+    }
+    // The destination geometry without the crop applied.
+    let uncropped: TjTransform = TjTransform {
+        options: xform.options & !TJXOPT_CROP,
+        ..*xform
+    };
+    let (dst_width, dst_height, dst_subsamp) =
+        transformed_specs(width, height, subsamp, &uncropped);
+    let Some((&mcu_width, &mcu_height)) = usize::try_from(dst_subsamp)
+        .ok()
+        .and_then(|index| TJ_MCU_WIDTH.get(index).zip(TJ_MCU_HEIGHT.get(index)))
+    else {
+        return Some(String::from(
+            "tj3TransformBufSize(): Could not determine subsampling level of JPEG image",
+        ));
+    };
+    if !(r.x as usize).is_multiple_of(mcu_width) || !(r.y as usize).is_multiple_of(mcu_height) {
+        return Some(format!(
+            "tj3TransformBufSize(): To crop this JPEG image, x must be a multiple of \
+             {mcu_width}\nand y must be a multiple of {mcu_height}."
+        ));
+    }
+    let exceeds: String = String::from(
+        "tj3TransformBufSize(): The cropping region exceeds the destination image dimensions",
+    );
+    if r.x >= dst_width || r.y >= dst_height {
+        return Some(exceeds);
+    }
+    let cropped_width: i64 = if r.w == 0 {
+        i64::from(dst_width - r.x)
+    } else {
+        i64::from(r.w)
+    };
+    let cropped_height: i64 = if r.h == 0 {
+        i64::from(dst_height - r.y)
+    } else {
+        i64::from(r.h)
+    };
+    if i64::from(r.x) + cropped_width > i64::from(dst_width)
+        || i64::from(r.y) + cropped_height > i64::from(dst_height)
+    {
+        return Some(exceeds);
+    }
+    None
 }
 
 /// `tj3TransformBufSize(handle, *transform) -> size_t`.
@@ -846,6 +924,10 @@ pub unsafe extern "C" fn tj3TransformBufSize(
                 return 0;
             }
             let subsamp: c_int = inst.inner.get(TjParam::Subsampling);
+            if let Some(refusal) = crop_spec_refusal(w, h, subsamp, xform) {
+                inst.set_error(refusal, TJERR_FATAL);
+                return 0;
+            }
             let (w, h, subsamp) = transformed_specs(w, h, subsamp, xform);
             inst.clear_error();
             let base: usize = crate::bufsize::tj3JPEGBufSize(w, h, subsamp);

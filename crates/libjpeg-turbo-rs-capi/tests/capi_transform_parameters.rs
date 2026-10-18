@@ -121,15 +121,23 @@ fn run(
     op: c_int,
     options: c_int,
 ) -> String {
+    run_region(label, case_name, jpeg, params, op, options, (0, 0, 0, 0))
+}
+
+/// [`run`] with a crop region, applied when `options` has `TJXOPT_CROP`.
+fn run_region(
+    label: &str,
+    case_name: &str,
+    jpeg: &[u8],
+    params: [(c_int, c_int); 2],
+    op: c_int,
+    options: c_int,
+    (x, y, w, h): (c_int, c_int, c_int, c_int),
+) -> String {
     let handle: *mut c_void = tj3Init(TJINIT_TRANSFORM);
     assert!(!handle.is_null());
     let transform: TjTransform = TjTransform {
-        r: TjRegion {
-            x: 0,
-            y: 0,
-            w: 0,
-            h: 0,
-        },
+        r: TjRegion { x, y, w, h },
         op,
         options,
         data: std::ptr::null_mut(),
@@ -268,6 +276,25 @@ fn trace_label(label: &str, jpeg: &[u8]) -> String {
     ];
     let mut trace: String = String::new();
     for (case_name, params, op, options) in cases {
+        if case_name == "opt_progressive" {
+            for (crop_name, crop_op, region) in [
+                ("crop_to_edge", TJXOP_NONE, (16, 16, 0, 0)),
+                ("crop_width_to_edge", TJXOP_NONE, (16, 0, 0, 16)),
+                ("crop_to_edge_rot90", TJXOP_ROT90, (16, 0, 0, 0)),
+                ("crop_past_edge", TJXOP_NONE, (48, 0, 32, 32)),
+                ("crop_origin_outside", TJXOP_NONE, (64, 0, 0, 0)),
+            ] {
+                trace.push_str(&run_region(
+                    label,
+                    crop_name,
+                    jpeg,
+                    [NONE, NONE],
+                    crop_op,
+                    TJXOPT_CROP,
+                    region,
+                ));
+            }
+        }
         trace.push_str(&run(label, case_name, jpeg, params, op, options));
     }
     if label == "big" {
@@ -611,6 +638,115 @@ fn saved_markers_count_against_maxmemory() {
     );
     assert!(transform_once(&with_markers, TJPARAM_MAXMEMORY, 9, no_crop()).is_ok());
     assert!(transform_once(&with_markers, TJPARAM_MAXMEMORY, 7, copy_none).is_ok());
+}
+
+/// Issue #675 (P4-240): a zero crop width or height is `JCROP_UNSET`, "to the
+/// edge" (`turbojpeg.c:2979-2986`), in `tj3Transform` and in
+/// `tj3TransformBufSize` (`getTransformedSpecs`, `:2862-2865`); the port
+/// refused the first and sized the second for the whole frame. The bytes are
+/// held to stock's by the oracle trace's `crop_*` cases.
+#[test]
+fn a_zero_crop_extent_runs_to_the_edge() {
+    let trace: String = our_trace();
+    for case_name in ["crop_to_edge", "crop_width_to_edge", "crop_to_edge_rot90"] {
+        assert_eq!(
+            rc_of(line_for(&trace, "base", case_name)),
+            "rc=0",
+            "{case_name}"
+        );
+    }
+    for case_name in ["crop_past_edge", "crop_origin_outside"] {
+        assert_eq!(
+            rc_of(line_for(&trace, "base", case_name)),
+            "rc=-1",
+            "{case_name}"
+        );
+    }
+    let handle: *mut c_void = tj3Init(TJINIT_TRANSFORM);
+    let transform: TjTransform = TjTransform {
+        r: TjRegion {
+            x: 16,
+            y: 16,
+            w: 0,
+            h: 0,
+        },
+        options: TJXOPT_CROP,
+        ..no_crop()
+    };
+    let photo: &[u8] = FIXTURES[0].1;
+    // SAFETY: live handle; `photo` is a live slice; `transform` outlives the call.
+    let (bound, expected): (usize, usize) = unsafe {
+        assert_eq!(tj3DecompressHeader(handle, photo.as_ptr(), photo.len()), 0);
+        let bound: usize =
+            libjpeg_turbo_rs_capi::transform::tj3TransformBufSize(handle, &transform);
+        tj3Destroy(handle);
+        (bound, libjpeg_turbo_rs_capi::tj3JPEGBufSize(48, 48, 2))
+    };
+    assert_eq!(bound, expected, "a 48x48 4:2:0 destination");
+}
+
+/// Issue #675 (codex review): `tj3TransformBufSize` validates the crop as
+/// upstream's `getTransformedSpecs` does (`turbojpeg.c:2848-2869`) — a zero
+/// extent runs to the edge, a region past the destination returns 0 with
+/// upstream's message. Every value below is stock 3.2.0's for
+/// `photo_64x64_420.jpg`.
+#[test]
+fn transform_buf_size_validates_the_crop_as_stock_does() {
+    let photo: &[u8] = FIXTURES[0].1;
+    let exceeds: &str =
+        "tj3TransformBufSize(): The cropping region exceeds the destination image dimensions";
+    let cases: [(c_int, (c_int, c_int, c_int, c_int), usize, &str); 9] = [
+        (TJXOP_NONE, (16, 16, 0, 0), 8960, ""),
+        (TJXOP_NONE, (64, 0, 0, 0), 0, exceeds),
+        (TJXOP_NONE, (0, 64, 0, 16), 0, exceeds),
+        (TJXOP_NONE, (48, 0, 32, 32), 0, exceeds),
+        (
+            TJXOP_NONE,
+            (8, 0, 16, 16),
+            0,
+            "tj3TransformBufSize(): To crop this JPEG image, x must be a multiple of 16\n\
+             and y must be a multiple of 16.",
+        ),
+        (TJXOP_ROT90, (16, 0, 0, 0), 11264, ""),
+        (
+            TJXOP_NONE,
+            (-1, 0, 0, 0),
+            0,
+            "tj3TransformBufSize(): Invalid cropping region",
+        ),
+        (TJXOP_NONE, (0, 0, 64, 64), 14336, ""),
+        (TJXOP_NONE, (0, 0, 0, 0), 14336, ""),
+    ];
+    let handle: *mut c_void = tj3Init(TJINIT_TRANSFORM);
+    // SAFETY: live handle; `photo` is a live slice.
+    unsafe { assert_eq!(tj3DecompressHeader(handle, photo.as_ptr(), photo.len()), 0) };
+    for (op, (x, y, w, h), expected, message) in cases {
+        let transform: TjTransform = TjTransform {
+            r: TjRegion { x, y, w, h },
+            op,
+            options: TJXOPT_CROP,
+            ..no_crop()
+        };
+        // SAFETY: live handle; `transform` outlives the call.
+        let (bound, error): (usize, String) = unsafe {
+            let bound: usize =
+                libjpeg_turbo_rs_capi::transform::tj3TransformBufSize(handle, &transform);
+            let error: String = std::ffi::CStr::from_ptr(tj3GetErrorStr(handle))
+                .to_string_lossy()
+                .into_owned();
+            (bound, error)
+        };
+        assert_eq!(bound, expected, "op {op} region {:?}", (x, y, w, h));
+        if expected == 0 {
+            assert_eq!(error, message, "op {op} region {:?}", (x, y, w, h));
+        }
+    }
+    destroy_handle(handle);
+}
+
+fn destroy_handle(handle: *mut c_void) {
+    // SAFETY: `handle` came from `tj3Init` and is not used again.
+    unsafe { tj3Destroy(handle) };
 }
 
 #[test]

@@ -86,6 +86,9 @@ static unsigned long long fnv1a(const unsigned char *bytes, size_t size)
   return hash;
 }
 
+/* The crop region the next `run` applies when TJXOPT_CROP is set. */
+static tjregion crop_region = { 0, 0, 0, 0 };
+
 /* One tj3Transform on a fresh TJINIT_TRANSFORM handle with up to two
  * parameters set (`param` < 0 means none). */
 static void run(const char *label, const char *case_name,
@@ -101,6 +104,7 @@ static void run(const char *label, const char *case_name,
   memset(&transform, 0, sizeof(transform));
   transform.op = op;
   transform.options = options;
+  if (options & TJXOPT_CROP) transform.r = crop_region;
   if (param1 >= 0) tj3Set(handle, param1, value1);
   if (param2 >= 0) tj3Set(handle, param2, value2);
   rc = tj3Transform(handle, jpeg, size, 1, &dst, &dst_size, &transform);
@@ -167,6 +171,25 @@ static int run_label(const char *workdir, const char *label)
   /* RESTARTBLOCKS set after RESTARTROWS clears it (`:819-830`). */
   run(label, "restartrows_then_blocks", jpeg, size, TJPARAM_RESTARTROWS, 1,
       TJPARAM_RESTARTBLOCKS, 4, TJXOP_NONE, 0);
+  /* Crop regions (P4-240): a zero width or height runs to the edge
+   * (JCROP_UNSET, `turbojpeg.c:2979-2986`); a region past the transformed
+   * image is "Invalid crop request". */
+  {
+    static const struct { const char *name; int op; tjregion r; } crops[] = {
+      { "crop_to_edge", TJXOP_NONE, { 16, 16, 0, 0 } },
+      { "crop_width_to_edge", TJXOP_NONE, { 16, 0, 0, 16 } },
+      { "crop_to_edge_rot90", TJXOP_ROT90, { 16, 0, 0, 0 } },
+      { "crop_past_edge", TJXOP_NONE, { 48, 0, 32, 32 } },
+      { "crop_origin_outside", TJXOP_NONE, { 64, 0, 0, 0 } },
+    };
+    size_t i;
+
+    for (i = 0; i < sizeof(crops) / sizeof(crops[0]); i++) {
+      crop_region = crops[i].r;
+      run(label, crops[i].name, jpeg, size, -1, 0, -1, 0, crops[i].op,
+          TJXOPT_CROP);
+    }
+  }
   run(label, "opt_progressive", jpeg, size, -1, 0, -1, 0, TJXOP_NONE,
       TJXOPT_PROGRESSIVE);
   run(label, "opt_arithmetic", jpeg, size, -1, 0, -1, 0, TJXOP_NONE,
