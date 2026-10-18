@@ -1372,6 +1372,8 @@ C expands instead of ignoring: `djpeg -rgb` on a `cjpeg -precision 12` grayscale
 
 **Acceptance criteria.** `undifference_row_16` wraps modulo 0xFFFF like C, with the sample-type truncation left to the output upscale stage (mirroring the P4-38 fix); a crafted wrapping 12-bit lossless fixture cross-validated against `djpeg` (3.x decodes 12-bit lossless); a note in the fix on whether the 12-as-8 route (`decode_12bit_as_8bit`, P4-65) shares the defect.
 
+**Progress (2026-10-17).** Not 12-bit only: `decompress_lossless_arbitrary` masks every precision below 16 the same way, and differential fuzzing against libjpeg-turbo 3.2.0 hit it on 8-bit frames (11 findings in one hour on 20 cores). Because the masked sample predicts its neighbours, one wrapped sum changes later samples too, so the divergence spreads along the row and into later rows. An experimental build that wraps at 0xFFFF and masks only at output matched libjpeg byte for byte on all 11.
+
 ## P4-67. `apply_orientation` Strided Reads Are Cache-Hostile for Orientations 5-8 — **OPEN**
 
 **Motivation.** Filed 2026-07-28 from the #391 code review. `Image::apply_orientation_value` (now `src/decode/pipeline_impl/api.rs`) walks the destination sequentially, so for the axis-swapping orientations (5-8) the source advances by `width * bpp` per inner-loop iteration — on a 4032 px-wide 12 MP phone photo (the feature's headline case) that is a ~12 KB stride at 3 bpp (~16 KB for RGBA), roughly one cache miss per pixel. A tiled transpose (32x32 or 64x64 blocks) is typically 3-6x faster on this shape (review estimate from the general pattern; not measured on this code — the acceptance criteria below require the before/after benchmark). Secondarily, the loop-invariant `match orientation` sits inside the inner loop; hoisting it to a per-orientation strategy would also let 3 degrade to whole-row reversed copies and 4 to row swaps.
@@ -13962,7 +13964,6 @@ remain enabled. `cargo test --locked --test marker_stray_bytes` passes all
 seven existing marker regressions, including strict-warning parity and
 pixel-identical C comparisons. No library behavior or public API changes.
 
-
 ## P4-244. YCbCr Output Bypasses the Upsampler: Replicated Chroma, and Panics on Two Legal Layouts — **CLOSED 2026-10-17**
 
 Filed from [#683](https://github.com/developer0hye/libjpeg-turbo-rs/issues/683).
@@ -14094,3 +14095,117 @@ produces libjpeg's output for that `out_color_space` (`jpeg12_*` for 12-bit,
 compared against a 12-bit-capable oracle) or is refused with `Unsupported`;
 never silently ignored. The `set_output_colorspace` rustdoc drops its
 "12-bit and lossless frames ignore this" caveat.
+
+## P4-247. Lossless Decode Diverges From libjpeg on Restart Intervals, Subsampled Frames and Multi-Scan Frames — **OPEN**
+
+Found by differential testing of `precision::decompress_lossless_arbitrary`
+against libjpeg-turbo 3.2.0 (libjpeg asked for `out_color_space =
+jpeg_color_space`, read through the 8-, 12- or 16-bit API by precision). All
+three are legal T.81 lossless layouts that libjpeg decodes to the source:
+
+1. **Restart intervals are ignored.** The DRI interval is read, but
+   prediction is not reset at each interval (T.81 H.1.2.1; C: `jddiffct.c`
+   `restart_rows_to_go` / `process_restart`). `cjpeg -lossless 1 -restart 1`
+   on a 33×17 greyscale image decodes with 527 of 561 samples different from
+   `djpeg`, and returns `Ok`; without `-restart` all 561 match.
+2. **Subsampled multi-component frames decode wrong.** An interleaved SOF3
+   frame with luma sampled 2×1, 2×2 or 1×2 against 1×1 chroma returns `Ok`
+   with 380–383 of 384 samples wrong on a 16×8 image (C decodes the stored
+   samples and upsamples them).
+3. **A first scan that codes fewer components than the frame is refused.**
+   C decodes the components across their later scans; P4-75 turned this
+   entry point's panic into `CorruptData` ("all 3 must be present in a
+   single interleaved scan"), so it is safe but unsupported.
+
+`cjpeg` cannot write 2 or 3 (it ignores `-sample` in lossless mode); a
+minimal T.81 Process-14 encoder for them is
+`fuzz/scripts/make_c_oracle_diff_seeds.py` in mshunshin/libjpeg-turbo-rs
+(branch `mycardium`).
+
+Acceptance: restart and subsampled frames byte-identical to libjpeg;
+multi-scan frames decoded, or refused as a documented decision.
+
+## P4-248. A 0xFF Fill Byte Before a Stuffed Byte Mis-Decodes Baseline 4:4:4, 4:2:2 and 4:1:1 Silently — **OPEN**
+
+Found by differential fuzzing on 2026-10-17. In entropy-coded data a run of
+0xFF bytes followed by 0x00 — fill before a stuffed byte — is read by libjpeg
+as one stuffed 0xFF (`jdhuff.c` `jpeg_fill_bit_buffer` skips the extra 0xFF),
+without a warning. P4-242 (#678) added that recovery, and
+`tests/marker_stray_bytes.rs::entropy_fill_before_stuffed_byte_is_warning_free`
+pins it, but only on a progressive 4:2:0 stream. The test's own recipe — the
+128×128 xorshift noise image, `cjpeg -quality 95`, one extra 0xFF inserted
+before the first `FF 00` after SOS — on **baseline** streams gives, against
+`djpeg -strict` (libjpeg-turbo 3.2.0) at `main` 25d6605c:
+
+| `cjpeg -sample` | baseline | progressive |
+|---|---|---|
+| `2x2` (4:2:0) | identical | identical |
+| `1x1` (4:4:4) | 151 of 49152 bytes differ (max 5) | identical |
+| `2x1` (4:2:2) | 151 differ (max 5) | identical |
+| `4x1` (4:1:1) | 149 differ (max 5) | identical |
+| `1x2` (4:4:0) | identical | identical |
+
+`djpeg -strict` exits 0 for every one; `Decoder` returns `Ok` with no warning
+in strict and lenient mode. On a fuzzed 61×45 4:4:0 stream with a 64-byte fill
+run, `read_coefficients` returned 0 where libjpeg (via `jpegtran -copy none`)
+holds −1 for most AC coefficients of two blocks, and the pixels differed by up
+to 41; any run of two or more 0xFF diverged, a lone `FF 00` did not. The
+baseline Huffman path for these layouts does not skip fill the way the
+progressive path does.
+
+Acceptance: the P4-242 test extended to baseline streams of every standard
+sampling layout, byte-identical to `djpeg -strict`.
+
+## P4-249. `decode_raw` Ignores Block Smoothing, Which libjpeg's Raw Output Applies — **OPEN**
+
+Found by differential fuzzing on 2026-10-17. `Decoder::decode_raw` documents
+itself as libjpeg's `jpeg_read_raw_data()`, but passes `block_smoothing =
+false` to the progressive plane decoder unconditionally
+(`src/decode/pipeline_impl/raw.rs`, "raw data decode: no block smoothing"),
+so `set_block_smoothing(true)` has no effect on it. libjpeg's coefficient
+controller smooths raw output too (`do_block_smoothing` is on by default) for
+progressive scans not refined to the last bit. A reproducer: `cjpeg
+-progressive -scans` with the script below on the 128×128 noise image, so
+every coefficient stops at Al = 1:
+
+```
+0,1,2: 0-0, 0, 1;
+0: 1-63, 0, 1;
+1: 1-63, 0, 1;
+2: 1-63, 0, 1;
+```
+
+Against libjpeg with `raw_data_out = TRUE` (default smoothing), `decode_raw`
+differs on 2474 of the 4:2:0 planes' samples and 6363 of the 4:4:4 planes';
+against libjpeg with `do_block_smoothing = FALSE` it is identical. `djpeg`
+emits no warning.
+
+Related, perhaps deliberate but undocumented: `Decoder` defaults
+`block_smoothing` to off (`api.rs`), where libjpeg defaults it on, so
+`decode_image` of the same streams differs from `djpeg` by 10,329 (4:4:4) and
+10,907 (4:2:0) bytes until `set_block_smoothing(true)` — then it is
+identical.
+`fuzz_decode_diff_c` already turns smoothing on for that reason.
+
+Acceptance: `decode_raw` honours `set_block_smoothing` and, with it on,
+matches `jpeg_read_raw_data` byte for byte; the default (and its rustdoc)
+decided and stated.
+
+## P4-250. Lossless Decode Refuses Tq or Ta Above 3, Which libjpeg Ignores — **OPEN**
+
+Found by differential fuzzing on 2026-10-17. A lossless frame uses neither the
+SOF quantization table selector Tq nor the SOS AC table selector Ta; T.81
+Tables B.2 and B.3 give both as 0 for lossless, and libjpeg neither checks
+nor uses them in lossless mode (`jdinput.c:299-300` skips
+`latch_quant_tables` for lossless; only DC tables are bound). The shared header parser (`src/decode/marker.rs`,
+"quantization table index … out of range (0-3)" and "Huffman table index out
+of range") range-checks them for every frame type, so a lossless frame with
+Tq or Ta of 4 or more is refused as `CorruptData` by both
+`precision::decompress_lossless_arbitrary` and `Decoder::decode_image`.
+Reproducer: `cjpeg -lossless 1` on any greyscale or RGB image, then set every
+component's Tq (or Ta) to 4 — `djpeg` decodes it with no warning. Encoders seen
+in practice write 0–2 (GE Vingmed ultrasound: Tq = 1–2, with Se = 63, which
+this decoder ignores and libjpeg refuses).
+
+Acceptance: SOF3/SOF11 frames accept any Tq and Ta, or the refusal is a
+documented decision.
