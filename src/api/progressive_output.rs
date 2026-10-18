@@ -637,7 +637,7 @@ impl ProgressiveDecoder {
             comment: try_clone_opt_string(&self.metadata.comment, "COM comment")?,
             density: self.metadata.density,
             saved_markers: try_clone_saved_markers(&self.metadata.saved_markers)?,
-            warnings: Vec::new(),
+            warnings: self.metadata.marker_warnings()?,
         })
     }
 
@@ -748,7 +748,7 @@ impl ProgressiveDecoder {
                 comment: try_clone_opt_string(&self.metadata.comment, "COM comment")?,
                 density: self.metadata.density,
                 saved_markers: try_clone_saved_markers(&self.metadata.saved_markers)?,
-                warnings: Vec::new(),
+                warnings: self.metadata.marker_warnings()?,
             })
         } else {
             // Upsample chroma
@@ -853,7 +853,7 @@ impl ProgressiveDecoder {
                 comment: try_clone_opt_string(&self.metadata.comment, "COM comment")?,
                 density: self.metadata.density,
                 saved_markers: try_clone_saved_markers(&self.metadata.saved_markers)?,
-                warnings: Vec::new(),
+                warnings: self.metadata.marker_warnings()?,
             })
         }
     }
@@ -901,7 +901,7 @@ impl ProgressiveDecoder {
             comment: try_clone_opt_string(&self.metadata.comment, "COM comment")?,
             density: self.metadata.density,
             saved_markers: try_clone_saved_markers(&self.metadata.saved_markers)?,
-            warnings: Vec::new(),
+            warnings: self.metadata.marker_warnings()?,
         })
     }
 

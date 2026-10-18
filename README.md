@@ -256,6 +256,9 @@ let info = decompress_into(&jpeg_bytes, PixelFormat::Rgb, &mut out)?;
 println!("{}x{} ({} bytes)", info.width, info.height, info.bytes_written);
 ```
 
+Marker recovery reports discarded bytes in `Image.warnings` (or `ImageInfo.warnings`).
+Set `Decoder::set_stop_on_warning(true)` to reject these recoverable inputs.
+
 ### Compress
 
 ```rust

@@ -64,6 +64,11 @@ impl<'a> Decoder<'a> {
                 })?;
             dc_tables.push(dc_table);
         }
+        // Each sample position is one MCU (all components 1x1; P4-247 tracks
+        // subsampled frames), so an MCU row is `width` MCUs.
+        // Refusing a partial-row interval, as libjpeg does, makes the
+        // `mcu_count` resets below land on row starts.
+        lossless_codec::restart_interval_rows(self.metadata.restart_interval, width)?;
 
         let entropy_data = &self.raw_data[self.metadata.entropy_data_offset..];
         let mut reader = BitReader::new(entropy_data);

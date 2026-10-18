@@ -75,7 +75,8 @@
 //!   `turbojpeg.c:376-378` and the sampling factors at `:418-427` (`:418-422`
 //!   is the horizontal half only). So the
 //!   reference for a compress is a fresh handle replaying the configuration
-//!   *plus the last publishing operation that got past its header parse*, on
+//!   *plus the last publishing operation that got past its configured header
+//!   checks (including `STOPONWARNING`)*, on
 //!   the image it ran on — a decode refused after that point has published. Skipping the compress comparison after any write-back — the first
 //!   draft — removed every sequence in which it could have differed, which is
 //!   the same compare-nothing defect the multi-input section describes. A
@@ -724,10 +725,8 @@ pub fn run_program_with(
         };
     }
     let inputs: Vec<&[u8]> = usable;
-    // Per-input facts P2 and P5 need after every decode. They depend on the
-    // bytes alone, so they are computed once here: a header parse per
-    // operation made the exhaustive sweep several times slower in debug.
-    let publishes: Vec<bool> = inputs.iter().map(|jpeg| header_parses(jpeg)).collect();
+    // P5's frame dimensions depend only on the bytes. Publication also
+    // depends on configuration: STOPONWARNING can refuse before write-back.
     let frame_dimensions: Vec<Option<(i32, i32)>> = inputs
         .iter()
         .map(|jpeg| frame_dimensions_of(jpeg))
@@ -811,13 +810,17 @@ pub fn run_program_with(
                 // entry point publishes right after the header parse, before
                 // its limit and crop checks, as upstream's
                 // `setDecompParameters` call precedes its `TJPARAM_MAXPIXELS`
-                // refusal (`turbojpeg-mp.c:190`, `:195-198`) — so a refused
-                // decode has written all thirteen, in C as here.
+                // refusal (`turbojpeg-mp.c:190`, `:195-198`) — so a decode
+                // refused after the header checks has written all thirteen,
+                // in C as here. Parser and strict marker refusals have not.
                 compare_untouched(index, op, ops, jpeg, &live, &before, published);
                 // A publisher is one that got past its header parse, not one
                 // that succeeded: a decode refused by a limit or by corrupt
-                // entropy data has already published, in C and here.
-                if op.publishes_for_compress() && publishes[selected] {
+                // entropy data has already published, in C and here. A
+                // STOPONWARNING refusal during the header read has not.
+                if op.publishes_for_compress()
+                    && (live_outcome.succeeded() || header_parses(&mut reference, jpeg))
+                {
                     // Only the most recent publisher matters, and it takes the
                     // position it had in the live sequence — so a `set` issued
                     // after it still wins on replay, exactly as it does live.
@@ -901,22 +904,21 @@ fn exceeds_limits(jpeg: &[u8], limits: &Limits) -> bool {
 
 /// Whether a decode-family operation got far enough to publish.
 ///
-/// Every `TjHandle` decompress entry point publishes — the thirteen
-/// parameters and the ICC profile — as soon as it has read the header up to
-/// the first SOS, before any limit, crop or decode step can refuse (`read_header`
-/// in `src/api/tj3.rs`), as upstream's `setDecompParameters` call precedes its
-/// refusals. That header read is identical in all four, takes nothing from the
-/// handle that matters here, and is exactly what `decompress_header` does, so
-/// a fresh handle's `decompress_header` answers the question: a published
-/// `JPEGWIDTH` replaces the -1 a fresh handle starts with. (Its `Err` alone
-/// would not do — it also refuses a `TJCS_DEFAULT` frame *after* publishing.)
+/// Every decompress entry point shares `read_header` in `src/api/tj3.rs`:
+/// marker parsing and STOPONWARNING checks precede publication, while pixel
+/// limits, crop and entropy refusals follow it. Probe a failed operation's
+/// configured reference handle so a strict marker refusal does not replace
+/// P2's earlier publisher. Successful operations need no extra probe.
 ///
-/// A decode that fails *after* that point must still become P2's last
-/// publisher: the live handle carries what it published, and a later compress
-/// reads it (`LOSSLESS` among them — the first version, keyed on success, saw a
-/// lossless compress on the live handle against a lossy one on the reference).
-fn header_parses(jpeg: &[u8]) -> bool {
-    let mut probe: TjHandle = TjHandle::new();
+/// Reset JPEGWIDTH first: configuration can set it, and the operation just
+/// compared may have published it. A newly published width detects write-back
+/// even if `decompress_header` subsequently refuses an unknown colorspace or
+/// an invalid ICC profile. This mutates only the disposable reference handle,
+/// after all comparisons against it have finished.
+fn header_parses(probe: &mut TjHandle, jpeg: &[u8]) -> bool {
+    probe
+        .set(TjParam::Width, -1)
+        .expect("TJPARAM_JPEGWIDTH accepts the unpublished sentinel");
     let _ = probe.decompress_header(jpeg);
     probe.get(TjParam::Width) != -1
 }

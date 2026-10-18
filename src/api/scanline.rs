@@ -73,7 +73,8 @@ impl<'a> ScanlineDecoder<'a> {
         self.decoder.block_smoothing = smooth;
     }
 
-    /// Override the output color space.
+    /// Override the output color space; see
+    /// [`crate::Decoder::set_output_colorspace`].
     pub fn set_output_colorspace(&mut self, cs: ColorSpace) {
         self.decoder.output_colorspace = Some(cs);
     }
