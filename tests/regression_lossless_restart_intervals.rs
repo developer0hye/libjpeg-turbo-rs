@@ -217,12 +217,21 @@ fn lossless_partial_row_restart_interval_is_refused_like_djpeg() {
             .arg(file.path())
             .output()
             .expect("run djpeg");
+        let c_stderr = String::from_utf8_lossy(&c.stderr);
         assert!(
-            !c.status.success()
-                && String::from_utf8_lossy(&c.stderr).contains("Invalid restart interval"),
-            "{label}: djpeg must refuse the interval: {}",
-            String::from_utf8_lossy(&c.stderr)
+            !c.status.success(),
+            "{label}: djpeg must refuse the interval: {c_stderr}"
         );
+        // The official Linux .deb builds of 3.1.4.1 and 3.2.0 refuse the
+        // 16-bit stream with the wrong text ("Corrupt JPEG data: bad ICC
+        // marker"; the stream has no APP2), so the message is pinned only at
+        // 8 bits. The unpatched stream decodes, so the refusal is the DRI's.
+        if precision == 8 {
+            assert!(
+                c_stderr.contains("Invalid restart interval"),
+                "{label}: djpeg must refuse with JERR_BAD_RESTART: {c_stderr}"
+            );
+        }
 
         let err = decompress_lossless_arbitrary(&jpeg)
             .err()
