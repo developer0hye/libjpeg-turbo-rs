@@ -744,7 +744,23 @@ impl<'a> Decoder<'a> {
         self.block_smoothing = smooth;
     }
 
-    /// Override the output color space.
+    /// Override the output color space, as libjpeg's `out_color_space`.
+    ///
+    /// For an 8-bit DCT frame (baseline, extended, progressive or
+    /// arithmetic):
+    /// - [`ColorSpace::Grayscale`]: one sample per pixel, converted as
+    ///   `djpeg -grayscale` converts it.
+    /// - [`ColorSpace::YCbCr`]: libjpeg's `JCS_YCbCr` output — every
+    ///   component upsampled as libjpeg upsamples it for RGB output, then
+    ///   interleaved unconverted. The [`Image`] is labelled
+    ///   [`PixelFormat::Rgb`] (three samples per pixel); the samples are Y,
+    ///   Cb, Cr. Only a YCbCr JPEG can be decoded this way; any other source
+    ///   is refused with [`crate::JpegError::Unsupported`], as libjpeg
+    ///   refuses it with `JERR_CONVERSION_NOTIMPL`.
+    /// - Other colour spaces are refused when the decode runs.
+    ///
+    /// 12-bit and lossless frames currently ignore this setting and decode
+    /// to their default output (P4-246).
     pub fn set_output_colorspace(&mut self, cs: ColorSpace) {
         self.output_colorspace = Some(cs);
     }
