@@ -111,8 +111,8 @@ On the `decompress` / `Decoder` paths under `src/decode/`, geometry-sized
 allocations report `JpegError::AllocationFailed` instead of aborting the
 process (P4-209, held by `tests/decode_alloc_gate.rs`). Not yet: the 12-/16-bit
 entry points in `src/api`, which a 12-bit source also reaches through
-`Decoder` (P4-216), the lenient-decode warning list (P4-215), and the
-encoder's allocations; an allocator refusal there still aborts.
+`Decoder` (P4-216), and the encoder's allocations; an allocator refusal
+there still aborts.
 
 Changing these defaults would be a new policy decision, made in a minor
 release and called out as **Breaking**.
@@ -167,7 +167,9 @@ Not counted anywhere:
 - the 12-bit staging when a 12-bit frame is decoded through `Decoder` /
   `decompress`, which checks only the 8-bit estimate above (P4-224);
 - per-row and per-block scratch;
-- the warning strings a lenient decode collects (P4-215);
+- the warning strings a lenient decode collects, at most
+  `MAX_DECODE_WARNINGS` (64) of them per decode plus one count of the rest
+  (P4-215);
 - the classic `jpeg_*` API, which has its own `max_memory_to_use` (P4-14).
 
 The budget is therefore stricter than libjpeg-turbo's in one way and looser in

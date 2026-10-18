@@ -96,6 +96,11 @@ pub use progressive::{
 };
 pub use raw::compress_raw;
 
+pub(crate) use arithmetic::{
+    compress_arithmetic_progressive_rgb_direct_scripted, compress_arithmetic_progressive_scripted,
+};
+pub(crate) use progressive::compress_progressive_rgb_direct_scripted;
+
 pub(crate) use progressive_entropy::{
     emit_eobrun, emit_eobrun_with_corr, encode_ac_first_block, encode_ac_refine_block,
     MAX_CORR_BITS,

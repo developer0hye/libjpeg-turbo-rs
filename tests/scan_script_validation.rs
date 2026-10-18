@@ -13,12 +13,20 @@
 //! `validate_script`. Every case that file format can express is run through
 //! it: a script C refuses must be refused here at the same entry, and a script
 //! C accepts must be accepted here and encoded to the same bytes.
+//!
+//! Issue #636 (P4-210): the script used to reach only the Huffman YCbCr /
+//! grayscale encode; arithmetic coding and RGB-direct output silently used
+//! C's default script instead. C honours `scan_info` independently of the
+//! entropy coder and the colorspace, so every case now runs in every
+//! [`Mode`], each against the matching `cjpeg -arithmetic` / `-rgb` call.
 
 mod helpers;
 
 use std::process::Command;
 
-use libjpeg_turbo_rs::{decompress, Encoder, JpegError, PixelFormat, ScanScript};
+use libjpeg_turbo_rs::{
+    decompress, ColorSpace, Encoder, JpegError, PixelFormat, ScanScript, Subsampling,
+};
 
 /// 40 so the 4:2:0 luma grid (5 blocks) is narrower than the MCU-padded grid
 /// (6): a non-interleaved scan that walked MCUs instead of the component's own
@@ -35,22 +43,110 @@ fn scan(components: &[u8], ss: u8, se: u8, ah: u8, al: u8) -> ScanScript {
     }
 }
 
-fn encode_rgb(script: Vec<ScanScript>) -> Result<Vec<u8>, JpegError> {
+/// One way of encoding the frame: the entropy coder and the output
+/// colorspace, as the builder options and the matching `cjpeg` switches.
+#[derive(Clone, Copy, Debug)]
+struct Mode {
+    label: &'static str,
+    arithmetic: bool,
+    /// `JCS_RGB` output (`.colorspace(ColorSpace::Rgb)`, `cjpeg -rgb`).
+    rgb_direct: bool,
+    /// For RGB-direct: request 2x2 luma-slot sampling (`cjpeg -sample
+    /// 2x2,1x1,1x1`) instead of `-rgb`'s 1x1, so the first component's grid
+    /// differs from the MCU grid as it does for YCbCr 4:2:0.
+    rgb_subsampled: bool,
+}
+
+const HUFFMAN_YCBCR: Mode = Mode {
+    label: "Huffman YCbCr",
+    arithmetic: false,
+    rgb_direct: false,
+    rgb_subsampled: false,
+};
+
+const MODES: [Mode; 5] = [
+    HUFFMAN_YCBCR,
+    Mode {
+        label: "arithmetic YCbCr",
+        arithmetic: true,
+        rgb_direct: false,
+        rgb_subsampled: false,
+    },
+    Mode {
+        label: "Huffman RGB-direct",
+        arithmetic: false,
+        rgb_direct: true,
+        rgb_subsampled: false,
+    },
+    Mode {
+        label: "Huffman RGB-direct 2x2",
+        arithmetic: false,
+        rgb_direct: true,
+        rgb_subsampled: true,
+    },
+    Mode {
+        label: "arithmetic RGB-direct 2x2",
+        arithmetic: true,
+        rgb_direct: true,
+        rgb_subsampled: true,
+    },
+];
+
+impl Mode {
+    /// RGB-direct has no grayscale form: `cjpeg -rgb` on a PGM is not a
+    /// grayscale encode.
+    fn covers(&self, grayscale: bool) -> bool {
+        !(grayscale && self.rgb_direct)
+    }
+
+    fn apply<'a>(&self, mut encoder: Encoder<'a>) -> Encoder<'a> {
+        if self.arithmetic {
+            encoder = encoder.arithmetic(true);
+        }
+        if self.rgb_direct {
+            encoder = encoder.colorspace(ColorSpace::Rgb);
+            if self.rgb_subsampled {
+                encoder = encoder.subsampling(Subsampling::S420);
+            }
+        }
+        encoder
+    }
+
+    fn cjpeg_args(&self) -> Vec<&'static str> {
+        let mut args: Vec<&'static str> = Vec::new();
+        if self.arithmetic {
+            args.push("-arithmetic");
+        }
+        if self.rgb_direct {
+            args.push("-rgb");
+            if self.rgb_subsampled {
+                args.extend(["-sample", "2x2,1x1,1x1"]);
+            }
+        }
+        args
+    }
+}
+
+fn encode_rgb_in(mode: Mode, script: Vec<ScanScript>) -> Result<Vec<u8>, JpegError> {
     let pixels: Vec<u8> = helpers::generate_gradient(SIDE, SIDE);
-    Encoder::new(&pixels, SIDE, SIDE, PixelFormat::Rgb)
+    mode.apply(Encoder::new(&pixels, SIDE, SIDE, PixelFormat::Rgb))
         .quality(75)
         .progressive(true)
         .scan_script(script)
         .encode()
 }
 
-fn encode_gray(script: Vec<ScanScript>) -> Result<Vec<u8>, JpegError> {
+fn encode_gray_in(mode: Mode, script: Vec<ScanScript>) -> Result<Vec<u8>, JpegError> {
     let pixels: Vec<u8> = helpers::generate_gradient_gray(SIDE, SIDE);
-    Encoder::new(&pixels, SIDE, SIDE, PixelFormat::Grayscale)
+    mode.apply(Encoder::new(&pixels, SIDE, SIDE, PixelFormat::Grayscale))
         .quality(75)
         .progressive(true)
         .scan_script(script)
         .encode()
+}
+
+fn encode_rgb(script: Vec<ScanScript>) -> Result<Vec<u8>, JpegError> {
+    encode_rgb_in(HUFFMAN_YCBCR, script)
 }
 
 /// The 1-based script entry a refusal names (0 = the script as a whole), or a
@@ -88,11 +184,13 @@ fn cjpeg_scan_file(script: &[ScanScript]) -> String {
         .collect()
 }
 
-/// What `cjpeg -scans` says about `script`: the stream it writes when it
-/// encodes, or the stderr text when it refuses. Quality 75 and cjpeg's
-/// default 4:2:0, which is what `encode_rgb` / `encode_gray` ask for.
+/// What `cjpeg -scans` says about `script` in `mode`: the stream it writes
+/// when it encodes, or the stderr text when it refuses. Quality 75 and
+/// cjpeg's default sampling for the mode, which is what `encode_rgb_in` /
+/// `encode_gray_in` ask for.
 fn cjpeg_verdict(
     cjpeg: &std::path::Path,
+    mode: Mode,
     script: &[ScanScript],
     grayscale: bool,
 ) -> Result<Vec<u8>, String> {
@@ -116,6 +214,7 @@ fn cjpeg_verdict(
     scans.write_bytes(cjpeg_scan_file(script).as_bytes());
     let output_jpeg = helpers::TempFile::new("scan.jpg");
     let output: std::process::Output = Command::new(cjpeg)
+        .args(mode.cjpeg_args())
         .arg("-scans")
         .arg(scans.path())
         .arg("-outfile")
@@ -364,11 +463,11 @@ fn accepted_cases() -> Vec<(&'static str, bool, Vec<ScanScript>)> {
     ]
 }
 
-fn encode_case(grayscale: bool, script: Vec<ScanScript>) -> Result<Vec<u8>, JpegError> {
+fn encode_case(mode: Mode, grayscale: bool, script: Vec<ScanScript>) -> Result<Vec<u8>, JpegError> {
     if grayscale {
-        encode_gray(script)
+        encode_gray_in(mode, script)
     } else {
-        encode_rgb(script)
+        encode_rgb_in(mode, script)
     }
 }
 
@@ -386,29 +485,31 @@ fn issue_610_se_past_63_is_refused_not_written() {
     assert_eq!(refused_entry(encode_rgb(script), "se = 64"), 2);
 }
 
-/// Every refusal agrees with `cjpeg -scans` on the entry it names.
+/// Every refusal agrees with `cjpeg -scans` on the entry it names, in every
+/// mode (issue #636: the arithmetic and RGB-direct encodes used to return
+/// `Ok` for all of these).
 #[test]
 fn refusals_match_cjpeg_entry_for_entry() {
     let cjpeg = require_c_tool!("cjpeg");
-    for case in refused_cases() {
-        let entry: usize =
-            refused_entry(encode_case(case.grayscale, case.script.clone()), case.label);
-        assert_eq!(
-            entry, case.entry,
-            "{}: Rust named the wrong entry",
-            case.label
-        );
-        match cjpeg_verdict(&cjpeg, &case.script, case.grayscale) {
-            Ok(_) => panic!(
-                "{}: cjpeg accepted a script this case says C refuses",
-                case.label
-            ),
-            Err(stderr) => assert!(
-                stderr.contains(&case.c_message),
-                "{}: cjpeg refused with {stderr:?}, expected {:?}",
-                case.label,
-                case.c_message
-            ),
+    for mode in MODES {
+        for case in refused_cases() {
+            if !mode.covers(case.grayscale) {
+                continue;
+            }
+            let label: String = format!("{} / {}", mode.label, case.label);
+            let entry: usize = refused_entry(
+                encode_case(mode, case.grayscale, case.script.clone()),
+                &label,
+            );
+            assert_eq!(entry, case.entry, "{label}: Rust named the wrong entry");
+            match cjpeg_verdict(&cjpeg, mode, &case.script, case.grayscale) {
+                Ok(_) => panic!("{label}: cjpeg accepted a script this case says C refuses"),
+                Err(stderr) => assert!(
+                    stderr.contains(&case.c_message),
+                    "{label}: cjpeg refused with {stderr:?}, expected {:?}",
+                    case.c_message
+                ),
+            }
         }
     }
 }
@@ -417,31 +518,46 @@ fn refusals_match_cjpeg_entry_for_entry() {
 /// still runs every Rust-side assertion.
 #[test]
 fn refusals_name_the_offending_entry() {
-    for case in refused_cases() {
-        let entry: usize = refused_entry(encode_case(case.grayscale, case.script), case.label);
-        assert_eq!(entry, case.entry, "{}", case.label);
+    for mode in MODES {
+        for case in refused_cases() {
+            if !mode.covers(case.grayscale) {
+                continue;
+            }
+            let label: String = format!("{} / {}", mode.label, case.label);
+            let entry: usize =
+                refused_entry(encode_case(mode, case.grayscale, case.script), &label);
+            assert_eq!(entry, case.entry, "{label}");
+        }
     }
 }
 
 /// Every script C accepts is accepted here, decodes to the frame, and is
-/// byte-identical to `cjpeg -scans`'s stream.
+/// byte-identical to `cjpeg -scans`'s stream — in every mode (issue #636: the
+/// arithmetic and RGB-direct encodes used to write C's default script).
 #[test]
 fn accepted_scripts_match_cjpeg() {
     let cjpeg = require_c_tool!("cjpeg");
-    for (label, grayscale, script) in accepted_cases() {
-        let c_jpeg: Vec<u8> = cjpeg_verdict(&cjpeg, &script, grayscale).unwrap_or_else(|stderr| {
-            panic!("{label}: cjpeg refused a script this case says C accepts: {stderr}")
-        });
-        let jpeg: Vec<u8> = encode_case(grayscale, script)
-            .unwrap_or_else(|error| panic!("{label}: Rust refused a valid script: {error}"));
-        let image = decompress(&jpeg).unwrap_or_else(|error| panic!("{label}: {error}"));
-        assert_eq!((image.width, image.height), (SIDE, SIDE), "{label}");
-        assert!(
-            jpeg == c_jpeg,
-            "{label}: Rust and cjpeg streams differ ({} vs {} bytes)",
-            jpeg.len(),
-            c_jpeg.len()
-        );
+    for mode in MODES {
+        for (case_label, grayscale, script) in accepted_cases() {
+            if !mode.covers(grayscale) {
+                continue;
+            }
+            let label: String = format!("{} / {case_label}", mode.label);
+            let c_jpeg: Vec<u8> =
+                cjpeg_verdict(&cjpeg, mode, &script, grayscale).unwrap_or_else(|stderr| {
+                    panic!("{label}: cjpeg refused a script this case says C accepts: {stderr}")
+                });
+            let jpeg: Vec<u8> = encode_case(mode, grayscale, script)
+                .unwrap_or_else(|error| panic!("{label}: Rust refused a valid script: {error}"));
+            let image = decompress(&jpeg).unwrap_or_else(|error| panic!("{label}: {error}"));
+            assert_eq!((image.width, image.height), (SIDE, SIDE), "{label}");
+            assert!(
+                jpeg == c_jpeg,
+                "{label}: Rust and cjpeg streams differ ({} vs {} bytes)",
+                jpeg.len(),
+                c_jpeg.len()
+            );
+        }
     }
 }
 
@@ -491,4 +607,100 @@ fn sequential_and_lossless_shaped_scripts_are_refused() {
         ),
         1
     );
+}
+
+/// Issue #636: where no encode path can follow a script, the builder refuses
+/// it rather than writing a stream that ignores it.
+///
+/// * Custom per-component sampling factors that map to no standard
+///   subsampling take a baseline-only encoder (P4-236), which has no
+///   progressive scans to script.
+/// * Without `progressive(true)` the builder encodes a sequential stream; it
+///   does not switch mode on the caller's behalf (in C the script itself
+///   selects the mode, `jcmaster.c` `validate_script`).
+/// * `lossless(true)` has no progressive form for a script to describe.
+#[test]
+fn issue_636_scripts_no_path_can_honour_are_refused() {
+    let script: Vec<ScanScript> = vec![dc_all(), scan(&[0], 1, 63, 0, 0)];
+    let pixels: Vec<u8> = helpers::generate_gradient(SIDE, SIDE);
+    let unsupported = |result: Result<Vec<u8>, JpegError>, label: &str| match result {
+        Err(JpegError::Unsupported(message)) => assert!(
+            message.contains("scan_script"),
+            "{label}: message does not name the option: {message}"
+        ),
+        Err(other) => panic!("{label}: expected Unsupported, got {other:?}"),
+        Ok(jpeg) => panic!(
+            "{label}: expected Unsupported, got Ok with {} bytes",
+            jpeg.len()
+        ),
+    };
+    unsupported(
+        Encoder::new(&pixels, SIDE, SIDE, PixelFormat::Rgb)
+            .sampling_factors(vec![(3, 2), (1, 1), (1, 1)])
+            .progressive(true)
+            .scan_script(script.clone())
+            .encode(),
+        "custom sampling",
+    );
+    unsupported(
+        Encoder::new(&pixels, SIDE, SIDE, PixelFormat::Rgb)
+            .scan_script(script.clone())
+            .encode(),
+        "progressive off",
+    );
+    unsupported(
+        Encoder::new(&pixels, SIDE, SIDE, PixelFormat::Rgb)
+            .arithmetic(true)
+            .scan_script(script.clone())
+            .encode(),
+        "arithmetic, progressive off",
+    );
+    unsupported(
+        Encoder::new(&pixels, SIDE, SIDE, PixelFormat::Rgb)
+            .lossless(true)
+            .progressive(true)
+            .scan_script(script.clone())
+            .encode(),
+        "lossless",
+    );
+    // Without a script each of these still encodes as before.
+    for (label, encoder) in [
+        (
+            "custom sampling",
+            Encoder::new(&pixels, SIDE, SIDE, PixelFormat::Rgb).sampling_factors(vec![
+                (3, 2),
+                (1, 1),
+                (1, 1),
+            ]),
+        ),
+        (
+            "sequential",
+            Encoder::new(&pixels, SIDE, SIDE, PixelFormat::Rgb),
+        ),
+        (
+            "lossless",
+            Encoder::new(&pixels, SIDE, SIDE, PixelFormat::Rgb).lossless(true),
+        ),
+    ] {
+        encoder
+            .encode()
+            .unwrap_or_else(|error| panic!("{label} without a script: {error}"));
+    }
+}
+
+/// Issue #636: an invalid script is refused on the arithmetic and RGB-direct
+/// paths with the typed error, ahead of the frame-size checks, as on the
+/// Huffman path (`validate_script` runs before `initial_setup` in
+/// `jcmaster.c`).
+#[test]
+fn issue_636_invalid_script_outranks_frame_errors_on_every_path() {
+    let script: Vec<ScanScript> = vec![dc_all(), scan(&[0], 1, 64, 0, 0)];
+    for mode in MODES {
+        let result = mode
+            .apply(Encoder::new(&[], 0, 0, PixelFormat::Rgb))
+            .progressive(true)
+            .scan_script(script.clone())
+            .encode();
+        assert_eq!(refused_entry(result, mode.label), 2, "{}", mode.label);
+    }
 }

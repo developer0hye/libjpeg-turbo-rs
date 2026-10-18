@@ -79,6 +79,29 @@ and `git log` between tags.
 
 ### Changed
 
+- **Breaking (behaviour): `Encoder::scan_script` is honoured on every
+  progressive path, and refused where none can follow it** (P4-210, #636).
+  The arithmetic-coded progressive encode (YCbCr, grayscale and RGB-direct)
+  and the Huffman RGB-direct one used to write C's default script and return
+  `Ok`; they now follow and validate the caller's script, byte-identical to
+  stock `cjpeg -scans` with `-arithmetic` / `-rgb`, and an invalid one returns
+  `JpegError::InvalidScanScript`. A script with `progressive(false)`, with
+  `lossless(true)`, or with `sampling_factors` that map to no standard
+  subsampling now returns `JpegError::Unsupported` instead of being ignored.
+  Non-interleaved DC scans on the arithmetic path walk the component's own
+  block grid, as the Huffman path does since P4-211.
+
+- **Breaking (Rust API): a lenient decode's warning list is bounded, and
+  `DecodeWarning` is `#[non_exhaustive]`** (P4-215, #641). A stream corrupt in
+  every MCU used to return one `DecodeWarning::HuffmanError` (with its own
+  heap string) per MCU — about 67 M for a 65500x65500 4:4:4 frame. A decode
+  now records the first `MAX_DECODE_WARNINGS` (64, exported at the root) and
+  follows them with one new `DecodeWarning::WarningsSuppressed { count }` for
+  the rest, as C prints only the first warning and counts the others.
+  `TruncatedData` and `UnsupportedRecovered` are never suppressed. Exhaustive
+  `match`es on `DecodeWarning` need a wildcard arm. The list is also moved
+  into the `Image` instead of cloned.
+
 - **Zero-filled `u8` decode buffers are allocated with `alloc_zeroed` again**
   (P4-228, #659). P4-209 made the owned decode output and the decoder planes
   fallible, but by reserving and then filling them, which wrote every byte

@@ -490,7 +490,7 @@
 | `JQUANT_TBL` | Quantization table (64 values + sent_table) | Internal `[u16; 64]` arrays | ✅ |
 | `JHUFF_TBL` | Huffman table (bits[17] + huffval[256]) | `HuffmanTable` / `HuffTable` | ✅ |
 | `jpeg_component_info` | Per-component metadata | `ComponentInfo` | ✅ |
-| `jpeg_scan_info` | Scan script entry (components, Ss/Se/Ah/Al) | `ScanScript` / `ScanInfo`; `Encoder::scan_script` is ignored on the arithmetic, RGB-direct and custom-sampling progressive paths (P4-210, #636); classic scanline wiring remains P4-91 | 🔶 |
+| `jpeg_scan_info` | Scan script entry (components, Ss/Se/Ah/Al) | `ScanScript` / `ScanInfo`; `Encoder::scan_script` is honoured by every progressive encode, Huffman and arithmetic, and refused where none applies (P4-210, #636); classic scanline wiring remains P4-91 | 🔶 |
 | `jpeg_marker_struct` | Saved marker (code, length, data, next) | Native markers exist; classic incremental pointer stability remains P4-26 | 🔶 |
 | `jpeg_common_struct` | Common fields (err, mem, progress) | Native equivalents exist; decompressor `global_state` matches stock (P4-104 closed 2026-08-14) except `DSTATE_BUFIMAGE`/`BUFPOST` (P4-13); classic error/progress contracts remain P4-100/P4-111 | 🔶 |
 | `jpeg_compress_struct` | Full compression state (~50 fields) | `Encoder` / `ScanlineEncoder`; residual classic option/state gaps are P4-84..P4-111 | 🔶 |
