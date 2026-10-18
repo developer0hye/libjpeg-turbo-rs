@@ -77,7 +77,9 @@ src/decode/lossless.rs	1	clamped-difference	.saturating_sub(point_transform as i
 src/decode/marker.rs	1	bounds-check	if size > data_end.saturating_sub(payload) {
 src/decode/marker.rs	1	bounds-check	if total > end.saturating_sub(self.pos) || self.pos + total > self.data.len() {
 src/decode/marker.rs	2	clamped-difference	let data_len = data_end.saturating_sub(data_start);
-src/decode/pipeline_impl/color.rs	1	bounds-check	if output_x_offset.saturating_add(out_width) > full_width || out_height > full_height {
+src/decode/pipeline_impl/color.rs	2	bounds-check	if output_x_offset.saturating_add(out_width) > full_width || out_height > full_height {
+src/decode/pipeline_impl/color.rs	1	bounds-check	if source_x.saturating_add(active_width) > component_width
+src/decode/pipeline_impl/color.rs	1	bounds-check	if window.x.saturating_add(window.width) > component_width {
 src/decode/pipeline_impl/output.rs	1	clamped-difference	*off = (cx * comp_w / full_width).min(comp_w.saturating_sub(1));
 src/decode/pipeline_impl/output.rs	1	clamped-difference	cw.min(out_width.saturating_sub(cx))
 src/decode/pipeline_impl/output.rs	1	clamped-difference	let above_idx: usize = cy.saturating_sub(1);
@@ -85,8 +87,6 @@ src/decode/pipeline_impl/output.rs	1	clamped-difference	let clamped_w: usize = e
 src/decode/pipeline_impl/output.rs	1	clamped-difference	let last_cy: usize = actual_cb_h.saturating_sub(1);
 src/decode/pipeline_impl/progressive.rs	1	clamped-difference	let mcu_start = mcu_start.saturating_sub(1);
 src/decode/toggles.rs	1	bounds-check	if cw < out_width || component_planes[0].len() < out_height.saturating_mul(cw) {
-src/decode/toggles.rs	1	clamped-difference	let cx: usize = (x / hf).min(cbw.saturating_sub(1));
-src/decode/toggles.rs	1	clamped-difference	let cy: usize = (y / vf).min((component_planes[1].len() / cbw).saturating_sub(1));
 src/encode/pipeline_impl/arithmetic.rs	1	geometry-count	.saturating_mul(mcus_per_row)
 src/encode/pipeline_impl/mcu.rs	1	clamped-difference	.saturating_sub(1)
 src/encode/pipeline_impl/mcu.rs	1	clamped-difference	let active_rows: usize = plane_height.saturating_sub(block_y).min(src_h);
