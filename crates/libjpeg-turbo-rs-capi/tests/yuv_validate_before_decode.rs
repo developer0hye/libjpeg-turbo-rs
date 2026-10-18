@@ -137,8 +137,10 @@ fn max_pixels_bounds_the_packed_entry_point() {
     // destroyed; nothing else can reach it.
     unsafe { tj3Destroy(handle) };
     assert_eq!(rc, -1, "a frame over TJPARAM_MAXPIXELS must be rejected");
+    // Upstream's message, raised by the planar body both entry points share
+    // (`turbojpeg.c:2228-2231`; P4-225).
     assert!(
-        err.to_lowercase().contains("pixel"),
+        err.contains("tj3DecompressToYUVPlanes8(): Image is too large"),
         "expected a pixel-limit rejection, got {err:?}"
     );
     assert!(

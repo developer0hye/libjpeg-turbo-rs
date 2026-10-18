@@ -466,8 +466,15 @@ pub fn decompress_to_yuv(data: &[u8]) -> Result<(Vec<u8>, usize, usize, Subsampl
 /// frame rather than passing the fourth plane on (P4-125); a Rust caller that
 /// sizes buffers for three planes must apply the same check itself.
 pub fn decompress_to_yuv_planes(data: &[u8]) -> Result<(Vec<Vec<u8>>, usize, usize, Subsampling)> {
-    let raw: crate::api::raw_data::RawImage = decompress_raw(data)?;
+    yuv_planes_from_raw(decompress_raw(data)?)
+}
 
+/// The plane trimming [`decompress_to_yuv_planes`] applies to a raw decode,
+/// shared with `TjHandle::decompress_to_yuv_planes`, which decodes under the
+/// handle's limits rather than the defaults.
+pub(crate) fn yuv_planes_from_raw(
+    raw: crate::api::raw_data::RawImage,
+) -> Result<(Vec<Vec<u8>>, usize, usize, Subsampling)> {
     // Determine subsampling from raw plane dimensions
     let subsampling: Subsampling = detect_subsampling(&raw)?;
 

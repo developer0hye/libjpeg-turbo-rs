@@ -373,3 +373,52 @@ fn entropy_fill_before_stuffed_byte_is_warning_free() {
     decoder.set_stop_on_warning(true);
     assert_eq!(decoder.decode_image().unwrap().data, pixels);
 }
+
+/// The TurboJPEG YUV-plane decode builds its own `Decoder`, so it must refuse
+/// stray bytes before a later scan's marker under STOPONWARNING as
+/// `djpeg -strict` does, and still decode them without it.
+#[test]
+fn stop_on_warning_rejects_late_marker_bytes_in_yuv_plane_decode() {
+    use libjpeg_turbo_rs::tj3::{TjHandle, TjParam};
+    let cjpeg = require_c_tool!("cjpeg");
+    let djpeg = require_c_tool!("djpeg");
+    let mut ppm = b"P6\n48 32\n255\n".to_vec();
+    ppm.extend(helpers::generate_gradient(48, 32));
+    let jpeg = helpers::encode_with_c_cjpeg(&cjpeg, &ppm, &["-progressive"], "marker_yuv_late");
+    let first_sos = jpeg.windows(2).position(|b| b == [0xFF, 0xDA]).unwrap();
+    let dht = jpeg
+        .windows(2)
+        .enumerate()
+        .find(|(p, b)| *p > first_sos && *b == [0xFF, 0xC4])
+        .unwrap()
+        .0;
+    let at = dht + 2 + usize::from(u16::from_be_bytes([jpeg[dht + 2], jpeg[dht + 3]]));
+    assert_eq!(jpeg[at], 0xFF);
+    let mut damaged = jpeg[..at].to_vec();
+    damaged.extend_from_slice(&[0x12, 0x34]);
+    damaged.extend_from_slice(&jpeg[at..]);
+    let input = helpers::TempFile::new("late_marker_yuv.jpg");
+    input.write_bytes(&damaged);
+    let strict = std::process::Command::new(&djpeg)
+        .arg("-strict")
+        .arg(input.path())
+        .output()
+        .unwrap();
+    assert_eq!(strict.status.code(), Some(1), "djpeg -strict refuses it");
+
+    let mut handle = TjHandle::new();
+    handle.set(TjParam::StopOnWarning, 1).unwrap();
+    let refused = handle
+        .decompress_to_yuv_planes(&damaged)
+        .expect_err("STOPONWARNING must refuse late stray marker bytes");
+    assert!(
+        refused.to_string().contains("extraneous bytes"),
+        "unexpected refusal: {refused}"
+    );
+    handle.set(TjParam::StopOnWarning, 0).unwrap();
+    let (planes, ..) = handle
+        .decompress_to_yuv_planes(&damaged)
+        .expect("without STOPONWARNING the stray bytes are skipped");
+    let (clean_planes, ..) = TjHandle::new().decompress_to_yuv_planes(&jpeg).unwrap();
+    assert_eq!(planes, clean_planes, "recovery decodes as the clean stream");
+}

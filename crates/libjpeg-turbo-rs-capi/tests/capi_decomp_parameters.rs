@@ -19,6 +19,7 @@ use std::path::PathBuf;
 
 mod helpers;
 
+use libjpeg_turbo_rs_capi::yuv::{tj3DecompressToYUV8, tj3DecompressToYUVPlanes8};
 use libjpeg_turbo_rs_capi::{
     tj3Decompress12, tj3Decompress16, tj3Decompress8, tj3DecompressHeader, tj3Destroy, tj3Get,
     tj3Init, tj3Set, tj3SetCroppingRegion, tj3SetScalingFactor, TjRegion, TjScalingFactor,
@@ -67,7 +68,7 @@ const TJPF_GRAY: c_int = 6;
 const TJPF_CMYK: c_int = 11;
 
 /// `(label, bytes)` — the oracle reads `<workdir>/<label>.jpg`.
-const FIXTURES: [(&str, &[u8]); 9] = [
+const FIXTURES: [(&str, &[u8]); 10] = [
     (
         "gray",
         include_bytes!("../../../tests/fixtures/gray_8x8.jpg"),
@@ -105,6 +106,10 @@ const FIXTURES: [(&str, &[u8]); 9] = [
     (
         "cmyk",
         include_bytes!("../../../tests/fixtures/real_world/pil_cmyk.jpg"),
+    ),
+    (
+        "unknown2",
+        include_bytes!("../../../tests/inputs/p4226_two_component_unknown_16x16.jpg"),
     ),
 ];
 
@@ -185,6 +190,34 @@ fn routed_decompress(
     }
 }
 
+/// The oracle's `yuv_decompress`: packed at align 1, or three planes
+/// `plane_size` bytes apart with default strides.
+fn yuv_decompress(
+    handle: *mut c_void,
+    jpeg: &[u8],
+    yuv: &mut [u8],
+    plane_size: usize,
+    planar: bool,
+) -> c_int {
+    // SAFETY: `yuv` holds three `plane_size` planes, each at least the frame
+    // padded to a 4:1:0 iMCU, which bounds every plane either entry point
+    // writes for the frame whose header sized it.
+    unsafe {
+        if !planar {
+            return tj3DecompressToYUV8(handle, jpeg.as_ptr(), jpeg.len(), yuv.as_mut_ptr(), 1);
+        }
+        let base: *mut u8 = yuv.as_mut_ptr();
+        let mut planes: [*mut u8; 3] = [base, base.add(plane_size), base.add(2 * plane_size)];
+        tj3DecompressToYUVPlanes8(
+            handle,
+            jpeg.as_ptr(),
+            jpeg.len(),
+            planes.as_mut_ptr(),
+            std::ptr::null(),
+        )
+    }
+}
+
 fn header(handle: *mut c_void, jpeg: &[u8]) -> c_int {
     // SAFETY: `jpeg` is a live slice of `jpeg.len()` bytes.
     unsafe { tj3DecompressHeader(handle, jpeg.as_ptr(), jpeg.len()) }
@@ -202,14 +235,22 @@ fn trace_label(label: &str, jpeg: &[u8], sequence: *mut c_void) -> String {
     }
 
     let probe: *mut c_void = instance();
-    assert_eq!(header(probe, jpeg), 0, "{label}: probe header");
-    let width: usize = get(probe, TJPARAM_JPEGWIDTH) as usize;
-    let height: usize = get(probe, TJPARAM_JPEGHEIGHT) as usize;
+    // A header refused after publishing (a JCS_UNKNOWN frame) still leaves
+    // the dimensions that size the buffer, as in the oracle.
+    header(probe, jpeg);
+    let width: c_int = get(probe, TJPARAM_JPEGWIDTH);
+    let height: c_int = get(probe, TJPARAM_JPEGHEIGHT);
     let precision: c_int = get(probe, TJPARAM_PRECISION);
     let lossless: c_int = get(probe, TJPARAM_LOSSLESS);
     let pixel_format: c_int = pixel_format_for(probe);
     destroy(probe);
-    let mut buffer: Vec<u16> = vec![0; width * height * 4];
+    assert!(
+        width > 0 && height > 0,
+        "{label}: probe header published no dimensions"
+    );
+    let mut buffer: Vec<u16> = vec![0; width as usize * height as usize * 4];
+    let plane_size: usize = (width as usize + 16) * (height as usize + 16);
+    let mut yuv: Vec<u8> = vec![0; plane_size * 3];
 
     let handle: *mut c_void = instance();
     let rc: c_int = header(handle, jpeg);
@@ -222,6 +263,11 @@ fn trace_label(label: &str, jpeg: &[u8], sequence: *mut c_void) -> String {
     let handle: *mut c_void = instance();
     let rc: c_int = routed_decompress(handle, jpeg, &mut buffer, precision, pixel_format);
     trace.push_str(&emit(label, "direct", rc, handle));
+    destroy(handle);
+
+    let handle: *mut c_void = instance();
+    let rc: c_int = routed_decompress(handle, jpeg, &mut buffer, 8, pixel_format);
+    trace.push_str(&emit(label, "dec8", rc, handle));
     destroy(handle);
 
     let handle: *mut c_void = instance();
@@ -246,6 +292,38 @@ fn trace_label(label: &str, jpeg: &[u8], sequence: *mut c_void) -> String {
 
     let rc: c_int = routed_decompress(sequence, jpeg, &mut buffer, precision, pixel_format);
     trace.push_str(&emit(label, "sequence", rc, sequence));
+
+    for planar in [false, true] {
+        let names: [&str; 4] = if planar {
+            [
+                "yuvplanes",
+                "yuvplanes_maxpixels",
+                "yuvplanes_scanlimit",
+                "yuvplanes_sequence",
+            ]
+        } else {
+            ["yuv", "yuv_maxpixels", "yuv_scanlimit", "yuv_sequence"]
+        };
+        for (case_index, limit) in [
+            None,
+            Some((TJPARAM_MAXPIXELS, 1)),
+            Some((TJPARAM_SCANLIMIT, 2)),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let handle: *mut c_void = instance();
+            if let Some((param, value)) = limit {
+                // SAFETY: live handle, valid parameter.
+                unsafe { tj3Set(handle, param, value) };
+            }
+            let rc: c_int = yuv_decompress(handle, jpeg, &mut yuv, plane_size, planar);
+            trace.push_str(&emit(label, names[case_index], rc, handle));
+            destroy(handle);
+        }
+        let rc: c_int = yuv_decompress(sequence, jpeg, &mut yuv, plane_size, planar);
+        trace.push_str(&emit(label, names[3], rc, sequence));
+    }
 
     if precision == 8 && lossless == 0 {
         let handle: *mut c_void = instance();
@@ -478,6 +556,83 @@ fn the_12_and_16_bit_entry_points_publish_and_honour_maxpixels() {
     );
 }
 
+/// Issue #653: `tj3Decompress8` refuses a 12-bit frame, as stock's 8-bit
+/// body does ("Unsupported JPEG data precision 12") — after publishing, so the
+/// caller can read `TJPARAM_PRECISION` and route to `tj3Decompress12`.
+#[test]
+fn decompress8_refuses_a_12_bit_frame_after_publishing() {
+    let trace: String = our_trace();
+    assert_eq!(
+        line_for(&trace, "lossy12", "dec8"),
+        "lossy12 dec8 rc=-1 subsamp=2 jw=227 jh=149 prec=12 cs=1 prog=0 arith=0 \
+         lossless=0 psv=0 pt=0 xd=1 yd=1 du=0"
+    );
+    assert_eq!(
+        line_for(&trace, "lossless16", "dec8"),
+        "lossless16 dec8 rc=-1 subsamp=3 jw=8 jh=8 prec=16 cs=2 prog=0 arith=0 \
+         lossless=1 psv=1 pt=0 xd=1 yd=1 du=0"
+    );
+    // An 8-bit frame still decodes through the same entry point.
+    assert!(line_for(&trace, "dense", "dec8").starts_with("dense dec8 rc=0 "));
+}
+
+/// Issue #653 (P4-226 criterion 2): a two-component frame is libjpeg's
+/// JCS_UNKNOWN. Stock publishes `TJCS_DEFAULT` and `TJSAMP_UNKNOWN` for it,
+/// refuses its header ("Could not determine colorspace of JPEG image") and
+/// refuses every decompress; the port published YCbCr and accepted the header.
+#[test]
+fn a_two_component_frame_publishes_tjcs_default_and_is_refused() {
+    let trace: String = our_trace();
+    let expected_params: &str =
+        "subsamp=-1 jw=16 jh=16 prec=8 cs=-1 prog=0 arith=0 lossless=0 psv=0 pt=0 xd=1 yd=1 du=0";
+    for case_name in ["header", "direct", "dec8", "sequence"] {
+        assert_eq!(
+            line_for(&trace, "unknown2", case_name),
+            format!("unknown2 {case_name} rc=-1 {expected_params}")
+        );
+    }
+}
+
+/// Issue #652: both YUV decompressors publish the thirteen, as upstream's
+/// `setDecompParameters` calls at `turbojpeg.c:2227` / `:2416` do — before
+/// their `TJPARAM_MAXPIXELS` refusal and before the decode `TJPARAM_SCANLIMIT`
+/// refuses — and a YUV decode on a used handle replaces what the previous
+/// decode published. They published nothing.
+#[test]
+fn the_yuv_decompressors_publish_the_thirteen() {
+    let trace: String = our_trace();
+    let prog: &str =
+        "subsamp=2 jw=64 jh=64 prec=8 cs=1 prog=1 arith=0 lossless=0 psv=0 pt=1 xd=1 yd=1 du=0";
+    for (case_name, rc) in [
+        ("yuv", 0),
+        ("yuvplanes", 0),
+        ("yuv_maxpixels", -1),
+        ("yuvplanes_maxpixels", -1),
+        ("yuv_scanlimit", -1),
+        ("yuvplanes_scanlimit", -1),
+    ] {
+        assert_eq!(
+            line_for(&trace, "prog", case_name),
+            format!("prog {case_name} rc={rc} {prog}")
+        );
+    }
+    // On the long-lived handle `gray` — the first fixture — ends with a
+    // planar YUV decode, so the next YUV decode there must replace a
+    // grayscale image's values; the stale-parameter shape this item closed.
+    let sequence: *mut c_void = instance();
+    let gray: &[u8] = FIXTURES[0].1;
+    let dense: &[u8] = FIXTURES[1].1;
+    let mut yuv: Vec<u8> = vec![0; (16 + 16) * (16 + 16) * 3];
+    assert_eq!(yuv_decompress(sequence, gray, &mut yuv, 32 * 32, true), 0);
+    assert_eq!(yuv_decompress(sequence, dense, &mut yuv, 32 * 32, false), 0);
+    assert_eq!(
+        emit("dense", "yuv_sequence", 0, sequence).trim_end(),
+        "dense yuv_sequence rc=0 subsamp=1 jw=16 jh=16 prec=8 cs=1 prog=0 arith=0 \
+         lossless=0 psv=0 pt=0 xd=72 yd=71 du=1"
+    );
+    destroy(sequence);
+}
+
 /// P4-142: the header of a stream with garbage entropy data is read — and
 /// a decompress of the same bytes fails, or the fixture would prove nothing.
 #[test]
@@ -534,4 +689,35 @@ fn oracle_source_is_present() {
         "missing oracle source {}",
         source.display()
     );
+}
+
+/// FNV-1a over `bytes`, as the probe that measured the stock values below.
+fn fnv1a(bytes: &[u8]) -> u64 {
+    bytes
+        .iter()
+        .fold(14_695_981_039_346_656_037, |hash: u64, &byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(1_099_511_628_211)
+        })
+}
+
+/// P4-225 review: the YUV path takes `TJPARAM_FASTDCT` from the handle, as
+/// upstream's planar body sets `dct_method` from it (`turbojpeg.c:2285`). The
+/// two digests are stock 3.2.0's for the packed 4:2:0 planes of
+/// `photo_64x64_420.jpg` at align 1, in a zeroed 8192-byte buffer.
+#[test]
+fn the_yuv_decompressors_honour_fastdct() {
+    const TJPARAM_FASTDCT: c_int = 10;
+    let photo: &[u8] = include_bytes!("../../../tests/fixtures/photo_64x64_420.jpg");
+    for (fast, digest) in [(0, 0x661c_dcec_9778_cb4e_u64), (1, 0x87da_26b1_10e2_320c)] {
+        let handle: *mut c_void = instance();
+        let mut yuv: Vec<u8> = vec![0; 8192];
+        // SAFETY: live handle; 8192 bytes hold the 6144-byte packed planes.
+        let rc: c_int = unsafe {
+            tj3Set(handle, TJPARAM_FASTDCT, fast);
+            tj3DecompressToYUV8(handle, photo.as_ptr(), photo.len(), yuv.as_mut_ptr(), 1)
+        };
+        destroy(handle);
+        assert_eq!(rc, 0);
+        assert_eq!(fnv1a(&yuv), digest, "FASTDCT={fast}");
+    }
 }
