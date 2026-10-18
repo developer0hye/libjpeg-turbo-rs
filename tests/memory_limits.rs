@@ -216,6 +216,68 @@ fn max_memory_accounts_for_grayscale_component0_upsampling_buffer() {
     assert_eq!(image.data.len(), width * height);
 }
 
+/// Issue #683 (P4-244): YCbCr output now upsamples each subsampled chroma
+/// component to a full-size plane before interleaving, as libjpeg does, so
+/// the estimate must count those planes. 4:2:0 adds two.
+#[test]
+fn max_memory_accounts_for_ycbcr_output_upsampling_buffers() {
+    let cjpeg: PathBuf = require_c_tool!("cjpeg");
+    let (width, height): (usize, usize) = (64, 64);
+    let pixels: Vec<u8> = (0..width * height * 3)
+        .map(|index| ((index * 29 + index / (width * 3) * 17) & 0xFF) as u8)
+        .collect();
+    let ppm: Vec<u8> = helpers::build_ppm(&pixels, width, height);
+    let jpeg: Vec<u8> = helpers::encode_with_c_cjpeg(
+        &cjpeg,
+        &ppm,
+        &["-sample", "2x2", "-quality", "90"],
+        "memory_ycbcr_output_s420",
+    );
+
+    // Output (3 B/px) + three component planes, without the two chroma
+    // planes the upsampler fills.
+    let old_underestimate: usize = width * height * 6;
+    let mut limited: Decoder = Decoder::new(&jpeg).expect("parse 4:2:0 header");
+    limited.set_output_colorspace(libjpeg_turbo_rs::ColorSpace::YCbCr);
+    limited.set_max_memory(old_underestimate);
+    let error = limited
+        .decode_image()
+        .expect_err("limit must account for full-size chroma upsampling planes");
+    assert!(
+        error.to_string().contains("estimated decode memory"),
+        "unexpected memory-limit error: {error}"
+    );
+
+    let corrected_estimate: usize = width * height * 8;
+    let mut allowed: Decoder = Decoder::new(&jpeg).expect("parse 4:2:0 header");
+    allowed.set_output_colorspace(libjpeg_turbo_rs::ColorSpace::YCbCr);
+    allowed.set_max_memory(corrected_estimate);
+    let image = allowed
+        .decode_image()
+        .expect("corrected YCbCr estimate must permit decode");
+    assert_eq!((image.width, image.height), (width, height));
+    match helpers::c_oracle::ycbcr_decode_c_oracle() {
+        Some(oracle) => {
+            let request = helpers::c_oracle::CYcbcrRequest {
+                scale: (1, 1),
+                fancy: true,
+                crop: None,
+            };
+            let (_, _, c_samples) =
+                helpers::c_oracle::decode_with_ycbcr_c_oracle(&oracle, &jpeg, &request)
+                    .expect("libjpeg decodes 4:2:0 to YCbCr");
+            assert_eq!(image.data, c_samples, "YCbCr output must match libjpeg");
+        }
+        None => {
+            assert!(
+                !helpers::is_ci(),
+                "CI provisions a libjpeg development install for the YCbCr oracle"
+            );
+            eprintln!("SKIP: no libjpeg development install; YCbCr pixels not compared");
+        }
+    }
+}
+
 #[test]
 fn max_memory_default_is_unlimited() {
     // No max_memory set -> should decode fine

@@ -1038,13 +1038,18 @@ pub fn decompress_12bit_with_limits(data: &[u8], limits: &DecodeLimits) -> Resul
         .map(|c| vec![0i16; comp_plane_w[c] * comp_plane_h[c]])
         .collect();
     let mut prev_dc: Vec<i32> = vec![0i32; num_components];
-    let mut mcu_count: u16 = 0;
+    // u32 like every other decoder's counter: a u16 overflows past 65,535
+    // MCUs (a 2048x2048 12-bit frame), panicking in debug builds and, once
+    // wrapped, misplacing restarts in release builds (P4-251). A u32 cannot:
+    // SOF dimensions are 16-bit and an MCU is at least 8x8, so a frame has at
+    // most 8192 x 8192 = 67,108,864 MCUs.
+    let mut mcu_count: u32 = 0;
     for mcu_row in 0..mcus_y {
         for mcu_col in 0..mcus_x {
             // Handle restart intervals.
             if metadata.restart_interval > 0
                 && mcu_count > 0
-                && mcu_count.is_multiple_of(metadata.restart_interval)
+                && mcu_count.is_multiple_of(u32::from(metadata.restart_interval))
             {
                 bit_reader.reset();
                 prev_dc.fill(0);
@@ -1537,6 +1542,10 @@ pub fn decompress_16bit_with_limits(data: &[u8], limits: &DecodeLimits) -> Resul
         )));
     }
     let dc_tables = lossless_dc_tables(scan, &metadata.dc_huffman_tables, nc)?;
+    // Each sample position is one MCU here (all components 1x1; P4-247
+    // tracks subsampled frames), so an MCU row is `width` MCUs.
+    let restart_rows: Option<usize> =
+        lossless::restart_interval_rows(metadata.restart_interval, width)?;
     // Every buffer below is sized from the SOF; refuse before the first.
     limits.check_memory(estimated_16bit_decode_bytes(width, height, nc))?;
     let entropy = &data[metadata.entropy_data_offset..];
@@ -1546,6 +1555,10 @@ pub fn decompress_16bit_with_limits(data: &[u8], limits: &DecodeLimits) -> Resul
         let mut prev_row: Option<Vec<u16>> = None;
         for y in 0..height {
             let rs = y * width;
+            let restart: bool = starts_restart_interval(y, restart_rows);
+            if restart {
+                br.reset();
+            }
             let mut diffs = Vec::with_capacity(width);
             for _ in 0..width {
                 diffs.push(decode_dc_wide(&mut br, dc_tables[0])?);
@@ -1557,7 +1570,7 @@ pub fn decompress_16bit_with_limits(data: &[u8], limits: &DecodeLimits) -> Resul
                 psv,
                 16,
                 pt,
-                y == 0,
+                y == 0 || restart,
             );
             prev_row = Some(output[rs..rs + width].to_vec());
         }
@@ -1578,6 +1591,10 @@ pub fn decompress_16bit_with_limits(data: &[u8], limits: &DecodeLimits) -> Resul
         let mut prev_rows: Vec<Option<Vec<u16>>> = vec![None; nc];
         for y in 0..height {
             let rs = y * width;
+            let restart: bool = starts_restart_interval(y, restart_rows);
+            if restart {
+                br.reset();
+            }
             let mut cd: Vec<Vec<i16>> = (0..nc).map(|_| Vec::with_capacity(width)).collect();
             for _ in 0..width {
                 for c in 0..nc {
@@ -1592,7 +1609,7 @@ pub fn decompress_16bit_with_limits(data: &[u8], limits: &DecodeLimits) -> Resul
                     psv,
                     16,
                     pt,
-                    y == 0,
+                    y == 0 || restart,
                 );
                 prev_rows[c] = Some(planes[c][rs..rs + width].to_vec());
             }
@@ -1616,6 +1633,13 @@ pub fn decompress_16bit_with_limits(data: &[u8], limits: &DecodeLimits) -> Resul
             precision: 16,
         })
     }
+}
+
+/// Whether sample row `y` starts a restart interval after the first. At
+/// such a row the decoder consumes the RSTn marker and predicts as on the
+/// scan's first row (T.81 H.1.2.1; `jddiffct.c` `process_restart`).
+fn starts_restart_interval(y: usize, restart_rows: Option<usize>) -> bool {
+    restart_rows.is_some_and(|rows| y > 0 && y.is_multiple_of(rows))
 }
 
 fn undifference_row_16(
@@ -2056,6 +2080,10 @@ pub fn decompress_lossless_arbitrary(data: &[u8]) -> Result<Image16> {
         )));
     }
     let dc_tables = lossless_dc_tables(scan, &metadata.dc_huffman_tables, nc)?;
+    // Each sample position is one MCU here (all components 1x1; P4-247
+    // tracks subsampled frames), so an MCU row is `width` MCUs.
+    let restart_rows: Option<usize> =
+        lossless::restart_interval_rows(metadata.restart_interval, width)?;
     let entropy = &data[metadata.entropy_data_offset..];
     let mut br = BitReader::new(entropy);
     if nc == 1 {
@@ -2063,6 +2091,10 @@ pub fn decompress_lossless_arbitrary(data: &[u8]) -> Result<Image16> {
         let mut prev_row: Option<Vec<u16>> = None;
         for y in 0..height {
             let rs: usize = y * width;
+            let restart: bool = starts_restart_interval(y, restart_rows);
+            if restart {
+                br.reset();
+            }
             let mut diffs = Vec::with_capacity(width);
             for _ in 0..width {
                 diffs.push(decode_dc_wide(&mut br, dc_tables[0])?);
@@ -2074,7 +2106,7 @@ pub fn decompress_lossless_arbitrary(data: &[u8]) -> Result<Image16> {
                 psv,
                 precision,
                 pt,
-                y == 0,
+                y == 0 || restart,
             );
             prev_row = Some(output[rs..rs + width].to_vec());
         }
@@ -2095,6 +2127,10 @@ pub fn decompress_lossless_arbitrary(data: &[u8]) -> Result<Image16> {
         let mut prev_rows: Vec<Option<Vec<u16>>> = vec![None; nc];
         for y in 0..height {
             let rs: usize = y * width;
+            let restart: bool = starts_restart_interval(y, restart_rows);
+            if restart {
+                br.reset();
+            }
             let mut cd: Vec<Vec<i16>> = (0..nc).map(|_| Vec::with_capacity(width)).collect();
             for _ in 0..width {
                 for c in 0..nc {
@@ -2109,7 +2145,7 @@ pub fn decompress_lossless_arbitrary(data: &[u8]) -> Result<Image16> {
                     psv,
                     precision,
                     pt,
-                    y == 0,
+                    y == 0 || restart,
                 );
                 prev_rows[c] = Some(planes[c][rs..rs + width].to_vec());
             }

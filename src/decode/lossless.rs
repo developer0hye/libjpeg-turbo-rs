@@ -1,3 +1,7 @@
+use crate::common::error::{JpegError, Result};
+#[allow(unused_imports)]
+use alloc::format;
+
 /// Lossless JPEG decoding (SOF3).
 ///
 /// Implements prediction and undifferencing for lossless JPEG
@@ -70,9 +74,50 @@ pub fn undifference_row(
     }
 }
 
+/// The number of MCU rows in each restart interval of a lossless scan, or
+/// `None` when the scan has no restart interval.
+///
+/// T.81 H.1.1 requires a lossless restart interval to be a whole number of
+/// MCU rows, and libjpeg refuses any other with `JERR_BAD_RESTART`
+/// (`jddiffct.c` `start_input_pass`). Accepting one would restart
+/// prediction in the middle of a row. At the start of each interval a
+/// decoder consumes the RSTn marker and predicts as on the first row of the
+/// scan (T.81 H.1.2.1; `jddiffct.c` `process_restart`).
+pub(crate) fn restart_interval_rows(
+    restart_interval: u16,
+    mcus_per_row: usize,
+) -> Result<Option<usize>> {
+    let interval: usize = usize::from(restart_interval);
+    if interval == 0 || mcus_per_row == 0 {
+        return Ok(None);
+    }
+    if !interval.is_multiple_of(mcus_per_row) {
+        // C's `JERR_BAD_RESTART` text (`jerror.h`), verbatim.
+        return Err(JpegError::CorruptData(format!(
+            "Invalid restart interval {interval}; must be an integer multiple of the \
+             number of MCUs in an MCU row ({mcus_per_row})"
+        )));
+    }
+    Ok(Some(interval / mcus_per_row))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restart_interval_rows_requires_whole_mcu_rows() {
+        assert_eq!(restart_interval_rows(0, 33).unwrap(), None);
+        assert_eq!(restart_interval_rows(33, 33).unwrap(), Some(1));
+        assert_eq!(restart_interval_rows(66, 33).unwrap(), Some(2));
+        assert_eq!(restart_interval_rows(65535, 1).unwrap(), Some(65535));
+        assert_eq!(restart_interval_rows(7, 0).unwrap(), None);
+        assert!(matches!(
+            restart_interval_rows(10, 33),
+            Err(JpegError::CorruptData(_))
+        ));
+        assert!(restart_interval_rows(34, 33).is_err());
+    }
 
     #[test]
     fn all_7_predictors_produce_valid_output() {

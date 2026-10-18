@@ -89,12 +89,12 @@ pub type Result<T> = core::result::Result<T, JpegError>;
 /// `num_warnings`.
 pub const MAX_DECODE_WARNINGS: usize = 64;
 
-/// Non-fatal warning that allows recovery in lenient mode.
+/// Non-fatal warning from marker recovery or lenient entropy decoding.
 ///
 /// A decode's list (`Image::warnings`) is bounded: at most
 /// [`MAX_DECODE_WARNINGS`] `HuffmanError` entries, then at most one
-/// `WarningsSuppressed` counting the rest. `TruncatedData` and
-/// `UnsupportedRecovered` occur at most once each per decode and are never
+/// `WarningsSuppressed` counting the rest. `ExtraneousData`, `TruncatedData`
+/// and `UnsupportedRecovered` occur at most once each per decode and are never
 /// suppressed, so a caller looking for them always finds them; `TruncatedData`
 /// comes before `WarningsSuppressed` and `UnsupportedRecovered` after it, so
 /// search the list rather than reading its last entry.
@@ -104,6 +104,8 @@ pub const MAX_DECODE_WARNINGS: usize = 64;
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum DecodeWarning {
+    /// Total stray bytes discarded between marker segments. Legal FF padding is excluded.
+    ExtraneousData { bytes: usize },
     /// Huffman decode error at the given MCU position.
     HuffmanError {
         mcu_x: usize,
@@ -132,6 +134,9 @@ pub enum DecodeWarning {
 impl core::fmt::Display for DecodeWarning {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::ExtraneousData { bytes } => {
+                write!(f, "{} extraneous bytes before JPEG markers", bytes)
+            }
             Self::HuffmanError {
                 mcu_x,
                 mcu_y,

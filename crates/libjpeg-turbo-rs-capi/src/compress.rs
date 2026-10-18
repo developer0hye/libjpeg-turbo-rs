@@ -231,7 +231,10 @@ pub unsafe extern "C" fn tj3Compress8(
                     if rb > 0 {
                         rb as u16
                     } else if rr > 0 {
-                        rr as u16
+                        // Rows, not MCUs: `jcmaster.c` per_scan_setup sets
+                        // `restart_in_rows * MCUs_per_row`, capped at 65535,
+                        // and a lossless MCU is one pixel.
+                        (rr as usize).saturating_mul(w).min(usize::from(u16::MAX)) as u16
                     } else {
                         0
                     }

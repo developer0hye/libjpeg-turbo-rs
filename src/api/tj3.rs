@@ -1012,6 +1012,7 @@ impl TjHandle {
     /// decode that follows refuses it — upstream's order too.
     fn read_header(&mut self, data: &[u8]) -> Result<()> {
         let header: Decoder<'_> = Decoder::new_header_only(data, self.decode_limits())?;
+        header.check_marker_warnings(self.stop_on_warning != 0)?;
         Self::check_frame_like_initial_setup(header.header())?;
         self.publish_header(&header)
     }
@@ -1367,6 +1368,11 @@ impl TjHandle {
         self.read_header(data)?;
         let limits: crate::common::types::DecodeLimits = self.decode_limits();
         limits.check_frame(self.width as usize, self.height as usize)?;
+        // High-precision decoding bypasses Decoder::decode_image, so strict
+        // mode must also inspect markers after the first SOS here.
+        if self.stop_on_warning != 0 {
+            Decoder::new_with_limits(data, limits)?.check_marker_warnings(true)?;
+        }
         Ok(limits)
     }
 }
