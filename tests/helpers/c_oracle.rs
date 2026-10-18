@@ -175,6 +175,80 @@ pub fn tables_only_c_oracle() -> Option<PathBuf> {
     build_libjpeg_oracle("tables_only_c_oracle")
 }
 
+/// Locate — building if necessary — the YCbCr-output oracle
+/// (`examples/ycbcr_decode_c_oracle.c`).
+///
+/// Issue #683 / P4-244: neither `djpeg` nor TurboJPEG can ask libjpeg for
+/// `out_color_space = JCS_YCbCr`, so this program is the only C reference for
+/// `Decoder::set_output_colorspace(ColorSpace::YCbCr)`. Same build-and-cache
+/// and `None`-means-skip contract as [`cmyk_c_oracle`].
+pub fn ycbcr_decode_c_oracle() -> Option<PathBuf> {
+    build_libjpeg_oracle("ycbcr_decode_c_oracle")
+}
+
+/// libjpeg's YCbCr output for one decode request.
+pub struct CYcbcrRequest {
+    /// `scale_num / scale_denom`.
+    pub scale: (u32, u32),
+    /// `do_fancy_upsampling`.
+    pub fancy: bool,
+    /// `djpeg -crop`-style region: x, y, width, height in output pixels.
+    pub crop: Option<(usize, usize, usize, usize)>,
+}
+
+/// Decode `jpeg` through the YCbCr oracle.
+///
+/// `Ok((width, height, samples))` is libjpeg's interleaved Y, Cb, Cr output.
+/// `Err(stderr)` is libjpeg refusing the request — an expected outcome for
+/// sources it will not convert (e.g. `JERR_CONVERSION_NOTIMPL`), which the
+/// caller asserts on rather than skipping.
+pub fn decode_with_ycbcr_c_oracle(
+    oracle: &Path,
+    jpeg: &[u8],
+    request: &CYcbcrRequest,
+) -> Result<(usize, usize, Vec<u8>), String> {
+    let dir = tempfile::tempdir().expect("tempdir for the YCbCr oracle input");
+    let input: PathBuf = dir.path().join("ycbcr_oracle_input.jpg");
+    std::fs::write(&input, jpeg).expect("write the YCbCr oracle input");
+    let mut command = Command::new(oracle);
+    command
+        .arg(&input)
+        .arg(request.scale.0.to_string())
+        .arg(request.scale.1.to_string())
+        .arg(if request.fancy { "1" } else { "0" });
+    if let Some((x, y, width, height)) = request.crop {
+        for value in [x, y, width, height] {
+            command.arg(value.to_string());
+        }
+    }
+    let output = command
+        .output()
+        .unwrap_or_else(|error| panic!("failed to run {oracle:?}: {error:?}"));
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).into_owned());
+    }
+    let newline: usize = output
+        .stdout
+        .iter()
+        .position(|&byte| byte == b'\n')
+        .expect("YCbCr oracle header line");
+    let header: String = String::from_utf8_lossy(&output.stdout[..newline]).into_owned();
+    let fields: Vec<&str> = header.split_whitespace().collect();
+    assert!(
+        fields.len() == 3 && fields[0] == "YCbCr",
+        "malformed YCbCr oracle header {header:?}"
+    );
+    let width: usize = fields[1].parse().expect("oracle width");
+    let height: usize = fields[2].parse().expect("oracle height");
+    let samples: Vec<u8> = output.stdout[newline + 1..].to_vec();
+    assert_eq!(
+        samples.len(),
+        width * height * 3,
+        "YCbCr oracle wrote a short image for {width}x{height}"
+    );
+    Ok((width, height, samples))
+}
+
 /// Shared build-and-cache for the `libjpeg`-linked oracles under `examples/`.
 fn build_libjpeg_oracle(stem: &str) -> Option<PathBuf> {
     let artifact_dir: PathBuf = artifact_dir()?;

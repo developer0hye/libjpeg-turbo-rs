@@ -192,9 +192,9 @@
 - [x] IPTC IIM accessor from the APP13 Photoshop IRB (`Image::iptc_data`, `Encoder::iptc_data` — #358)
 - [x] Decode into caller-owned buffer (`decompress_into`, `output_buffer_size`, `Decoder::decode_image_into` — #354)
 - [x] Scaled IDCT — all 16 factors: 1/8 through 2/1 (`set_scale` with a `ScalingFactor::try_new` value; exactly upstream's `tj3SetScalingFactor` set)
-- [x] Crop decode (`decompress_cropped`, `set_crop_region`) — a region past the scaled output is refused with `JpegError::InvalidCropRegion`, as `djpeg -crop` refuses it; `x` aligns down to the iMCU boundary as `jpeg_crop_scanline` does; `decompress_cropped` clamps by contract ([P4-197](last_mile/phase4.md#p4-197-a-cropping-region-whose-left-boundary-exceeds-the-scaled-width-decodes-to-zero-columns-and-trips-a-false-debug_assert--closed-2026-10-07), #618)
+- [x] Crop decode (`decompress_cropped`, `set_crop_region`) — a region past the scaled output is refused with `JpegError::InvalidCropRegion`, as `djpeg -crop` refuses it; `x` aligns down to the iMCU boundary as `jpeg_crop_scanline` does; `decompress_cropped` clamps by contract ([P4-197](last_mile/phase4.md#p4-197-a-cropping-region-whose-left-boundary-exceeds-the-scaled-width-decodes-to-zero-columns-and-trips-a-false-debug_assert--closed-2026-10-07), #618); crop edges on direct-RGB and grayscale output, and YCbCr→RGB crops that leave 2:1 chroma two samples wide, still differ from `djpeg -crop` ([P4-245](last_mile/phase4.md#p4-245-horizontal-crops-give-some-upsampled-planes-context-from-outside-the-crop--open))
 - [x] `TJPARAM_BOTTOMUP` — Bottom-up row order (`ScanlineDecoder::set_bottom_up()`)
-- [x] Native explicit output colorspace (`Decoder::set_output_colorspace()`)
+- [x] Native explicit output colorspace (`Decoder::set_output_colorspace()`) — YCbCr output byte-identical to libjpeg's `JCS_YCbCr` ([P4-244](last_mile/phase4.md#p4-244-ycbcr-output-bypasses-the-upsampler-replicated-chroma-and-panics-on-two-legal-layouts--closed-2026-10-17)); 12-bit and lossless frames ignore it ([P4-246](last_mile/phase4.md#p4-246-12-bit-and-lossless-decodes-ignore-set_output_colorspace--open))
 - [ ] Classic `out_color_space` translation and error contract — P4-98/P4-99
 - [x] YCbCr/YUV raw output (skip color conversion) (`decompress_raw()`)
 - [x] `raw_data_out` — Raw downsampled component output (`decompress_raw()`)
