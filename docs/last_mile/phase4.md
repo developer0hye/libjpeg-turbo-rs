@@ -77,7 +77,7 @@
 | P4-116 | CLOSED 2026-08-08 (C-parity tests can convert Rust/oracle failures or missing comparisons into a pass) |
 | P4-117 | CLOSED 2026-08-08 (4:4:1 trim rejected images shorter than one iMCU row) |
 | P4-120 | CLOSED 2026-08-13 (`fail_nth_allocation_for_tests` makes both `jpeg_mem_dest` OOM paths reachable, code 56 + `msg_parm.i[0] == 10` asserted) |
-| P4-121 | OPEN (lossless encode accepts a restart interval C refuses to decode) |
+| P4-121 | CLOSED 2026-10-17 (lossless encode refuses a restart interval that is not whole MCU rows, with `JERR_BAD_RESTART`'s text) |
 | P4-122 | OPEN (the Pillow smoke harness substitutes for a v6b library, which its own policy forbids) |
 | P4-125 | CLOSED 2026-08-08 (TurboJPEG YUV decompress entry points emitted one plane per SOF component) |
 | P4-126 | CLOSED 2026-08-09 (`yuv_plane_width`/`yuv_plane_height` accept any component index) |
@@ -2386,7 +2386,11 @@ upstream code in the message (`JERR_BUFFER_SIZE`, `JERR_BAD_PRECISION`,
 
 Not yet done: the remaining private-string-only
 sites (45 of the original 59 `last_error` assignments still have no
-`error_exit` nearby), criterion (4)'s stock-versus-Rust setjmp harness matrix,
+`error_exit` nearby); encode-backend refusals, which the classic API runs in
+`jpeg_finish_compress` and reports as `JERR_BAD_DCT_COEF` where upstream
+raises the specific code at `jpeg_start_compress` (for example a misaligned
+lossless restart interval, `JERR_BAD_RESTART`, found 2026-10-17 while closing
+P4-121); criterion (4)'s stock-versus-Rust setjmp harness matrix,
 and P4-104's *decompressor* state work, which is separate from the compressor
 states corrected here. `cargo test --workspace --no-fail-fast`: 2466 passed, 0 failed,
 1 ignored (macOS aarch64).
@@ -4525,7 +4529,7 @@ tests failing. `cargo test --workspace --no-fail-fast`: 2458 passed, 0 failed,
 1 ignored. Once this merges, `cross_product_transform`'s trim carve-out
 assertion fired as designed and the carve-out is deleted; trim now reports 78/78.
 
-## P4-121. Lossless Encode Accepts a Restart Interval C Refuses to Decode — **OPEN**
+## P4-121. Lossless Encode Accepts a Restart Interval C Refuses to Decode — **CLOSED 2026-10-17**
 
 **Motivation.** Filed 2026-08-08 while repairing `c_cjpeg_djpeg_tests::
 c_cjpeg_lossless` under P4-116. Asking for a lossless stream with
@@ -4537,7 +4541,7 @@ djpeg: Invalid restart interval 1; must be an integer multiple of the number
 ```
 
 **Root cause.** In lossless mode the restart interval must be a whole number of
-MCU rows. Upstream enforces this **in the encoder**: `jclossls.c:294-296`
+MCU rows. Upstream enforces this **in the encoder**: `jclossls.c:295-297`
 raises `JERR_BAD_RESTART` from `start_pass_lossless` when
 `restart_interval % MCUs_per_row != 0`, so C cannot emit such a stream at all.
 The decoder repeats the check at `jddiffct.c:108`. Our encoder performs
@@ -4562,6 +4566,26 @@ path.
 **Why deferred.** P4-116 is test integrity; this is an encoder validation gap
 it uncovered. The affected call is a misuse that upstream diagnoses, not a
 silent data corruption, so it does not block the test work.
+
+**Status (2026-10-17): closed.** `compress_lossless_extended_precision`, the
+Huffman lossless encoder behind `Encoder`, `tj3Compress8` and the classic
+API, refuses an interval that is not a multiple of the row width with
+`JERR_BAD_RESTART`'s text verbatim: "Invalid restart interval 10; must be an
+integer multiple of the number of MCUs in an MCU row (33)" (criterion 1).
+The classic API encodes in `jpeg_finish_compress`, so it raises the refusal
+there, under the generic `JERR_BAD_DCT_COEF` with that text as the message;
+upstream raises `JERR_BAD_RESTART` itself at `jpeg_start_compress`. That
+code-and-timing gap is recorded under P4-100. `restart_rows(n)` still resolves to whole rows (criterion 2).
+`tests/regression_lossless_restart_intervals.rs::lossless_encoder_restart_intervals_follow_libjpeg`
+asserts the refusal of a 10-block interval and decodes 1- and 2-row
+intervals back to the exact input through `djpeg`, `decompress` and
+`decompress_lossless_arbitrary` (criterion 3). The decoders refuse a
+misaligned `DRI` as `jddiffct.c:107` does (criterion 4, under P4-247).
+Closing it exposed one more mistranslation: for lossless precisions 2..=7,
+`tj3Compress8` passed `TJPARAM_RESTARTROWS` on as an MCU count, so one row
+became a 1-MCU interval. It now converts rows to `rows × width` MCUs, capped
+at 65535, as `jcmaster.c` per_scan_setup does
+(`crates/libjpeg-turbo-rs-capi/tests/capi_lossless_restart_interval.rs`).
 
 ## P4-122. The Pillow Smoke Harness Performs the v6b Substitution Its Own Policy Forbids — **OPEN**
 
@@ -14096,7 +14120,7 @@ compared against a 12-bit-capable oracle) or is refused with `Unsupported`;
 never silently ignored. The `set_output_colorspace` rustdoc drops its
 "12-bit and lossless frames ignore this" caveat.
 
-## P4-247. Lossless Decode Diverges From libjpeg on Restart Intervals, Subsampled Frames and Multi-Scan Frames — **OPEN**
+## P4-247. Lossless Decode Diverges From libjpeg on Restart Intervals, Subsampled Frames and Multi-Scan Frames — **PARTIAL: restart intervals fixed; subsampled and multi-scan frames remain**
 
 Found by differential testing of `precision::decompress_lossless_arbitrary`
 against libjpeg-turbo 3.2.0 (libjpeg asked for `out_color_space =
@@ -14111,7 +14135,8 @@ three are legal T.81 lossless layouts that libjpeg decodes to the source:
 2. **Subsampled multi-component frames decode wrong.** An interleaved SOF3
    frame with luma sampled 2×1, 2×2 or 1×2 against 1×1 chroma returns `Ok`
    with 380–383 of 384 samples wrong on a 16×8 image (C decodes the stored
-   samples and upsamples them).
+   samples and upsamples them). `Decoder` decodes the same three streams
+   with the same counts wrong (checked 2026-10-17).
 3. **A first scan that codes fewer components than the frame is refused.**
    C decodes the components across their later scans; P4-75 turned this
    entry point's panic into `CorruptData` ("all 3 must be present in a
@@ -14124,6 +14149,28 @@ minimal T.81 Process-14 encoder for them is
 
 Acceptance: restart and subsampled frames byte-identical to libjpeg;
 multi-scan frames decoded, or refused as a documented decision.
+
+**Status (2026-10-17): part 1 fixed.**
+`decompress_lossless_arbitrary` and its 16-bit twin `decompress_16bit`,
+which had the same loop, now consume the RSTn marker at the start of each
+restart interval and predict the interval's first row as the scan's first
+row. The three Huffman lossless decoders (these two and `Decoder`) refuse an
+interval that is not a whole number of MCU rows with `JERR_BAD_RESTART`'s
+text, as T.81 H.1.1 requires and `jddiffct.c:107` does. `Decoder` used to
+restart prediction mid-row on such a stream: given a `cjpeg -restart 1`
+stream (markers every 33 MCUs) whose `DRI` was patched to 10, it returned
+`Ok` with 550 of 561 samples wrong, where `djpeg` refuses the `DRI`.
+`tests/regression_lossless_restart_intervals.rs`
+compares 96 `cjpeg` streams with `djpeg` — precisions 2, 8, 12 and 16,
+greyscale and RGB, predictors 1, 4 and 7 (Pt 0 or 1), intervals of 0, 1, 2
+and 20 rows — through `decompress_lossless_arbitrary` and, at 16 bits,
+`decompress_16bit`. Before the fix every one of the 48 streams with a restart
+marker inside the image failed (60 failing decoder results); the 20-row
+interval is longer than the image, so its 24 streams pass either way. It also
+pins the partial-row refusal next to `djpeg`'s. The encoder side closed as
+P4-121; arithmetic-coded (SOF11) restarts are P4-253. Parts 2 and 3 remain.
+Every Huffman lossless decoder still treats each sample position as one MCU,
+so part 2's fix must revisit their restart arithmetic too.
 
 ## P4-248. A 0xFF Fill Byte Before a Stuffed Byte Mis-Decodes Baseline 4:4:4, 4:2:2 and 4:1:1 Silently — **OPEN**
 
@@ -14248,3 +14295,40 @@ restart per 257-MCU row) through `decompress_12bit` and `decompress_raw_12`
 identically to `djpeg` (libjpeg-turbo 3.2.0) in debug and release builds;
 before the fix it panicked in debug and differed on 16,448 samples in release.
 
+## P4-252. 12- and 16-Bit TurboJPEG Compression Drops the Restart Interval — **OPEN**
+
+Found on 2026-10-17 while closing P4-121. With `TJPARAM_RESTARTROWS` set to
+1, `tj3Compress12` (lossy and lossless) and `tj3Compress16` (lossless) return
+success and write no `DRI` segment. `tj3Compress8` on the same 33×17
+greyscale source writes `DRI` 5 (lossy) and 33 (lossless). Upstream applies
+the handle's restart parameters at every precision (`turbojpeg.c`
+`setCompDefaults`, then `jcmaster.c` `per_scan_setup`); `cjpeg -precision 12`
+and `cjpeg -precision 16 -lossless` with `-restart 1` write restart markers.
+
+The cause, by reading: `TjHandle::compress_12bit*` and `compress_16bit*` call
+`precision::compress_12bit_with_precision` and
+`compress_16bit_with_precision`, which take no restart argument, so
+`TJPARAM_RESTARTBLOCKS` is dropped the same way. The stream is valid, just
+without restart markers: the option is lost silently, as in P4-39.
+
+Acceptance: the 12- and 16-bit paths honour both restart parameters with the
+interval upstream computes (lossless: whole MCU rows only, as P4-121), pinned
+by a test against TurboJPEG or `cjpeg`.
+
+## P4-253. Arithmetic-Coded (SOF11) Lossless Decode Ignores Restart Intervals — **OPEN**
+
+Found by reading on 2026-10-17, while fixing P4-247 part 1:
+`Decoder::decode_lossless_arithmetic` never resets the arithmetic decoder's
+statistics or the prediction at a restart interval. T.81 H.1.1: "When the
+encoder is reset in the restart interval control procedure (see E.1.4), the
+prediction is reset to a default value. If arithmetic coding is used, the
+statistics are also reset."
+
+Not reproduced, and there is no libjpeg oracle: libjpeg-turbo 3.2.0 has no
+arithmetic-coded lossless mode (`jdmaster.c:673-674` and `jcinit.c:74-75`
+raise `JERR_ARITH_NOTIMPL`), and our own SOF11 lossless encoder writes no
+restart interval.
+
+Acceptance: SOF11 lossless restart intervals decode per T.81 H.1.1 and
+H.1.2.1, proven by a hand-built stream, or SOF11 lossless decode is refused
+like libjpeg's, as a documented decision.

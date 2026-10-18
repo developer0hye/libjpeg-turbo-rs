@@ -291,6 +291,19 @@ and `git log` between tags.
   never public API, and the gap never shipped: published 0.8.0 exposed the
   unchecked kernel more broadly, which the P4-135 row of
   `docs/security/AFFECTED_VERSIONS.md` already covers.
+- **Breaking (behaviour): lossless restart intervals follow T.81 and
+  libjpeg** (P4-247 part 1, P4-121).
+  `precision::decompress_lossless_arbitrary` and `precision::decompress_16bit`
+  ignored them: they neither consumed the RSTn markers nor restarted
+  prediction, so a stream with restarts (`cjpeg -lossless 1 -restart 1`)
+  decoded wrong samples with `Ok`, or failed with an invalid Huffman code.
+  T.81 H.1.1 requires a lossless interval to be a whole number of MCU rows.
+  These decoders and `Decoder` now refuse any other with libjpeg's
+  `JERR_BAD_RESTART` text (`Decoder` returned `Ok` with wrong samples), and
+  the lossless encoder now returns that error instead of writing a stream
+  `djpeg` refuses, as `cjpeg` does. `tj3Compress8` at lossless precisions
+  2–7 passed `TJPARAM_RESTARTROWS` on as an MCU count; it now converts rows
+  to MCUs as `jcmaster.c` does.
 
 - **Breaking (behaviour): every TurboJPEG decompress publishes what
   `setDecompParameters` publishes** (P4-199 #620, P4-200 #621, P4-203 #625).

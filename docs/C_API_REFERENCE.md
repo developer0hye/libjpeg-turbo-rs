@@ -46,8 +46,8 @@
 | `LOSSLESS` | Lossless JPEG mode | `compress_lossless()` | ✅ |
 | `LOSSLESSPSV` | Lossless predictor 1-7 | `Encoder::lossless_predictor()` | ✅ |
 | `LOSSLESSPT` | Lossless point transform 0-15 | `Encoder::lossless_point_transform()` | ✅ |
-| `RESTARTBLOCKS` | Restart interval (MCU blocks) | `Encoder::restart_blocks()` | ✅ |
-| `RESTARTROWS` | Restart interval (MCU rows) | `Encoder::restart_rows()` | ✅ |
+| `RESTARTBLOCKS` | Restart interval (MCU blocks) | `Encoder::restart_blocks()`; `tj3Compress12` / `tj3Compress16` drop it ([P4-252](last_mile/phase4.md#p4-252-12--and-16-bit-turbojpeg-compression-drops-the-restart-interval--open)) | 🔶 |
+| `RESTARTROWS` | Restart interval (MCU rows) | `Encoder::restart_rows()`; `tj3Compress12` / `tj3Compress16` drop it ([P4-252](last_mile/phase4.md#p4-252-12--and-16-bit-turbojpeg-compression-drops-the-restart-interval--open)) | 🔶 |
 | `XDENSITY` | Horizontal pixel density | `Encoder::density()` + `TjHandle` compress/decompress wiring | ✅ |
 | `YDENSITY` | Vertical pixel density | `Encoder::density()` + `TjHandle` compress/decompress wiring | ✅ |
 | `DENSITYUNITS` | 0=unknown, 1=ppi, 2=ppcm | `Encoder::density()` + `TjHandle` compress/decompress wiring | ✅ |
@@ -84,8 +84,8 @@
 | C Function | Description | Rust | Status |
 |---|---|---|---|
 | `tj3Compress8(handle, src, w, pitch, h, pf, &dst, &size)` | Compress 8-bit pixels to JPEG | `compress()`, `compress_optimized()`, etc. | ✅ |
-| `tj3Compress12(handle, src, w, pitch, h, pf, &dst, &size)` | Compress 12-bit pixels | `TjHandle::compress_12bit()` / `compress_12bit()` | ✅ |
-| `tj3Compress16(handle, src, w, pitch, h, pf, &dst, &size)` | Compress 16-bit pixels — lossless only: fails with `JERR_BAD_PRECISION` unless `TJPARAM_LOSSLESS` is set, as upstream does (P4-150) | `TjHandle::compress_16bit()` / `compress_16bit()` | ✅ |
+| `tj3Compress12(handle, src, w, pitch, h, pf, &dst, &size)` | Compress 12-bit pixels; drops `TJPARAM_RESTARTBLOCKS` / `RESTARTROWS` ([P4-252](last_mile/phase4.md#p4-252-12--and-16-bit-turbojpeg-compression-drops-the-restart-interval--open)) | `TjHandle::compress_12bit()` / `compress_12bit()` | 🔶 |
+| `tj3Compress16(handle, src, w, pitch, h, pf, &dst, &size)` | Compress 16-bit pixels — lossless only: fails with `JERR_BAD_PRECISION` unless `TJPARAM_LOSSLESS` is set, as upstream does (P4-150); drops `TJPARAM_RESTARTBLOCKS` / `RESTARTROWS` ([P4-252](last_mile/phase4.md#p4-252-12--and-16-bit-turbojpeg-compression-drops-the-restart-interval--open)) | `TjHandle::compress_16bit()` / `compress_16bit()` | 🔶 |
 
 ### Compression from YUV
 
