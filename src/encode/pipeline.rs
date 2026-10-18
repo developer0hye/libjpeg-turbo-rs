@@ -20,5 +20,5 @@ pub use super::pipeline_impl::{
 pub(crate) use super::pipeline_impl::{
     compress_arithmetic_progressive_rgb_direct_scripted, compress_arithmetic_progressive_scripted,
     compress_progressive_rgb_direct_scripted, emit_eobrun, emit_eobrun_with_corr,
-    encode_ac_first_block, encode_ac_refine_block, MAX_CORR_BITS,
+    encode_ac_first_block, encode_ac_refine_block, CustomSamplingFrame, MAX_CORR_BITS,
 };
