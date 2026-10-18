@@ -99,6 +99,73 @@ pub(super) fn fancy_h2v2_strided_dispatch(
     }
 }
 
+/// libjpeg's 2:1 fancy filters on an input two samples wide, where only the
+/// first- and last-column cases of `h2v1_fancy_upsample` /
+/// `h2v2_fancy_upsample` run (`jdsample.c`). Only a crop reaches them: at a
+/// component's own width of two samples `jinit_upsampler` picks the box
+/// filter, and the shared row kernels encode that choice, but a
+/// `jpeg_crop_scanline` that narrows a wider component to two samples keeps
+/// the fancy filter unless it re-initialises the upsampler (P4-244). `vertical_factor` is 1 (h2v1) or 2 (h2v2,
+/// whose top and bottom rows take themselves as the outer neighbour, as
+/// libjpeg's replicated context rows do).
+fn fancy_upsample_two_columns(
+    input: &[u8],
+    in_height: usize,
+    vertical_factor: usize,
+    output: &mut [u8],
+    out_stride: usize,
+) {
+    for y in 0..in_height {
+        let cur: &[u8] = &input[y * 2..y * 2 + 2];
+        if vertical_factor == 1 {
+            let (left, right) = (u16::from(cur[0]), u16::from(cur[1]));
+            output[y * out_stride..y * out_stride + 4].copy_from_slice(&[
+                cur[0],
+                ((left * 3 + right + 2) >> 2) as u8,
+                ((right * 3 + left + 1) >> 2) as u8,
+                cur[1],
+            ]);
+            continue;
+        }
+        let above: &[u8] = if y > 0 {
+            &input[(y - 1) * 2..y * 2]
+        } else {
+            cur
+        };
+        let below: &[u8] = if y + 1 < in_height {
+            &input[(y + 1) * 2..(y + 2) * 2]
+        } else {
+            cur
+        };
+        for (v, neighbor) in [(0, above), (1, below)] {
+            let left: i32 = i32::from(cur[0]) * 3 + i32::from(neighbor[0]);
+            let right: i32 = i32::from(cur[1]) * 3 + i32::from(neighbor[1]);
+            let out_y: usize = y * 2 + v;
+            output[out_y * out_stride..out_y * out_stride + 4].copy_from_slice(&[
+                ((left * 4 + 8) >> 4) as u8,
+                ((left * 3 + right + 7) >> 4) as u8,
+                ((right * 3 + left + 8) >> 4) as u8,
+                ((right * 4 + 7) >> 4) as u8,
+            ]);
+        }
+    }
+}
+
+/// The output columns a decode emits: `width` columns starting at `x`, out of
+/// `uncropped_width`. `x` lies on an iMCU column boundary, as
+/// `jpeg_crop_scanline` aligns it; an uncropped decode is `x = 0` with
+/// `width == uncropped_width` and `reinit_upsampler == false`.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct UpsampleWindow {
+    pub(super) x: usize,
+    pub(super) width: usize,
+    pub(super) uncropped_width: usize,
+    /// The crop re-initialised libjpeg's upsampler, so every component picks
+    /// box or fancy from its cropped width rather than its uncropped one —
+    /// see [`Decoder::crop_reinitialises_upsampler`].
+    pub(super) reinit_upsampler: bool,
+}
+
 impl<'a> Decoder<'a> {
     /// Select the IDCT function based on the configured DCT method.
     #[inline(always)]
@@ -751,6 +818,55 @@ impl<'a> Decoder<'a> {
         output_height: usize,
         block_size: usize,
     ) -> Result<(Cow<'plane, [u8]>, usize)> {
+        self.upsample_component_window(
+            component_plane,
+            component_index,
+            frame,
+            mcus_x,
+            mcus_y,
+            comp_block_sizes,
+            full_width,
+            full_height,
+            UpsampleWindow {
+                x: 0,
+                width: output_width,
+                uncropped_width: output_width,
+                reinit_upsampler: false,
+            },
+            output_height,
+            block_size,
+        )
+    }
+
+    /// [`Self::upsample_component_plane`] over the output columns a
+    /// horizontally cropped decode emits, upsampled as libjpeg upsamples them
+    /// (P4-244).
+    ///
+    /// `jpeg_crop_scanline` (`jdapistd.c`) narrows every component's
+    /// `downsampled_width` to the iMCU-aligned crop, so to the upsampler the
+    /// crop *is* the image: the fancy filters replicate the edge sample at
+    /// both crop edges instead of reading the real neighbours outside it. The
+    /// box-or-fancy choice for a 2:1 component (fancy only above two input
+    /// samples) is made from its uncropped width, unless the crop
+    /// re-initialised the upsampler (`window.reinit_upsampler`), in which case
+    /// it is made from the cropped width.
+    ///
+    /// Column 0 of the returned plane is output column `window.x`.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn upsample_component_window<'plane>(
+        &self,
+        component_plane: &'plane [u8],
+        component_index: usize,
+        frame: &FrameHeader,
+        mcus_x: usize,
+        mcus_y: usize,
+        comp_block_sizes: &[usize],
+        full_width: usize,
+        full_height: usize,
+        window: UpsampleWindow,
+        output_height: usize,
+        block_size: usize,
+    ) -> Result<(Cow<'plane, [u8]>, usize)> {
         let component = frame.components.get(component_index).ok_or_else(|| {
             JpegError::CorruptData(format!(
                 "missing component {component_index} for colorspace conversion"
@@ -793,29 +909,52 @@ impl<'a> Decoder<'a> {
             )));
         }
         if horizontal_factor == 1 && vertical_factor == 1 {
-            return Ok((Cow::Borrowed(component_plane), component_width));
+            if window.x.saturating_add(window.width) > component_width {
+                return Err(JpegError::CorruptData(format!(
+                    "component {component_index} output columns {}+{} exceed its plane width {component_width}",
+                    window.x, window.width
+                )));
+            }
+            return Ok((Cow::Borrowed(&component_plane[window.x..]), component_width));
+        }
+        if !window.x.is_multiple_of(horizontal_factor) {
+            return Err(JpegError::CorruptData(format!(
+                "crop offset {} is not on a component {component_index} sample boundary",
+                window.x
+            )));
         }
 
-        let active_width = output_width.div_ceil(horizontal_factor);
-        let active_height = output_height.div_ceil(vertical_factor);
-        if active_width > component_width || active_height > component_height {
+        let source_x: usize = window.x / horizontal_factor;
+        let active_width: usize = window.width.div_ceil(horizontal_factor);
+        let active_height: usize = output_height.div_ceil(vertical_factor);
+        if source_x.saturating_add(active_width) > component_width
+            || active_height > component_height
+        {
             return Err(JpegError::CorruptData(format!(
                 "component {component_index} active area exceeds its plane: \
-                 active={active_width}x{active_height}, plane={component_width}x{component_height}"
+                 active={active_width}x{active_height} at x={source_x}, \
+                 plane={component_width}x{component_height}"
             )));
         }
         let mut active: Vec<u8> =
             try_reserved_vec(active_width * active_height, "active component area")?;
         for row in 0..active_height {
-            let start = row * component_width;
+            let start = row * component_width + source_x;
             active.extend_from_slice(&component_plane[start..start + active_width]);
         }
 
         let mut full: Vec<u8> =
             try_zeroed_bytes(full_width * full_height, "upsampled component plane")?;
         // C disables fancy upsampling for a 1x1 scaled IDCT, and for the
-        // horizontal 2:1 kernels when the active input is at most two pixels.
-        let horizontal_fancy_too_narrow = horizontal_factor == 2 && active_width <= 2;
+        // horizontal 2:1 kernels when the input is at most two pixels wide
+        // (`jinit_upsampler`). That choice sees the uncropped width unless the
+        // crop re-ran `jinit_upsampler` with the cropped widths.
+        let fancy_input_width: usize = if window.reinit_upsampler {
+            active_width
+        } else {
+            window.uncropped_width.div_ceil(horizontal_factor)
+        };
+        let horizontal_fancy_too_narrow: bool = horizontal_factor == 2 && fancy_input_width <= 2;
         let use_box_filter = self.fast_upsample || block_size == 1 || horizontal_fancy_too_narrow;
         if use_box_filter {
             upsample_generic_nearest(
@@ -826,6 +965,14 @@ impl<'a> Decoder<'a> {
                 full_width,
                 horizontal_factor,
                 vertical_factor,
+            );
+        } else if horizontal_factor == 2 && active_width == 2 && vertical_factor <= 2 {
+            fancy_upsample_two_columns(
+                &active,
+                active_height,
+                vertical_factor,
+                &mut full,
+                full_width,
             );
         } else if horizontal_factor == 2 && vertical_factor == 1 {
             for row in 0..active_height {
@@ -912,47 +1059,13 @@ impl<'a> Decoder<'a> {
         // 0, but a strict YCbCr decode still rejects streams where chroma
         // out-samples luma; lenient mode is the opt-in that accepts them.
         if !self.lenient && jpeg_color_space == ColorSpace::YCbCr {
-            let component_width = |index: usize| {
-                mcus_x
-                    * frame.components[index].horizontal_sampling as usize
-                    * comp_block_sizes[index]
-            };
-            let component_height = |index: usize| {
-                mcus_y
-                    * frame.components[index].vertical_sampling as usize
-                    * comp_block_sizes[index]
-            };
-            let luma_width = component_width(0);
-            let luma_height = component_height(0);
-            let cb_width = component_width(1);
-            let cb_height = component_height(1);
-            let cr_width = component_width(2);
-            let cr_height = component_height(2);
-            if [
-                luma_width,
-                luma_height,
-                cb_width,
-                cb_height,
-                cr_width,
-                cr_height,
-            ]
-            .contains(&0)
-            {
-                return Err(JpegError::CorruptData(
-                    "cannot validate grayscale sampling factors with zero component geometry"
-                        .into(),
-                ));
-            }
-            let cb_h_factor = luma_width / cb_width;
-            let cb_v_factor = luma_height / cb_height;
-            let cr_h_factor = luma_width / cr_width;
-            let cr_v_factor = luma_height / cr_height;
-            if cb_h_factor == 0 || cb_v_factor == 0 || cr_h_factor == 0 || cr_v_factor == 0 {
-                return Err(JpegError::CorruptData(format!(
-                    "chroma upsample factor zero (a chroma component out-samples luma): \
-                     cb={cb_h_factor}x{cb_v_factor} cr={cr_h_factor}x{cr_v_factor}"
-                )));
-            }
+            Self::reject_chroma_outsampling_luma(
+                frame,
+                mcus_x,
+                mcus_y,
+                comp_block_sizes,
+                "grayscale",
+            )?;
         }
 
         let mut full_planes: Vec<Cow<'_, [u8]>> = Vec::with_capacity(required_components);
@@ -1017,6 +1130,221 @@ impl<'a> Decoder<'a> {
             width: out_width,
             height: out_height,
             pixel_format: PixelFormat::Grayscale,
+            precision: 8,
+            data,
+            icc_profile,
+            exif_data,
+            comment: try_clone_opt_string(&self.metadata.comment, "COM comment")?,
+            density: self.metadata.density,
+            saved_markers: try_clone_saved_markers(&self.metadata.saved_markers)?,
+            warnings,
+        })
+    }
+
+    /// P4-21's strict contract for a three-component YCbCr source: refuse a
+    /// stream in which a chroma component out-samples luma. Lenient decoding
+    /// is the opt-in that accepts such (legal) streams; callers check that.
+    /// `conversion` names the requested output in the error message.
+    fn reject_chroma_outsampling_luma(
+        frame: &FrameHeader,
+        mcus_x: usize,
+        mcus_y: usize,
+        comp_block_sizes: &[usize],
+        conversion: &str,
+    ) -> Result<()> {
+        let component_width = |index: usize| {
+            mcus_x * frame.components[index].horizontal_sampling as usize * comp_block_sizes[index]
+        };
+        let component_height = |index: usize| {
+            mcus_y * frame.components[index].vertical_sampling as usize * comp_block_sizes[index]
+        };
+        let luma_width = component_width(0);
+        let luma_height = component_height(0);
+        let cb_width = component_width(1);
+        let cb_height = component_height(1);
+        let cr_width = component_width(2);
+        let cr_height = component_height(2);
+        if [
+            luma_width,
+            luma_height,
+            cb_width,
+            cb_height,
+            cr_width,
+            cr_height,
+        ]
+        .contains(&0)
+        {
+            return Err(JpegError::CorruptData(format!(
+                "cannot validate {conversion} sampling factors with zero component geometry"
+            )));
+        }
+        let cb_h_factor = luma_width / cb_width;
+        let cb_v_factor = luma_height / cb_height;
+        let cr_h_factor = luma_width / cr_width;
+        let cr_v_factor = luma_height / cr_height;
+        if cb_h_factor == 0 || cb_v_factor == 0 || cr_h_factor == 0 || cr_v_factor == 0 {
+            return Err(JpegError::CorruptData(format!(
+                "chroma upsample factor zero (a chroma component out-samples luma): \
+                 cb={cb_h_factor}x{cb_v_factor} cr={cr_h_factor}x{cr_v_factor}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Whether `jpeg_crop_scanline` would re-initialise libjpeg's upsampler
+    /// for this crop: it does when *any* component's `downsampled_width`
+    /// falls from at least two samples to fewer (`jdapistd.c`), and
+    /// `jinit_upsampler` then re-picks *every* component's method from the
+    /// cropped widths. A component's width is the output width divided,
+    /// rounding up, by its upsampling ratio, as in
+    /// [`Self::upsample_component_window`].
+    fn crop_reinitialises_upsampler(
+        frame: &FrameHeader,
+        mcus_x: usize,
+        comp_block_sizes: &[usize],
+        full_width: usize,
+        out_width: usize,
+        uncropped_out_width: usize,
+    ) -> bool {
+        frame
+            .components
+            .iter()
+            .zip(comp_block_sizes)
+            .any(|(component, &component_block_size)| {
+                let plane_width: usize =
+                    mcus_x * component.horizontal_sampling as usize * component_block_size;
+                if plane_width == 0 || !full_width.is_multiple_of(plane_width) {
+                    return false;
+                }
+                let ratio: usize = full_width / plane_width;
+                ratio != 0
+                    && out_width.div_ceil(ratio) < 2
+                    && uncropped_out_width.div_ceil(ratio) >= 2
+            })
+    }
+
+    /// Produce YCbCr output as libjpeg does for `out_color_space =
+    /// JCS_YCbCr` (issue #683, P4-244).
+    ///
+    /// `jdsample.c::jinit_upsampler` picks each component's upsampling
+    /// method from the component geometry and `do_fancy_upsampling` alone —
+    /// never from the output colour space — so every component is upsampled
+    /// exactly as libjpeg upsamples it for RGB output, by
+    /// [`Self::upsample_component_window`].
+    /// `jdcolor.c` then applies `null_convert`, which interleaves the planes
+    /// unchanged. That null conversion is the only one C permits into
+    /// `JCS_YCbCr`: any other source colour space is
+    /// `JERR_CONVERSION_NOTIMPL`.
+    ///
+    /// The image keeps the three-sample [`PixelFormat::Rgb`] label, as this
+    /// override always has; its samples are Y, Cb, Cr.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn decode_ycbcr_override(
+        &self,
+        component_planes: &[Vec<u8>],
+        frame: &FrameHeader,
+        out_width: usize,
+        out_height: usize,
+        uncropped_out_width: usize,
+        full_width: usize,
+        full_height: usize,
+        mcus_x: usize,
+        mcus_y: usize,
+        block_size: usize,
+        comp_block_sizes: &[usize],
+        crop_x: Option<usize>,
+        icc_profile: Option<Vec<u8>>,
+        exif_data: Option<Vec<u8>>,
+        warnings: Vec<DecodeWarning>,
+    ) -> Result<Image> {
+        let jpeg_color_space: ColorSpace = self.detect_color_space();
+        if jpeg_color_space != ColorSpace::YCbCr || frame.components.len() != 3 {
+            return Err(JpegError::Unsupported(format!(
+                "cannot output YCbCr from a {jpeg_color_space:?} JPEG with {} components (C: JERR_CONVERSION_NOTIMPL)",
+                frame.components.len()
+            )));
+        }
+        if comp_block_sizes.len() < 3 || component_planes.len() < 3 {
+            return Err(JpegError::CorruptData(format!(
+                "YCbCr output needs 3 decoded components, got {} planes and {} geometries",
+                component_planes.len(),
+                comp_block_sizes.len()
+            )));
+        }
+        if !self.lenient {
+            Self::reject_chroma_outsampling_luma(frame, mcus_x, mcus_y, comp_block_sizes, "YCbCr")?;
+        }
+
+        let output_x_offset: usize = crop_x.unwrap_or(0);
+        if output_x_offset.saturating_add(out_width) > full_width || out_height > full_height {
+            return Err(JpegError::CorruptData(format!(
+                "YCbCr output region {output_x_offset}+{out_width}x{out_height} exceeds {full_width}x{full_height}"
+            )));
+        }
+        let window: UpsampleWindow = UpsampleWindow {
+            x: output_x_offset,
+            width: out_width,
+            uncropped_width: uncropped_out_width,
+            reinit_upsampler: Self::crop_reinitialises_upsampler(
+                frame,
+                mcus_x,
+                comp_block_sizes,
+                full_width,
+                out_width,
+                uncropped_out_width,
+            ),
+        };
+        let mut full_planes: Vec<Cow<'_, [u8]>> = Vec::with_capacity(3);
+        let mut strides: Vec<usize> = Vec::with_capacity(3);
+        for (component_index, component_plane) in component_planes.iter().take(3).enumerate() {
+            let (full_plane, stride) = self.upsample_component_window(
+                component_plane,
+                component_index,
+                frame,
+                mcus_x,
+                mcus_y,
+                comp_block_sizes,
+                full_width,
+                full_height,
+                window,
+                out_height,
+                block_size,
+            )?;
+            full_planes.push(full_plane);
+            strides.push(stride);
+        }
+
+        let row_bytes: usize = out_width.checked_mul(3).ok_or_else(|| {
+            JpegError::Unsupported(format!("YCbCr output width {out_width} overflows"))
+        })?;
+        let total_bytes: usize = row_bytes.checked_mul(out_height).ok_or_else(|| {
+            JpegError::Unsupported(format!(
+                "YCbCr output {out_width}x{out_height} overflows usize"
+            ))
+        })?;
+        let mut data: Vec<u8> = try_zeroed_bytes(total_bytes, "YCbCr override output")?;
+        if row_bytes > 0 {
+            for (y, out_row) in data.chunks_exact_mut(row_bytes).enumerate() {
+                // Column 0 of each windowed plane is output column `window.x`.
+                let source_row = |plane: usize| {
+                    let start = y * strides[plane];
+                    &full_planes[plane][start..start + out_width]
+                };
+                let (luma, cb, cr) = (source_row(0), source_row(1), source_row(2));
+                for (pixel, ((&y_sample, &cb_sample), &cr_sample)) in
+                    out_row.chunks_exact_mut(3).zip(luma.iter().zip(cb).zip(cr))
+                {
+                    pixel.copy_from_slice(&[y_sample, cb_sample, cr_sample]);
+                }
+            }
+        }
+
+        Ok(Image {
+            xmp_data: try_clone_opt(&self.metadata.xmp_data, "XMP metadata")?,
+            iptc_data: try_clone_opt(&self.metadata.iptc_data, "IPTC metadata")?,
+            width: out_width,
+            height: out_height,
+            pixel_format: PixelFormat::Rgb,
             precision: 8,
             data,
             icc_profile,

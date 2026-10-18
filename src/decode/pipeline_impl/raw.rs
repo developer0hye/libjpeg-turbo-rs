@@ -21,6 +21,7 @@ impl<'a> Decoder<'a> {
         crate::api::raw_data::RawImage,
         Vec<crate::common::error::DecodeWarning>,
     )> {
+        self.check_marker_warnings(self.stop_on_warning)?;
         self.check_header_limits()?;
         let frame = &self.metadata.frame;
         let width: usize = frame.width as usize;
