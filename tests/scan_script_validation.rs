@@ -612,9 +612,6 @@ fn sequential_and_lossless_shaped_scripts_are_refused() {
 /// Issue #636: where no encode path can follow a script, the builder refuses
 /// it rather than writing a stream that ignores it.
 ///
-/// * Custom per-component sampling factors that map to no standard
-///   subsampling take a baseline-only encoder (P4-236), which has no
-///   progressive scans to script.
 /// * Without `progressive(true)` the builder encodes a sequential stream; it
 ///   does not switch mode on the caller's behalf (in C the script itself
 ///   selects the mode, `jcmaster.c` `validate_script`).
@@ -634,14 +631,6 @@ fn issue_636_scripts_no_path_can_honour_are_refused() {
             jpeg.len()
         ),
     };
-    unsupported(
-        Encoder::new(&pixels, SIDE, SIDE, PixelFormat::Rgb)
-            .sampling_factors(vec![(3, 2), (1, 1), (1, 1)])
-            .progressive(true)
-            .scan_script(script.clone())
-            .encode(),
-        "custom sampling",
-    );
     unsupported(
         Encoder::new(&pixels, SIDE, SIDE, PixelFormat::Rgb)
             .scan_script(script.clone())

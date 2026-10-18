@@ -91,8 +91,16 @@ and `git log` between tags.
     encode with an explicit sampling request no longer has its SOF patched to
     that factor.
   - Factor sets C refuses (more than 10 blocks per MCU) return `CorruptData`.
-  - `smoothing_factor`, `fancy_downsampling`, custom Huffman tables and
-    `scan_script` return `Unsupported` with such factors (P4-237, #673).
+  - Custom progressive scripts, smoothing, RGB-direct, four-factor CMYK,
+    grayscale conversion and installed Huffman tables now compose too
+    (P4-237, #673). The Rust-only `fancy_downsampling` prefilter remains refused.
+    Smoothing follows C's full-size/h2v2-only kernel selection and context-row
+    padding; single-component DC scans traverse their component's block grid.
+    The 10-block MCU limit is checked per scan, allowing larger factors when
+    the script uses only non-interleaved scans.
+  - Stock 3.2.0 ARM NEON mis-selects input rows for h2v2 components with
+    vertical factor > 1; Rust follows scalar C. This byte-parity exception is
+    tracked separately as P4-241 (#679).
 
 - **Breaking (behaviour): `Encoder::scan_script` is honoured on every
   progressive path, and refused where none can follow it** (P4-210, #636).
@@ -101,8 +109,7 @@ and `git log` between tags.
   `Ok`; they now follow and validate the caller's script, byte-identical to
   stock `cjpeg -scans` with `-arithmetic` / `-rgb`, and an invalid one returns
   `JpegError::InvalidScanScript`. A script with `progressive(false)`, with
-  `lossless(true)`, or with `sampling_factors` that map to no standard
-  subsampling now returns `JpegError::Unsupported` instead of being ignored.
+  `lossless(true)` returns `JpegError::Unsupported` instead of being ignored.
   Non-interleaved DC scans on the arithmetic path walk the component's own
   block grid, as the Huffman path does since P4-211.
 

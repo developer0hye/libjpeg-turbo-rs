@@ -164,11 +164,23 @@ fn cjpeg_encode(
     pixels: &[u8],
     sample: &str,
 ) -> Result<Vec<u8>, String> {
+    cjpeg_encode_size(cjpeg, extra_args, grayscale, pixels, sample, WIDTH, HEIGHT)
+}
+
+fn cjpeg_encode_size(
+    cjpeg: &std::path::Path,
+    extra_args: &[&str],
+    grayscale: bool,
+    pixels: &[u8],
+    sample: &str,
+    width: usize,
+    height: usize,
+) -> Result<Vec<u8>, String> {
     let input = helpers::TempFile::new(if grayscale { "cs.pgm" } else { "cs.ppm" });
     if grayscale {
-        helpers::write_pgm_file(input.path(), WIDTH, HEIGHT, pixels);
+        helpers::write_pgm_file(input.path(), width, height, pixels);
     } else {
-        helpers::write_ppm_file(input.path(), WIDTH, HEIGHT, pixels);
+        helpers::write_ppm_file(input.path(), width, height, pixels);
     }
     let output_jpeg = helpers::TempFile::new("cs.jpg");
     let output: std::process::Output = Command::new(cjpeg)
@@ -344,42 +356,15 @@ fn issue_664_factor_sets_c_refuses_are_refused() {
     }
 }
 
-/// Issue #664: options with no C counterpart on this path, or that C applies
-/// only partly here, are refused rather than dropped.
-///
-/// * `smoothing_factor`: C smooths only full-size components and h2v2 ones
-///   and traces `JTRC_SMOOTH_NOTIMPL` for the rest (`jcsample.c`).
-/// * `fancy_downsampling`: a Rust-only prefilter keyed on `subsampling()`,
-///   which these factors bypass.
-/// * custom Huffman tables: not carried by this encoder.
+/// The Rust-only fancy prefilter has no arbitrary-factor implementation.
 #[test]
-fn issue_664_options_this_path_cannot_carry_are_refused() {
-    let pixels: Vec<u8> = textured_rgb(WIDTH, HEIGHT);
-    let base = || {
-        Encoder::new(&pixels, WIDTH, HEIGHT, PixelFormat::Rgb).sampling_factors(vec![
-            (3, 2),
-            (1, 1),
-            (1, 1),
-        ])
-    };
-    let table = libjpeg_turbo_rs::HuffmanTableDef {
-        bits: [0, 0, 1, 5, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0],
-        values: (0..12).collect(),
-    };
-    for (label, encoder) in [
-        ("smoothing", base().smoothing_factor(10)),
-        ("fancy downsampling", base().fancy_downsampling(true)),
-        ("custom Huffman table", base().huffman_dc_table(0, table)),
-    ] {
-        match encoder.encode() {
-            Err(JpegError::Unsupported(message)) => assert!(
-                message.contains("sampling_factors"),
-                "{label}: message does not name sampling_factors: {message}"
-            ),
-            Err(other) => panic!("{label}: expected Unsupported, got {other:?}"),
-            Ok(jpeg) => panic!("{label}: expected Unsupported, got {} bytes", jpeg.len()),
-        }
-    }
+fn issue_664_fancy_downsampling_is_explicitly_refused() {
+    let pixels = textured_rgb(WIDTH, HEIGHT);
+    assert!(
+        matches!(Encoder::new(&pixels, WIDTH, HEIGHT, PixelFormat::Rgb)
+        .sampling_factors(vec![(3,2),(1,1),(1,1)]).fancy_downsampling(true).encode(),
+        Err(JpegError::Unsupported(message)) if message.contains("fancy_downsampling"))
+    );
 }
 
 /// Issue #664: the same lossless rule for a single-component frame. A
@@ -438,4 +423,488 @@ fn issue_664_rgb_direct_lossless_ignores_sampling_as_c_does() {
         .encode()
         .unwrap_or_else(|error| panic!("Rust refused: {error}"));
     assert_same_stream("RGB-direct lossless 3x2", &jpeg, &c_jpeg);
+}
+
+/// Issue #673: color conversion and smoothing compose with every entropy mode.
+#[test]
+fn issue_673_rgb_gray_and_smoothing_match_cjpeg() {
+    let cjpeg = require_c_tool!("cjpeg");
+    let pixels = textured_rgb(WIDTH, HEIGHT);
+    for &(sample, factors) in COLOR_FACTORS {
+        for &mode in MODES {
+            for kind in ["rgb", "gray", "smooth"] {
+                let mut args = mode.cjpeg_args.to_vec();
+                let mut enc = (mode.apply)(
+                    Encoder::new(&pixels, WIDTH, HEIGHT, PixelFormat::Rgb)
+                        .quality(75)
+                        .sampling_factors(factors.to_vec()),
+                );
+                match kind {
+                    "rgb" => {
+                        args.push("-rgb");
+                        enc = enc.colorspace(libjpeg_turbo_rs::ColorSpace::Rgb);
+                    }
+                    "gray" => {
+                        args.push("-grayscale");
+                        enc = enc.grayscale_from_color(true);
+                    }
+                    _ => {
+                        args.extend(["-smooth", "10"]);
+                        enc = enc.smoothing_factor(10);
+                    }
+                }
+                let label = format!("{sample} / {} / {kind}", mode.label);
+                let c = cjpeg_encode(&cjpeg, &args, false, &pixels, sample).expect(&label);
+                let rust = enc.encode().expect(&label);
+                assert_same_stream(&label, &rust, &c);
+            }
+        }
+    }
+}
+
+fn component_script(n: u8) -> Vec<libjpeg_turbo_rs::ScanScript> {
+    use libjpeg_turbo_rs::ScanScript;
+    let mut script = Vec::new();
+    // Separate DC first/refinement scans expose component versus frame MCU grids.
+    // Reverse scan order also checks table emission follows the scan, not the frame.
+    for ci in (0..n).rev() {
+        script.push(ScanScript {
+            components: vec![ci],
+            ss: 0,
+            se: 0,
+            ah: 0,
+            al: 1,
+        });
+    }
+    for ci in (0..n).rev() {
+        script.push(ScanScript {
+            components: vec![ci],
+            ss: 1,
+            se: 63,
+            ah: 0,
+            al: 0,
+        });
+        script.push(ScanScript {
+            components: vec![ci],
+            ss: 0,
+            se: 0,
+            ah: 1,
+            al: 0,
+        });
+    }
+    script
+}
+
+/// Issue #673: scripted DC scans must traverse each component's real block grid.
+#[test]
+fn issue_673_component_scans_match_cjpeg() {
+    let cjpeg = require_c_tool!("cjpeg");
+    let pixels = textured_rgb(WIDTH, HEIGHT);
+    let script = component_script(3);
+    let file = helpers::TempFile::new("custom-scans.txt");
+    let text: String = script
+        .iter()
+        .map(|s| {
+            format!(
+                "{}: {} {} {} {};\n",
+                s.components[0], s.ss, s.se, s.ah, s.al
+            )
+        })
+        .collect();
+    std::fs::write(file.path(), text).unwrap();
+    for &(sample, factors) in COLOR_FACTORS {
+        for arithmetic in [false, true] {
+            for rgb in [false, true] {
+                for restart in ["0", "1", "1B"] {
+                    let mut args =
+                        vec!["-scans", file.path().to_str().unwrap(), "-restart", restart];
+                    let mut enc = Encoder::new(&pixels, WIDTH, HEIGHT, PixelFormat::Rgb)
+                        .quality(75)
+                        .sampling_factors(factors.to_vec())
+                        .progressive(true)
+                        .arithmetic(arithmetic)
+                        .scan_script(script.clone());
+                    if arithmetic {
+                        args.push("-arithmetic");
+                    }
+                    if rgb {
+                        args.push("-rgb");
+                        enc = enc.colorspace(libjpeg_turbo_rs::ColorSpace::Rgb);
+                    }
+                    enc = match restart {
+                        "1" => enc.restart_rows(1),
+                        "1B" => enc.restart_blocks(1),
+                        _ => enc,
+                    };
+                    let label =
+                        format!("{sample} arithmetic={arithmetic} rgb={rgb} restart={restart}");
+                    let c = cjpeg_encode(&cjpeg, &args, false, &pixels, sample).expect(&label);
+                    let rust = enc.encode().expect(&label);
+                    assert_same_stream(&label, &rust, &c);
+                }
+            }
+        }
+    }
+}
+
+fn installed_tables(mut enc: Encoder<'_>, cmyk: bool) -> Encoder<'_> {
+    use libjpeg_turbo_rs::{encode::tables::*, HuffmanTableDef};
+    for i in 0..if cmyk { 1 } else { 2 } {
+        let (db, dv, ab, av) = if i == 0 {
+            (
+                DC_LUMINANCE_BITS,
+                DC_LUMINANCE_VALUES.to_vec(),
+                AC_LUMINANCE_BITS,
+                AC_LUMINANCE_VALUES.to_vec(),
+            )
+        } else {
+            (
+                DC_CHROMINANCE_BITS,
+                DC_CHROMINANCE_VALUES.to_vec(),
+                AC_CHROMINANCE_BITS,
+                AC_CHROMINANCE_VALUES.to_vec(),
+            )
+        };
+        let mut dc = HuffmanTableDef {
+            bits: db,
+            values: dv,
+        };
+        let mut ac = HuffmanTableDef {
+            bits: ab,
+            values: av,
+        };
+        dc.values.swap(0, 1);
+        ac.values.swap(0, 1);
+        enc = enc.huffman_dc_table(i, dc).huffman_ac_table(i, ac);
+    }
+    enc
+}
+
+/// Issue #673: four independently sampled CMYK planes and nondefault Huffman
+/// tables, including modes where C regenerates or does not use those tables.
+#[test]
+fn issue_673_cmyk_and_installed_tables_match_stock_api() {
+    let Some(oracle) = helpers::c_oracle::custom_sampling_c_oracle() else {
+        assert!(
+            !helpers::is_ci(),
+            "CI requires a libjpeg development install for the sampling oracle"
+        );
+        eprintln!("SKIP: libjpeg development install not found");
+        return;
+    };
+    for cmyk in [false, true] {
+        let factors = if cmyk {
+            vec![(1, 1), (1, 1), (1, 1), (3, 2)]
+        } else {
+            vec![(3, 2), (1, 1), (1, 1)]
+        };
+        let sample = if cmyk {
+            "1x1,1x1,1x1,3x2"
+        } else {
+            "3x2,1x1,1x1"
+        };
+        let format = if cmyk {
+            PixelFormat::Cmyk
+        } else {
+            PixelFormat::Rgb
+        };
+        let pixels: Vec<u8> = (0..WIDTH * HEIGHT * format.bytes_per_pixel())
+            .map(|i| ((i * 37 + i / 7) % 256) as u8)
+            .collect();
+        for arithmetic in [false, true] {
+            for progressive in [false, true] {
+                for script in [false, true] {
+                    if script && !progressive {
+                        continue;
+                    }
+                    for custom in [false, true] {
+                        for smooth in [0, 10] {
+                            for restart in [0, 1, 2] {
+                                for (quality, optimize) in [(75, false), (75, true), (10, true)] {
+                                    let mut enc = Encoder::new(&pixels, WIDTH, HEIGHT, format)
+                                        .quality(quality)
+                                        .optimize_huffman(optimize)
+                                        .sampling_factors(factors.clone())
+                                        .arithmetic(arithmetic)
+                                        .progressive(progressive)
+                                        .smoothing_factor(smooth);
+                                    if custom {
+                                        enc = installed_tables(enc, cmyk);
+                                    }
+                                    if script {
+                                        enc = enc.scan_script(component_script(if cmyk {
+                                            4
+                                        } else {
+                                            3
+                                        }));
+                                    }
+                                    if restart == 1 {
+                                        enc = enc.restart_blocks(1);
+                                    }
+                                    if restart == 2 {
+                                        enc = enc.restart_rows(1);
+                                    }
+                                    let args: Vec<String> = vec![
+                                        WIDTH.to_string(),
+                                        HEIGHT.to_string(),
+                                        u8::from(cmyk).to_string(),
+                                        sample.into(),
+                                        quality.to_string(),
+                                        u8::from(progressive).to_string(),
+                                        u8::from(arithmetic).to_string(),
+                                        smooth.to_string(),
+                                        u8::from(restart == 1).to_string(),
+                                        u8::from(restart == 2).to_string(),
+                                        u8::from(custom).to_string(),
+                                        u8::from(script).to_string(),
+                                        u8::from(optimize).to_string(),
+                                    ];
+                                    let c = helpers::c_oracle::encode_with_cmyk_c_oracle(
+                                        &oracle, &pixels, &args,
+                                    );
+                                    let label = format!("cmyk={cmyk} arithmetic={arithmetic} progressive={progressive} script={script} custom={custom} smooth={smooth} restart={restart} quality={quality} optimize={optimize}");
+                                    let rust = enc.encode().expect(&label);
+                                    assert_same_stream(&label, &rust, &c);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Issue #673: tiny/odd dimensions and factors whose maximum horizontal and
+/// vertical sampling live on different components stress padding/context rows.
+#[test]
+fn issue_673_smoothing_edges_match_cjpeg() {
+    let cjpeg = require_c_tool!("cjpeg");
+    for (width, height) in [(1, 1), (7, 9), (25, 17), (74, 45)] {
+        let pixels = textured_rgb(width, height);
+        for (sample, factors) in COLOR_FACTORS.iter().copied().chain([
+            ("4x1,1x4,1x1", [(4, 1), (1, 4), (1, 1)]),
+            ("2x1,1x2,1x1", [(2, 1), (1, 2), (1, 1)]),
+        ]) {
+            for smooth in [1, 50, 100] {
+                let c = cjpeg_encode_size(
+                    &cjpeg,
+                    &[
+                        "-smooth",
+                        &smooth.to_string(),
+                        "-progressive",
+                        "-restart",
+                        "1",
+                    ],
+                    false,
+                    &pixels,
+                    sample,
+                    width,
+                    height,
+                )
+                .unwrap();
+                let rust = Encoder::new(&pixels, width, height, PixelFormat::Rgb)
+                    .quality(75)
+                    .sampling_factors(factors.to_vec())
+                    .smoothing_factor(smooth)
+                    .progressive(true)
+                    .restart_rows(1)
+                    .encode()
+                    .unwrap();
+                assert_same_stream(
+                    &format!("{width}x{height} {sample} smooth={smooth}"),
+                    &rust,
+                    &c,
+                );
+            }
+        }
+    }
+}
+
+/// Issue #673: C's 10-block limit applies to each interleaved scan, not to
+/// the whole frame when every scan contains just one component.
+#[test]
+fn issue_673_large_factors_with_separate_scans_match_cjpeg() {
+    let cjpeg = require_c_tool!("cjpeg");
+    let pixels = textured_rgb(WIDTH, HEIGHT);
+    let script = component_script(3);
+    let file = helpers::TempFile::new("large-sampling-scans.txt");
+    std::fs::write(
+        file.path(),
+        script
+            .iter()
+            .map(|s| {
+                format!(
+                    "{}: {} {} {} {};\n",
+                    s.components[0], s.ss, s.se, s.ah, s.al
+                )
+            })
+            .collect::<String>(),
+    )
+    .unwrap();
+    for arithmetic in [false, true] {
+        let mut args = vec!["-scans", file.path().to_str().unwrap(), "-restart", "1"];
+        if arithmetic {
+            args.push("-arithmetic");
+        }
+        let c = cjpeg_encode(&cjpeg, &args, false, &pixels, "4x4,1x1,1x1").unwrap();
+        let rust = Encoder::new(&pixels, WIDTH, HEIGHT, PixelFormat::Rgb)
+            .quality(75)
+            .sampling_factors(vec![(4, 4), (1, 1), (1, 1)])
+            .progressive(true)
+            .arithmetic(arithmetic)
+            .restart_rows(1)
+            .scan_script(script.clone())
+            .encode()
+            .unwrap();
+        assert_same_stream("4x4 separate scans", &rust, &c);
+    }
+}
+
+/// Issue #673: mixed interleaved/non-interleaved scripts. Stock 3.2.0 ARM
+/// NEON's h2v2 downsampler uses outrow instead of 2*outrow when v > 1;
+/// explicitly use scalar stock C for this upstream-divergent factor set.
+#[test]
+fn issue_673_mixed_scans_match_scalar_cjpeg() {
+    use libjpeg_turbo_rs::ScanScript;
+    let cjpeg = require_c_tool!("cjpeg");
+    let pixels = textured_rgb(51, 29);
+    let input = helpers::TempFile::new("mixed-scans.ppm");
+    helpers::write_ppm_file(input.path(), 51, 29, &pixels);
+    let file = helpers::TempFile::new("mixed-scans.txt");
+    std::fs::write(file.path(), "0 2: 0 0 0 1;\n1: 0 0 0 1;\n2: 1 63 0 0;\n0: 1 63 0 0;\n1: 1 63 0 0;\n0 1: 0 0 1 0;\n2: 0 0 1 0;\n").unwrap();
+    let script: Vec<ScanScript> = [
+        (vec![0, 2], 0, 0, 0, 1),
+        (vec![1], 0, 0, 0, 1),
+        (vec![2], 1, 63, 0, 0),
+        (vec![0], 1, 63, 0, 0),
+        (vec![1], 1, 63, 0, 0),
+        (vec![0, 1], 0, 0, 1, 0),
+        (vec![2], 0, 0, 1, 0),
+    ]
+    .into_iter()
+    .map(|(components, ss, se, ah, al)| ScanScript {
+        components,
+        ss,
+        se,
+        ah,
+        al,
+    })
+    .collect();
+    for arithmetic in [false, true] {
+        let output = helpers::TempFile::new("mixed-scans.jpg");
+        let mut cmd = Command::new(&cjpeg);
+        cmd.env("JSIMD_FORCENONE", "1")
+            .args([
+                "-quality",
+                "75",
+                "-sample",
+                "2x2,1x4,4x1",
+                "-restart",
+                "1",
+                "-scans",
+            ])
+            .arg(file.path());
+        if arithmetic {
+            cmd.arg("-arithmetic");
+        }
+        let result = cmd
+            .arg("-outfile")
+            .arg(output.path())
+            .arg(input.path())
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let rust = Encoder::new(&pixels, 51, 29, PixelFormat::Rgb)
+            .quality(75)
+            .sampling_factors(vec![(2, 2), (1, 4), (4, 1)])
+            .progressive(true)
+            .arithmetic(arithmetic)
+            .restart_rows(1)
+            .scan_script(script.clone())
+            .encode()
+            .unwrap();
+        assert_same_stream(
+            "mixed scans / scalar C",
+            &rust,
+            &std::fs::read(output.path()).unwrap(),
+        );
+    }
+}
+
+/// Issue #673 review: RGB override must not reinterpret a grayscale or CMYK
+/// input as three packed channels. Preserve the builder's format guard.
+#[test]
+fn issue_673_rgb_override_respects_effective_input_format() {
+    let cjpeg = require_c_tool!("cjpeg");
+    let pixels = textured_rgb(WIDTH, HEIGHT);
+    let c = cjpeg_encode(&cjpeg, &["-grayscale"], false, &pixels, "3x2,1x1,1x1").unwrap();
+    let rust = Encoder::new(&pixels, WIDTH, HEIGHT, PixelFormat::Rgb)
+        .colorspace(libjpeg_turbo_rs::ColorSpace::Rgb)
+        .grayscale_from_color(true)
+        .sampling_factors(vec![(3, 2), (1, 1), (1, 1)])
+        .encode()
+        .unwrap();
+    assert_same_stream("grayscale overrides RGB-direct", &rust, &c);
+    let Some(oracle) = helpers::c_oracle::custom_sampling_c_oracle() else {
+        assert!(
+            !helpers::is_ci(),
+            "CI requires a libjpeg development install for the sampling oracle"
+        );
+        eprintln!("SKIP: libjpeg development install not found");
+        return;
+    };
+    let pixels: Vec<u8> = (0..WIDTH * HEIGHT * 4).map(|i| (i % 256) as u8).collect();
+    let args: Vec<String> = [
+        WIDTH.to_string(),
+        HEIGHT.to_string(),
+        "1".into(),
+        "1x1,1x1,1x1,3x2".into(),
+        "75".into(),
+        "0".into(),
+        "0".into(),
+        "0".into(),
+        "0".into(),
+        "0".into(),
+        "0".into(),
+        "0".into(),
+        "0".into(),
+    ]
+    .into();
+    let c = helpers::c_oracle::encode_with_cmyk_c_oracle(&oracle, &pixels, &args);
+    let rust = Encoder::new(&pixels, WIDTH, HEIGHT, PixelFormat::Cmyk)
+        .colorspace(libjpeg_turbo_rs::ColorSpace::Rgb)
+        .sampling_factors(vec![(1, 1), (1, 1), (1, 1), (3, 2)])
+        .encode()
+        .unwrap();
+    assert_same_stream("CMYK retains four components", &rust, &c);
+}
+
+/// Issue #673 review: the coefficient path must preserve RGB ICC metadata,
+/// which the older pixel-domain RGB writers used to insert themselves.
+#[test]
+fn issue_673_rgb_direct_icc_matches_cjpeg() {
+    let cjpeg = require_c_tool!("cjpeg");
+    let pixels = textured_rgb(WIDTH, HEIGHT);
+    let profile = b"issue-673 ICC profile bytes";
+    let file = helpers::TempFile::new("custom-sampling.icc");
+    std::fs::write(file.path(), profile).unwrap();
+    for &mode in MODES {
+        let mut args = mode.cjpeg_args.to_vec();
+        args.extend(["-rgb", "-icc", file.path().to_str().unwrap()]);
+        let c = cjpeg_encode(&cjpeg, &args, false, &pixels, "3x2,1x1,1x1").unwrap();
+        let rust = (mode.apply)(
+            Encoder::new(&pixels, WIDTH, HEIGHT, PixelFormat::Rgb)
+                .colorspace(libjpeg_turbo_rs::ColorSpace::Rgb)
+                .sampling_factors(vec![(3, 2), (1, 1), (1, 1)])
+                .icc_profile(profile),
+        )
+        .encode()
+        .unwrap();
+        assert_same_stream(mode.label, &rust, &c);
+    }
 }

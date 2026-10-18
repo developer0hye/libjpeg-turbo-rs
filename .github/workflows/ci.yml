@@ -4,7 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    # Also validate the #673 follow-up while it is stacked on #677.
+    branches: [main, fix/p4-236-nonstandard-sampling-modes]
 
 env:
   CARGO_TERM_COLOR: always

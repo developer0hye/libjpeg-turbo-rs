@@ -186,10 +186,8 @@ impl<'a> Encoder<'a> {
     /// ignoring the script when no path can follow it: without
     /// [`progressive`](Self::progressive) (in C the script itself selects
     /// progressive mode; this builder does not switch modes for you), with
-    /// [`lossless`](Self::lossless), or with
-    /// [`sampling_factors`](Self::sampling_factors) that map to no standard
-    /// subsampling, whose coefficient writers take only C's default
-    /// progression (P4-237, #673).
+    /// [`lossless`](Self::lossless). Explicit sampling factors are supported
+    /// by the coefficient writers (P4-237, #673).
     pub fn scan_script(mut self, script: Vec<ScanScript>) -> Self {
         self.scan_script = Some(script);
         self
@@ -395,13 +393,17 @@ impl<'a> Encoder<'a> {
     /// Factors that map to no standard [`Subsampling`] compose with
     /// [`progressive`](Self::progressive), [`arithmetic`](Self::arithmetic),
     /// [`optimize_huffman`](Self::optimize_huffman), restart intervals, the
-    /// DCT method and quantisation tables, byte-identical to `cjpeg -sample`.
+    /// DCT method and quantisation tables, matching `cjpeg -sample`.
+    /// Stock 3.2.0 ARM NEON mis-selects input rows for h2v2 components with
+    /// vertical factor > 1; those factors match scalar C instead (P4-241).
     /// [`lossless`](Self::lossless) ignores them and codes every component at
-    /// 1x1, as C does. `encode` returns [`JpegError::Unsupported`] for
-    /// [`scan_script`](Self::scan_script),
-    /// [`smoothing_factor`](Self::smoothing_factor),
-    /// [`fancy_downsampling`](Self::fancy_downsampling), custom Huffman tables
-    /// and RGB-direct output with such factors (P4-237, #673).
+    /// 1x1, as C does. Custom progressive scripts, RGB-direct, four-component
+    /// CMYK, custom Huffman tables and smoothing also compose (P4-237, #673).
+    /// Smoothing affects full-size and h2v2 components, as in C; other ratios
+    /// remain unsmoothed. Grayscale output accepts one factor or uses the
+    /// first of three supplied factors. The Rust-only
+    /// [`fancy_downsampling`](Self::fancy_downsampling) prefilter remains
+    /// unsupported on this coefficient path.
     pub fn sampling_factors(mut self, factors: Vec<(u8, u8)>) -> Self {
         self.custom_sampling_factors = Some(factors);
         self.has_explicit_subsampling = true;
@@ -935,12 +937,13 @@ impl<'a> Encoder<'a> {
             || self.has_custom_quant_tables()
             || scaled_quant_could_exceed_255;
 
-        // Smoothing needs the full-plane buffering that only the baseline
-        // optimized path provides; the progressive, arithmetic and lossless
-        // paths downsample per block from unpadded planes and have no
-        // equivalent. Rather than accept the option and drop it — which is
-        // what used to happen, and is the whole subject of #322 — say so.
-        if self.smoothing_factor > 0 && (self.progressive || self.arithmetic || self.lossless) {
+        // The explicit-factor front end supports smoothing before every
+        // entropy mode (and C disables it in lossless mode). The older
+        // pixel-domain progressive/arithmetic paths still cannot carry it.
+        if self.smoothing_factor > 0
+            && self.custom_sampling_factors.is_none()
+            && (self.progressive || self.arithmetic || self.lossless)
+        {
             return Err(crate::common::error::JpegError::Unsupported(
                 "smoothing_factor is not supported with progressive, arithmetic \
                  or lossless encoding; it requires the full-plane path used by \
@@ -982,8 +985,10 @@ impl<'a> Encoder<'a> {
                     _ => return None,
                 })
             });
-        let use_custom_sampling: bool =
-            self.custom_sampling_factors.is_some() && mapped_subsampling.is_none();
+        let use_custom_sampling: bool = self.custom_sampling_factors.is_some()
+            && (mapped_subsampling.is_none()
+                || effective_format == PixelFormat::Grayscale
+                || self.smoothing_factor > 0);
         let effective_subsampling: Subsampling = if self.colorspace_override
             == Some(ColorSpace::Rgb)
             && effective_format == PixelFormat::Rgb
@@ -1018,14 +1023,6 @@ impl<'a> Encoder<'a> {
             _ => 0,
         };
 
-        // Lossless resets the factors to 1x1 (below), so this does not apply.
-        if rgb_direct && use_custom_sampling && !self.lossless {
-            return Err(JpegError::Unsupported(
-                "direct-RGB encoding requires sampling factors [(H,V),(1,1),(1,1)] with a supported H/V pair"
-                    .to_string(),
-            ));
-        }
-
         // Every progressive path below follows a caller's script (P4-210,
         // #636). Where no path can, refuse rather than encode a stream that
         // silently ignores it.
@@ -1044,39 +1041,15 @@ impl<'a> Encoder<'a> {
                     "scan_script requires progressive(true)".to_string(),
                 ));
             }
-            if use_custom_sampling {
-                // The coefficient writers that code these factors take only
-                // C's default progression.
-                return Err(JpegError::Unsupported(
-                    "scan_script is not supported with sampling factors that map to no standard subsampling"
-                        .to_string(),
-                ));
-            }
         }
 
-        // Non-standard factors are coded from coefficients by the transcode
-        // writers (P4-236, #664), which carry every mode switch but not these
-        // three; refuse them rather than drop them. Lossless ignores the
-        // factors entirely, as C does, so none of this applies to it.
-        if use_custom_sampling && !self.lossless {
-            let unsupported: Option<&str> = if self.smoothing_factor > 0 {
-                // C smooths only the full-size and h2v2 components here and
-                // traces JTRC_SMOOTH_NOTIMPL for the rest (`jcsample.c`).
-                Some("smoothing_factor")
-            } else if self.fancy_downsampling {
-                // A Rust-only prefilter keyed on `subsampling()`, which these
-                // factors bypass.
-                Some("fancy_downsampling")
-            } else if self.has_custom_huffman_tables() {
-                Some("custom Huffman tables")
-            } else {
-                None
-            };
-            if let Some(option) = unsupported {
-                return Err(JpegError::Unsupported(format!(
-                    "{option} is not supported with sampling_factors that map to no standard subsampling"
-                )));
-            }
+        // This Rust-only prefilter is keyed on Subsampling rather than
+        // per-component factors. Refuse it instead of silently applying a
+        // different filter. Lossless ignores sampling options, as C does.
+        if use_custom_sampling && !self.lossless && self.fancy_downsampling {
+            return Err(JpegError::Unsupported(
+                "fancy_downsampling is not supported with custom sampling_factors".to_string(),
+            ));
         }
 
         // One params value carrying every baseline option, instead of an if/else
@@ -1109,7 +1082,14 @@ impl<'a> Encoder<'a> {
             params
         };
 
-        let base = if rgb_direct && self.arithmetic && self.progressive && !self.lossless {
+        let base = if use_custom_sampling && !self.lossless {
+            self.encode_custom_sampling(
+                effective_pixels,
+                effective_format,
+                quality,
+                progressive_quant_tables.as_ref(),
+            )?
+        } else if rgb_direct && self.arithmetic && self.progressive && !self.lossless {
             // JCS_RGB arithmetic progressive (#345).
             encoder::compress_arithmetic_progressive_rgb_direct_scripted(
                 &baseline_params,
@@ -1139,13 +1119,6 @@ impl<'a> Encoder<'a> {
             // Adobe APP14, 'R','G','B' component IDs — so routing it here
             // would have replaced a lossless stream with a baseline one.
             encoder::compress_rgb_direct_with_params(&baseline_params, self.icc_profile)?
-        } else if use_custom_sampling && !self.lossless {
-            self.encode_custom_sampling(
-                effective_pixels,
-                effective_format,
-                quality,
-                progressive_quant_tables.as_ref(),
-            )?
         } else if self.lossless && self.arithmetic {
             encoder::compress_lossless_arithmetic(
                 effective_pixels,
@@ -1244,10 +1217,13 @@ impl<'a> Encoder<'a> {
                 base
             };
 
-        // RGB-direct writes the ICC profile itself, right after the Adobe
-        // marker, to keep cjpeg's marker order; injecting it again here would
-        // emit two copies.
-        let icc_to_inject: Option<&[u8]> = if rgb_direct { None } else { self.icc_profile };
+        // Pixel-domain RGB writers already emit ICC after Adobe. The custom
+        // coefficient route relies on this shared metadata injection instead.
+        let icc_to_inject: Option<&[u8]> = if rgb_direct && !use_custom_sampling {
+            None
+        } else {
+            self.icc_profile
+        };
         let with_meta = if icc_to_inject.is_some()
             || self.exif_data.is_some()
             || self.xmp_data.is_some()
@@ -1331,10 +1307,16 @@ impl<'a> Encoder<'a> {
     ) -> Result<Vec<u8>> {
         use crate::api::coefficient::{
             write_coefficients_arithmetic, write_coefficients_optimized,
-            write_coefficients_progressive, write_coefficients_progressive_arithmetic,
+            write_coefficients_progressive_arithmetic_scripted,
+            write_coefficients_progressive_scripted,
         };
 
         let factors: &[(u8, u8)] = self.custom_sampling_factors.as_deref().unwrap_or(&[]);
+        let factors = if pixel_format == PixelFormat::Grayscale && factors.len() == 3 {
+            &factors[..1]
+        } else {
+            factors
+        };
         let frame: encoder::CustomSamplingFrame = encoder::CustomSamplingFrame::new(
             pixels,
             self.width,
@@ -1344,6 +1326,9 @@ impl<'a> Encoder<'a> {
             quality,
             custom_quant,
             self.dct_method,
+            self.colorspace_override == Some(ColorSpace::Rgb) && pixel_format == PixelFormat::Rgb,
+            self.smoothing_factor,
+            self.scan_script.as_deref(),
         )?;
 
         // `restart_in_rows` counts MCU rows of the scan being coded: the
@@ -1372,14 +1357,26 @@ impl<'a> Encoder<'a> {
         // C turns `optimize_coding` off under arithmetic coding and on for
         // progressive Huffman (`jcmaster.c`), which these writers do too.
         if !self.progressive && !self.arithmetic && !self.optimize_huffman {
-            return frame.write_sequential(restart_interval);
+            return frame.write_sequential(
+                restart_interval,
+                Some(&self.custom_huffman_dc),
+                Some(&self.custom_huffman_ac),
+            );
         }
         let mut coefficients = frame.into_coefficients();
         coefficients.restart_interval = restart_interval;
         if self.progressive && self.arithmetic {
-            write_coefficients_progressive_arithmetic(&coefficients, restart_rows)
+            write_coefficients_progressive_arithmetic_scripted(
+                &coefficients,
+                restart_rows,
+                self.scan_script.as_deref(),
+            )
         } else if self.progressive {
-            write_coefficients_progressive(&coefficients, restart_rows)
+            write_coefficients_progressive_scripted(
+                &coefficients,
+                restart_rows,
+                self.scan_script.as_deref(),
+            )
         } else if self.arithmetic {
             write_coefficients_arithmetic(&coefficients)
         } else {

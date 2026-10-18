@@ -66,7 +66,7 @@
 - [x] TJSAMP_410 (4:1:0; H=4,V=2)
 - [x] TJSAMP_24 (2:4; H=2,V=4)
 - [x] TJSAMP_UNKNOWN (unusual/custom subsampling detection) (`Subsampling::Unknown`)
-- [x] Arbitrary `cjpeg -sample` factors (`Encoder::sampling_factors`) with progressive, arithmetic, restart, optimized Huffman, DCT method and quantisation tables, byte-identical to `cjpeg` (P4-236, #664); `scan_script`, smoothing, RGB-direct, CMYK and `grayscale_from_color` are still refused ([P4-237](last_mile/phase4.md#p4-237-encoder-refuses-scan_script-smoothing-rgb-direct-cmyk-and-grayscale_from_color-with-non-standard-sampling_factors-that-cjpeg--sample-accepts--open), #673)
+- [x] Arbitrary `cjpeg -sample` factors (`Encoder::sampling_factors`) with progressive, arithmetic, restart, optimized Huffman, DCT method and quantisation tables, byte-identical to `cjpeg` (P4-236, #664); custom progressive scripts, smoothing, RGB-direct, four-factor CMYK, grayscale conversion and installed Huffman tables are supported (P4-237, #673); the Rust-only fancy prefilter remains refused; the upstream ARM NEON byte-parity exception is P4-241 (#679)
 
 ---
 

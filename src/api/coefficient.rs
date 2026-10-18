@@ -109,8 +109,9 @@ fn has_rgb_component_ids(coeffs: &JpegCoefficients) -> bool {
             .eq(*b"RGB")
 }
 
-fn uses_single_rgb_coding_table(coeffs: &JpegCoefficients) -> bool {
-    has_rgb_component_ids(coeffs)
+fn uses_single_color_coding_table(coeffs: &JpegCoefficients) -> bool {
+    (has_rgb_component_ids(coeffs)
+        || (coeffs.components.len() == 4 && coeffs.adobe_transform == Some(0)))
         && coeffs
             .components
             .iter()
@@ -118,7 +119,7 @@ fn uses_single_rgb_coding_table(coeffs: &JpegCoefficients) -> bool {
 }
 
 fn coding_table_for_component(coeffs: &JpegCoefficients, component_index: usize) -> usize {
-    if component_index == 0 || uses_single_rgb_coding_table(coeffs) {
+    if component_index == 0 || uses_single_color_coding_table(coeffs) {
         0
     } else {
         1
@@ -443,9 +444,19 @@ pub(crate) fn write_coefficients_from<S: CoefficientBlockSource>(
     coeffs: &JpegCoefficients,
     source: &mut S,
 ) -> Result<Vec<u8>> {
+    write_coefficients_from_custom(coeffs, source, None, None)
+}
+
+/// Sequential encoder variant carrying caller-installed Huffman tables.
+pub(crate) fn write_coefficients_from_custom<S: CoefficientBlockSource>(
+    coeffs: &JpegCoefficients,
+    source: &mut S,
+    custom_dc: Option<&[Option<crate::HuffmanTableDef>; 4]>,
+    custom_ac: Option<&[Option<crate::HuffmanTableDef>; 4]>,
+) -> Result<Vec<u8>> {
     let num_components = coeffs.components.len();
     let is_grayscale = num_components == 1;
-    let uses_secondary_table: bool = !is_grayscale && !uses_single_rgb_coding_table(coeffs);
+    let uses_secondary_table: bool = !is_grayscale && !uses_single_color_coding_table(coeffs);
 
     // Standard ITU-T T.81 Annex K Huffman tables only define DC
     // categories 0..=11; for `data_precision > 8` the source can produce
@@ -464,13 +475,28 @@ pub(crate) fn write_coefficients_from<S: CoefficientBlockSource>(
         )));
     }
 
-    // Build Huffman tables
-    let dc_luma_table = build_huff_table(&tables::DC_LUMINANCE_BITS, &tables::DC_LUMINANCE_VALUES);
-    let ac_luma_table = build_huff_table(&tables::AC_LUMINANCE_BITS, &tables::AC_LUMINANCE_VALUES);
-    let dc_chroma_table =
-        build_huff_table(&tables::DC_CHROMINANCE_BITS, &tables::DC_CHROMINANCE_VALUES);
-    let ac_chroma_table =
-        build_huff_table(&tables::AC_CHROMINANCE_BITS, &tables::AC_CHROMINANCE_VALUES);
+    let dc = |i: usize| -> (&[u8; 17], &[u8]) {
+        if let Some(table) = custom_dc.and_then(|tables| tables[i].as_ref()) {
+            (&table.bits, &table.values)
+        } else if i == 0 {
+            (&tables::DC_LUMINANCE_BITS, &tables::DC_LUMINANCE_VALUES)
+        } else {
+            (&tables::DC_CHROMINANCE_BITS, &tables::DC_CHROMINANCE_VALUES)
+        }
+    };
+    let ac = |i: usize| -> (&[u8; 17], &[u8]) {
+        if let Some(table) = custom_ac.and_then(|tables| tables[i].as_ref()) {
+            (&table.bits, &table.values)
+        } else if i == 0 {
+            (&tables::AC_LUMINANCE_BITS, &tables::AC_LUMINANCE_VALUES)
+        } else {
+            (&tables::AC_CHROMINANCE_BITS, &tables::AC_CHROMINANCE_VALUES)
+        }
+    };
+    let dc_luma_table = build_huff_table(dc(0).0, dc(0).1);
+    let ac_luma_table = build_huff_table(ac(0).0, ac(0).1);
+    let dc_chroma_table = build_huff_table(dc(1).0, dc(1).1);
+    let ac_chroma_table = build_huff_table(ac(1).0, ac(1).1);
 
     let max_h: usize = coeffs
         .components
@@ -634,35 +660,11 @@ pub(crate) fn write_coefficients_from<S: CoefficientBlockSource>(
     }
 
     // Huffman tables
-    marker_writer::write_dht(
-        &mut output,
-        0,
-        0,
-        &tables::DC_LUMINANCE_BITS,
-        &tables::DC_LUMINANCE_VALUES,
-    );
-    marker_writer::write_dht(
-        &mut output,
-        1,
-        0,
-        &tables::AC_LUMINANCE_BITS,
-        &tables::AC_LUMINANCE_VALUES,
-    );
+    marker_writer::write_dht(&mut output, 0, 0, dc(0).0, dc(0).1);
+    marker_writer::write_dht(&mut output, 1, 0, ac(0).0, ac(0).1);
     if uses_secondary_table {
-        marker_writer::write_dht(
-            &mut output,
-            0,
-            1,
-            &tables::DC_CHROMINANCE_BITS,
-            &tables::DC_CHROMINANCE_VALUES,
-        );
-        marker_writer::write_dht(
-            &mut output,
-            1,
-            1,
-            &tables::AC_CHROMINANCE_BITS,
-            &tables::AC_CHROMINANCE_VALUES,
-        );
+        marker_writer::write_dht(&mut output, 0, 1, dc(1).0, dc(1).1);
+        marker_writer::write_dht(&mut output, 1, 1, ac(1).0, ac(1).1);
     }
 
     // DRI (restart interval) — after DHT, before SOS (matching C jpegtran order)
@@ -1419,7 +1421,7 @@ pub fn write_coefficients_optimized(coeffs: &JpegCoefficients) -> Result<Vec<u8>
 
     let num_components: usize = coeffs.components.len();
     let is_grayscale: bool = num_components == 1;
-    let uses_secondary_table: bool = !is_grayscale && !uses_single_rgb_coding_table(coeffs);
+    let uses_secondary_table: bool = !is_grayscale && !uses_single_color_coding_table(coeffs);
 
     let opt_max_h: usize = coeffs
         .components
@@ -1733,12 +1735,21 @@ pub fn write_coefficients_progressive(
     coeffs: &JpegCoefficients,
     restart_rows: Option<u16>,
 ) -> Result<Vec<u8>> {
+    write_coefficients_progressive_scripted(coeffs, restart_rows, None)
+}
+
+/// Encoder-only entry point; public transcode callers retain default progression.
+pub(crate) fn write_coefficients_progressive_scripted(
+    coeffs: &JpegCoefficients,
+    restart_rows: Option<u16>,
+    script: Option<&[crate::ScanScript]>,
+) -> Result<Vec<u8>> {
     use crate::encode::huff_opt;
     use crate::encode::progressive::{generic_progression, simple_progression};
 
     let num_components: usize = coeffs.components.len();
     let is_grayscale: bool = num_components == 1;
-    let uses_secondary_table: bool = !is_grayscale && !uses_single_rgb_coding_table(coeffs);
+    let uses_secondary_table: bool = !is_grayscale && !uses_single_color_coding_table(coeffs);
 
     let max_h: usize = coeffs
         .components
@@ -1776,7 +1787,16 @@ pub fn write_coefficients_progressive(
         (interleaved_mcus_x, interleaved_mcus_y)
     };
 
-    let scans = if uses_single_rgb_coding_table(coeffs) {
+    let scans = if let Some(script) = script {
+        crate::encode::progressive::scans_from_script(
+            script,
+            match num_components {
+                1 => crate::PixelFormat::Grayscale,
+                4 => crate::PixelFormat::Cmyk,
+                _ => crate::PixelFormat::Rgb,
+            },
+        )?
+    } else if uses_single_color_coding_table(coeffs) {
         generic_progression(num_components)
     } else {
         simple_progression(num_components)
@@ -1848,6 +1868,13 @@ pub fn write_coefficients_progressive(
 
     // === Encode each scan with per-scan optimized Huffman tables ===
     for scan in &scans {
+        // A non-interleaved DC scan has one block per MCU, just like AC.
+        let (mcus_x, mcus_y) = if scan.component_indices.len() == 1 {
+            let ci = scan.component_indices[0];
+            (data_blocks_x[ci], data_blocks_y[ci])
+        } else {
+            (mcus_x, mcus_y)
+        };
         let is_dc_scan: bool = scan.ss == 0 && scan.se == 0;
         let is_first: bool = scan.ah == 0;
         let scan_ri: u16 = per_scan_ri(&scan.component_indices);
@@ -1939,16 +1966,29 @@ pub fn write_coefficients_progressive(
             // Generate optimal tables and write DHT markers.
             let (dc_luma_bits, dc_luma_values) = huff_opt::gen_optimal_table(&dc_luma_freq);
             let dc_luma_table: HuffTable = build_huff_table(&dc_luma_bits, &dc_luma_values);
-            marker_writer::write_dht(&mut output, 0, 0, &dc_luma_bits, &dc_luma_values);
 
-            let dc_chroma_table: HuffTable = if uses_secondary_table {
-                let (bits, vals) = huff_opt::gen_optimal_table(&dc_chroma_freq);
-                marker_writer::write_dht(&mut output, 0, 1, &bits, &vals);
-                build_huff_table(&bits, &vals)
+            let (dc_chroma_bits, dc_chroma_values) = if uses_secondary_table {
+                huff_opt::gen_optimal_table(&dc_chroma_freq)
             } else {
-                // Unused for grayscale.
-                build_huff_table(&tables::DC_CHROMINANCE_BITS, &tables::DC_CHROMINANCE_VALUES)
+                (
+                    tables::DC_CHROMINANCE_BITS,
+                    tables::DC_CHROMINANCE_VALUES.to_vec(),
+                )
             };
+            let dc_chroma_table = build_huff_table(&dc_chroma_bits, &dc_chroma_values);
+            let mut emitted = [false; 2];
+            for &ci in &scan.component_indices {
+                let table = coding_table_for_component(coeffs, ci);
+                if !emitted[table] {
+                    let (bits, values) = if table == 0 {
+                        (&dc_luma_bits, &dc_luma_values)
+                    } else {
+                        (&dc_chroma_bits, &dc_chroma_values)
+                    };
+                    marker_writer::write_dht(&mut output, 0, table as u8, bits, values);
+                    emitted[table] = true;
+                }
+            }
 
             if scan_ri != saved_ri {
                 marker_writer::write_dri(&mut output, scan_ri);
@@ -2468,7 +2508,7 @@ pub fn write_coefficients_arithmetic(coeffs: &JpegCoefficients) -> Result<Vec<u8
 
     let num_components: usize = coeffs.components.len();
     let is_grayscale: bool = num_components == 1;
-    let num_arith_tables: usize = if is_grayscale || uses_single_rgb_coding_table(coeffs) {
+    let num_arith_tables: usize = if is_grayscale || uses_single_color_coding_table(coeffs) {
         1
     } else {
         2
@@ -2643,6 +2683,15 @@ pub fn write_coefficients_progressive_arithmetic(
     coeffs: &JpegCoefficients,
     restart_rows: Option<u16>,
 ) -> Result<Vec<u8>> {
+    write_coefficients_progressive_arithmetic_scripted(coeffs, restart_rows, None)
+}
+
+/// Encoder-only entry point; public transcode callers retain default progression.
+pub(crate) fn write_coefficients_progressive_arithmetic_scripted(
+    coeffs: &JpegCoefficients,
+    restart_rows: Option<u16>,
+    script: Option<&[crate::ScanScript]>,
+) -> Result<Vec<u8>> {
     use crate::encode::arithmetic::ArithEncoder;
     use crate::encode::progressive::{generic_progression, simple_progression};
 
@@ -2682,7 +2731,16 @@ pub fn write_coefficients_progressive_arithmetic(
         (interleaved_mcus_x, interleaved_mcus_y)
     };
 
-    let scans = if uses_single_rgb_coding_table(coeffs) {
+    let scans = if let Some(script) = script {
+        crate::encode::progressive::scans_from_script(
+            script,
+            match num_components {
+                1 => crate::PixelFormat::Grayscale,
+                4 => crate::PixelFormat::Cmyk,
+                _ => crate::PixelFormat::Rgb,
+            },
+        )?
+    } else if uses_single_color_coding_table(coeffs) {
         generic_progression(num_components)
     } else {
         simple_progression(num_components)
@@ -2750,6 +2808,13 @@ pub fn write_coefficients_progressive_arithmetic(
     let mut saved_ri: u16 = 0;
 
     for scan in &scans {
+        // A non-interleaved DC scan has one block per MCU, just like AC.
+        let (mcus_x, mcus_y) = if scan.component_indices.len() == 1 {
+            let ci = scan.component_indices[0];
+            (data_blocks_x[ci], data_blocks_y[ci])
+        } else {
+            (mcus_x, mcus_y)
+        };
         arith_enc.reset();
 
         let is_dc_scan: bool = scan.ss == 0 && scan.se == 0;
