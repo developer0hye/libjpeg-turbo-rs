@@ -77,9 +77,11 @@ pub enum JpegError {
 /// Convenience alias used throughout the crate.
 pub type Result<T> = core::result::Result<T, JpegError>;
 
-/// Non-fatal warning that allows recovery in lenient mode.
+/// Non-fatal warning from marker recovery or lenient entropy decoding.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DecodeWarning {
+    /// Total stray bytes discarded between marker segments. Legal FF padding is excluded.
+    ExtraneousData { bytes: usize },
     /// Huffman decode error at the given MCU position.
     HuffmanError {
         mcu_x: usize,
@@ -102,6 +104,9 @@ pub enum DecodeWarning {
 impl core::fmt::Display for DecodeWarning {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::ExtraneousData { bytes } => {
+                write!(f, "{} extraneous bytes before JPEG markers", bytes)
+            }
             Self::HuffmanError {
                 mcu_x,
                 mcu_y,

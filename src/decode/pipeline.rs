@@ -63,7 +63,7 @@ pub struct Image {
     pub density: DensityInfo,
     /// Saved APP/COM markers.
     pub saved_markers: Vec<SavedMarker>,
-    /// Warnings accumulated during lenient decoding.
+    /// Warnings from marker recovery and lenient entropy decoding.
     pub warnings: Vec<DecodeWarning>,
 }
 
@@ -93,7 +93,7 @@ pub struct ImageInfo {
     pub density: DensityInfo,
     /// Saved APP/COM markers.
     pub saved_markers: Vec<SavedMarker>,
-    /// Warnings accumulated during lenient decoding.
+    /// Warnings from marker recovery and lenient entropy decoding.
     pub warnings: Vec<DecodeWarning>,
 }
 
