@@ -1285,6 +1285,11 @@ impl TjHandle {
         // (`jdapistd.c:695-698`): an 8-bit build reads no wider sample
         // (`JERR_BAD_PRECISION`), and a lossless frame has no DCT blocks to
         // emit (`JERR_NOTIMPL`).
+        // Markers after the first SOS: the header read checked only those
+        // before it, and this decoder does not carry the handle's flag.
+        if self.stop_on_warning != 0 {
+            decoder.check_marker_warnings(true)?;
+        }
         Self::refuse_precision_above_8(decoder.header())?;
         if self.lossless != 0 {
             return Err(JpegError::Unsupported(alloc::string::String::from(
