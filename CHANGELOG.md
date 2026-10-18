@@ -301,12 +301,54 @@ and `git log` between tags.
   runs system/Rust bidirectional cross-decodes.
 
 ### Fixed
+- **YCbCr output** (`Decoder::set_output_colorspace(ColorSpace::YCbCr)`, also
+  `ScanlineDecoder`) of an 8-bit DCT frame is now libjpeg's `JCS_YCbCr` output
+  byte for byte, crops included: each component goes through the same
+  upsampler as RGB output, then the planes are interleaved unchanged (P4-244,
+  #683). It used to replicate chroma (4:2:2, 4:2:0 and 4:4:0 differed on most
+  chroma samples), panicked when chroma out-samples luma or Cr is sampled more
+  coarsely than Cb, returned wrong Cr for other Cb ≠ Cr layouts, and returned
+  RGB and CMYK/YCCK sources unconverted. Those sources are now refused with
+  `Unsupported`, as libjpeg refuses them (`JERR_CONVERSION_NOTIMPL`). The
+  output keeps the 3-byte `PixelFormat::Rgb` label; its samples are Y, Cb,
+  Cr. A `max_memory` budget now counts the upsampled chroma planes. 12-bit and
+  lossless frames still ignore the request (P4-246). The low-level
+  `decode::toggles::decode_with_colorspace_override` keeps its replicating
+  behaviour but returns `Unsupported` instead of panicking, and now also
+  refuses layouts whose luma is not a whole multiple of chroma.
+- The marker reader skips bytes that are not 0xFF before a marker, as
+  `next_marker` (`jdmarker.c`) does with its `JWRN_EXTRANEOUS_DATA` warning.
+  A JPEG with stray bytes between two segments decoded with `djpeg` and failed
+  here with `InvalidMarker` or `UnexpectedEof`; it now decodes pixel-identical
+  to `djpeg` (`tests/marker_stray_bytes.rs`). Recovery reports an aggregate
+  `DecodeWarning::ExtraneousData`; STOPONWARNING rejects it on native decode,
+  raw decode, and TurboJPEG header/full-image paths. **Source compatibility:**
+  exhaustive matches on `DecodeWarning` need an `ExtraneousData` arm; callers
+  constructing low-level `JpegMetadata` literals must initialize `extraneous_bytes`.
+- `precision::decompress_12bit` and `raw_data_12::decompress_raw_12` counted
+  MCUs in a `u16` (P4-251). A frame of more than 65,535 MCUs (2048×2048
+  12-bit greyscale) panicked with an overflow in debug builds; release builds
+  wrapped the count and misplaced restarts whose interval does not divide
+  65,536, decoding wrong samples with `Ok`. Both counters are now `u32`.
 - The crate-private AVX2 merged H2V2 colour-conversion wrapper now checks
   both rows of each pair (it checked only the first) and falls back to the
   scalar path otherwise (P4-191). Its only caller passes valid rows, it was
   never public API, and the gap never shipped: published 0.8.0 exposed the
   unchecked kernel more broadly, which the P4-135 row of
   `docs/security/AFFECTED_VERSIONS.md` already covers.
+- **Breaking (behaviour): lossless restart intervals follow T.81 and
+  libjpeg** (P4-247 part 1, P4-121).
+  `precision::decompress_lossless_arbitrary` and `precision::decompress_16bit`
+  ignored them: they neither consumed the RSTn markers nor restarted
+  prediction, so a stream with restarts (`cjpeg -lossless 1 -restart 1`)
+  decoded wrong samples with `Ok`, or failed with an invalid Huffman code.
+  T.81 H.1.1 requires a lossless interval to be a whole number of MCU rows.
+  These decoders and `Decoder` now refuse any other with libjpeg's
+  `JERR_BAD_RESTART` text (`Decoder` returned `Ok` with wrong samples), and
+  the lossless encoder now returns that error instead of writing a stream
+  `djpeg` refuses, as `cjpeg` does. `tj3Compress8` at lossless precisions
+  2–7 passed `TJPARAM_RESTARTROWS` on as an MCU count; it now converts rows
+  to MCUs as `jcmaster.c` does.
 
 - **Breaking (behaviour): every TurboJPEG decompress publishes what
   `setDecompParameters` publishes** (P4-199 #620, P4-200 #621, P4-203 #625).

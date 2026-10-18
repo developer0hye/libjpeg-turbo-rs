@@ -1245,3 +1245,115 @@ fn the_oracle_rejects_a_reference_that_skips_the_last_published_header() {
          P2 is vacuous otherwise"
     );
 }
+
+/// Fuzz Smoke run 38178419410: strict header refusal must preserve the earlier publisher.
+#[test]
+fn scheduled_strict_header_refusal_replays_without_a_false_crash() {
+    let data: &[u8] =
+        include_bytes!("inputs/api_sequence/crash-b8b11a401c012e2783742ed0983a12fb8bb15164");
+    let (program, body) = program_from_bytes(data);
+    let inputs: Vec<&[u8]> = fuzz_inputs(body);
+    let report = run_program(&inputs, &program, &LIMITS);
+    assert_eq!(report.executed, program.len());
+}
+
+/// A warning before SOS publishes in permissive mode and refuses before publication in strict mode.
+#[test]
+fn warning_policy_changes_whether_a_header_is_replayed() {
+    let clean: &[u8] = BUILTIN_INPUTS[0];
+    let mut damaged: Vec<u8> = clean[..2].to_vec();
+    damaged.extend_from_slice(&[0x12, 0x34]);
+    damaged.extend_from_slice(&clean[2..]);
+    let inputs: [&[u8]; 2] = [clean, &damaged];
+    for publisher in [
+        Op::DecompressHeader,
+        Op::Decompress,
+        Op::Decompress12,
+        Op::Decompress16,
+    ] {
+        // Pin the publication boundary independently of the replay oracle:
+        // moving publication before strict refusal must fail this test even
+        // if the live handle and configured probe both make that mistake.
+        let mut handle: TjHandle = TjHandle::new();
+        handle
+            .decompress_header(clean)
+            .expect("clean header publishes");
+        handle.set(TjParam::Width, 123).expect("width is settable");
+        handle.set_icc_profile(Some(vec![0xAC; 96]));
+        handle
+            .set(TjParam::StopOnWarning, 1)
+            .expect("strict mode is valid");
+        let before: Vec<i32> = ALL_PARAMS.iter().map(|&param| handle.get(param)).collect();
+        let publish = |handle: &mut TjHandle| -> libjpeg_turbo_rs::Result<()> {
+            match publisher {
+                Op::DecompressHeader => handle.decompress_header(&damaged),
+                Op::Decompress => handle.decompress(&damaged).map(|_| ()),
+                Op::Decompress12 => handle.decompress_12bit(&damaged).map(|_| ()),
+                Op::Decompress16 => handle.decompress_16bit(&damaged).map(|_| ()),
+                _ => unreachable!("only decode-family publishers are tested"),
+            }
+        };
+        let error = publish(&mut handle).expect_err("strict header warnings must refuse");
+        assert!(error.to_string().contains("stop_on_warning"), "{error}");
+        let after: Vec<i32> = ALL_PARAMS.iter().map(|&param| handle.get(param)).collect();
+        assert_eq!(
+            after, before,
+            "{publisher:?}: strict refusal published parameters"
+        );
+        assert_eq!(handle.icc_profile(), Some(&[0xAC; 96][..]));
+        handle
+            .set(TjParam::StopOnWarning, 0)
+            .expect("permissive mode is valid");
+        let result = publish(&mut handle);
+        if matches!(publisher, Op::Decompress12 | Op::Decompress16) {
+            assert!(
+                result.is_err(),
+                "an 8-bit source cannot yield 12/16-bit output"
+            );
+        } else {
+            result.expect("permissive header/decode succeeds");
+        }
+        assert_eq!(handle.get(TjParam::Width), 8);
+        assert_eq!(handle.get(TjParam::Subsampling), 3);
+        assert_eq!(handle.icc_profile(), None);
+
+        let program: Vec<Op> = vec![
+            Op::Set {
+                param: TjParam::Quality,
+                value: 82,
+            },
+            Op::DecompressHeader,
+            Op::Set {
+                param: TjParam::StopOnWarning,
+                value: 1,
+            },
+            // Width is settable: a publication probe must not mistake this for header success.
+            Op::Set {
+                param: TjParam::Width,
+                value: 123,
+            },
+            Op::SetIcc {
+                profile: Some(vec![0xAC; 96]),
+            },
+            Op::SelectInput { index: 1 },
+            publisher.clone(),
+            Op::Compress {
+                width: 8,
+                height: 8,
+                format: 0,
+            },
+            Op::Set {
+                param: TjParam::StopOnWarning,
+                value: 0,
+            },
+            publisher,
+            Op::Compress {
+                width: 8,
+                height: 8,
+                format: 0,
+            },
+        ];
+        let report = run_program(&inputs, &program, &LIMITS);
+        assert_eq!(report.executed, program.len());
+    }
+}

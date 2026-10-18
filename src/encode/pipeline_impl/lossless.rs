@@ -94,6 +94,18 @@ pub fn compress_lossless_extended_precision(
             width, height
         )));
     }
+    // T.81 H.1.1: a lossless restart interval is a whole number of MCU rows,
+    // and an MCU here is one pixel. C refuses any other at compress time
+    // (`jclossls.c` start_pass, `JERR_BAD_RESTART`), and decoders, this
+    // crate's included, refuse the stream it would make.
+    if restart_interval > 0 && !usize::from(restart_interval).is_multiple_of(width) {
+        // C's `JERR_BAD_RESTART` text (`jerror.h`), verbatim.
+        return Err(JpegError::Unsupported(format!(
+            "Invalid restart interval {}; must be an integer multiple of the \
+             number of MCUs in an MCU row ({})",
+            restart_interval, width
+        )));
+    }
 
     let bpp: usize = pixel_format.bytes_per_pixel();
     let expected_size: usize =
