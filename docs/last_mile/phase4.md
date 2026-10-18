@@ -14209,3 +14209,35 @@ this decoder ignores and libjpeg refuses).
 
 Acceptance: SOF3/SOF11 frames accept any Tq and Ta, or the refusal is a
 documented decision.
+
+## P4-251. 12-Bit Decoders Count MCUs in a `u16`: Debug Panic at 65,536 MCUs, Misplaced Restarts in Release — **OPEN**
+
+`precision::decompress_12bit` and `raw_data_12::decompress_raw_12` keep their
+MCU counter in a `u16` (`src/api/precision.rs:1041`,
+`src/api/raw_data_12.rs:326`), where every other decoder's counter is `u32`.
+A frame of more than 65,535 MCUs — a 2048×2048 12-bit greyscale image is the
+first square size — overflows it:
+
+- **Debug builds panic** ("attempt to add with overflow",
+  `precision.rs:1097`, `raw_data_12.rs:380`) on every such frame, with or
+  without restart markers. Through `catch_unwind` this surfaces as a
+  `DecoderPanic` for native callers; elsewhere it aborts the decode.
+- **Release builds wrap.** That is harmless without restarts, but the
+  restart check `mcu_count.is_multiple_of(restart_interval)` then runs on the
+  wrapped count, so once a frame passes 65,536 MCUs its restarts land in the
+  wrong place unless the interval divides 65,536. Both functions return `Ok`.
+
+Measured at `main` 25d6605c against `djpeg` (libjpeg-turbo 3.2.0), on
+`cjpeg -precision 12 -quality 95` greyscale images:
+
+| Frame | debug | release |
+|---|---|---|
+| 2048×2048 (65,536 MCUs) | panic | identical |
+| 2048×2048, `-restart 1` (256 MCUs, divides 65,536) | panic | identical |
+| 2056×2056 (66,049 MCUs) | panic | identical |
+| 2056×2056, `-restart 1` (257 MCUs) | panic | 16,448 of 4,227,136 samples differ — one MCU row |
+
+Acceptance: both counters `u32` like the rest of the decoders, and a
+regression test decoding a 2056×2056 12-bit frame with a 257-MCU restart
+interval byte-identical to `djpeg` in a debug build.
+
