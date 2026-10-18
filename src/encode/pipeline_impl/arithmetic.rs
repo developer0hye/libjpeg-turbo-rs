@@ -2,8 +2,8 @@ use super::{
     convert_to_ycbcr, convert_to_ycbcr_padded, downsample_chroma_block, extract_block, format,
     gather_block, gather_downsampled_block, inject_metadata, is_y_dummy, marker_writer,
     pad_plane_to_mcu_grid, resolve_quant_tables, scale_quant_for_fdct, scale_quant_for_ifast, vec,
-    CompLayout, CompressParams, DctMethod, ImageLayout, JpegError, PixelFormat, QuantDivisors,
-    Result, Subsampling, ToString, Vec,
+    CompLayout, CompressParams, DctMethod, ImageLayout, JpegError, PixelFormat, ProgressiveScan,
+    QuantDivisors, Result, ScanScript, Subsampling, ToString, Vec,
 };
 
 /// Compress with arithmetic entropy coding (SOF9).
@@ -659,6 +659,37 @@ pub fn compress_arithmetic_progressive(
     restart_in_rows: u16,
     custom_quant: Option<&[Option<[u16; 64]>; 4]>,
 ) -> Result<Vec<u8>> {
+    compress_arithmetic_progressive_scripted(
+        pixels,
+        width,
+        height,
+        pixel_format,
+        quality,
+        subsampling,
+        dct_method,
+        restart_interval,
+        restart_in_rows,
+        custom_quant,
+        None,
+    )
+}
+
+/// [`compress_arithmetic_progressive`] with the caller's scan script, when
+/// there is one (`cjpeg -arithmetic -scans`, P4-210).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn compress_arithmetic_progressive_scripted(
+    pixels: &[u8],
+    width: usize,
+    height: usize,
+    pixel_format: PixelFormat,
+    quality: u8,
+    subsampling: Subsampling,
+    dct_method: DctMethod,
+    restart_interval: u16,
+    restart_in_rows: u16,
+    custom_quant: Option<&[Option<[u16; 64]>; 4]>,
+    script: Option<&[ScanScript]>,
+) -> Result<Vec<u8>> {
     compress_arithmetic_progressive_inner(
         pixels,
         width,
@@ -671,6 +702,7 @@ pub fn compress_arithmetic_progressive(
         restart_in_rows,
         custom_quant,
         false,
+        script,
     )
 }
 
@@ -680,6 +712,17 @@ pub fn compress_arithmetic_progressive_rgb_direct(
     params: &CompressParams<'_>,
     icc_profile: Option<&[u8]>,
     restart_in_rows: u16,
+) -> Result<Vec<u8>> {
+    compress_arithmetic_progressive_rgb_direct_scripted(params, icc_profile, restart_in_rows, None)
+}
+
+/// [`compress_arithmetic_progressive_rgb_direct`] with the caller's scan
+/// script, when there is one (`cjpeg -rgb -arithmetic -scans`, P4-210).
+pub(crate) fn compress_arithmetic_progressive_rgb_direct_scripted(
+    params: &CompressParams<'_>,
+    icc_profile: Option<&[u8]>,
+    restart_in_rows: u16,
+    script: Option<&[ScanScript]>,
 ) -> Result<Vec<u8>> {
     let base: Vec<u8> = compress_arithmetic_progressive_inner(
         params.pixels,
@@ -693,6 +736,7 @@ pub fn compress_arithmetic_progressive_rgb_direct(
         restart_in_rows,
         params.custom_quant,
         true,
+        script,
     )?;
     match icc_profile {
         Some(icc) => inject_metadata(&base, Some(icc), None),
@@ -713,9 +757,18 @@ fn compress_arithmetic_progressive_inner(
     restart_in_rows: u16,
     custom_quant: Option<&[Option<[u16; 64]>; 4]>,
     direct_rgb: bool,
+    script: Option<&[ScanScript]>,
 ) -> Result<Vec<u8>> {
     use crate::encode::arithmetic::ArithEncoder;
-    use crate::encode::progressive::simple_progression_for;
+    use crate::encode::progressive::{scans_from_script, simple_progression_for};
+
+    // A caller's script is validated before anything else, as on the Huffman
+    // path: C's `validate_script` runs ahead of `initial_setup`'s frame checks
+    // (`jcmaster.c`).
+    let custom_scans: Option<Vec<ProgressiveScan>> = match script {
+        Some(script) => Some(scans_from_script(script, pixel_format)?),
+        None => None,
+    };
 
     if width == 0 || height == 0 {
         return Err(JpegError::CorruptData(
@@ -980,9 +1033,12 @@ fn compress_arithmetic_progressive_inner(
         }
     }
 
-    // Generate scan progression
-    // JCS_RGB is not YCbCr, so it takes C's all-purpose scan script.
-    let scans = simple_progression_for(num_components, !direct_rgb);
+    // The caller's script, or C's default: JCS_RGB is not YCbCr, so it takes
+    // C's all-purpose scan script.
+    let scans: Vec<ProgressiveScan> = match custom_scans {
+        Some(scans) => scans,
+        None => simple_progression_for(num_components, !direct_rgb),
+    };
 
     // Assemble output
     let mut output: Vec<u8> = Vec::with_capacity(width * height * 2);
@@ -1121,15 +1177,32 @@ fn compress_arithmetic_progressive_inner(
 
         let is_dc_scan: bool = scan.ss == 0 && scan.se == 0;
 
+        // A single-component scan is non-interleaved (T.81 A.2.2): C walks
+        // that component's own width_in_blocks x height_in_blocks grid, one
+        // block per MCU, not the frame's MCU grid. The AC scans below already
+        // do; DC scans take the same geometry here. Only a caller's script can
+        // send DC for one component alone (P4-210 — the Huffman twin is
+        // P4-211).
+        let (scan_layouts, scan_mcus_x, scan_mcus_y): (Vec<CompLayout>, usize, usize) =
+            if scan.component_indices.len() == 1 {
+                let ci: usize = scan.component_indices[0];
+                let mut layouts: Vec<CompLayout> = comp_layouts.clone();
+                layouts[ci].h_blocks = 1;
+                layouts[ci].v_blocks = 1;
+                (layouts, comp_wib[ci], comp_hib[ci])
+            } else {
+                (comp_layouts.clone(), mcus_x, mcus_y)
+            };
+
         if is_dc_scan {
             if scan.ah == 0 {
                 // DC first scan
                 encode_arith_dc_first_scan(
                     &coeff_bufs,
-                    &comp_layouts,
+                    &scan_layouts,
                     scan,
-                    mcus_x,
-                    mcus_y,
+                    scan_mcus_x,
+                    scan_mcus_y,
                     &mut arith_enc,
                     scan_ri,
                     direct_rgb,
@@ -1138,10 +1211,10 @@ fn compress_arithmetic_progressive_inner(
                 // DC refine scan
                 encode_arith_dc_refine_scan(
                     &coeff_bufs,
-                    &comp_layouts,
+                    &scan_layouts,
                     scan,
-                    mcus_x,
-                    mcus_y,
+                    scan_mcus_x,
+                    scan_mcus_y,
                     &mut arith_enc,
                     scan_ri,
                 );

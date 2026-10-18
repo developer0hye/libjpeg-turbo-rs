@@ -101,6 +101,51 @@ and `git log` between tags.
 
 ### Changed
 
+- **Breaking (behaviour): non-standard `Encoder::sampling_factors` compose
+  with every mode** (P4-236, #664).
+  - Factors that map to no standard `Subsampling` (3x2, 1x4, a component 0
+    that is not the largest, …) used to take a baseline-only encoder.
+    `progressive`, `arithmetic`, `lossless`, restart intervals, optimized
+    Huffman, the DCT method and custom or 16-bit quantisation tables were
+    dropped, and `encode` returned an SOF0 stream.
+  - These now code as requested, byte-identical to `cjpeg -sample`.
+  - `lossless(true)` ignores the factors, as C does. A grayscale lossless
+    encode with an explicit sampling request no longer has its SOF patched to
+    that factor.
+  - Factor sets C refuses (more than 10 blocks per MCU) return `CorruptData`.
+  - Custom progressive scripts, smoothing, RGB-direct, four-factor CMYK,
+    grayscale conversion and installed Huffman tables now compose too
+    (P4-237, #673). The Rust-only `fancy_downsampling` prefilter remains refused.
+    Smoothing follows C's full-size/h2v2-only kernel selection and context-row
+    padding; single-component DC scans traverse their component's block grid.
+    The 10-block MCU limit is checked per scan, allowing larger factors when
+    the script uses only non-interleaved scans.
+  - Stock 3.2.0 ARM NEON mis-selects input rows for h2v2 components with
+    vertical factor > 1; Rust follows scalar C. This byte-parity exception is
+    tracked separately as P4-241 (#679).
+
+- **Breaking (behaviour): `Encoder::scan_script` is honoured on every
+  progressive path, and refused where none can follow it** (P4-210, #636).
+  The arithmetic-coded progressive encode (YCbCr, grayscale and RGB-direct)
+  and the Huffman RGB-direct one used to write C's default script and return
+  `Ok`; they now follow and validate the caller's script, byte-identical to
+  stock `cjpeg -scans` with `-arithmetic` / `-rgb`, and an invalid one returns
+  `JpegError::InvalidScanScript`. A script with `progressive(false)`, with
+  `lossless(true)` returns `JpegError::Unsupported` instead of being ignored.
+  Non-interleaved DC scans on the arithmetic path walk the component's own
+  block grid, as the Huffman path does since P4-211.
+
+- **Breaking (Rust API): a lenient decode's warning list is bounded, and
+  `DecodeWarning` is `#[non_exhaustive]`** (P4-215, #641). A stream corrupt in
+  every MCU used to return one `DecodeWarning::HuffmanError` (with its own
+  heap string) per MCU — about 67 M for a 65500x65500 4:4:4 frame. A decode
+  now records the first `MAX_DECODE_WARNINGS` (64, exported at the root) and
+  follows them with one new `DecodeWarning::WarningsSuppressed { count }` for
+  the rest, as C prints only the first warning and counts the others.
+  `TruncatedData` and `UnsupportedRecovered` are never suppressed. Exhaustive
+  `match`es on `DecodeWarning` need a wildcard arm. The list is also moved
+  into the `Image` instead of cloned.
+
 - **Zero-filled `u8` decode buffers are allocated with `alloc_zeroed` again**
   (P4-228, #659). P4-209 made the owned decode output and the decoder planes
   fallible, but by reserving and then filling them, which wrote every byte

@@ -166,9 +166,8 @@ Open on `main` (the [OPEN Items table](LAST_MILE.md#open-items) is the full list
 
 | Item | Effect |
 | --- | --- |
-| [P4-210](last_mile/phase4.md#p4-210-encoderscan_script-is-silently-ignored-outside-the-huffman-ycbcrgrayscale-progressive-path--open) | `Encoder::scan_script` is silently ignored for arithmetic, RGB-direct and custom-sampling progressive encodes. |
+| [P4-241](last_mile/phase4.md#p4-241-stock-arm-neon-h2v2-sampling-differs-from-scalar-c-when-component-v-exceeds-1--open) | Stock 3.2.0 ARM NEON averages different source rows for h2v2 components with vertical factor > 1. Rust matches scalar C; default NEON byte identity is not claimed for those factors (#679). |
 | [P4-213](last_mile/phase4.md#p4-213-cmykycck-12-bit-and-lossless-decodes-stage-a-full-size-copy-even-when-given-a-caller-buffer--open) | CMYK/YCCK, 12-bit and lossless decodes stage a full-size copy even into a caller buffer, and `max_memory` does not count it. |
-| [P4-215](last_mile/phase4.md#p4-215-lenient-decodes-collect-one-warning-string-per-corrupt-mcu-without-a-cap-and-clone-the-list-infallibly-into-every-image--open) | Lenient decodes keep an uncapped per-MCU warning list. |
 | [P4-216](last_mile/phase4.md#p4-216-the-12-16-bit-decode-entry-points-in-srcapi-still-allocate-geometry-sized-buffers-infallibly--open) | 12-/16-bit decode entry points abort on allocator refusal. |
 | [P4-219](last_mile/phase4.md#p4-219-12-bit-decodes-ignore-the-horizontal-crop-and-tjhandles-1216-bit-decompress-ignores-the-cropping-region-entirely--open) | 12-bit decodes ignore the horizontal crop. |
 | [P4-221](last_mile/phase4.md#p4-221-encode-path-allocations-are-all-infallible-and-no-gate-tracks-them--open) | Encode-path allocations abort on allocator refusal. |
@@ -180,8 +179,6 @@ Also open on `main`, filed by the pull requests linked:
 - **P4-218** ([#646](https://github.com/developer0hye/libjpeg-turbo-rs/pull/646)):
   `decompress_into` still allocates whole-image component planes, so the
   buffer-reuse path is not a low-memory path.
-- **P4-230** ([#661](https://github.com/developer0hye/libjpeg-turbo-rs/issues/661)):
-  the crate adds 10–15 % more code to a release binary than 0.8.0 did.
 - **P4-222** ([#649](https://github.com/developer0hye/libjpeg-turbo-rs/pull/649)):
   the low-level modules are de facto API until they are narrowed.
 - **P4-220** ([#645](https://github.com/developer0hye/libjpeg-turbo-rs/pull/645)):

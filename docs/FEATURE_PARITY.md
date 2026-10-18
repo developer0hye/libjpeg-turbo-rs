@@ -66,6 +66,7 @@
 - [x] TJSAMP_410 (4:1:0; H=4,V=2)
 - [x] TJSAMP_24 (2:4; H=2,V=4)
 - [x] TJSAMP_UNKNOWN (unusual/custom subsampling detection) (`Subsampling::Unknown`)
+- [x] Arbitrary `cjpeg -sample` factors (`Encoder::sampling_factors`) with progressive, arithmetic, restart, optimized Huffman, DCT method and quantisation tables, byte-identical to `cjpeg` (P4-236, #664); custom progressive scripts, smoothing, RGB-direct, four-factor CMYK, grayscale conversion and installed Huffman tables are supported (P4-237, #673); the Rust-only fancy prefilter remains refused; the upstream ARM NEON byte-parity exception is P4-241 (#679)
 
 ---
 
@@ -134,7 +135,7 @@
 
 ### Progressive Scan Control
 - [ ] Full classic `jpeg_simple_progression()` semantics — progressive mode works, but public script installation remains P4-91
-- [ ] Classic `scan_info` / `num_scans` wiring — native `Encoder::scan_script()` is ready for Huffman progressive YCbCr/grayscale and silently ignored on the arithmetic, RGB-direct and custom-sampling paths ([P4-210](last_mile/phase4.md#p4-210-encoderscan_script-is-silently-ignored-outside-the-huffman-ycbcrgrayscale-progressive-path--open), #636); classic scanline wiring remains P4-91
+- [ ] Classic `scan_info` / `num_scans` wiring — native `Encoder::scan_script()` is honoured by every progressive encode (Huffman and arithmetic; YCbCr, grayscale and RGB-direct) and refused with `Unsupported` where no path can follow it ([P4-210](last_mile/phase4.md#p4-210-encoderscan_script-is-silently-ignored-outside-the-huffman-ycbcrgrayscale-progressive-path--closed-2026-10-07), #636); classic scanline wiring remains P4-91
 - [x] `jpeg_scan_info` struct — `ScanScript` struct
 
 ### DCT Method
@@ -419,14 +420,14 @@
 ## 13. Error Handling
 
 - [x] `Result<T, JpegError>` for all public operations
-- [x] `DecodeWarning` list: marker recovery (`ExtraneousData`) and lenient entropy warnings (`HuffmanError`, `TruncatedData`, `UnsupportedRecovered`)
+- [x] `DecodeWarning` list: marker recovery (`ExtraneousData`) and lenient entropy warnings (`HuffmanError`, `TruncatedData`, `UnsupportedRecovered`, `WarningsSuppressed`)
 - [x] Custom error handler — `ErrorHandler` trait
 - [ ] Classic codec failures consistently reach `error_exit()` — native typed errors exist; P4-100
 - [x] `emit_message()` callback — `ErrorHandler::emit_warning()` + `ErrorHandler::trace()`
 - [x] `output_message()` / `format_message()` — Rust `Display` trait on `JpegError` replaces the callbacks for the native API; the C ABI implements both per `jerror.c` — `format_message` renders upstream's text (P4-146, 2026-08-11), `output_message` writes it to stderr through the installed formatter (P4-146 criterion 4, 2026-08-13)
 - [x] `reset_error_mgr()` — N/A (Rust `Result` is stateless; no accumulated error state to reset)
 - [x] `trace_level` control — `ErrorHandler::trace()` callback with level parameter
-- [x] `num_warnings` counter — `Image.warnings` vec (count via `.len()`)
+- [x] `num_warnings` counter — `Image.warnings` vec (count via `.len()`, except that Huffman errors past `MAX_DECODE_WARNINGS` are one `WarningsSuppressed { count }` entry, P4-215)
 - [x] `msg_code` / `msg_parm` / `jpeg_message_table` — the native API uses typed `JpegError` / `DecodeWarning` enums instead of C integer codes + format strings; the C ABI carries all three, `jpeg_std_error` installing the 129-entry upstream table (P4-146, 2026-08-11)
 - [x] `tj3GetErrorStr()` / `tj3GetErrorCode()` — Rust `Result<T, JpegError>` with `Display` impl replaces C per-handle error getters
 - [x] Classic `jpeg_resync_to_restart()` default algorithm — suspending-source trace vs stock; native strategy extension remains available separately (P4-97, 2026-08-14)
