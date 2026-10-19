@@ -1,3 +1,49 @@
+use crate::common::error::{DecodeWarning, JpegError, Result};
+use alloc::vec::Vec;
+
+/// The error a strict decode reports when a symbol fails to decode: once the
+/// segment has run short ([`BitReader::insufficient_data`]) the stuffed zero
+/// bits are the cause, so the stream is truncated, not corrupt (P4-254).
+pub(crate) fn short_segment_error(reader: &BitReader<'_>, error: JpegError) -> JpegError {
+    if reader.insufficient_data() {
+        JpegError::UnexpectedEof
+    } else {
+        error
+    }
+}
+
+/// Call after decoding one MCU (a row, for lossless) that started with the
+/// segment not yet short (`was_short == false`). If it read past the end of
+/// the segment — djpeg's `JWRN_HIT_MARKER` — a strict decode is refused with
+/// [`JpegError::UnexpectedEof`], and a lenient one records
+/// [`DecodeWarning::TruncatedData`] once and carries on, leaving every MCU up
+/// to the next restart marker zero, as libjpeg does (P4-254).
+pub(crate) fn check_segment_end(
+    reader: &BitReader<'_>,
+    was_short: bool,
+    lenient: bool,
+    decoded_mcus: usize,
+    total_mcus: usize,
+    warnings: &mut Vec<DecodeWarning>,
+) -> Result<()> {
+    if was_short || !reader.insufficient_data() {
+        return Ok(());
+    }
+    if !lenient {
+        return Err(JpegError::UnexpectedEof);
+    }
+    if !warnings
+        .iter()
+        .any(|w| matches!(w, DecodeWarning::TruncatedData { .. }))
+    {
+        warnings.push(DecodeWarning::TruncatedData {
+            decoded_mcus,
+            total_mcus,
+        });
+    }
+    Ok(())
+}
+
 /// Reads individual bits from JPEG entropy-coded data.
 /// Handles byte stuffing (0xFF 0x00 -> 0xFF) and detects restart markers.
 ///
@@ -17,6 +63,15 @@ pub struct BitReader<'a> {
     /// checkpoint is unreliable and must be discarded, the window
     /// extended, and the work retried. Never set when `is_final`.
     starved: bool,
+    /// Zero bits at the bottom of `bit_buffer` that did not come from the
+    /// data: the reader sat at a marker, or past the end of a final window,
+    /// and filled with zeros. Stuffed bits are always the buffer's suffix,
+    /// so `bits_left < stuffed_bits` means a read consumed some (P4-254).
+    stuffed_bits: u32,
+    /// libjpeg's `insufficient_data`, carried across a [`Self::reset`] that
+    /// found no restart marker to resume from (`process_restart`,
+    /// jdhuff.c:533-539). See [`Self::insufficient_data`].
+    insufficient: bool,
     /// Bytes examined by `reset()`'s forward scan, cumulative.
     ///
     /// Test-only, and the point is complexity rather than performance:
@@ -38,6 +93,8 @@ pub struct BitReaderState {
     pub pos: usize,
     pub bit_buffer: u64,
     pub bits_left: u8,
+    pub stuffed_bits: u32,
+    pub insufficient: bool,
 }
 
 impl<'a> BitReader<'a> {
@@ -49,6 +106,8 @@ impl<'a> BitReader<'a> {
             bits_left: 0,
             is_final: true,
             starved: false,
+            stuffed_bits: 0,
+            insufficient: false,
             #[cfg(test)]
             scan_bytes_examined: 0,
         }
@@ -66,6 +125,8 @@ impl<'a> BitReader<'a> {
             bits_left: state.bits_left,
             is_final,
             starved: false,
+            stuffed_bits: state.stuffed_bits,
+            insufficient: state.insufficient,
             #[cfg(test)]
             scan_bytes_examined: 0,
         }
@@ -80,6 +141,8 @@ impl<'a> BitReader<'a> {
             pos: self.pos,
             bit_buffer: self.bit_buffer,
             bits_left: self.bits_left,
+            stuffed_bits: self.stuffed_bits,
+            insufficient: self.insufficient,
         }
     }
 
@@ -90,13 +153,49 @@ impl<'a> BitReader<'a> {
         self.starved
     }
 
+    /// True once a read has consumed a bit the data did not hold: the
+    /// entropy-coded segment ended (at a marker, or at the end of a final
+    /// window) before the decoder was done with it. This is libjpeg's
+    /// `insufficient_data` / `JWRN_HIT_MARKER` condition (jdhuff.c:361-373):
+    /// a read asked for more bits than were left. Peeking past the end, as a
+    /// Huffman lookahead does, never sets it.
+    ///
+    /// It stays set until a [`Self::reset`] consumes a restart marker, as
+    /// `process_restart` clears it only then (jdhuff.c:533-539), or the
+    /// reader moves to a new scan with [`Self::set_position`] (P4-254).
+    pub fn insufficient_data(&self) -> bool {
+        self.insufficient || u32::from(self.bits_left) < self.stuffed_bits
+    }
+
+    /// Call when a Huffman lookup fails on the 16-bit window just peeked. If
+    /// fewer than 16 of those bits were data, libjpeg's bit-by-bit decode
+    /// (`jpeg_huff_decode`, which only gives up past 16 bits) would have read
+    /// stuffed bits first and raised `JWRN_HIT_MARKER`, so the segment counts
+    /// as short even though nothing was consumed (P4-254).
+    pub(crate) fn note_failed_lookup(&mut self) {
+        if self.stuffed_bits > 0 && u32::from(self.bits_left) < self.stuffed_bits + 16 {
+            self.insufficient = true;
+        }
+    }
+
+    /// Clear the bit buffer at a restart boundary, keeping
+    /// [`Self::insufficient_data`] in the sticky flag until a restart
+    /// marker is found to clear it.
+    fn discard_bits_for_restart(&mut self) {
+        self.insufficient = self.insufficient_data();
+        self.bit_buffer = 0;
+        self.bits_left = 0;
+        self.stuffed_bits = 0;
+    }
+
     /// Appends one byte from `window` at `off` into the bit buffer.
     /// Returns the updated offset (advances by 1, or 2 for byte-stuffed
     /// `0xFF 0x00`). Returns `usize::MAX` as a sentinel meaning "abort fast
-    /// path; let `fill_buffer_slow` walk the multi-FF run" — `0xFF 0xFF…`
-    /// can be either fill bytes before a marker or fill bytes before a
-    /// stuffed `0xFF` data byte (libjpeg-turbo's `jpeg_fill_bit_buffer`
-    /// at jdhuff.c:316–331 accepts both).
+    /// path; let `fill_buffer_slow` handle it" for a marker, which stuffs
+    /// zeros (P4-254), and for a multi-FF run — `0xFF 0xFF…` can be either
+    /// fill bytes before a marker or fill bytes before a stuffed `0xFF` data
+    /// byte (libjpeg-turbo's `jpeg_fill_bit_buffer` at jdhuff.c:316–331
+    /// accepts both).
     /// `off` must be < 15 and `window.len()` must be 16.
     #[inline(always)]
     fn get_byte(window: &[u8], off: usize, bit_buffer: &mut u64, bits_left: &mut u8) -> usize {
@@ -110,14 +209,12 @@ impl<'a> BitReader<'a> {
             *bit_buffer = (*bit_buffer << 8) | 0xFF_u64;
             *bits_left += 8;
             next_off + 1
-        } else if window[next_off] == 0xFF {
-            // Multi-FF run — fall back to slow path.
-            usize::MAX
         } else {
-            // Marker — push zero, don't advance.
-            *bit_buffer <<= 8;
-            *bits_left += 8;
-            off
+            // Multi-FF run or marker — fall back to the slow path, which
+            // classifies the run and counts the zeros it stuffs at a marker
+            // (P4-254). Markers are rare (restarts, EOI), so the fast path
+            // stays free of that bookkeeping.
+            usize::MAX
         }
     }
 
@@ -171,7 +268,9 @@ impl<'a> BitReader<'a> {
             let byte: u8 = match self.data.get(pos) {
                 Some(&b) => b,
                 None => {
-                    if !self.is_final {
+                    if self.is_final {
+                        self.stuffed_bits = self.stuffed_bits.saturating_add(8);
+                    } else {
                         self.starved = true;
                     }
                     self.bit_buffer <<= 8;
@@ -216,6 +315,7 @@ impl<'a> BitReader<'a> {
                     self.pos = scan - 1;
                     self.bit_buffer <<= 8;
                     self.bits_left += 8;
+                    self.stuffed_bits = self.stuffed_bits.saturating_add(8);
                 }
                 None => {
                     // EOF in the middle of (or right after) the FF run.
@@ -226,6 +326,7 @@ impl<'a> BitReader<'a> {
                     // moving pos, so the retry re-examines the run.
                     if self.is_final {
                         self.pos = self.data.len();
+                        self.stuffed_bits = self.stuffed_bits.saturating_add(8);
                     } else {
                         self.starved = true;
                     }
@@ -284,8 +385,7 @@ impl<'a> BitReader<'a> {
     /// marker; do not call it expecting a "consume only if the marker is exactly
     /// at `pos`" semantics.
     pub fn reset(&mut self) {
-        self.bit_buffer = 0;
-        self.bits_left = 0;
+        self.discard_bits_for_restart();
 
         // Scan forward to the next restart marker (0xFF 0xDn) and consume it.
         //
@@ -313,6 +413,9 @@ impl<'a> BitReader<'a> {
             match self.data[self.pos + 1] {
                 0xD0..=0xD7 => {
                     self.pos += 2; // consume the restart marker
+                                   // A new data segment starts (process_restart,
+                                   // jdhuff.c:533-539).
+                    self.insufficient = false;
                     return;
                 }
                 0x00 => self.pos += 2, // stuffed literal 0xFF data byte
@@ -335,8 +438,7 @@ impl<'a> BitReader<'a> {
     /// Used by the resync-strategy path (A6-3) which needs to know the
     /// observed RST number to decide whether a desync occurred.
     pub fn reset_and_consume_rst(&mut self) -> Option<u8> {
-        self.bit_buffer = 0;
-        self.bits_left = 0;
+        self.discard_bits_for_restart();
 
         // Skip padding 0xFF bytes first (byte stuffing at segment boundaries).
         while self.pos + 1 < self.data.len() && self.data[self.pos] == 0xFF {
@@ -344,6 +446,7 @@ impl<'a> BitReader<'a> {
             if (0xD0..=0xD7).contains(&marker) {
                 let rst_num: u8 = marker - 0xD0;
                 self.pos += 2;
+                self.insufficient = false;
                 return Some(rst_num);
             }
             if marker == 0xFF {
@@ -368,14 +471,14 @@ impl<'a> BitReader<'a> {
     ///
     /// Bit state is reset regardless of whether a marker is found.
     pub fn scan_to_next_rst(&mut self) -> Option<u8> {
-        self.bit_buffer = 0;
-        self.bits_left = 0;
+        self.discard_bits_for_restart();
         while self.pos + 1 < self.data.len() {
             if self.data[self.pos] == 0xFF {
                 let marker = self.data[self.pos + 1];
                 if (0xD0..=0xD7).contains(&marker) {
                     let rst_num: u8 = marker - 0xD0;
                     self.pos += 2;
+                    self.insufficient = false;
                     return Some(rst_num);
                 }
                 if marker == 0x00 {
@@ -401,11 +504,15 @@ impl<'a> BitReader<'a> {
     }
 
     /// Set the byte position directly (for progressive multi-scan).
-    /// Resets the bit buffer.
+    /// Resets the bit buffer, and [`Self::insufficient_data`] with it: a
+    /// new scan is a new data segment (libjpeg clears the flag per scan,
+    /// jdhuff.c:128).
     pub fn set_position(&mut self, pos: usize) {
         self.pos = pos;
         self.bit_buffer = 0;
         self.bits_left = 0;
+        self.stuffed_bits = 0;
+        self.insufficient = false;
     }
 
     /// Return current byte position in the underlying data.
@@ -413,7 +520,10 @@ impl<'a> BitReader<'a> {
         self.pos
     }
 
-    /// Returns true if the reader has exhausted all input data.
+    /// True once every input byte has been loaded into the bit buffer
+    /// (`pos >= len`), not once its bits are consumed: up to 7 bytes may
+    /// still be unread. A short segment is [`Self::insufficient_data`]
+    /// (P4-254).
     pub fn is_eof(&self) -> bool {
         self.pos >= self.data.len()
     }
@@ -558,5 +668,87 @@ mod tests {
         let mut br = BitReader::new(&data);
         br.reset();
         assert_eq!(br.position(), 1, "reset() halts on a dangling final 0xFF");
+    }
+
+    // P4-254: `insufficient_data` is libjpeg's `nbits > bits_left` test
+    // (jdhuff.c:361-373) — set by consuming a stuffed bit, never by peeking.
+
+    #[test]
+    fn insufficient_data_needs_a_read_past_the_marker() {
+        let data = [0xABu8, 0xCD, 0xFF, 0xD9];
+        let mut br = BitReader::new(&data);
+        assert_eq!(br.read_bits(16), 0xABCD);
+        assert!(!br.insufficient_data(), "every bit read came from the data");
+        let _ = br.peek_bits(16);
+        assert!(
+            !br.insufficient_data(),
+            "a lookahead past EOI is not a read"
+        );
+        let _ = br.read_bits(1);
+        assert!(
+            br.insufficient_data(),
+            "one bit past EOI is insufficient data"
+        );
+    }
+
+    #[test]
+    fn insufficient_data_in_the_fast_fill_path() {
+        // 20 bytes, so the first fill takes the 16-byte window path, whose
+        // marker branch must count the zeros it pushes too.
+        let mut data = vec![0x12u8, 0x34, 0x56, 0xFF, 0xD9];
+        data.resize(20, 0);
+        let mut br = BitReader::new(&data);
+        assert_eq!(br.read_bits(16), 0x1234);
+        assert_eq!(br.read_bits(8), 0x56);
+        assert!(!br.insufficient_data());
+        br.skip_bits(1);
+        assert!(br.insufficient_data(), "a skip past the marker counts too");
+    }
+
+    #[test]
+    fn insufficient_data_at_the_end_of_a_final_window() {
+        let data = [0xABu8];
+        let mut br = BitReader::new(&data);
+        assert_eq!(br.read_bits(8), 0xAB);
+        assert!(!br.insufficient_data());
+        let _ = br.read_bits(1);
+        assert!(br.insufficient_data(), "the data ended with no marker");
+    }
+
+    #[test]
+    fn window_end_starves_instead_of_running_short() {
+        // A partial window's end is not the end of the segment (P4-58).
+        let data = [0xABu8];
+        let start = BitReader::new(&data).state();
+        let mut br = BitReader::resume_windowed(&data, start, false);
+        let _ = br.read_bits(9);
+        assert!(br.starved());
+        assert!(!br.insufficient_data());
+    }
+
+    #[test]
+    fn insufficient_data_clears_only_at_a_restart_marker() {
+        let data = [0x80u8, 0xFF, 0xD0, 0xC0, 0xFF, 0xD9];
+        let mut br = BitReader::new(&data);
+        assert_eq!(br.read_bits(1), 1);
+        let _ = br.read_bits(8); // 7 data bits, then 1 stuffed bit at RST0
+        assert!(br.insufficient_data());
+        br.reset();
+        assert!(
+            !br.insufficient_data(),
+            "a consumed RST starts a new segment"
+        );
+        assert_eq!(br.read_bits(8), 0xC0);
+        let _ = br.read_bits(1); // runs into EOI
+        assert!(br.insufficient_data());
+        br.reset(); // no restart marker ahead, only EOI
+        assert!(
+            br.insufficient_data(),
+            "without an RST the segment stays short (process_restart keeps the flag)"
+        );
+        let mut resumed = BitReader::resume_windowed(&data, br.state(), true);
+        assert!(resumed.insufficient_data(), "a checkpoint carries the flag");
+        resumed.set_position(3);
+        assert!(!resumed.insufficient_data(), "a new scan clears it");
     }
 }

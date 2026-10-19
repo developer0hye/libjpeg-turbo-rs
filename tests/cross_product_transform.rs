@@ -200,16 +200,62 @@ fn attempt_transform(
     }
 }
 
+/// P4-256: with `trim`, a transform that maps a partial edge MCU of a
+/// subsampled image writes one MCU too few, so djpeg reports "premature end
+/// of data segment" on the output. Decoders hid this until P4-254 made them
+/// refuse a short segment. Each combination listed here must still fail to
+/// decode, so the fix deletes its entry.
+const P4_256_TRIM_SHORT_OUTPUT: &[&str] = &[
+    "422-vflip trim opt=false prog=false",
+    "422-vflip trim opt=false prog=true",
+    "422-rot90 trim opt=false prog=false",
+    "422-rot90 trim opt=false prog=true",
+    "420-vflip trim opt=false prog=false",
+    "420-vflip trim opt=false prog=true",
+    "420-rot90 trim opt=false prog=false",
+    "420-rot90 trim opt=false prog=true",
+    "411-vflip trim opt=false prog=false",
+    "411-vflip trim opt=false prog=true",
+    "411-rot90 trim opt=false prog=false",
+    "411-rot90 trim opt=false prog=true",
+];
+
+/// P4-256 in the full matrix: its 48x48 sources leave a partial edge MCU only
+/// for 4:1:1 and 4:4:1 (32-pixel MCUs).
+const P4_256_FULL_SHORT_OUTPUT: &[&str] = &[
+    "411-none-rot90 ari=false copy=All crop=false gray=false opt=false prog=false trim=true",
+    "411-none-rot90 ari=false copy=All crop=false gray=false opt=false prog=true trim=true",
+    "411-none-rot90 ari=false copy=None crop=false gray=false opt=false prog=false trim=true",
+    "411-none-rot90 ari=false copy=None crop=false gray=false opt=false prog=true trim=true",
+    "411-rows-rot90 ari=false copy=All crop=false gray=false opt=false prog=false trim=true",
+    "411-rows-rot90 ari=false copy=All crop=false gray=false opt=false prog=true trim=true",
+    "411-rows-rot90 ari=false copy=None crop=false gray=false opt=false prog=false trim=true",
+    "411-rows-rot90 ari=false copy=None crop=false gray=false opt=false prog=true trim=true",
+    "411-blocks-rot90 ari=false copy=All crop=false gray=false opt=false prog=false trim=true",
+    "411-blocks-rot90 ari=false copy=All crop=false gray=false opt=false prog=true trim=true",
+    "411-blocks-rot90 ari=false copy=None crop=false gray=false opt=false prog=false trim=true",
+    "411-blocks-rot90 ari=false copy=None crop=false gray=false opt=false prog=true trim=true",
+    "441-none-rot270 ari=false copy=All crop=false gray=false opt=false prog=false trim=true",
+    "441-none-rot270 ari=false copy=All crop=false gray=false opt=false prog=true trim=true",
+    "441-rows-rot270 ari=false copy=All crop=false gray=false opt=false prog=false trim=true",
+    "441-rows-rot270 ari=false copy=All crop=false gray=false opt=false prog=true trim=true",
+    "441-blocks-rot270 ari=false copy=All crop=false gray=false opt=false prog=false trim=true",
+    "441-blocks-rot270 ari=false copy=All crop=false gray=false opt=false prog=true trim=true",
+];
+
 /// Assert a transform matrix accounted for every attempt and verified at least
 /// one round-trip. Refusals are reported in full rather than tolerated: if a
 /// combination is genuinely out of scope it belongs in an explicit skip rule
-/// with a citation, not folded silently into the pass.
+/// with a citation, not folded silently into the pass. `known_short_output`
+/// lists the combinations whose output is known to be short (P4-256): each must
+/// fail to decode with `UnexpectedEof`, and no other may fail.
 fn assert_transform_matrix_accounted(
     name: &str,
     tested: u32,
     round_tripped: u32,
     refused: &[String],
     decode_failures: &[String],
+    known_short_output: &[&str],
 ) {
     println!(
         "{name}: {tested} attempted, {round_tripped} round-tripped, {} refused, {} decode failures",
@@ -224,10 +270,28 @@ fn assert_transform_matrix_accounted(
         refused.len(),
         decode_failures.len()
     );
+    let short_output_error: String = format!("{}", libjpeg_turbo_rs::JpegError::UnexpectedEof);
+    let (known, unexpected): (Vec<&String>, Vec<&String>) =
+        decode_failures.iter().partition(|failure| {
+            failure
+                .split_once(": decode error: ")
+                .is_some_and(|(label, error)| {
+                    known_short_output.contains(&label) && error == short_output_error
+                })
+        });
     assert!(
-        decode_failures.is_empty(),
+        unexpected.is_empty(),
         "{name} decode failures:\n{}",
-        decode_failures.join("\n")
+        unexpected
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<&str>>()
+            .join("\n")
+    );
+    assert_eq!(
+        known.len(),
+        known_short_output.len(),
+        "{name}: a P4-256 combination no longer fails; delete its entry"
     );
     assert!(
         refused.is_empty(),
@@ -490,6 +554,7 @@ fn tjtrantest_arithmetic_cross_product() {
         round_tripped,
         &refused,
         &decode_failures,
+        &[],
     );
 }
 
@@ -661,6 +726,7 @@ fn tjtrantest_crop_cross_product() {
         round_tripped,
         &refused,
         &decode_failures,
+        &[],
     );
 }
 
@@ -833,6 +899,7 @@ fn tjtrantest_trim_cross_product() {
         round_tripped,
         &refused,
         &decode_failures,
+        P4_256_TRIM_SHORT_OUTPUT,
     );
 }
 
@@ -945,6 +1012,7 @@ fn tjtrantest_grayscale_input_cross_product() {
         round_tripped,
         &refused,
         &decode_failures,
+        &[],
     );
 }
 
@@ -1040,6 +1108,7 @@ fn tjtrantest_restart_cross_product() {
         round_tripped,
         &refused,
         &decode_failures,
+        &[],
     );
 }
 
@@ -1286,6 +1355,7 @@ fn tjtrantest_full_cross_product() {
         round_tripped,
         &refused,
         &decode_failures,
+        P4_256_FULL_SHORT_OUTPUT,
     );
 }
 

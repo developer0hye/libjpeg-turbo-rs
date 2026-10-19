@@ -295,7 +295,7 @@
 
 ### Options (TJXOPT flags)
 - [x] TJXOPT_PERFECT (1) — Fail if transform is not perfect (partial iMCU) (`TransformOptions.perfect`)
-- [x] TJXOPT_TRIM (2) — Discard partial iMCU edges (`TransformOptions.trim`); an axis holding less than one whole iMCU is left untrimmed rather than rejected, matching `trim_right_edge`/`trim_bottom_edge` (P4-117)
+- [x] TJXOPT_TRIM (2) — Discard partial iMCU edges (`TransformOptions.trim`); an axis holding less than one whole iMCU is left untrimmed rather than rejected, matching `trim_right_edge`/`trim_bottom_edge` (P4-117); a trimmed `VFlip`/`Rot90` of a subsampled source with a partial edge MCU writes too few MCUs (P4-256)
 - [x] TJXOPT_CROP (4) — Enable lossless cropping region (`TransformOptions.crop`)
 - [x] TJXOPT_GRAY (8) — Convert to grayscale during transform (`TransformOptions.grayscale`)
 - [x] TJXOPT_NOOUTPUT (16) — Dry run (no output image) (`TransformOptions.no_output`)
@@ -421,6 +421,7 @@
 
 - [x] `Result<T, JpegError>` for all public operations
 - [x] `DecodeWarning` list: marker recovery (`ExtraneousData`) and lenient entropy warnings (`HuffmanError`, `TruncatedData`, `UnsupportedRecovered`, `WarningsSuppressed`)
+- [x] Short entropy-coded segment (`JWRN_HIT_MARKER`): every sequential Huffman decoder refuses it in strict mode (`UnexpectedEof`); in lenient mode (`Decoder::set_lenient`, `decompress_12bit_lenient`, `decompress_raw_12_lenient`, `decompress_lossless_arbitrary_lenient`) it greys the rest of the segment like djpeg and warns `TruncatedData` (P4-254). Progressive scans are P4-255
 - [x] Custom error handler — `ErrorHandler` trait
 - [ ] Classic codec failures consistently reach `error_exit()` — native typed errors exist; P4-100
 - [x] `emit_message()` callback — `ErrorHandler::emit_warning()` + `ErrorHandler::trace()`

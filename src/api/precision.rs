@@ -4,9 +4,9 @@
 /// - 12-bit (J12SAMPLE / i16): DCT-based encode/decode with values 0-4095,
 ///   used in medical imaging (DICOM).
 /// - 16-bit (J16SAMPLE / u16): lossless-only (SOF3) with values 0-65535.
-use crate::common::error::{JpegError, Result};
+use crate::common::error::{DecodeWarning, JpegError, Result};
 use crate::common::types::{DecodeLimits, Subsampling};
-use crate::decode::bitstream::BitReader;
+use crate::decode::bitstream::{check_segment_end, short_segment_error, BitReader};
 use crate::decode::huffman;
 use crate::decode::lossless;
 use crate::decode::marker::MarkerReader;
@@ -898,7 +898,35 @@ pub fn decompress_12bit(data: &[u8]) -> Result<Image12> {
 /// planes and the interleaved result — two bytes a sample each — before the
 /// first of them is allocated. Exceeding any of them is
 /// [`JpegError::LimitExceeded`].
+///
+/// A stream whose entropy-coded data ends before its last MCU is refused with
+/// [`JpegError::UnexpectedEof`]; [`decompress_12bit_lenient`] decodes it as
+/// djpeg does instead.
 pub fn decompress_12bit_with_limits(data: &[u8], limits: &DecodeLimits) -> Result<Image12> {
+    decompress_12bit_impl(data, limits, false, &mut Vec::new())
+}
+
+/// [`decompress_12bit`] that recovers from entropy-coded data ending before
+/// the last MCU, as djpeg does (`JWRN_HIT_MARKER`): every MCU after the end,
+/// up to the next restart marker, is mid-grey (2048), and the returned
+/// warnings include [`DecodeWarning::TruncatedData`]. Other corruption is
+/// still an error (P4-254).
+pub fn decompress_12bit_lenient(data: &[u8]) -> Result<(Image12, Vec<DecodeWarning>)> {
+    let mut warnings: Vec<DecodeWarning> = Vec::new();
+    let image: Image12 =
+        decompress_12bit_impl(data, &DecodeLimits::default(), true, &mut warnings)?;
+    Ok((image, warnings))
+}
+
+/// The 12-bit decode behind [`decompress_12bit_with_limits`] and
+/// [`decompress_12bit_lenient`]; `lenient` selects how a short entropy
+/// segment is handled (P4-254).
+pub(crate) fn decompress_12bit_impl(
+    data: &[u8],
+    limits: &DecodeLimits,
+    lenient: bool,
+    warnings: &mut Vec<DecodeWarning>,
+) -> Result<Image12> {
     let mut reader = MarkerReader::new(data);
     reader.set_scan_cap(limits.max_scans);
     let metadata = reader.read_markers()?;
@@ -1054,6 +1082,8 @@ pub fn decompress_12bit_with_limits(data: &[u8], limits: &DecodeLimits) -> Resul
                 bit_reader.reset();
                 prev_dc.fill(0);
             }
+            // Once the segment has run short, blocks stay zero: mid-grey (P4-254).
+            let segment_short: bool = bit_reader.insufficient_data();
             // Decode blocks in scan order (matching C libjpeg-turbo MCU structure).
             for (scan_idx, &frame_idx) in scan_to_frame.iter().enumerate() {
                 let h_samp: usize = comp_h_samp[frame_idx];
@@ -1065,12 +1095,16 @@ pub fn decompress_12bit_with_limits(data: &[u8], limits: &DecodeLimits) -> Resul
                 for v in 0..v_samp {
                     for h in 0..h_samp {
                         let mut block = [0i16; 64];
-                        let dc_diff: i16 =
-                            huffman::decode_dc_coefficient(&mut bit_reader, dc_table)?;
-                        // Use i32 for DC prediction to avoid overflow with 12-bit range.
-                        prev_dc[frame_idx] += dc_diff as i32;
-                        block[0] = prev_dc[frame_idx].clamp(-32768, 32767) as i16;
-                        huffman::decode_ac_coefficients(&mut bit_reader, ac_table, &mut block)?;
+                        if !segment_short {
+                            let dc_diff: i16 =
+                                huffman::decode_dc_coefficient(&mut bit_reader, dc_table)
+                                    .map_err(|e| short_segment_error(&bit_reader, e))?;
+                            // Use i32 for DC prediction to avoid overflow with 12-bit range.
+                            prev_dc[frame_idx] += dc_diff as i32;
+                            block[0] = prev_dc[frame_idx].clamp(-32768, 32767) as i16;
+                            huffman::decode_ac_coefficients(&mut bit_reader, ac_table, &mut block)
+                                .map_err(|e| short_segment_error(&bit_reader, e))?;
+                        }
                         // Dequantize
                         let mut deq = [0i16; 64];
                         for k in 0..64 {
@@ -1099,6 +1133,14 @@ pub fn decompress_12bit_with_limits(data: &[u8], limits: &DecodeLimits) -> Resul
                     }
                 }
             }
+            check_segment_end(
+                &bit_reader,
+                segment_short,
+                lenient,
+                mcu_count as usize,
+                mcus_x * mcus_y,
+                warnings,
+            )?;
             mcu_count += 1;
         }
     }
@@ -1561,8 +1603,13 @@ pub fn decompress_16bit_with_limits(data: &[u8], limits: &DecodeLimits) -> Resul
             }
             let mut diffs = Vec::with_capacity(width);
             for _ in 0..width {
-                diffs.push(decode_dc_wide(&mut br, dc_tables[0])?);
+                diffs.push(
+                    decode_dc_wide(&mut br, dc_tables[0])
+                        .map_err(|e| short_segment_error(&br, e))?,
+                );
             }
+            // This row read past the end of its segment: refused (P4-254).
+            check_segment_end(&br, false, false, rs, width * height, &mut Vec::new())?;
             undifference_row_16(
                 &diffs,
                 prev_row.as_deref(),
@@ -1598,9 +1645,14 @@ pub fn decompress_16bit_with_limits(data: &[u8], limits: &DecodeLimits) -> Resul
             let mut cd: Vec<Vec<i16>> = (0..nc).map(|_| Vec::with_capacity(width)).collect();
             for _ in 0..width {
                 for c in 0..nc {
-                    cd[c].push(decode_dc_wide(&mut br, dc_tables[c])?);
+                    cd[c].push(
+                        decode_dc_wide(&mut br, dc_tables[c])
+                            .map_err(|e| short_segment_error(&br, e))?,
+                    );
                 }
             }
+            // This row read past the end of its segment: refused (P4-254).
+            check_segment_end(&br, false, false, rs, width * height, &mut Vec::new())?;
             for c in 0..nc {
                 undifference_row_16(
                     &cd[c],
@@ -1684,7 +1736,13 @@ fn decode_dc_wide(
 ) -> Result<i16> {
     let peek = reader.peek_bits(16);
     let (s, l) = table.lookup_fast(peek);
-    let (category, code_len) = if l > 0 { (s, l) } else { table.lookup(peek)? };
+    let (category, code_len) = if l > 0 {
+        (s, l)
+    } else {
+        table
+            .lookup(peek)
+            .inspect_err(|_| reader.note_failed_lookup())?
+    };
     reader.skip_bits(code_len);
     if category == 0 {
         return Ok(0);
@@ -2032,7 +2090,31 @@ fn gather_dc_symbol_wide(diff: i32, freq: &mut [u32; 257]) {
 ///
 /// Reads the precision from the SOF3 marker and returns an `Image16`
 /// with the `precision` field set accordingly.
+///
+/// A stream whose entropy-coded data ends before its last row is refused
+/// with [`JpegError::UnexpectedEof`]; [`decompress_lossless_arbitrary_lenient`]
+/// decodes it as djpeg does instead.
 pub fn decompress_lossless_arbitrary(data: &[u8]) -> Result<Image16> {
+    decompress_lossless_arbitrary_impl(data, false, &mut Vec::new())
+}
+
+/// [`decompress_lossless_arbitrary`] that recovers from entropy-coded data
+/// ending before the last row, as djpeg does (`JWRN_HIT_MARKER`): every row
+/// after the end, up to the next restart marker, is mid-grey
+/// (`1 << (precision - 1)`), and the returned warnings include
+/// [`DecodeWarning::TruncatedData`]. Other corruption is still an error
+/// (P4-254).
+pub fn decompress_lossless_arbitrary_lenient(data: &[u8]) -> Result<(Image16, Vec<DecodeWarning>)> {
+    let mut warnings: Vec<DecodeWarning> = Vec::new();
+    let image: Image16 = decompress_lossless_arbitrary_impl(data, true, &mut warnings)?;
+    Ok((image, warnings))
+}
+
+fn decompress_lossless_arbitrary_impl(
+    data: &[u8],
+    lenient: bool,
+    warnings: &mut Vec<DecodeWarning>,
+) -> Result<Image16> {
     let mut reader = MarkerReader::new(data);
     let metadata = reader.read_markers()?;
     // Default frame-dimension guard (issue #355 review HIGH-1): this
@@ -2095,10 +2177,20 @@ pub fn decompress_lossless_arbitrary(data: &[u8]) -> Result<Image16> {
             if restart {
                 br.reset();
             }
+            // Once the segment has run short, a row is zero differences from a
+            // reset predictor: mid-grey, as libjpeg leaves it (jdlhuff.c:224-239;
+            // P4-254).
+            let segment_short: bool = br.insufficient_data();
             let mut diffs = Vec::with_capacity(width);
             for _ in 0..width {
-                diffs.push(decode_dc_wide(&mut br, dc_tables[0])?);
+                diffs.push(if segment_short {
+                    0
+                } else {
+                    decode_dc_wide(&mut br, dc_tables[0])
+                        .map_err(|e| short_segment_error(&br, e))?
+                });
             }
+            check_segment_end(&br, segment_short, lenient, rs, width * height, warnings)?;
             undifference_row_16(
                 &diffs,
                 prev_row.as_deref(),
@@ -2106,7 +2198,7 @@ pub fn decompress_lossless_arbitrary(data: &[u8]) -> Result<Image16> {
                 psv,
                 precision,
                 pt,
-                y == 0 || restart,
+                y == 0 || restart || segment_short,
             );
             prev_row = Some(output[rs..rs + width].to_vec());
         }
@@ -2131,12 +2223,19 @@ pub fn decompress_lossless_arbitrary(data: &[u8]) -> Result<Image16> {
             if restart {
                 br.reset();
             }
+            let segment_short: bool = br.insufficient_data();
             let mut cd: Vec<Vec<i16>> = (0..nc).map(|_| Vec::with_capacity(width)).collect();
             for _ in 0..width {
                 for c in 0..nc {
-                    cd[c].push(decode_dc_wide(&mut br, dc_tables[c])?);
+                    cd[c].push(if segment_short {
+                        0
+                    } else {
+                        decode_dc_wide(&mut br, dc_tables[c])
+                            .map_err(|e| short_segment_error(&br, e))?
+                    });
                 }
             }
+            check_segment_end(&br, segment_short, lenient, rs, width * height, warnings)?;
             for c in 0..nc {
                 undifference_row_16(
                     &cd[c],
@@ -2145,7 +2244,7 @@ pub fn decompress_lossless_arbitrary(data: &[u8]) -> Result<Image16> {
                     psv,
                     precision,
                     pt,
-                    y == 0 || restart,
+                    y == 0 || restart || segment_short,
                 );
                 prev_rows[c] = Some(planes[c][rs..rs + width].to_vec());
             }

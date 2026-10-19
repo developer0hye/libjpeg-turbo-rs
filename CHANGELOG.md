@@ -10,6 +10,11 @@ and `git log` between tags.
 
 ### Added
 
+- **Lenient 12-bit and lossless decodes** (P4-254):
+  `precision::decompress_12bit_lenient`, `raw_data_12::decompress_raw_12_lenient`
+  and `precision::decompress_lossless_arbitrary_lenient` decode a stream whose
+  entropy-coded data ends before the last MCU as djpeg does, and return the
+  warnings with the image. Other corruption is still an error.
 - **`TjHandle::scaling_factor`** returns the factor `set_scaling_factor`
   set; `TjHandle::decompress_to_yuv_planes` now applies it (P4-234, #667).
 - **Supported root paths for module-only APIs** (P4-222): `libjpeg_turbo_rs::yuv`
@@ -326,6 +331,28 @@ and `git log` between tags.
   runs system/Rust bidirectional cross-decodes.
 
 ### Fixed
+- **Breaking (behaviour): a short entropy-coded segment is refused, or decoded
+  as djpeg decodes it** (P4-254). When the data ended before the last MCU —
+  the stream stopped, or an EOI came early — the sequential Huffman decoders
+  read the missing bits as zeros.
+  - Strict decoding returned `Ok` with wrong samples (`Decoder`,
+    `decompress_12bit`, `decompress_raw_12`, `decompress_16bit`,
+    `decompress_lossless_arbitrary`, `read_coefficients`); only the 8-bit
+    fast path refused a stream with no EOI. It now returns
+    `JpegError::UnexpectedEof`.
+  - The entry points with no lenient form follow: `read_coefficients` and the
+    transforms on it, `TjHandle::decompress*` (so `tj3Decompress*`), and the
+    classic C ABI's `jpeg_start_decompress` (`JERR_INPUT_EOF`). Stock decodes
+    these with a warning instead (P4-258).
+  - Lenient decoding gave no warning when an EOI followed the cut, and left
+    zero samples where djpeg greys. It now reports
+    `DecodeWarning::TruncatedData` once and leaves the rest of the segment
+    mid-grey, byte-identical to djpeg; a restart marker resumes decoding.
+  - Complete streams decode `Ok` with no warning, with or without an EOI. The
+    old fast path could refuse one with no EOI whose last MCUs fit in its
+    final bytes.
+  - The fractional-chroma-sampling refusal (P4-36) now runs before entropy
+    decoding, as C's does, so it still wins over a short segment.
 - **YCbCr output** (`Decoder::set_output_colorspace(ColorSpace::YCbCr)`, also
   `ScanlineDecoder`) of an 8-bit DCT frame is now libjpeg's `JCS_YCbCr` output
   byte for byte, crops included: each component goes through the same

@@ -390,6 +390,18 @@ pipeline, `precision::decompress_12bit_with_limits` /
 budget counts, is in
 [`docs/STABILITY.md`](docs/STABILITY.md#what-the-memory-budget-covers).
 
+### Truncated input
+
+When a sequential stream's entropy-coded data ends before its last MCU,
+strict decoding returns `JpegError::UnexpectedEof`. Lenient decoding
+(`Decoder::set_lenient`, `precision::decompress_12bit_lenient`,
+`raw_data_12::decompress_raw_12_lenient`,
+`precision::decompress_lossless_arbitrary_lenient`) returns what djpeg
+returns: the rest of the segment mid-grey, with a
+`DecodeWarning::TruncatedData` warning. `read_coefficients`, `TjHandle` and
+the classic C ABI have no lenient form yet and refuse such a stream, where
+libjpeg-turbo decodes it with a warning (P4-258).
+
 ## Features
 
 ### Codec Support
