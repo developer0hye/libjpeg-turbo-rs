@@ -353,6 +353,24 @@ and `git log` between tags.
     final bytes.
   - The fractional-chroma-sampling refusal (P4-36) now runs before entropy
     decoding, as C's does, so it still wins over a short segment.
+- **Breaking (behaviour): a short segment in a progressive scan is refused,
+  or decoded as djpeg decodes it** (P4-255). P4-254's check now covers the
+  progressive Huffman decoders: `Decoder` (`decode_image` and `decode_raw`),
+  `ProgressiveDecoder` and `read_coefficients`. A progressive stream cut short
+  with an EOI after the cut used to decode `Ok` with no warning.
+  - Strict decoding returns `JpegError::UnexpectedEof`. `ProgressiveDecoder`
+    and `read_coefficients` are strict.
+  - Lenient decoding reports `DecodeWarning::TruncatedData` once and leaves
+    the rest of the segment as the earlier scans left it, up to the next
+    restart marker. With block smoothing on, as djpeg decodes, the output is
+    byte-identical to djpeg's: smoothing uses the coefficient bits from
+    before the final scan for the rows that scan never reached
+    (`last_good_iMCU_row`).
+- **`ProgressiveDecoder` misplaced blocks in subsampled images with partial
+  MCUs** (P4-259). Its non-interleaved scans walked the MCU-padded block grid
+  rather than the component's own blocks, so a 227×149 4:2:0 progressive
+  image decoded with 89% of its samples wrong. It now matches `Decoder` and
+  djpeg.
 - **YCbCr output** (`Decoder::set_output_colorspace(ColorSpace::YCbCr)`, also
   `ScanlineDecoder`) of an 8-bit DCT frame is now libjpeg's `JCS_YCbCr` output
   byte for byte, crops included: each component goes through the same

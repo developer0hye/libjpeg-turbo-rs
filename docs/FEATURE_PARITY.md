@@ -421,7 +421,7 @@
 
 - [x] `Result<T, JpegError>` for all public operations
 - [x] `DecodeWarning` list: marker recovery (`ExtraneousData`) and lenient entropy warnings (`HuffmanError`, `TruncatedData`, `UnsupportedRecovered`, `WarningsSuppressed`)
-- [x] Short entropy-coded segment (`JWRN_HIT_MARKER`): every sequential Huffman decoder refuses it in strict mode (`UnexpectedEof`); in lenient mode (`Decoder::set_lenient`, `decompress_12bit_lenient`, `decompress_raw_12_lenient`, `decompress_lossless_arbitrary_lenient`) it greys the rest of the segment like djpeg and warns `TruncatedData` (P4-254). Progressive scans are P4-255
+- [x] Short entropy-coded segment (`JWRN_HIT_MARKER`): every Huffman decoder, sequential and progressive, refuses it in strict mode (`UnexpectedEof`); in lenient mode (`Decoder::set_lenient`, `decompress_12bit_lenient`, `decompress_raw_12_lenient`, `decompress_lossless_arbitrary_lenient`) it leaves the rest of the segment as djpeg does — mid-grey, or for a progressive scan as the earlier scans left it, with block smoothing following libjpeg's `last_good_iMCU_row` — and warns `TruncatedData` (P4-254, P4-255)
 - [x] Custom error handler — `ErrorHandler` trait
 - [ ] Classic codec failures consistently reach `error_exit()` — native typed errors exist; P4-100
 - [x] `emit_message()` callback — `ErrorHandler::emit_warning()` + `ErrorHandler::trace()`

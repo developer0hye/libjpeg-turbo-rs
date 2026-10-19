@@ -10115,8 +10115,8 @@ reproduces through `jpeg_mem_src` too.
    truncated sequential stream now fails with `JERR_INPUT_EOF` (44): P4-254
    made the strict decoder this path uses refuse a short entropy segment
    (P4-258). Stock decodes it, the rest grey, with `JWRN_JPEG_EOF` (123) +
-   `JWRN_HIT_MARKER` (120); a truncated progressive one (P4-255) still
-   decodes here without them. Both reproduce through
+   `JWRN_HIT_MARKER` (120); since P4-255 a truncated progressive one
+   fails the same way. Both reproduce through
    `jpeg_mem_src` as well, so this is error-translation work in the
    decode path (P4-100's theme), recorded here because the measurements
    came from this path's probes.
@@ -14961,7 +14961,7 @@ incremental, lossless and 12-bit), `decompress_12bit`, `decompress_raw_12`,
 
 **Not covered:**
 
-- progressive scans (P4-255);
+- progressive scans (P4-255, closed 2026-10-19);
 - arithmetic coding, which has no `JWRN_HIT_MARKER` in C;
 - a multi-scan stream that stops with no EOI, which the marker walk refuses
   before any decoding (P4-257);
@@ -15009,7 +15009,7 @@ Two follow-ons:
   showed that some trimmed transforms write short output. That is filed as
   P4-256.
 
-## P4-255. Progressive Huffman Decode Ignores a Short Entropy-Coded Segment — **OPEN**
+## P4-255. Progressive Huffman Decode Ignores a Short Entropy-Coded Segment — **CLOSED 2026-10-19**
 
 P4-254 fixed the sequential Huffman decoders, but the progressive scan loops
 — `decode_progressive_planes` (`src/decode/pipeline_impl/progressive.rs`),
@@ -15024,11 +15024,113 @@ Measured at P4-254's branch against `djpeg` 3.2.0, on `cjpeg -progressive
 testorig.ppm` cut at 60% of the file with an EOI appended: strict and lenient
 decoding both return `Ok`, with no warning, where djpeg warns "premature end
 of data segment". (Without the EOI the stream fails earlier, in the marker
-walk: P4-257.)
+walk: P4-257.) Cutting inside each scan of four `cjpeg -progressive`
+fixtures gave the same at every entry point: `Decoder::decode_image`,
+`decode_raw`, `ProgressiveDecoder` and `read_coefficients` all returned `Ok`.
 
-Acceptance: progressive decoding uses `BitReader::insufficient_data()` as the
-sequential decoders do. Strict decoding refuses a truncated progressive
-stream, and lenient decoding matches djpeg on it.
+**Fix.** The progressive loops check `BitReader::insufficient_data()` before
+each MCU (one block, in a non-interleaved scan) and after it, as the
+sequential ones do:
+
+- strict: `JpegError::UnexpectedEof`, from `Decoder`, `ProgressiveDecoder`
+  and `read_coefficients`;
+- lenient (`Decoder` only): `DecodeWarning::TruncatedData` once per decode,
+  and every later block of the segment left as the earlier scans left it,
+  up to the next consumed RST. A block that fails to decode on the stuffed
+  bits keeps what it decoded.
+
+Lenient output with block smoothing on also needs C's
+`last_good_iMCU_row`. `consume_data` records the iMCU row of the last MCU
+that began with data in its segment (jdcoefct.c:257-258), across every scan.
+`decompress_smooth_data` then smooths the rows after it with the
+coefficient bits from before each component's last scan
+(jdcoefct.c:556-563), which `start_pass_phuff_decoder` saves
+(jdphuff.c:132-137) and `smoothing_ok` latches (jdcoefct.c:451-456). The
+pipeline now tracks that row, and `toggles::compute_prev_coef_bits` gives
+those bits. For a complete stream the row is the last one, so nothing
+changes. The two AC slow-path lookups in `decode/progressive.rs` now call
+`note_failed_lookup`, as the sequential lookups do.
+
+**Not covered:**
+
+- a scan cut short in the middle of the stream, with later scans present:
+  strict decoding refuses it, but lenient decoding can fail when a later
+  refinement scan desyncs on blocks the short scan left unset (P4-260);
+- arithmetic coding, which has no `JWRN_HIT_MARKER` in C;
+- a progressive stream that stops with no EOI, which the marker walk refuses
+  before any decoding (P4-257);
+- `ProgressiveDecoder` and `read_coefficients` have no lenient form, so they
+  refuse what stock decodes with a warning (P4-258);
+- a stream that ends cleanly at a scan boundary, with scans missing: C
+  decodes it with no warning, and so does this crate.
+
+**Status (2026-10-19): closed.** `cargo test --test
+cross_check_p4_255_progressive_short_segment` uses four `cjpeg -progressive`
+fixtures from `testorig.ppm`, all 227×149 so that both axes have partial
+MCUs: 4:2:0 with ten scans, greyscale (non-interleaved DC scans), 4:4:4, and a
+restart marker per MCU row. It checks:
+
+- **a cut in the middle of each scan, with an EOI**: `decode_image`,
+  `decode_raw`, `ProgressiveDecoder` and `read_coefficients` refuse all 36,
+  and `jpegtran` reports each as a warning. Lenient decoding with block
+  smoothing returns djpeg's samples byte for byte (djpeg exits 2), with one
+  `TruncatedData`, and warns once without smoothing too;
+- **a scan's second half dropped, the later scans kept**: all 32 are refused
+  at every strict entry point;
+- **a short restart interval** in the first scan and in the last: refused in
+  strict mode, and resumed at the next RST, byte-identical to djpeg, in
+  lenient mode;
+- **complete streams** decode unchanged and without a warning at every entry
+  point, strict and lenient, with and without smoothing.
+
+`cargo test --lib toggles` pins the saved-bits rules. Making the
+`ProgressiveDecoder` check safe needed P4-259 first.
+
+## P4-259. `ProgressiveDecoder` Walked Non-Interleaved Scans Over the MCU-Padded Block Grid — **CLOSED 2026-10-19**
+
+Found while fixing P4-255. A non-interleaved scan codes a component's own
+blocks, `width_in_blocks` × `height_in_blocks` (jdinput.c:119-124,
+175-176). `ProgressiveDecoder::decode_one_scan` walked `blocks_x` ×
+`blocks_y`, the MCU-padded grid its buffers are laid out on. For a
+subsampled image whose size is not a whole number of MCUs, the component
+grid is narrower, so every row after the first was misplaced. The decoder
+also read blocks the scan does not hold. P4-211 fixed the same walk in
+`Decoder`'s progressive DC scans; `decode_progressive_coefficients` already
+walked the component's own blocks.
+
+Measured with `cjpeg -progressive` on `testorig.ppm` (227×149): 4:2:0 output
+differed from `Decoder` and djpeg in 90,306 of 101,469 samples, and 4:2:2 in
+90,356. A 224×144 crop (whole MCUs) matched exactly.
+
+**Fix.** Non-interleaved scans walk the component's own block grid, as the
+other two progressive loops do, with `blocks_x` kept as the buffer stride.
+
+**Status (2026-10-19): closed.**
+`progressive_decoder_walks_each_components_own_blocks_p4_259` checks 4:2:0,
+4:2:2 and 4:4:0 at 227×149 against djpeg, and
+`complete_progressive_streams_decode_unchanged` checks every P4-255 fixture.
+
+## P4-260. Lenient Progressive Decoding Fails on a Corrupt Huffman Code Where libjpeg Warns and Decodes — **OPEN**
+
+`Decoder`'s progressive path has no recovery from corrupt entropy-coded data
+in lenient mode. A code no table holds returns `CorruptData` ("invalid
+Huffman code") and fails the decode. libjpeg's `jpeg_huff_decode` warns
+`JWRN_HUFF_BAD_CODE` and returns symbol 0 (jdhuff.c:465-467; jdphuff.c
+reaches it through `HUFF_DECODE`), so djpeg decodes on.
+The sequential path conceals such a block (P4-23).
+
+Found with P4-255's fixtures (P4-255's branch, against djpeg 3.2.0): drop
+the second half of a progressive stream's AC-first scan for a chroma
+component and keep the later scans. The component's AC refinement scan then
+reads correction bits for coefficients the short scan never set, desyncs,
+and meets a bad code. That happened in 3 of the 32 such cases: `cjpeg
+-progressive testorig.ppm`'s fourth scan (Cb, 1-63), and the third and
+fourth scans of the `-restart 1` version. Lenient decoding returns
+`CorruptData`, where djpeg exits 2. djpeg prints only the first warning
+("premature end of data segment"), as libjpeg does by default.
+
+Acceptance: lenient progressive decoding recovers from a bad code as libjpeg
+does, with a `DecodeWarning`, and matches djpeg on these inputs.
 
 ## P4-256. Trimmed Transforms of Subsampled Images Write Too Few MCUs — **OPEN**
 
@@ -15090,7 +15192,10 @@ with `JWRN_HIT_MARKER` (and `JWRN_JPEG_EOF`):
   unless `TJPARAM_STOPONWARNING` is set;
 - the classic C ABI, through the strict `Decoder` behind
   `jpeg_start_decompress` — `JERR_INPUT_EOF` (44) where stock decodes the
-  rest grey and warns.
+  rest grey and warns;
+- since P4-255, `ProgressiveDecoder` — libjpeg's buffered-image mode, which
+  decodes a truncated progressive stream with `JWRN_HIT_MARKER` — and
+  `read_coefficients` on a progressive stream.
 
 Before P4-254 these returned the image with no warning, decoded from stuffed
 zero bits, so neither behaviour matched stock. Measured on `testorig.jpg` cut

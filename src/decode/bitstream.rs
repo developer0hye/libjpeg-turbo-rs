@@ -12,6 +12,24 @@ pub(crate) fn short_segment_error(reader: &BitReader<'_>, error: JpegError) -> J
     }
 }
 
+/// The result of decoding one block of a progressive scan (P4-255). A block
+/// that fails to decode once the segment has run short failed on the stuffed
+/// zero bits: strict decoding reports the truncation
+/// ([`short_segment_error`]), and lenient decoding keeps what the block
+/// decoded and carries on, as libjpeg does once `insufficient_data` is set,
+/// [`check_segment_end`] recording the warning.
+pub(crate) fn progressive_block_result(
+    reader: &BitReader<'_>,
+    lenient: bool,
+    result: Result<()>,
+) -> Result<()> {
+    match result {
+        Err(_) if lenient && reader.insufficient_data() => Ok(()),
+        Err(error) => Err(short_segment_error(reader, error)),
+        Ok(()) => Ok(()),
+    }
+}
+
 /// Call after decoding one MCU (a row, for lossless) that started with the
 /// segment not yet short (`was_short == false`). If it read past the end of
 /// the segment — djpeg's `JWRN_HIT_MARKER` — a strict decode is refused with

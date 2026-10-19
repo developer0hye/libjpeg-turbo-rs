@@ -54,6 +54,7 @@ src/decode/pipeline_impl/progressive.rs	1	component-count	one optional DC table 
 src/decode/pipeline_impl/raw.rs	1	component-count	one block size per frame component (<= 4)	let comp_block_sizes: Vec<usize> = vec![block_size; num_components];
 src/decode/pipeline_impl/raw.rs	1	component-count	one width per frame component (<= 4)	let mut plane_widths: Vec<usize> = Vec::with_capacity(num_components);
 src/decode/pipeline_impl/raw.rs	1	component-count	one height per frame component (<= 4)	let mut plane_heights: Vec<usize> = Vec::with_capacity(num_components);
-src/decode/toggles.rs	1	component-count	one 64-entry coef_bits row per frame component (<= 4)	let mut coef_bits: Vec<[i32; 64]> = vec![[-1i32; 64]; num_components];
+src/decode/toggles.rs	2	component-count	one 64-entry coef_bits row per frame component (<= 4), in compute_coef_bits and compute_prev_coef_bits	let mut coef_bits: Vec<[i32; 64]> = vec![[-1i32; 64]; num_components];
+src/decode/toggles.rs	1	component-count	one 64-entry saved coef_bits row per frame component (<= 4)	let mut prev_coef_bits: Vec<[i32; 64]> = vec![[-1i32; 64]; num_components];
 src/decode/toggles.rs	1	component-count	one SAVED_COEFS row per frame component (<= 4)	let mut result: Vec<[i32; SAVED_COEFS]> = Vec::with_capacity(num_components);
 src/decode/toggles.rs	1	infallible-public-signature	pub apply_block_smoothing_coeffs returns (); the pipeline uses try_apply_block_smoothing_coeffs	Vec::with_capacity(dc_snapshot_len(coeff_buf.len(), row_stride, blocks_x));
