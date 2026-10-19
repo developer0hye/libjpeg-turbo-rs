@@ -8,6 +8,7 @@ use crate::common::layout::checked_span;
 use crate::common::quant_table::NATURAL_ORDER;
 use crate::common::try_alloc::try_filled_vec;
 use crate::common::types::{ColorSpace, CropRegion, MarkerSaveConfig, SavedMarker};
+use crate::decode::bitstream::short_segment_error;
 use crate::decode::marker::{JpegMetadata, MarkerReader};
 use crate::encode::huffman_encode::{build_huff_table, BitWriter, HuffTable, HuffmanEncoder};
 use crate::encode::marker_writer;
@@ -3234,13 +3235,20 @@ fn decode_baseline_coefficients(
                     bit_reader.reset();
                     mcu_decoder.reset();
                 }
-                mcu_decoder.decode_block(
-                    &mut bit_reader,
-                    plan.comp_idx,
-                    plan.dc_table,
-                    plan.ac_table,
-                    &mut coeffs,
-                )?;
+                mcu_decoder
+                    .decode_block(
+                        &mut bit_reader,
+                        plan.comp_idx,
+                        plan.dc_table,
+                        plan.ac_table,
+                        &mut coeffs,
+                    )
+                    .map_err(|e| short_segment_error(&bit_reader, e))?;
+                // The block read past the end of its segment: these would be
+                // coefficients the stream does not hold (P4-254).
+                if bit_reader.insufficient_data() {
+                    return Err(JpegError::UnexpectedEof);
+                }
                 comp_data[0].blocks[by * stride + bx] = coeffs;
                 mcu_count += 1;
             }
@@ -3291,13 +3299,15 @@ fn decode_baseline_coefficients(
 
                 for v in 0..v_blocks {
                     for h in 0..h_blocks {
-                        mcu_decoder.decode_block(
-                            &mut bit_reader,
-                            plan.comp_idx,
-                            plan.dc_table,
-                            plan.ac_table,
-                            &mut coeffs,
-                        )?;
+                        mcu_decoder
+                            .decode_block(
+                                &mut bit_reader,
+                                plan.comp_idx,
+                                plan.dc_table,
+                                plan.ac_table,
+                                &mut coeffs,
+                            )
+                            .map_err(|e| short_segment_error(&bit_reader, e))?;
 
                         let bx = mcu_x * h_blocks + h;
                         let by = mcu_y * v_blocks + v;
@@ -3307,6 +3317,10 @@ fn decode_baseline_coefficients(
                 }
             }
 
+            // The MCU read past the end of its segment: refused (P4-254).
+            if bit_reader.insufficient_data() {
+                return Err(JpegError::UnexpectedEof);
+            }
             mcu_count += 1;
         }
     }
@@ -3561,7 +3575,7 @@ fn decode_progressive_coefficients(
     mcus_x: usize,
     mcus_y: usize,
 ) -> Result<()> {
-    use crate::decode::bitstream::BitReader;
+    use crate::decode::bitstream::{progressive_block_result, BitReader};
     use crate::decode::progressive;
 
     let frame = &metadata.frame;
@@ -3652,20 +3666,27 @@ fn decode_progressive_coefficients(
                                 let coeffs = &mut comp_data[comp_idx].blocks[block_idx];
 
                                 if is_dc {
-                                    if ah == 0 {
+                                    let result: Result<()> = if ah == 0 {
                                         progressive::decode_dc_first(
                                             &mut bit_reader,
                                             dc_table,
                                             &mut dc_preds[comp_idx],
                                             coeffs,
                                             al,
-                                        )?;
+                                        )
                                     } else {
-                                        progressive::decode_dc_refine(&mut bit_reader, coeffs, al)?;
-                                    }
+                                        progressive::decode_dc_refine(&mut bit_reader, coeffs, al)
+                                    };
+                                    progressive_block_result(&bit_reader, false, result)?;
                                 }
                             }
                         }
+                    }
+                    // This MCU read past the end of its segment (jpegtran's
+                    // JWRN_HIT_MARKER): refused, as `read_coefficients` is
+                    // strict (P4-255).
+                    if bit_reader.insufficient_data() {
+                        return Err(JpegError::UnexpectedEof);
                     }
 
                     mcu_count += 1;
@@ -3732,7 +3753,7 @@ fn decode_progressive_coefficients(
                     let block_idx = by * stride_x + bx;
                     let coeffs = &mut comp_data[comp_idx].blocks[block_idx];
 
-                    if is_dc {
+                    let result: Result<()> = if is_dc {
                         if ah == 0 {
                             progressive::decode_dc_first(
                                 &mut bit_reader,
@@ -3740,9 +3761,9 @@ fn decode_progressive_coefficients(
                                 &mut dc_pred,
                                 coeffs,
                                 al,
-                            )?;
+                            )
                         } else {
-                            progressive::decode_dc_refine(&mut bit_reader, coeffs, al)?;
+                            progressive::decode_dc_refine(&mut bit_reader, coeffs, al)
                         }
                     } else if ah == 0 {
                         progressive::decode_ac_first_tracked(
@@ -3754,7 +3775,7 @@ fn decode_progressive_coefficients(
                             al,
                             &mut eob_run,
                             &mut ac_max_k[comp_idx][block_idx],
-                        )?;
+                        )
                     } else {
                         progressive::decode_ac_refine_tracked(
                             &mut bit_reader,
@@ -3765,7 +3786,14 @@ fn decode_progressive_coefficients(
                             al,
                             &mut eob_run,
                             &mut ac_max_k[comp_idx][block_idx],
-                        )?;
+                        )
+                    };
+                    progressive_block_result(&bit_reader, false, result)?;
+                    // This block read past the end of its segment (jpegtran's
+                    // JWRN_HIT_MARKER): refused, as `read_coefficients` is
+                    // strict (P4-255).
+                    if bit_reader.insufficient_data() {
+                        return Err(JpegError::UnexpectedEof);
                     }
 
                     mcu_count += 1;

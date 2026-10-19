@@ -390,6 +390,22 @@ pipeline, `precision::decompress_12bit_with_limits` /
 budget counts, is in
 [`docs/STABILITY.md`](docs/STABILITY.md#what-the-memory-budget-covers).
 
+### Truncated input
+
+When a stream's entropy-coded data ends before its last MCU, strict decoding
+returns `JpegError::UnexpectedEof`, for sequential and progressive Huffman
+scans alike. Lenient decoding (`Decoder::set_lenient`,
+`precision::decompress_12bit_lenient`,
+`raw_data_12::decompress_raw_12_lenient`,
+`precision::decompress_lossless_arbitrary_lenient`) returns what djpeg
+returns, with a `DecodeWarning::TruncatedData` warning: the rest of a
+sequential segment mid-grey, or, in a progressive scan, the rest of the
+segment as the earlier scans left it (byte-identical to djpeg with
+`Decoder::set_block_smoothing(true)`, libjpeg's default). `read_coefficients`,
+`ProgressiveDecoder`, `TjHandle` and the classic C ABI have no lenient form
+yet and refuse such a stream, where libjpeg-turbo decodes it with a warning
+(P4-258).
+
 ## Features
 
 ### Codec Support
