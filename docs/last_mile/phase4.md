@@ -5632,7 +5632,7 @@ was filed with:
 | --- | --- | --- |
 | beta1-2 | Per-instance SIMD dispatch replaces thread-local storage | **Closed 2026-09-08 — [P4-132](#p4-132-classic-c-abi-per-cinfo-state-is-thread-affine-p4-16-option-a--closed-2026-09-08).** Upstream removing TLS from its libjpeg API is that item's central evidence. |
 | beta1-6 | RISC-V Vector (RVV) SIMD | **Tracked — [P4-134](#p4-134-no-risc-v-rvv-simd-backend--upstream-32-ships-one--partial-measured-under-emulation-only-hardware-measurement-outstanding)**, and it expires [P4-60](#p4-60-scalar-kernels-are-25x-slower-than-cs-scalar-kernels--open)'s premise that riscv64 was scalar-vs-scalar. |
-| beta1-8 | 8-bit lossy JPEG decompressed to 12-bit output | **New — [P4-171](#p4-171-8-bit-lossy-jpeg-cannot-be-decompressed-to-12-bit-output-32-beta1-note-8--open).** Measured: `src/api/precision.rs:917` refuses any stream whose precision is not 12, so we reject where 3.2 decodes. |
+| beta1-8 | 8-bit lossy JPEG decompressed to 12-bit output | **New — [P4-171](#p4-171-8-bit-lossy-jpeg-cannot-be-decompressed-to-12-bit-output-32-beta1-note-8--open).** Measured: `src/api/precision.rs:945` refuses any stream whose precision is not 12, so we reject where 3.2 decodes. |
 | beta1-10 | TurboJPEG: `TJCS_DEFAULT`, repeated `tj3GetICCProfile`, ICC from a compression instance, 4:1:0 and 2:4 subsampling | **Split.** 4:1:0 and 2:4 are implemented (`TJSAMP_410`/`TJSAMP_24`) and covered by the subsampling matrices; the ICC and `TJCS_DEFAULT` additions are **new — [P4-172](#p4-172-turbojpeg-32-icc-and-tjcs_default-additions-are-unimplemented-32-beta1-note-10--open)**. |
 | beta1-4, beta1-12, 3.2.0-4 | jpegtran `-crop` expansion honouring `-trim`/`-perfect`; new `-roll`; the `-crop`/`-trim` overflow fix and its flatten/reflect error | **New — [P4-173](#p4-173-jpegtran-32-crop-expansion--roll-and-the-flattenreflect-refusal-are-unported--open).** These are `transupp.c` semantics our transform API mirrors, so "it is app code" does not exempt us. |
 | beta1-9, 3.2.0-2 | 8/16-bit PNG in cjpeg/djpeg and `tj3LoadImage*`/`tj3SaveImage*`, ICC transfer, PNG-writer hardening | **New — [P4-174](#p4-174-png-interchange-parity-for-tj3loadimagetj3saveimage-is-narrower-than-32--open).** PNG exists here behind a cargo feature; the 3.2 additions (16-bit, ICC transfer under `TJPARAM_SAVEMARKERS`, reversible upscaling of non-standard precisions) are not implemented. |
@@ -10111,9 +10111,12 @@ reproduces through `jpeg_mem_src` too.
    window when `next_input_byte` points into `stdio_fill_backing` (the
    discriminator excludes dangling `Owned` windows, gap 1).
 3. **Stream-error code and warning gaps.** A no-SOI stream raises
-   `JERR_BAD_LENGTH` (12) where stock raises `JERR_NO_SOI` (55), and a
-   truncated stream decodes without stock's `JWRN_JPEG_EOF` (123) +
-   `JWRN_HIT_MARKER` (120) warnings. Both reproduce through
+   `JERR_BAD_LENGTH` (12) where stock raises `JERR_NO_SOI` (55). A
+   truncated sequential stream now fails with `JERR_INPUT_EOF` (44): P4-254
+   made the strict decoder this path uses refuse a short entropy segment
+   (P4-258). Stock decodes it, the rest grey, with `JWRN_JPEG_EOF` (123) +
+   `JWRN_HIT_MARKER` (120); a truncated progressive one (P4-255) still
+   decodes here without them. Both reproduce through
    `jpeg_mem_src` as well, so this is error-translation work in the
    decode path (P4-100's theme), recorded here because the measurements
    came from this path's probes.
@@ -10519,7 +10522,7 @@ Upstream exposes it two ways — `cinfo->data_precision = 12` after
 `jpeg_read_header()` in the libjpeg API, and `tj3Decompress12()` after
 `tj3DecompressHeader()` in TurboJPEG.
 
-Neither works here. `src/api/precision.rs:917-922` refuses any stream whose SOF
+Neither works here. `src/api/precision.rs:945-950` refuses any stream whose SOF
 precision is not 12:
 
 ```rust
@@ -14895,3 +14898,209 @@ restart interval.
 Acceptance: SOF11 lossless restart intervals decode per T.81 H.1.1 and
 H.1.2.1, proven by a hand-built stream, or SOF11 lossless decode is refused
 like libjpeg's, as a documented decision.
+
+## P4-254. A Short Entropy-Coded Segment Decodes Silently from Stuffed Zero Bits — **CLOSED 2026-10-19**
+
+When the entropy-coded data ends before the last MCU — the stream simply
+stops, or an EOI (or another marker) comes early — the sequential Huffman
+decoders read the missing bits as zeros, with no warning and, in strict mode,
+no error. libjpeg calls this `JWRN_HIT_MARKER` ("premature end of data
+segment"). Once a read needs more bits than the segment holds
+(`jpeg_fill_bit_buffer`, jdhuff.c:361-373), it warns once per segment and
+leaves every later MCU zero, which decodes as mid-grey (`decode_mcu`,
+jdhuff.c:787-799; lossless `decode_mcus`, jdlhuff.c:224-239). A restart
+marker that is really found starts a new segment (`process_restart`,
+jdhuff.c:533-539; lossless jddiffct.c:178-183, jdlhuff.c:184-185). A stream
+that just stops gets `JWRN_JPEG_EOF` and a fake EOI first (jdatasrc.c:109-113,
+or :135-140 for a memory source), so it ends the same way.
+
+Measured at `main` 614898f4 against `djpeg` (libjpeg-turbo 3.2.0). The inputs
+were `testorig.jpg` (4:2:0), `cjpeg -grayscale`, `cjpeg -restart 1`,
+`monkey12.jpg`, and `cjpeg -lossless 1` (8-bit RGB, and 16-bit from
+`monkey16.pgm`). Each was cut at 50% and 90% of its entropy-coded data, with
+and without an EOI appended. (`cjpeg -grayscale` has no effect in lossless
+mode, which keeps every input component.)
+
+- **Strict entry points returned `Ok` with wrong samples.** That covers every
+  `Decoder` path, `decompress_12bit`, `decompress_raw_12`,
+  `decompress_lossless_arbitrary`, `decompress_16bit` and
+  `read_coefficients`.
+- **The one exception** was the 8-bit interleaved fast path, which refused a
+  stream with no EOI. Its `is_eof()` check is `pos >= len`, true as soon as
+  the last byte is in the 56-bit buffer — not when it is consumed — so it
+  fires up to about 7 bytes early. By the same token it could refuse a
+  complete stream with no EOI whose last MCUs fit in its final bytes.
+- **Lenient `Decoder`** gave no warning when an EOI followed the cut. When the
+  data stopped it gave `TruncatedData`, but left zero samples where djpeg
+  greys: black, or RGB (0, 135, 0) after YCbCr conversion.
+
+**Fix.** `BitReader` counts the zero bits it stuffs at a marker or at the end
+of a final window. `insufficient_data()` is true once a read consumes one
+(`bits_left < stuffed_bits`), which is libjpeg's `nbits > bits_left`; a
+lookahead never sets it. A Huffman lookup that fails on a window holding
+fewer than 16 data bits sets it too, because C's bit-by-bit
+`jpeg_huff_decode` only rules a code out after 16 bits, so it would have read
+the stuffed ones first. The flag survives a `reset()` that finds no restart
+marker. Every sequential Huffman loop checks it after each MCU (each row, for
+lossless), after any restart processing:
+
+- strict: `JpegError::UnexpectedEof`;
+- lenient: `DecodeWarning::TruncatedData` once per decode, and every later MCU
+  zero up to the next consumed RST.
+
+It covers every `Decoder` path (fast, general, non-interleaved, windowed
+incremental, lossless and 12-bit), `decompress_12bit`, `decompress_raw_12`,
+`decompress_16bit`, `decompress_lossless_arbitrary` and `read_coefficients`.
+
+- **New lenient entry points:** `precision::decompress_12bit_lenient`,
+  `raw_data_12::decompress_raw_12_lenient` and
+  `precision::decompress_lossless_arbitrary_lenient` (which covers 16-bit).
+  Each returns its warnings alongside the image and still refuses other
+  corruption.
+- **Complete streams** decode `Ok` with no warning, with or without an EOI.
+
+**Not covered:**
+
+- progressive scans (P4-255);
+- arithmetic coding, which has no `JWRN_HIT_MARKER` in C;
+- a multi-scan stream that stops with no EOI, which the marker walk refuses
+  before any decoding (P4-257);
+- the strict entry points with no lenient form — `read_coefficients` and the
+  transforms on it, `TjHandle` and the classic C ABI — now refuse what stock
+  decodes with a warning (P4-258);
+- `JWRN_JPEG_EOF` for a complete scan with no EOI, and the C-ABI warning
+  trace (P4-164 item 3);
+- restart-number checks: `reset()` resumes at whichever RSTn comes next,
+  where libjpeg's `read_restart_marker` keeps the flag when the number is
+  not the one expected; this predates P4-254;
+- when a lookup fails on stuffed bits, lenient decoding zeroes that block
+  (P4-23's concealment), where libjpeg decodes it as symbol 0, so that one
+  MCU can differ from djpeg's.
+
+**Status (2026-10-19): closed.** `cargo test --test
+cross_check_p4_254_short_entropy_segment` cuts each fixture at 25%, 60% and
+90% of its entropy-coded data, with and without an EOI, and checks:
+
+- strict decoding refuses every cut;
+- lenient decoding returns djpeg's samples byte for byte (djpeg exits 2) for
+  8-bit colour, greyscale, one scan per component, 12-bit, 8-bit RGB and grey
+  lossless and 16-bit lossless, with one `TruncatedData`;
+- one or two short restart intervals grey up to the next RST and resume there,
+  as djpeg does, for 4:2:0 and for 8-bit RGB and grey lossless;
+- `decompress_raw_12_lenient` greys its last MCU row;
+- `read_coefficients` (both its loops) refuses each cut, which `jpegtran`
+  reports as a warning;
+- the incremental reader refuses each cut;
+- complete streams, with and without an EOI, decode unchanged at every entry
+  point.
+
+`cargo test --lib bitstream huffman::tests` pins the reader and the failed
+lookup. `c_djpeg_error_recovery_diff_zero` (`tests/error_recovery.rs`) now
+asserts byte equality with djpeg on its truncated fixture; it used to take
+its "djpeg failed" branch on djpeg's warning exit and compare nothing.
+
+Two follow-ons:
+
+- **Fractional sampling.** The colour path's fractional-sampling refusal
+  (P4-36) now runs before entropy decoding, as C's `jinit_upsampler` does, so
+  a stream with both defects still gets that error rather than
+  `UnexpectedEof`.
+- **A bug the fix exposed.** Making the decoders refuse a short segment
+  showed that some trimmed transforms write short output. That is filed as
+  P4-256.
+
+## P4-255. Progressive Huffman Decode Ignores a Short Entropy-Coded Segment — **OPEN**
+
+P4-254 fixed the sequential Huffman decoders, but the progressive scan loops
+— `decode_progressive_planes` (`src/decode/pipeline_impl/progressive.rs`),
+`decode_one_scan` (`src/api/progressive_output.rs`) and
+`decode_progressive_coefficients` (`src/api/coefficient.rs`) — still read
+past the end of a segment as zero bits. C checks `insufficient_data` in
+`decode_mcu_DC_first`, `decode_mcu_AC_first` and `decode_mcu_AC_refine`
+(jdphuff.c:312, 387, 526); `decode_mcu_DC_refine` skips the check, since zero
+bits leave its data unchanged (jdphuff.c:467-469).
+
+Measured at P4-254's branch against `djpeg` 3.2.0, on `cjpeg -progressive
+testorig.ppm` cut at 60% of the file with an EOI appended: strict and lenient
+decoding both return `Ok`, with no warning, where djpeg warns "premature end
+of data segment". (Without the EOI the stream fails earlier, in the marker
+walk: P4-257.)
+
+Acceptance: progressive decoding uses `BitReader::insufficient_data()` as the
+sequential decoders do. Strict decoding refuses a truncated progressive
+stream, and lenient decoding matches djpeg on it.
+
+## P4-256. Trimmed Transforms of Subsampled Images Write Too Few MCUs — **OPEN**
+
+With `trim`, `transform_jpeg_with_options` writes fewer MCUs than its output
+frame holds when it maps a partial edge MCU of a subsampled image. The SOF
+matches C `jpegtran -trim`'s. For example, a 35x27 4:2:0 source with
+`VFlip` gives 35x16 from both, but the Rust entropy-coded data is shorter
+(720 bytes against jpegtran's 750). djpeg 3.2.0 reports "Corrupt JPEG data:
+premature end of data segment" on it (exit 2), and lenient decoding reports
+`TruncatedData { decoded_mcus: 2, total_mcus: 3 }`.
+
+Affected, in `tests/cross_product_transform.rs`:
+
+- `VFlip` and `Rot90` of 4:2:2, 4:2:0 and 4:1:1 (35x27 sources);
+- `Rot90` of 4:1:1 and `Rot270` of 4:4:1 (48x48 sources);
+- in each case with or without restart intervals, and with `progressive` set
+  or not. With `trim`, `progressive` has no effect: the output is the same
+  single-scan baseline stream, byte for byte.
+
+Every other combination in those matrices decodes cleanly.
+
+Decoders hid this by filling the missing MCUs from stuffed zero bits, until
+P4-254 made them refuse a short segment. `P4_256_TRIM_SHORT_OUTPUT` and
+`P4_256_FULL_SHORT_OUTPUT` pin the 30 combinations, and each must still fail
+to decode.
+
+Acceptance: those outputs decode in djpeg without a warning and match
+`jpegtran -trim`'s, and both lists are deleted. Whether `progressive` should
+apply with `trim` (jpegtran's does) is part of the fix.
+
+## P4-257. A Multi-Scan Stream That Ends Without an EOI Fails in the Marker Walk — **OPEN**
+
+When a progressive stream, or a sequential one with several scans (e.g.
+`cjpeg -scans` with one component per scan), simply stops partway through
+its data, `Decoder` returns `UnexpectedEof` in strict and lenient mode alike.
+The failure comes from the marker walk, before any entropy decoding: looking
+for the next marker, it runs off the end. djpeg decodes the same stream with
+`JWRN_JPEG_EOF` ("Premature end of JPEG file"): its source manager inserts a
+fake EOI, and the components and coefficients it never reached stay zero.
+
+Measured on P4-254's branch, unchanged from `main`, on `cjpeg -scans` with
+`0;`, `1;`, `2;` from `testorig.ppm`, cut at 25% and 60% of its entropy-coded
+data (inside the first scan): `UnexpectedEof` in both modes, where djpeg
+exits 2. With an EOI after the cut, P4-254's lenient decode matches djpeg.
+
+Acceptance: lenient decoding of a multi-scan stream with no EOI ends the walk
+at the end of the data as if an EOI followed, and matches djpeg.
+
+## P4-258. Strict-Only Entry Points Refuse a Short Segment That Stock Decodes With a Warning — **OPEN**
+
+P4-254 made the strict decoders refuse a short entropy-coded segment. The
+entry points with no lenient form now refuse what stock libjpeg-turbo decodes
+with `JWRN_HIT_MARKER` (and `JWRN_JPEG_EOF`):
+
+- `read_coefficients`, and the transforms built on it — `jpegtran` writes the
+  zeroed coefficients and warns;
+- `TjHandle::decompress*`, including its `decompress_12bit` and
+  `decompress_16bit` — C's `tj3Decompress*` writes the image and returns -1 with `TJERR_WARNING`
+  unless `TJPARAM_STOPONWARNING` is set;
+- the classic C ABI, through the strict `Decoder` behind
+  `jpeg_start_decompress` — `JERR_INPUT_EOF` (44) where stock decodes the
+  rest grey and warns.
+
+Before P4-254 these returned the image with no warning, decoded from stuffed
+zero bits, so neither behaviour matched stock. Measured on `testorig.jpg` cut
+at 60% with an EOI appended: `TjHandle::decompress` returned `Ok` before
+P4-254 and returns `UnexpectedEof` now.
+`tests/cross_check_p4_254_short_entropy_segment.rs` pins the
+`read_coefficients` refusal. The classic C ABI path is by reading.
+
+Acceptance: these paths decode a short segment as djpeg does — grey to the
+next restart marker — and report it as stock does: a `JWRN_HIT_MARKER`
+warning through `emit_message` for the classic ABI, `TJERR_WARNING` for
+TurboJPEG, a `DecodeWarning` for `read_coefficients` and transforms. It is
+fatal only under `TJPARAM_STOPONWARNING` or a caller's request for strictness.

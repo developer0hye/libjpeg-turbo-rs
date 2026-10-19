@@ -1,7 +1,7 @@
 use super::Decoder;
 use crate::common::error::{JpegError, Result};
 use crate::common::quant_table::QuantTable;
-use crate::decode::bitstream::BitReader;
+use crate::decode::bitstream::{short_segment_error, BitReader};
 use crate::decode::entropy::{self, McuDecoder};
 use alloc::{format, vec::Vec};
 
@@ -106,6 +106,8 @@ impl<'a> Decoder<'a> {
                 pos: 0,
                 bit_buffer: 0,
                 bits_left: 0,
+                stuffed_bits: 0,
+                insufficient: false,
             },
             dc_snapshot: McuDecoder::new(frame.components.len()),
             planes,
@@ -180,7 +182,6 @@ impl<'a> Decoder<'a> {
             .collect();
 
         let restart_interval: u32 = self.metadata.restart_interval as u32;
-        let total_mcus: usize = st.mcus_x * st.mcus_y;
         let mut coeffs = [0i16; 64];
 
         while st.mcu_y < st.mcus_y {
@@ -222,7 +223,7 @@ impl<'a> Decoder<'a> {
                                     if reader.starved() {
                                         return Ok(false);
                                     }
-                                    return Err(e);
+                                    return Err(short_segment_error(&reader, e));
                                 }
                             }
 
@@ -245,11 +246,12 @@ impl<'a> Decoder<'a> {
                     }
                 }
 
-                mcu_count += 1;
-
-                if is_final && reader.is_eof() && (mcu_count as usize) < total_mcus {
+                // This MCU read past the end of its segment (P4-254). A
+                // partial window's end only starves, so this is real.
+                if reader.insufficient_data() {
                     return Err(JpegError::UnexpectedEof);
                 }
+                mcu_count += 1;
             }
 
             if reader.starved() {
