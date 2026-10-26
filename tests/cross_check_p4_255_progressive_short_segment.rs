@@ -228,6 +228,9 @@ fn assert_lenient_matches_djpeg(djpeg: &Path, jpeg: &[u8], case: &str) {
     let unsmoothed = Decoder::new(jpeg)
         .and_then(|d| d.with_lenient(true).decode_image())
         .unwrap_or_else(|e| panic!("{case}: lenient decode without smoothing failed: {e}"));
+    // Only the warning is checked here: djpeg has no switch for
+    // `do_block_smoothing` (`-nosmooth` turns off fancy upsampling), so an
+    // unsmoothed decode has no command-line reference.
     assert_eq!(truncated_count(&unsmoothed.warnings), 1, "{case}");
 }
 

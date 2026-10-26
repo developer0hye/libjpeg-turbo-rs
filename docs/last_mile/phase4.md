@@ -15202,10 +15202,62 @@ zero bits, so neither behaviour matched stock. Measured on `testorig.jpg` cut
 at 60% with an EOI appended: `TjHandle::decompress` returned `Ok` before
 P4-254 and returns `UnexpectedEof` now.
 `tests/cross_check_p4_254_short_entropy_segment.rs` pins the
-`read_coefficients` refusal. The classic C ABI path is by reading.
+`read_coefficients` refusal, and
+`crates/libjpeg-turbo-rs-capi/tests/capi_p4_258_short_segment.rs` the classic
+C ABI's: `jpeg_start_decompress` raises `JERR_INPUT_EOF` on `testorig.jpg` cut
+at 60% with an EOI appended. Closing this item flips that test.
 
 Acceptance: these paths decode a short segment as djpeg does — grey to the
 next restart marker — and report it as stock does: a `JWRN_HIT_MARKER`
 warning through `emit_message` for the classic ABI, `TJERR_WARNING` for
 TurboJPEG, a `DecodeWarning` for `read_coefficients` and transforms. It is
 fatal only under `TJPARAM_STOPONWARNING` or a caller's request for strictness.
+
+## P4-261. Short-Segment Recovery Differs From libjpeg When a Code Runs Into the Padding or a Restart Interval Is Lost — **OPEN**
+
+Found reviewing #689/#691 (P4-254, P4-255), by reading `jdhuff.c` and not yet
+reproduced. Three corner cases of the recovery those PRs added differ from
+stock:
+
+- **A code that fails only because it ran into the zero bits padding a short
+  segment.** libjpeg warns `JWRN_HUFF_BAD_CODE` and returns symbol 0
+  (`jdhuff.c:466-467`): a DC code becomes difference 0, so the component keeps
+  its predictor, and an AC code ends the block. Here the lenient 12-bit and
+  lossless entry points (`decompress_12bit_lenient`,
+  `decompress_raw_12_lenient`, `decompress_lossless_arbitrary_lenient`) map
+  the failure to `UnexpectedEof` and return it, contrary to their docs; the
+  8-bit lenient path conceals the block with the P4-23 recovery (zeroed block,
+  `mcu_decoder.reset()`), which drops the DC predictor; and the progressive
+  path (`progressive_block_result`) keeps the partial block, so a DC-first
+  block stays 0 where libjpeg writes `last_dc_val << Al`. The 25/60/90% cuts
+  the P4-254/P4-255 tests use never stop on such a prefix (a DC luminance
+  window starting with nine or more 1-bits, or an AC window with no 16-bit
+  completion), so their byte-identity with djpeg does not cover it.
+- **A whole restart interval lost.** `BitReader::reset()` clears the
+  short-segment flag on whatever RST it consumes. libjpeg's
+  `jpeg_resync_to_restart` leaves a later-numbered RST unread, so the flag
+  stays set and the next interval is grey too; here decoding resumes one
+  interval early, misaligned.
+- **Warning count.** `TruncatedData` is reported once per decode; libjpeg
+  warns once per short segment (`jdhuff.c:367`). That matters once P4-258
+  maps the warnings to `emit_message` and `num_warnings`.
+
+Acceptance: a fixture cut where a Huffman code straddles the end of the data,
+and one with an interval removed between two RST markers, decode identically
+to djpeg in every lenient entry point (8-bit, 12-bit, raw 12-bit, lossless,
+progressive), with libjpeg's warning count.
+
+## P4-262. The Lenient 12-Bit, Raw 12-Bit and Lossless Decoders Take No `DecodeLimits` — **OPEN**
+
+Found reviewing #689 (P4-254). `precision::decompress_12bit_lenient`,
+`raw_data_12::decompress_raw_12_lenient` and
+`precision::decompress_lossless_arbitrary_lenient` apply
+`DecodeLimits::default()` with no way to pass a caller's budget, while their
+strict forms have `*_with_limits` (P4-199). A caller decoding untrusted input
+cannot have both lenient recovery and a memory or dimension budget.
+`precision` and `raw_data_12` are covered by the semver policy
+(`docs/STABILITY.md`), so these signatures freeze at the next release.
+
+Acceptance: each lenient entry point has a form that takes `&DecodeLimits`
+(or one options value carrying both), with a test that a limit refuses a
+stream the default admits, before the release that first ships them.
