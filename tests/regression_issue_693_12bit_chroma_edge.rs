@@ -70,13 +70,17 @@ fn twelve_bit_subsampled_edges_match_djpeg_at_every_size() {
         helpers::skip_missing_c_capability("cjpeg", "-precision 12");
         return;
     }
-    let samplings: [(&str, &str); 4] = [
+    let samplings: [(&str, &str); 5] = [
         ("420", "2x2,1x1,1x1"),
         ("422", "2x1,1x1,1x1"),
         ("440", "1x2,1x1,1x1"),
         ("411", "4x1,1x1,1x1"),
+        ("410", "4x2,1x1,1x1"),
     ];
-    let sizes: [(usize, usize); 10] = [
+    // Even, odd and whole-MCU sizes, the widths where the h2 filters switch
+    // to replication (two chroma samples or fewer), and frames one or two
+    // samples tall or wide, where the vertical filters run out of rows.
+    let sizes: [(usize, usize); 15] = [
         (62, 46),
         (63, 47),
         (64, 48),
@@ -87,6 +91,11 @@ fn twelve_bit_subsampled_edges_match_djpeg_at_every_size() {
         (4, 4),
         (5, 5),
         (6, 6),
+        (62, 1),
+        (62, 2),
+        (5, 1),
+        (1, 62),
+        (2, 62),
     ];
     let mut failures: Vec<String> = Vec::new();
     for (name, sample) in samplings {

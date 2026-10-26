@@ -23,7 +23,9 @@ use alloc::{string::ToString, vec::Vec};
 /// Decoded 12-bit JPEG image.
 #[derive(Debug)]
 pub struct Image12 {
-    /// Pixel data as 12-bit samples (0-4095).
+    /// Pixel data as 12-bit samples (0-4095), interleaved
+    /// `num_components` to a pixel, in the colour space
+    /// [`decompress_12bit`] describes.
     pub data: Vec<i16>,
     pub width: usize,
     pub height: usize,
@@ -865,6 +867,11 @@ fn estimated_16bit_decode_bytes(width: usize, height: usize, components: usize) 
 ///
 /// Handles arbitrary chroma subsampling (4:4:4, 4:2:2, 4:2:0, etc.)
 /// by decoding at component resolution and upsampling to full size.
+///
+/// The samples are in libjpeg's default output colour space for the source
+/// (`jdapimin.c` `default_decompress_parms`): RGB for a YCbCr frame, CMYK
+/// for a CMYK or YCCK frame, and the stored samples unchanged otherwise
+/// (greyscale, an RGB-coded frame, an unrecognised component count).
 ///
 /// Applies [`DecodeLimits::default`]; use [`decompress_12bit_with_limits`]
 /// to bound the decode with a caller's budget.

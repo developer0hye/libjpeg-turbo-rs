@@ -475,6 +475,17 @@ impl<'a> Decoder<'a> {
                 "cannot convert 12-bit JPEG to Cmyk".to_string(),
             ));
         }
+        // The arms below read one sample (gray) or three (RGB) a pixel. A
+        // four-component frame (CMYK, or YCCK that decompress_12bit returns
+        // as CMYK) or a two-component one would be misread, or indexed past
+        // the samples, so refuse it; decompress_12bit returns its samples.
+        let frame_components: usize = self.metadata.frame.components.len();
+        if frame_components != 1 && frame_components != 3 {
+            return Err(JpegError::Unsupported(format!(
+                "12-bit {frame_components}-component frame to 8-bit output \
+                 (use precision::decompress_12bit)"
+            )));
+        }
         let img12 = crate::api::precision::decompress_12bit(self.raw_data)?;
         let num_components: usize = img12.num_components;
 

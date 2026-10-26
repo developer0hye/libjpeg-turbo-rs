@@ -153,8 +153,15 @@ fn rgb_coded_12bit_flat_planes_are_not_colour_converted() {
         Subsampling::S444,
     )
     .expect("compress_raw");
-    let image8 = decompress(&make_rgb_coded(&jpeg8)).expect("decompress 8-bit");
+    let rgb_coded8: Vec<u8> = make_rgb_coded(&jpeg8);
+    let image8 = decompress(&rgb_coded8).expect("decompress 8-bit");
     assert_eq!(&image8.data[..3], &stored8);
+    let (_, _, expected8): (usize, usize, Vec<u8>) =
+        helpers::decode_with_c_djpeg(&djpeg, &rgb_coded8, "issue_694_flat_rgb_8bit");
+    assert_eq!(
+        image8.data, expected8,
+        "8-bit RGB-coded frame against djpeg"
+    );
 
     let stored12: [i16; 3] = [3000, 1000, 500];
     let planes12: Vec<Vec<i16>> = stored12.iter().map(|&v| vec![v; width * height]).collect();
@@ -237,5 +244,36 @@ fn four_component_12bit_frames_match_libjpeg_cmyk_output() {
                 expected.len()
             );
         }
+    }
+}
+
+/// Found reviewing the #694 fix: `Decoder`'s 12-to-8-bit path read every
+/// colour frame as three samples a pixel, so a 12-bit CMYK or YCCK frame came
+/// back from `decompress` as `Ok` with its four-sample pixels misread as RGB.
+/// It is refused until that path converts four components; the samples are
+/// available through `decompress_12bit`.
+#[test]
+fn four_component_12bit_frame_is_refused_by_the_8bit_decoder() {
+    let Some(oracle) = cmyk12_oracle() else {
+        return;
+    };
+    let (width, height): (usize, usize) = (16, 16);
+    for ycck in [true, false] {
+        let jpeg: Vec<u8> = encode_with_cmyk12_c_oracle(
+            &oracle,
+            &noise_12bit(width * height * 4, 6941),
+            width,
+            height,
+            95,
+            ycck,
+        );
+        let result = decompress(&jpeg);
+        assert!(
+            matches!(result, Err(libjpeg_turbo_rs::JpegError::Unsupported(_))),
+            "ycck={ycck}: {:?}",
+            result
+                .as_ref()
+                .map(|image| (image.pixel_format, image.data.len()))
+        );
     }
 }

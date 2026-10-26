@@ -71,7 +71,10 @@ static int encode(int width, int height, int quality, const char *colorspace)
   jpeg_finish_compress(&cinfo);
   jpeg_destroy_compress(&cinfo);
 
-  fwrite(jpeg, 1, jpeg_size, stdout);
+  if (fwrite(jpeg, 1, jpeg_size, stdout) != jpeg_size || fflush(stdout)) {
+    fprintf(stderr, "short write\n");
+    return 1;
+  }
   free(jpeg);
   free(samples);
   return 0;
@@ -111,7 +114,15 @@ static int decode(const char *path)
   while (cinfo.output_scanline < cinfo.output_height) {
     row = row_buffer;
     jpeg12_read_scanlines(&cinfo, &row, 1);
-    fwrite(row_buffer, sizeof(J12SAMPLE), row_samples, stdout);
+    if (fwrite(row_buffer, sizeof(J12SAMPLE), row_samples, stdout) !=
+        row_samples) {
+      fprintf(stderr, "short write\n");
+      return 1;
+    }
+  }
+  if (fflush(stdout)) {
+    fprintf(stderr, "short write\n");
+    return 1;
   }
   jpeg_finish_decompress(&cinfo);
   jpeg_destroy_decompress(&cinfo);
