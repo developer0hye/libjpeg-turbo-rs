@@ -337,6 +337,24 @@ and `git log` between tags.
   runs system/Rust bidirectional cross-decodes.
 
 ### Fixed
+- **12-bit decode matches libjpeg at the image edge and in colour**
+  (`precision::decompress_12bit` and everything built on it: `TjHandle` and
+  `tj3Decompress12`, `jpeg12_read_scanlines`, `Decoder` on a 12-bit frame).
+  - The last chroma column or row of a subsampled frame whose width or height
+    is even but not a whole number of MCUs was blended with MCU padding
+    (P4-263, #693); 4:2:0 and 4:2:2 frames 3–4 pixels wide were
+    triangle-filtered where libjpeg replicates.
+  - The source colour space is classified as libjpeg does (P4-264, #694): an
+    RGB-coded frame (`cjpeg -rgb`) is returned unconverted, where it used to
+    be colour-converted a second time, and a YCCK frame is converted to CMYK,
+    where it used to come back as YCCK.
+  - **Behaviour:** `Decoder` / `decompress` refuse a 12-bit frame of other
+    than one or three components with `Unsupported`; a CMYK or YCCK frame
+    used to come back as `Ok` with its pixels misread as RGB. Its samples are
+    available through `precision::decompress_12bit`.
+- `JpegCoefficients::quant_tables` and `EncoderConfig::quant_tables` were
+  documented as zigzag order; they have always been in natural (row-major)
+  order. Only the documentation changed.
 - **Breaking (behaviour): a short entropy-coded segment is refused, or decoded
   as djpeg decodes it** (P4-254). When the data ended before the last MCU —
   the stream stopped, or an EOI came early — the sequential Huffman decoders
