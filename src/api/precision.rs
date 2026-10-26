@@ -5,7 +5,7 @@
 ///   used in medical imaging (DICOM).
 /// - 16-bit (J16SAMPLE / u16): lossless-only (SOF3) with values 0-65535.
 use crate::common::error::{JpegError, Result};
-use crate::common::types::{DecodeLimits, Subsampling};
+use crate::common::types::{ColorSpace, DecodeLimits, Subsampling};
 use crate::decode::bitstream::BitReader;
 use crate::decode::huffman;
 use crate::decode::lossless;
@@ -672,6 +672,12 @@ fn write_sof0_precision(
 /// Fused h2v2 fancy upsample for 12-bit (i16) planes.
 /// Exactly matches C jdsample.c h2v2_fancy_upsample: computes column sums
 /// (vertical blend) then horizontal interpolation with a single >>4 shift.
+///
+/// `in_w` x `in_h` are the component's real samples (libjpeg's
+/// `downsampled_width` / `downsampled_height`). Like `jinit_upsampler`, the
+/// h2v1 and h2v2 triangle filters apply only to a component more than two
+/// samples wide; a narrower one is replicated (`h2v1_upsample` /
+/// `h2v2_upsample`).
 #[allow(clippy::too_many_arguments)]
 fn fancy_upsample_12bit(
     input: &[i16],
@@ -684,7 +690,8 @@ fn fancy_upsample_12bit(
     out_w: usize,
     out_h: usize,
 ) {
-    if h_factor == 2 && v_factor == 2 {
+    let is_fancy_width: bool = in_w > 2;
+    if h_factor == 2 && v_factor == 2 && is_fancy_width {
         // Fused h2v2: matches C h2v2_fancy_upsample exactly.
         for y in 0..in_h {
             let cur_off: usize = y * in_stride;
@@ -703,20 +710,6 @@ fn fancy_upsample_12bit(
                 // inptr0 = nearest row, inptr1 = farther row
                 let far_off: usize = if v == 0 { above_off } else { below_off };
                 let colsum = |x: usize| input[cur_off + x] as i32 * 3 + input[far_off + x] as i32;
-
-                if in_w == 0 {
-                    continue;
-                }
-                if in_w == 1 {
-                    let cs: i32 = colsum(0);
-                    if out_w > 0 {
-                        output[oy * out_w] = ((cs * 4 + 8) >> 4) as i16;
-                    }
-                    if out_w > 1 {
-                        output[oy * out_w + 1] = ((cs * 4 + 7) >> 4) as i16;
-                    }
-                    continue;
-                }
 
                 // First column
                 let mut this_cs: i32 = colsum(0);
@@ -752,21 +745,14 @@ fn fancy_upsample_12bit(
                 }
             }
         }
-    } else if h_factor == 2 && v_factor == 1 {
+    } else if h_factor == 2 && v_factor == 1 && is_fancy_width {
         // h2v1: horizontal-only fancy upsample
         for y in 0..in_h.min(out_h) {
             let row = |x: usize| input[y * in_stride + x] as i32;
-            if in_w == 0 {
-                continue;
-            }
             // First column
             let inval: i32 = row(0);
             output[y * out_w] = inval as i16;
-            if out_w > 1 && in_w > 1 {
-                output[y * out_w + 1] = ((inval * 3 + row(1) + 2) >> 2) as i16;
-            } else if out_w > 1 {
-                output[y * out_w + 1] = inval as i16;
-            }
+            output[y * out_w + 1] = ((inval * 3 + row(1) + 2) >> 2) as i16;
             // Middle
             for x in 1..in_w - 1 {
                 let cur: i32 = row(x);
@@ -779,16 +765,12 @@ fn fancy_upsample_12bit(
                 }
             }
             // Last column
-            if in_w > 1 {
-                let x: usize = in_w - 1;
-                let cur: i32 = row(x);
-                let ox: usize = x * 2;
-                if ox < out_w {
-                    output[y * out_w + ox] = ((cur * 3 + row(x - 1) + 1) >> 2) as i16;
-                }
-                if ox + 1 < out_w {
-                    output[y * out_w + ox + 1] = cur as i16;
-                }
+            let x: usize = in_w - 1;
+            let cur: i32 = row(x);
+            let ox: usize = x * 2;
+            output[y * out_w + ox] = ((cur * 3 + row(x - 1) + 1) >> 2) as i16;
+            if ox + 1 < out_w {
+                output[y * out_w + ox + 1] = cur as i16;
             }
         }
     } else if h_factor == 1 && v_factor == 2 {
@@ -1119,8 +1101,11 @@ pub fn decompress_12bit_with_limits(data: &[u8], limits: &DecodeLimits) -> Resul
             }
             full_planes.push(full);
         } else {
-            let in_w: usize = comp_plane_w[c].min(width / h_factor + 1);
-            let in_h: usize = comp_plane_h[c].min(height / v_factor + 1);
+            // libjpeg's `downsampled_width` / `downsampled_height`
+            // (`jdinput.c`): the real samples, without the MCU padding the
+            // upsampler must not blend in at the edge (issue #693).
+            let in_w: usize = comp_plane_w[c].min(width.div_ceil(h_factor));
+            let in_h: usize = comp_plane_h[c].min(height.div_ceil(v_factor));
             let pw: usize = comp_plane_w[c];
             let mut full: Vec<i16> = vec![0i16; width * height];
             fancy_upsample_12bit(
@@ -1130,29 +1115,67 @@ pub fn decompress_12bit_with_limits(data: &[u8], limits: &DecodeLimits) -> Resul
         }
     }
 
-    // Interleave and convert YCbCr → RGB (or output raw for grayscale).
-    let mut result: Vec<i16> = Vec::with_capacity(width * height * num_components);
-    if num_components == 3 {
-        // YCbCr → RGB color conversion (12-bit range: 0–4095, center=2048).
-        // Matches C jdcolor.c exactly: SCALEBITS=16, FIX(x) = (x * 65536 + 0.5).
+    // Classify the source as libjpeg does (`jdapimin.c`
+    // `default_decompress_parms`, from the JFIF/Adobe state at the first SOS
+    // and the component IDs) and convert to its default output: YCbCr to
+    // RGB, YCCK to CMYK, everything else unchanged. Converting on the
+    // component count alone turned an RGB-coded frame's colours a second
+    // time and returned YCCK as if it were CMYK (issue #694).
+    let component_ids: [u8; 3] = if num_components == 3 {
+        [
+            frame.components[0].id,
+            frame.components[1].id,
+            frame.components[2].id,
+        ]
+    } else {
+        [0; 3]
+    };
+    let source_color_space: ColorSpace = ColorSpace::classify_source(
+        num_components,
+        metadata.saw_jfif_marker_at_first_sos,
+        metadata.adobe_transform_at_first_sos,
+        &component_ids,
+        frame.is_lossless,
+    );
+    // YCbCr → RGB color conversion (12-bit range: 0–4095, center=2048).
+    // Matches C jdcolor.c exactly: SCALEBITS=16, FIX(x) = (x * 65536 + 0.5).
+    let ycc_to_rgb = |yy: i32, cb: i32, cr: i32| -> [i32; 3] {
         const FIX_1_402: i32 = 91881;
         const FIX_0_344: i32 = 22554;
         const FIX_0_714: i32 = 46802;
         const FIX_1_772: i32 = 116130;
         const ONE_HALF: i32 = 1 << 15; // 2^15
         const SCALEBITS: i32 = 16;
-        for y in 0..height {
-            for x in 0..width {
-                let yy: i32 = full_planes[0][y * width + x] as i32;
-                let cb: i32 = full_planes[1][y * width + x] as i32 - 2048;
-                let cr: i32 = full_planes[2][y * width + x] as i32 - 2048;
-                let r: i32 = yy + ((FIX_1_402 * cr + ONE_HALF) >> SCALEBITS);
-                let g: i32 = yy + ((-FIX_0_344 * cb + -FIX_0_714 * cr + ONE_HALF) >> SCALEBITS);
-                let b: i32 = yy + ((FIX_1_772 * cb + ONE_HALF) >> SCALEBITS);
-                result.push(r.clamp(0, 4095) as i16);
-                result.push(g.clamp(0, 4095) as i16);
-                result.push(b.clamp(0, 4095) as i16);
-            }
+        let cb: i32 = cb - 2048;
+        let cr: i32 = cr - 2048;
+        [
+            (yy + ((FIX_1_402 * cr + ONE_HALF) >> SCALEBITS)).clamp(0, 4095),
+            (yy + ((-FIX_0_344 * cb + -FIX_0_714 * cr + ONE_HALF) >> SCALEBITS)).clamp(0, 4095),
+            (yy + ((FIX_1_772 * cb + ONE_HALF) >> SCALEBITS)).clamp(0, 4095),
+        ]
+    };
+    let mut result: Vec<i16> = Vec::with_capacity(width * height * num_components);
+    if source_color_space == ColorSpace::YCbCr {
+        let ycc = full_planes[0]
+            .iter()
+            .zip(&full_planes[1])
+            .zip(&full_planes[2]);
+        for ((&yy, &cb), &cr) in ycc {
+            let rgb: [i32; 3] = ycc_to_rgb(yy as i32, cb as i32, cr as i32);
+            result.extend(rgb.map(|value| value as i16));
+        }
+    } else if source_color_space == ColorSpace::Ycck {
+        // `jdcolor.c` `ycck_cmyk_convert`: the YCbCr → RGB math, inverted to
+        // C, M, Y; K passes through.
+        let ycck = full_planes[0]
+            .iter()
+            .zip(&full_planes[1])
+            .zip(&full_planes[2])
+            .zip(&full_planes[3]);
+        for (((&yy, &cb), &cr), &k) in ycck {
+            let rgb: [i32; 3] = ycc_to_rgb(yy as i32, cb as i32, cr as i32);
+            result.extend(rgb.map(|value| (4095 - value) as i16));
+            result.push(k);
         }
     } else {
         for y in 0..height {
