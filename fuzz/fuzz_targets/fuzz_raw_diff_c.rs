@@ -14,8 +14,10 @@
 //!    them is not compared: it is not part of the image.
 //!
 //! Skips: arithmetic-coded streams (the open divergence
-//! `fuzz_decode_diff_c` also skips), and precisions other than 8 and
-//! lossless frames, which both decoders refuse for raw output. A mismatch is
+//! `fuzz_decode_diff_c` also skips), lossless frames, which both decoders
+//! refuse for raw output, and precisions other than 8: `decode_raw` is 8-bit
+//! only, and this target does not compare 12-bit raw planes
+//! (`raw_data_12::decompress_raw_12` against `jpeg12_read_raw_data`). A mismatch is
 //! excused, unless `LTRS_FUZZ_INCLUDE_KNOWN=1`, when libjpeg without block
 //! smoothing agrees with Rust (P4-249) or the entropy data holds 0xFF fill
 //! before a stuffed byte (P4-248).
