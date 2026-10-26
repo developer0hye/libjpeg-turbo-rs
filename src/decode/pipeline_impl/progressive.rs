@@ -6,7 +6,7 @@ use crate::common::layout::checked_span;
 use crate::common::quant_table::QuantTable;
 use crate::common::try_alloc::{try_filled_vec, try_zeroed_bytes};
 use crate::common::types::{FrameHeader, ScanComponentSelector};
-use crate::decode::bitstream::BitReader;
+use crate::decode::bitstream::{check_segment_end, progressive_block_result, BitReader};
 use crate::decode::marker::ScanInfo;
 use crate::decode::progressive as progressive_codec;
 use alloc::{format, vec, vec::Vec};
@@ -83,6 +83,12 @@ impl<'a> Decoder<'a> {
             .collect::<Result<Vec<Vec<u8>>>>()?;
 
         // Process each scan, enforcing scan_limit if set
+        let mut warnings: Vec<DecodeWarning> = Vec::new();
+        // libjpeg's `last_good_iMCU_row`: the iMCU row of the last MCU that
+        // began with data left in its segment (consume_data, jdcoefct.c:257-258),
+        // updated through every scan, so the final scan sets it. Block
+        // smoothing treats the rows after it as missing that scan (P4-255).
+        let mut last_good_imcu_row: usize = 0;
         for (scan_idx, scan_info) in self.metadata.scans.iter().enumerate() {
             if scan_idx >= self.limits.max_scans {
                 return Err(JpegError::LimitExceeded {
@@ -101,6 +107,8 @@ impl<'a> Decoder<'a> {
                 mcus_y,
                 max_h,
                 max_v,
+                &mut warnings,
+                &mut last_good_imcu_row,
             )?;
         }
 
@@ -130,6 +138,8 @@ impl<'a> Decoder<'a> {
         if block_smoothing {
             let coef_bits_all: Vec<[i32; 10]> =
                 crate::decode::toggles::compute_coef_bits(&self.metadata.scans, frame);
+            let prev_coef_bits_all: Vec<[i32; 10]> =
+                crate::decode::toggles::compute_prev_coef_bits(&self.metadata.scans, frame);
             let all_prerequisites_ok = coef_bits_all.iter().enumerate().all(|(comp_idx, cb)| {
                 crate::decode::toggles::smoothing_prerequisites_ok_for_component(
                     cb,
@@ -153,6 +163,8 @@ impl<'a> Decoder<'a> {
                         ci.height_in_blocks,
                         ci.v_samp,
                         &coef_bits_all[comp_idx],
+                        &prev_coef_bits_all[comp_idx],
+                        last_good_imcu_row,
                         quant_tables[comp_idx],
                     )?;
                 }
@@ -191,9 +203,9 @@ impl<'a> Decoder<'a> {
             }
         }
 
-        // Progressive decoding doesn't have per-MCU error recovery yet;
-        // errors in scans propagate normally.
-        Ok((component_planes, Vec::new()))
+        // A segment that ran short is the only recovery: other decode errors
+        // in a scan propagate.
+        Ok((component_planes, warnings))
     }
 
     /// Decode one progressive scan's entropy data into the coefficient buffers.
@@ -209,6 +221,8 @@ impl<'a> Decoder<'a> {
         mcus_y: usize,
         max_h: usize,
         max_v: usize,
+        warnings: &mut Vec<DecodeWarning>,
+        last_good_imcu_row: &mut usize,
     ) -> Result<()> {
         let scan = &scan_info.header;
         let ss = scan.spec_start;
@@ -253,6 +267,8 @@ impl<'a> Decoder<'a> {
                 se,
                 ah,
                 al,
+                warnings,
+                last_good_imcu_row,
             )
         } else {
             // Non-interleaved scan (single component)
@@ -275,6 +291,8 @@ impl<'a> Decoder<'a> {
                 se,
                 ah,
                 al,
+                warnings,
+                last_good_imcu_row,
             )
         }
     }
@@ -295,6 +313,8 @@ impl<'a> Decoder<'a> {
         _se: u8,
         ah: u8,
         al: u8,
+        warnings: &mut Vec<DecodeWarning>,
+        last_good_imcu_row: &mut usize,
     ) -> Result<()> {
         let scan = &scan_info.header;
         let mut dc_preds = [0i16; 4];
@@ -324,9 +344,16 @@ impl<'a> Decoder<'a> {
         // Start at restart_interval so the first MCU doesn't trigger a reset.
         // When restart_interval is 0, countdown is never checked.
         let mut restart_countdown: u32 = restart_interval;
+        let total_mcus: usize = mcus_x * mcus_y;
+        let mut mcu_count: usize = 0;
 
         for mcu_y in 0..mcus_y {
             for mcu_x in 0..mcus_x {
+                // Before the restart is processed, as C checks it before
+                // `decode_mcu`, which processes the restart.
+                if !bit_reader.insufficient_data() {
+                    *last_good_imcu_row = mcu_y;
+                }
                 if restart_interval > 0 {
                     if restart_countdown == 0 {
                         bit_reader.reset();
@@ -336,7 +363,15 @@ impl<'a> Decoder<'a> {
                     restart_countdown -= 1;
                 }
 
+                // Once the segment has run short, libjpeg leaves every later
+                // MCU of the segment as it was (`decode_mcu_DC_first`,
+                // jdphuff.c:312). Its DC refinement reads on, but zero bits
+                // change nothing (jdphuff.c:467-469), so skipping is the same.
+                let segment_short: bool = bit_reader.insufficient_data();
                 for (si, &comp_idx) in scan_comp_indices.iter().enumerate() {
+                    if segment_short {
+                        break;
+                    }
                     let ci = &comp_infos[comp_idx];
 
                     for v in 0..ci.v_samp {
@@ -347,7 +382,7 @@ impl<'a> Decoder<'a> {
                             let coeffs = &mut coeff_bufs[comp_idx][block_idx];
 
                             if is_dc {
-                                if ah == 0 {
+                                let result: Result<()> = if ah == 0 {
                                     let dc_table = dc_tables[si].expect(
                                         "DC initial scan must have resolved DC table (ah==0 \
                                          path of pre-resolution above)",
@@ -358,14 +393,28 @@ impl<'a> Decoder<'a> {
                                         &mut dc_preds[comp_idx],
                                         coeffs,
                                         al,
-                                    )?;
+                                    )
                                 } else {
-                                    progressive_codec::decode_dc_refine(bit_reader, coeffs, al)?;
+                                    progressive_codec::decode_dc_refine(bit_reader, coeffs, al)
+                                };
+                                if result.is_err() {
+                                    progressive_block_result(bit_reader, self.lenient, result)?;
                                 }
                             }
                         }
                     }
                 }
+                if !segment_short && bit_reader.insufficient_data() {
+                    check_segment_end(
+                        bit_reader,
+                        false,
+                        self.lenient,
+                        mcu_count,
+                        total_mcus,
+                        warnings,
+                    )?;
+                }
+                mcu_count += 1;
             }
         }
 
@@ -392,6 +441,8 @@ impl<'a> Decoder<'a> {
         se: u8,
         ah: u8,
         al: u8,
+        warnings: &mut Vec<DecodeWarning>,
+        last_good_imcu_row: &mut usize,
     ) -> Result<()> {
         let ci = &comp_infos[comp_idx];
         let mut dc_pred = 0i16;
@@ -458,27 +509,75 @@ impl<'a> Decoder<'a> {
         let scan_blocks_x = ci.width_in_blocks;
         let scan_blocks_y = ci.height_in_blocks;
         let stride = ci.blocks_x; // buffer stride (MCU-aligned)
+        let lenient: bool = self.lenient;
+        let total_blocks: usize = scan_blocks_x * scan_blocks_y;
+
+        // The last good iMCU row (see `decode_progressive_planes`). One iMCU
+        // row of a non-interleaved scan is `v_samp` block rows. Noted before
+        // the restart is processed, as C checks it before `decode_mcu`, which
+        // processes the restart.
+        let v_samp: usize = ci.v_samp;
+        macro_rules! note_good_row {
+            ($imcu_row:expr) => {
+                if !bit_reader.insufficient_data() {
+                    *last_good_imcu_row = $imcu_row;
+                }
+            };
+        }
+        // Each block of a non-interleaved scan is one MCU. Once the segment
+        // has run short, libjpeg leaves every later block of the segment as
+        // it was (`decode_mcu_DC_first`, `decode_mcu_AC_first`,
+        // `decode_mcu_AC_refine`: jdphuff.c:312, 387, 526). Its DC refinement
+        // reads on, but zero bits change nothing (jdphuff.c:467-469), so
+        // skipping is the same. Strict decoding refuses the scan instead.
+        macro_rules! decode_block {
+            ($block_index:expr, $decode:expr) => {
+                if !bit_reader.insufficient_data() {
+                    let result: Result<()> = $decode;
+                    if result.is_err() {
+                        progressive_block_result(bit_reader, lenient, result)?;
+                    }
+                    if bit_reader.insufficient_data() {
+                        check_segment_end(
+                            bit_reader,
+                            false,
+                            lenient,
+                            $block_index,
+                            total_blocks,
+                            warnings,
+                        )?;
+                    }
+                }
+            };
+        }
 
         if is_dc && ah == 0 {
             let dc_table = dc_table.ok_or_else(|| {
                 JpegError::CorruptData("DC Huffman table required for DC-first scan".into())
             })?;
             for by in 0..scan_blocks_y {
+                let imcu_row: usize = by / v_samp;
                 for bx in 0..scan_blocks_x {
+                    note_good_row!(imcu_row);
                     restart_check_dc!(bit_reader, dc_pred, restart_countdown, restart_interval);
                     let coeffs = &mut coeff_slice[by * stride + bx];
-                    progressive_codec::decode_dc_first(
-                        bit_reader,
-                        dc_table,
-                        &mut dc_pred,
-                        coeffs,
-                        al,
-                    )?;
+                    decode_block!(
+                        by * scan_blocks_x + bx,
+                        progressive_codec::decode_dc_first(
+                            bit_reader,
+                            dc_table,
+                            &mut dc_pred,
+                            coeffs,
+                            al,
+                        )
+                    );
                 }
             }
         } else if is_dc {
             for by in 0..scan_blocks_y {
+                let imcu_row: usize = by / v_samp;
                 for bx in 0..scan_blocks_x {
+                    note_good_row!(imcu_row);
                     if restart_interval > 0 {
                         if restart_countdown == 0 {
                             bit_reader.reset();
@@ -487,7 +586,10 @@ impl<'a> Decoder<'a> {
                         restart_countdown -= 1;
                     }
                     let coeffs = &mut coeff_slice[by * stride + bx];
-                    progressive_codec::decode_dc_refine(bit_reader, coeffs, al)?;
+                    decode_block!(
+                        by * scan_blocks_x + bx,
+                        progressive_codec::decode_dc_refine(bit_reader, coeffs, al)
+                    );
                 }
             }
         } else if ah == 0 {
@@ -495,19 +597,32 @@ impl<'a> Decoder<'a> {
                 JpegError::CorruptData("AC Huffman table required for AC-first scan".into())
             })?;
             for by in 0..scan_blocks_y {
+                let imcu_row: usize = by / v_samp;
                 for bx in 0..scan_blocks_x {
+                    note_good_row!(imcu_row);
                     restart_check_ac!(bit_reader, eob_run, restart_countdown, restart_interval);
+                    // A block inside an EOB run reads no bits, so it cannot
+                    // run the segment short: take it here, as
+                    // `decode_ac_first_tracked` would, without the checks. A
+                    // run only starts after a decode that validated the scan.
+                    if eob_run > 0 {
+                        eob_run -= 1;
+                        continue;
+                    }
                     let coeffs = &mut coeff_slice[by * stride + bx];
-                    progressive_codec::decode_ac_first_tracked(
-                        bit_reader,
-                        ac_table,
-                        coeffs,
-                        ss,
-                        se,
-                        al,
-                        &mut eob_run,
-                        &mut ac_max_k[by * stride + bx],
-                    )?;
+                    decode_block!(
+                        by * scan_blocks_x + bx,
+                        progressive_codec::decode_ac_first_tracked(
+                            bit_reader,
+                            ac_table,
+                            coeffs,
+                            ss,
+                            se,
+                            al,
+                            &mut eob_run,
+                            &mut ac_max_k[by * stride + bx],
+                        )
+                    );
                 }
             }
         } else {
@@ -515,19 +630,24 @@ impl<'a> Decoder<'a> {
                 JpegError::CorruptData("AC Huffman table required for AC-refine scan".into())
             })?;
             for by in 0..scan_blocks_y {
+                let imcu_row: usize = by / v_samp;
                 for bx in 0..scan_blocks_x {
+                    note_good_row!(imcu_row);
                     restart_check_ac!(bit_reader, eob_run, restart_countdown, restart_interval);
                     let coeffs = &mut coeff_slice[by * stride + bx];
-                    progressive_codec::decode_ac_refine_tracked(
-                        bit_reader,
-                        ac_table,
-                        coeffs,
-                        ss,
-                        se,
-                        al,
-                        &mut eob_run,
-                        &mut ac_max_k[by * stride + bx],
-                    )?;
+                    decode_block!(
+                        by * scan_blocks_x + bx,
+                        progressive_codec::decode_ac_refine_tracked(
+                            bit_reader,
+                            ac_table,
+                            coeffs,
+                            ss,
+                            se,
+                            al,
+                            &mut eob_run,
+                            &mut ac_max_k[by * stride + bx],
+                        )
+                    );
                 }
             }
         }

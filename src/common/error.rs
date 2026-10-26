@@ -112,7 +112,14 @@ pub enum DecodeWarning {
         mcu_y: usize,
         message: String,
     },
-    /// Data ended before all MCUs were decoded.
+    /// An entropy-coded segment ended before its last MCU — the data stopped,
+    /// or a marker came early: libjpeg's `JWRN_HIT_MARKER`. Lenient decoding
+    /// leaves the rest of that segment mid-grey and resumes at the next restart
+    /// marker; strict decoding returns [`JpegError::UnexpectedEof`] instead.
+    /// `decoded_mcus` counts the MCUs before the one that ran short — for
+    /// lossless, where each sample position is an MCU, the samples before the
+    /// row that ran short; per scan for a non-interleaved scan — and
+    /// `total_mcus` the MCUs in the frame (or scan) (P4-254).
     TruncatedData {
         decoded_mcus: usize,
         total_mcus: usize,

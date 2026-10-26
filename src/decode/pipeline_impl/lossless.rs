@@ -1,12 +1,12 @@
 use super::output::pad_alpha_offset;
 use super::{Decoder, Image};
-use crate::common::error::{JpegError, Result};
+use crate::common::error::{DecodeWarning, JpegError, Result};
 use crate::common::huffman_table::HuffmanTable;
 use crate::common::try_alloc::{
     try_clone_opt, try_clone_opt_string, try_clone_saved_markers, try_filled_vec, try_reserved_vec,
 };
 use crate::common::types::{FrameHeader, PixelFormat};
-use crate::decode::bitstream::BitReader;
+use crate::decode::bitstream::{check_segment_end, short_segment_error, BitReader};
 use crate::decode::{huffman, lossless as lossless_codec};
 use alloc::{format, string::ToString, vec, vec::Vec};
 
@@ -82,18 +82,43 @@ impl<'a> Decoder<'a> {
             let mut prev_row: Option<Vec<u16>> = None;
             let ri: u32 = self.metadata.restart_interval as u32;
             let mut mcu_count: u32 = 0;
+            let mut warnings: Vec<DecodeWarning> = Vec::new();
 
             for y in 0..height {
                 let row_start = y * width;
+                // Restart intervals are whole rows (refused otherwise, above),
+                // so a restart lands here. Process it before testing the
+                // segment, as libjpeg does (jddiffct.c:178-183): a consumed
+                // RST starts a new one.
+                if ri > 0 && mcu_count > 0 && mcu_count.is_multiple_of(ri) {
+                    reader.reset();
+                    prev_row = None;
+                }
+                // Once the segment has run short, a row is zero differences
+                // from a reset predictor: mid-grey, as libjpeg leaves it
+                // (jdlhuff.c:224-239; P4-254).
+                let row_short: bool = reader.insufficient_data();
                 let mut diffs = Vec::with_capacity(width);
                 for _x in 0..width {
-                    if ri > 0 && mcu_count > 0 && mcu_count.is_multiple_of(ri) {
-                        reader.reset();
-                        prev_row = None;
-                    }
-                    let diff = huffman::decode_dc_coefficient(&mut reader, dc_table)?;
+                    let diff = if row_short {
+                        0
+                    } else {
+                        huffman::decode_dc_coefficient(&mut reader, dc_table)
+                            .map_err(|e| short_segment_error(&reader, e))?
+                    };
                     diffs.push(diff);
                     mcu_count += 1;
+                }
+                check_segment_end(
+                    &reader,
+                    row_short,
+                    self.lenient,
+                    row_start,
+                    width * height,
+                    &mut warnings,
+                )?;
+                if row_short {
+                    prev_row = None;
                 }
                 lossless_codec::undifference_row(
                     &diffs,
@@ -107,7 +132,10 @@ impl<'a> Decoder<'a> {
                 prev_row = Some(output[row_start..row_start + width].to_vec());
             }
 
-            self.lossless_output_grayscale(&output, width, height, pt, icc_profile, exif_data)
+            let mut image: Image =
+                self.lossless_output_grayscale(&output, width, height, pt, icc_profile, exif_data)?;
+            image.warnings = warnings;
+            Ok(image)
         } else if num_components == 3 {
             // Multi-component (color) lossless decode — interleaved scan.
             // The interleaved loop indexes `dc_tables[0..3]`, so a malformed
@@ -127,25 +155,46 @@ impl<'a> Decoder<'a> {
             let mut prev_rows: Vec<Option<Vec<u16>>> = vec![None; 3];
             let ri: u32 = self.metadata.restart_interval as u32;
             let mut mcu_count: u32 = 0;
+            let mut warnings: Vec<DecodeWarning> = Vec::new();
 
             for y in 0..height {
                 let row_start = y * width;
                 let mut comp_diffs: Vec<Vec<i16>> =
                     (0..3).map(|_| Vec::with_capacity(width)).collect();
+                // As in the grayscale loop above: restart, then test (P4-254).
+                if ri > 0 && mcu_count > 0 && mcu_count.is_multiple_of(ri) {
+                    reader.reset();
+                    for pr in prev_rows.iter_mut() {
+                        *pr = None;
+                    }
+                }
+                let row_short: bool = reader.insufficient_data();
 
                 // Interleaved: for each pixel, decode diff for each component
                 for _ in 0..width {
-                    if ri > 0 && mcu_count > 0 && mcu_count.is_multiple_of(ri) {
-                        reader.reset();
-                        for pr in prev_rows.iter_mut() {
-                            *pr = None;
-                        }
-                    }
                     for c in 0..3 {
-                        let diff = huffman::decode_dc_coefficient(&mut reader, dc_tables[c])?;
+                        let diff = if row_short {
+                            0
+                        } else {
+                            huffman::decode_dc_coefficient(&mut reader, dc_tables[c])
+                                .map_err(|e| short_segment_error(&reader, e))?
+                        };
                         comp_diffs[c].push(diff);
                     }
                     mcu_count += 1;
+                }
+                check_segment_end(
+                    &reader,
+                    row_short,
+                    self.lenient,
+                    row_start,
+                    width * height,
+                    &mut warnings,
+                )?;
+                if row_short {
+                    for pr in prev_rows.iter_mut() {
+                        *pr = None;
+                    }
                 }
 
                 // Undifference each component
@@ -163,7 +212,16 @@ impl<'a> Decoder<'a> {
                 }
             }
 
-            self.lossless_output_color(&comp_planes, width, height, pt, icc_profile, exif_data)
+            let mut image: Image = self.lossless_output_color(
+                &comp_planes,
+                width,
+                height,
+                pt,
+                icc_profile,
+                exif_data,
+            )?;
+            image.warnings = warnings;
+            Ok(image)
         } else {
             Err(JpegError::Unsupported(format!(
                 "{} components not yet supported for lossless",
