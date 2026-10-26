@@ -10,6 +10,12 @@ and `git log` between tags.
 
 ### Added
 
+- **`Decoder::decode_raw_with_warnings`** returns `decode_raw`'s component
+  planes together with the warnings `decode_image` reports for the same
+  stream: the blocks a lenient decode concealed (`HuffmanError`, capped by
+  `WarningsSuppressed`) and stray bytes between markers (`ExtraneousData`).
+  `decode_raw` drops them, so a caller decoding planes leniently could not
+  tell recovered output from clean output.
 - **`TjHandle::scaling_factor`** returns the factor `set_scaling_factor`
   set; `TjHandle::decompress_to_yuv_planes` now applies it (P4-234, #667).
 - **Supported root paths for module-only APIs** (P4-222): `libjpeg_turbo_rs::yuv`
