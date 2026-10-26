@@ -1884,6 +1884,14 @@ smoothing and both restart controls; and (6) invalid or incomplete tables fail
 through the classic error manager rather than panicking or silently falling
 back.
 
+**Also (2026-10-26, by reading, from the P4-264 docs audit):**
+`jpeg_set_linear_quality` passes `jcparam.c`'s standard tables to
+`jpeg_add_quant_table` in zigzag order (`16, 11, 12, 14, …`), while
+`jpeg_add_quant_table` takes `basic_table` in natural order, as C does. It is
+harmless only because the stored tables are never applied; wiring them in
+for this item must reorder those two constants to natural order (`16, 11, 10,
+16, 24, …`), or every `jpeg_set_quality` encode will scramble its tables.
+
 ## P4-86. Classic Lossy Scanline Compression Ignores Public DCT Method — **OPEN**
 
 **Motivation.** Filed 2026-08-02 during the P4-82 option-dispatch review.
@@ -15287,7 +15295,9 @@ padding instead of replicated (`jdsample.c` `h2v1_fancy_upsample` /
 samples. A second gap showed up in the same matrix: `jinit_upsampler` uses the
 h2v1/h2v2 triangle filters only for a component more than two samples wide and
 replicates a narrower one (`h2v1_upsample` / `h2v2_upsample`); the 12-bit path
-filtered it, so frames 3–4 pixels wide at 4:2:0 or 4:2:2 differed too. Every
+filtered it, so 3- and 4-pixel-wide 4:2:0 and 4:2:2 frames differed too
+(3×3 and 4×4 measured). By reading, the removed one-column branch also blended
+1- and 2-pixel-wide 4:2:0 frames vertically where libjpeg replicates. Every
 12-bit entry point goes through this function: `decompress_12bit*`,
 `TjHandle::decompress_12bit`, `tj3Decompress12`, `jpeg12_read_scanlines`, and
 `Decoder` on a 12-bit frame.

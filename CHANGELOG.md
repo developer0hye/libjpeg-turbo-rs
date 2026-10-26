@@ -342,14 +342,15 @@ and `git log` between tags.
   `tj3Decompress12`, `jpeg12_read_scanlines`, `Decoder` on a 12-bit frame).
   - The last chroma column or row of a subsampled frame whose width or height
     is even but not a whole number of MCUs was blended with MCU padding
-    (P4-263, #693); 4:2:0 and 4:2:2 frames 3–4 pixels wide were
-    triangle-filtered where libjpeg replicates.
+    (P4-263, #693); 4:2:0 frames four pixels wide or narrower and 4:2:2
+    frames three or four pixels wide were filtered where libjpeg replicates.
   - The source colour space is classified as libjpeg does (P4-264, #694): an
     RGB-coded frame (`cjpeg -rgb`) is returned unconverted, where it used to
     be colour-converted a second time, and a YCCK frame is converted to CMYK,
     where it used to come back as YCCK.
-  - **Behaviour:** `Decoder` / `decompress` refuse a 12-bit frame of other
-    than one or three components with `Unsupported`; a CMYK or YCCK frame
+  - **Behaviour:** `Decoder` / `decompress`, and so the `image` adapter,
+    refuse a 12-bit frame of other than one or three components with
+    `Unsupported`; a CMYK or YCCK frame
     used to come back as `Ok` with its pixels misread as RGB. Its samples are
     available through `precision::decompress_12bit`.
 - `JpegCoefficients::quant_tables` and `EncoderConfig::quant_tables` were
