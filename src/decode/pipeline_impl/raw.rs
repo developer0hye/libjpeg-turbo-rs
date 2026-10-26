@@ -8,15 +8,51 @@ impl<'a> Decoder<'a> {
     /// Returns component planes at their native (potentially subsampled)
     /// resolution, without performing color conversion or upsampling.
     /// This matches libjpeg-turbo's `jpeg_read_raw_data()` functionality.
+    ///
+    /// The warnings a lenient decode recovers from are dropped; call
+    /// [`Self::decode_raw_with_warnings`] to keep them.
     pub fn decode_raw(self) -> Result<crate::api::raw_data::RawImage> {
-        self.decode_raw_with_warnings(8).map(|(raw, _warnings)| raw)
+        self.decode_raw_scaled_with_warnings(8)
+            .map(|(raw, _warnings)| raw)
+    }
+
+    /// [`Self::decode_raw`], also returning the warnings the decode recovered
+    /// from, as [`Self::decode_image`] returns them in
+    /// [`crate::Image::warnings`] for the same stream. In lenient mode
+    /// ([`Self::set_lenient`]) that is a `HuffmanError` for each MCU concealed
+    /// as grey (up to the cap, then `WarningsSuppressed`); in any mode,
+    /// `ExtraneousData` for stray bytes between markers. Without them a caller
+    /// decoding leniently cannot tell recovered planes from clean ones. Like
+    /// `decode_raw`, it applies no block smoothing (P4-249).
+    pub fn decode_raw_with_warnings(
+        self,
+    ) -> Result<(
+        crate::api::raw_data::RawImage,
+        Vec<crate::common::error::DecodeWarning>,
+    )> {
+        let extraneous_bytes: usize = self.metadata.extraneous_bytes;
+        let (raw, mut warnings) = self.decode_raw_scaled_with_warnings(8)?;
+        if extraneous_bytes != 0 {
+            warnings
+                .try_reserve(1)
+                .map_err(|_| JpegError::AllocationFailed {
+                    what: "marker warning",
+                    bytes: core::mem::size_of::<crate::common::error::DecodeWarning>() as u64,
+                })?;
+            warnings.push(crate::common::error::DecodeWarning::ExtraneousData {
+                bytes: extraneous_bytes,
+            });
+        }
+        Ok((raw, warnings))
     }
 
     /// [`Self::decode_raw`] with every component's blocks reconstructed at
     /// `block_size` x `block_size` (1..=16, the scaled IDCTs), also returning
     /// the warnings the entropy decode recovered from — for
     /// `TjHandle::decompress_to_yuv_planes`, which emits planes at the handle's
-    /// scaling factor and honours `TJPARAM_STOPONWARNING`.
+    /// scaling factor and honours `TJPARAM_STOPONWARNING`. The marker walk's
+    /// `ExtraneousData` is not among them: the caller checks it
+    /// ([`Self::decode_raw_with_warnings`] adds it).
     ///
     /// One size for every component is what TurboJPEG's raw path uses:
     /// `jpeg_calc_output_dimensions` would give a subsampled component a
@@ -24,7 +60,7 @@ impl<'a> Decoder<'a> {
     /// subsamplings (4:2:0, 4:1:0, 2:4) `tj3DecompressToYUVPlanes8` forces it
     /// back to the luma size (`turbojpeg.c:2299-2316`), so the chroma planes
     /// stay subsampled (P4-234).
-    pub(crate) fn decode_raw_with_warnings(
+    pub(crate) fn decode_raw_scaled_with_warnings(
         self,
         block_size: usize,
     ) -> Result<(
