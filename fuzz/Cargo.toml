@@ -102,3 +102,22 @@ doc = false
 name = "fuzz_api_sequence"
 path = "fuzz_targets/fuzz_api_sequence.rs"
 doc = false
+
+# Differential targets against C oracle programs (`examples/*_c_oracle.c`)
+# built by `fuzz/build_c_oracles.sh`: YCbCr output (P4-244), raw component
+# planes, and lossless decode (P4-247). They exit with an error, rather than
+# skipping, when their oracle is not configured.
+[[bin]]
+name = "fuzz_ycbcr_diff_c"
+path = "fuzz_targets/fuzz_ycbcr_diff_c.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_raw_diff_c"
+path = "fuzz_targets/fuzz_raw_diff_c.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_lossless_diff_c"
+path = "fuzz_targets/fuzz_lossless_diff_c.rs"
+doc = false

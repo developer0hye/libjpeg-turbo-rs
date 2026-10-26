@@ -50,7 +50,7 @@ cargo +nightly fuzz run fuzz_decompress -- -dict=fuzz/jpeg.dict -max_total_time=
 |--------|-------------|-------------|
 | `fuzz_decompress` | Main decoder — highest priority target | ~347 |
 | `fuzz_decompress_lenient` | Lenient-mode decoder (tolerates partial corruption) | ~347 |
-| `fuzz_decompress_precision` | 12/16-bit and arbitrary-precision decode entry points (`api/precision.rs`) | 3 |
+| `fuzz_decompress_precision` | 12/16-bit and arbitrary-precision decode entry points (`api/precision.rs`) | 353 |
 | `fuzz_roundtrip` | Compress then decompress — checks encoder/decoder consistency | ~320 |
 | `fuzz_read_coefficients` | DCT coefficient reader | ~347 |
 | `fuzz_transform` | Read coefficients then write them back | ~331 |
@@ -61,6 +61,71 @@ cargo +nightly fuzz run fuzz_decompress -- -dict=fuzz/jpeg.dict -max_total_time=
 | `fuzz_decode_diff_c` | Differential decode against a subprocess `djpeg` (P2-7) | 330 |
 | `fuzz_encode_diff_c` | Differential encode round-trip against subprocess `cjpeg`/`djpeg` (P2-7) | 299 |
 | `fuzz_transform_diff_c` | Differential transform against a subprocess `jpegtran` (P2-7) | 10 |
+| `fuzz_ycbcr_diff_c` | YCbCr output (`set_output_colorspace(YCbCr)`) at every scale, box/fancy upsampling and crops, byte-exact against libjpeg's `JCS_YCbCr` (P4-244) | 198 |
+| `fuzz_raw_diff_c` | `Decoder::decode_raw` component planes, byte-exact against `jpeg_read_raw_data` | 36 |
+| `fuzz_lossless_diff_c` | `precision::decompress_lossless_arbitrary` at precision 2–16, byte-exact against libjpeg's lossless decoder (P4-247) | 25 |
+
+### Targets with C oracle programs
+
+`fuzz_ycbcr_diff_c`, `fuzz_raw_diff_c` and `fuzz_lossless_diff_c` compare
+against libjpeg calls no command-line tool exposes, through small programs in
+`examples/*_c_oracle.c`. Build them against a libjpeg-turbo 3.x development
+install (headers and library; the lossless oracle needs the 12- and 16-bit
+API), export the paths the script prints, then run as usual:
+
+```bash
+eval "$(fuzz/build_c_oracles.sh /opt/homebrew/opt/jpeg-turbo)"
+cargo +nightly fuzz run fuzz_lossless_diff_c -- -dict=fuzz/jpeg.dict -max_total_time=600
+```
+
+Without its oracle such a target exits with an error rather than comparing
+nothing, and an oracle that cannot be started, or that exits with anything but
+0 or libjpeg's error status 1, panics the run. Each target asserts only on
+inputs libjpeg decodes without a warning. Known divergences are handled in two
+ways, each naming its LAST_MILE item; `LTRS_FUZZ_INCLUDE_KNOWN=1` turns both
+off, to confirm the target still finds them or that a fix closed them:
+
+- **Skipped before decoding**, because Rust refuses or cannot express the
+  input: arithmetic-coded streams, YCbCr output of 12-bit and lossless frames
+  (P4-246), lossless frames whose first scan codes fewer components than the
+  frame or whose components are subsampled (P4-247), and lossless Tq/Ta above
+  3 (P4-250).
+- **Excused after the comparison**, so the input still exercises the code: a
+  scaled decode of coefficients no 8-bit image produces (the scaled IDCTs
+  saturate by design), 0xFF fill before a stuffed byte in a sequential
+  Huffman frame (P4-248), raw output that equals libjpeg's with smoothing off
+  (P4-249), and a lossless mismatch whose every differing sample equals
+  libjpeg's masked to the precision (P4-66). P4-66 is only partly excused:
+  once a wrapped sample spreads through later predictions the mismatch still
+  fails, so lossless findings below 16 bits need replaying against a build
+  that wraps modulo 2^16.
+
+The lossless target also hands libjpeg a
+one-component frame's sampling factors as 1×1, which T.81 makes equivalent:
+for a 1×v component libjpeg applies a restart's prediction reset at the
+start of the v-row iMCU row, so an interval that is not a multiple of v rows
+decodes wrong in libjpeg-turbo 3.2.0 and right in Rust.
+
+These targets run by hand only: they are not in `fuzz-smoke.yml`, and no PR
+job builds them, so a green PR run does not show they still compile. The raw
+target covers 8-bit frames only; 12-bit raw planes
+(`raw_data_12::decompress_raw_12` against `jpeg12_read_raw_data`) have no
+differential target.
+
+`fuzz/known_divergences/<target>/` keeps one input per class, outside the
+corpora so a run does not stop on them: replay with
+`LTRS_FUZZ_INCLUDE_KNOWN=1` to confirm each still diverges, or that a fix
+closed it. When an item closes, move its input into the target's corpus and
+delete the skip or excuse that named it. The first campaign (2026-10-17, one
+hour on a 20-core aarch64 host, about 44 million executions across the three
+targets) found the classes above. A later two-minute run on this tree's base
+found two more, which have no excuse yet, so their inputs fail with or without
+the switch: a scaled, fancy-upsampled, cropped YCbCr decode with two Cb
+samples wrong (P4-265), and an 8-bit RGB lossless frame with 18 samples wrong
+(P4-266). Their seeds come from
+`fuzz/scripts/make_c_oracle_diff_seeds.py <cjpeg 3.x>`, which includes a small
+T.81 lossless encoder for layouts `cjpeg` cannot write; the
+`diffseed_lossless_*` files it writes into `fuzz_decompress_precision/` too.
 
 ## Run
 

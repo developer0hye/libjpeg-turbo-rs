@@ -14728,8 +14728,8 @@ three are legal T.81 lossless layouts that libjpeg decodes to the source:
 
 `cjpeg` cannot write 2 or 3 (it ignores `-sample` in lossless mode); a
 minimal T.81 Process-14 encoder for them is
-`fuzz/scripts/make_c_oracle_diff_seeds.py` in mshunshin/libjpeg-turbo-rs
-(branch `mycardium`).
+`fuzz/scripts/make_c_oracle_diff_seeds.py` (added with the C-oracle fuzz
+targets in #690).
 
 Acceptance: restart and subsampled frames byte-identical to libjpeg;
 multi-scan frames decoded, or refused as a documented decision.
@@ -15361,3 +15361,37 @@ Acceptance: `jpeg12_read_scanlines` never writes more than
 (as `JERR_CONVERSION_NOTIMPL` does upstream) before any row is written; a
 capi test asks for `JCS_GRAYSCALE` from a three-component 12-bit frame with a
 guard-page row buffer and asserts no write past it.
+
+## P4-265. A Scaled, Fancy-Upsampled, Cropped YCbCr Decode Returns Two Wrong Cb Samples — **OPEN**
+
+Found by `fuzz_ycbcr_diff_c` (#690) in a two-minute run on `main` 614898f4;
+the same input diverges on 25d6605c plus #684, #687 and #688, so no recent
+merge introduced it. A 61×45 baseline frame with 4×2 luma and 1×1 chroma,
+decoded with `set_output_colorspace(YCbCr)` at scale 3/8, fancy upsampling,
+and crop `(4, 2, 9, 5)` (a 13×5 output): two Cb samples differ from libjpeg's
+`JCS_YCbCr` output (Rust 120 and 40, libjpeg 184 and 231). The same decode
+without the crop matches. It is none of the filed classes (P4-244's crop
+re-initialisation, P4-248) and has not been triaged further. Reproducer:
+`fuzz/known_divergences/fuzz_ycbcr_diff_c/p4_265_scaled_fancy_crop_chroma.bin`
+(the target's input format: three option bytes, then the JPEG).
+
+Acceptance: that input, and the crop matrix of
+`tests/regression_issue_683_ycbcr_output.rs` extended to 4×2/1×1/1×1 at every
+scale, byte-identical to `examples/ycbcr_decode_c_oracle.c`.
+
+## P4-266. An 8-Bit RGB Lossless Frame (Predictor 5) Differs From libjpeg in 18 Samples — **OPEN**
+
+Found by `fuzz_lossless_diff_c` (#690) in the same run. A 61×45 three-component
+8-bit SOF3 frame (Adobe transform 0, components `R`, `G`, `B` at 1×1,
+predictor 5, Pt 0, no restart interval):
+`precision::decompress_lossless_arbitrary` differs from libjpeg's lossless
+decoder (`examples/lossless_decode_c_oracle.c`) in 18 of 8,235 samples, all
+of them from sample 2551 on (for example Rust 132 against libjpeg 4, 113
+against 241). The target's P4-66 check (every differing sample equal after
+masking to the precision) does not excuse it, and the differences are
+multiples of 64, not 256, so it is not plainly P4-66's wrap; untriaged.
+Reproducer:
+`fuzz/known_divergences/fuzz_lossless_diff_c/p4_266_lossless_rgb_predictor5.jpg`.
+
+Acceptance: the cause identified, and that input decoded byte-identically to
+libjpeg, or the divergence shown to be P4-66 and folded into it.
