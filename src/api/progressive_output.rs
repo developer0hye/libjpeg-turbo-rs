@@ -20,7 +20,7 @@ use crate::common::try_alloc::{
     try_zeroed_bytes,
 };
 use crate::common::types::*;
-use crate::decode::bitstream::BitReader;
+use crate::decode::bitstream::{progressive_block_result, BitReader};
 use crate::decode::marker::{JpegMetadata, MarkerReader, ScanInfo};
 use crate::decode::pipeline::{upsample_generic_nearest, Image};
 use crate::decode::progressive;
@@ -489,20 +489,27 @@ impl ProgressiveDecoder {
                                     &mut self.coeff_bufs[comp_idx][block_idx];
 
                                 if is_dc {
-                                    if ah == 0 {
+                                    let result: Result<()> = if ah == 0 {
                                         progressive::decode_dc_first(
                                             &mut bit_reader,
                                             dc_table,
                                             &mut dc_preds[comp_idx],
                                             coeffs,
                                             al,
-                                        )?;
+                                        )
                                     } else {
-                                        progressive::decode_dc_refine(&mut bit_reader, coeffs, al)?;
-                                    }
+                                        progressive::decode_dc_refine(&mut bit_reader, coeffs, al)
+                                    };
+                                    progressive_block_result(&bit_reader, false, result)?;
                                 }
                             }
                         }
+                    }
+                    // This MCU read past the end of its segment (djpeg's
+                    // JWRN_HIT_MARKER): refused, as this decoder is strict
+                    // (P4-255).
+                    if bit_reader.insufficient_data() {
+                        return Err(JpegError::UnexpectedEof);
                     }
 
                     mcu_count += 1;
@@ -513,8 +520,28 @@ impl ProgressiveDecoder {
             // Non-interleaved scan (single component)
             let comp_idx: usize = scan_comp_indices[0];
             let sc = &scan_components[0];
+            // A non-interleaved scan codes the component's own blocks,
+            // `width_in_blocks` × `height_in_blocks` (jdinput.c:119-124,
+            // 175-176), not the MCU-padded grid the buffers are laid out on
+            // (P4-259). `blocks_x` stays the buffer stride.
+            let frame = &self.metadata.frame;
+            let max_h: usize = frame
+                .components
+                .iter()
+                .map(|c| c.horizontal_sampling as usize)
+                .max()
+                .unwrap_or(1);
+            let max_v: usize = frame
+                .components
+                .iter()
+                .map(|c| c.vertical_sampling as usize)
+                .max()
+                .unwrap_or(1);
             let blocks_x: usize = self.comp_infos[comp_idx].blocks_x;
-            let blocks_y: usize = self.comp_infos[comp_idx].blocks_y;
+            let scan_blocks_x: usize =
+                (frame.width as usize * self.comp_infos[comp_idx].h_samp).div_ceil(max_h * 8);
+            let scan_blocks_y: usize =
+                (frame.height as usize * self.comp_infos[comp_idx].v_samp).div_ceil(max_v * 8);
             let mut dc_pred: i16 = 0;
             let mut eob_run: u16 = 0;
             let mut mcu_count: u32 = 0;
@@ -549,8 +576,8 @@ impl ProgressiveDecoder {
                 None
             };
 
-            for by in 0..blocks_y {
-                for bx in 0..blocks_x {
+            for by in 0..scan_blocks_y {
+                for bx in 0..scan_blocks_x {
                     if restart_interval > 0
                         && mcu_count > 0
                         && mcu_count.is_multiple_of(restart_interval as u32)
@@ -563,7 +590,7 @@ impl ProgressiveDecoder {
                     let block_idx: usize = by * blocks_x + bx;
                     let coeffs: &mut [i16; 64] = &mut self.coeff_bufs[comp_idx][block_idx];
 
-                    if is_dc {
+                    let result: Result<()> = if is_dc {
                         if ah == 0 {
                             progressive::decode_dc_first(
                                 &mut bit_reader,
@@ -571,9 +598,9 @@ impl ProgressiveDecoder {
                                 &mut dc_pred,
                                 coeffs,
                                 al,
-                            )?;
+                            )
                         } else {
-                            progressive::decode_dc_refine(&mut bit_reader, coeffs, al)?;
+                            progressive::decode_dc_refine(&mut bit_reader, coeffs, al)
                         }
                     } else if ah == 0 {
                         progressive::decode_ac_first_tracked(
@@ -585,7 +612,7 @@ impl ProgressiveDecoder {
                             al,
                             &mut eob_run,
                             &mut self.ac_max_k_bufs[comp_idx][block_idx],
-                        )?;
+                        )
                     } else {
                         progressive::decode_ac_refine_tracked(
                             &mut bit_reader,
@@ -596,7 +623,14 @@ impl ProgressiveDecoder {
                             al,
                             &mut eob_run,
                             &mut self.ac_max_k_bufs[comp_idx][block_idx],
-                        )?;
+                        )
+                    };
+                    progressive_block_result(&bit_reader, false, result)?;
+                    // This block read past the end of its segment (djpeg's
+                    // JWRN_HIT_MARKER): refused, as this decoder is strict
+                    // (P4-255).
+                    if bit_reader.insufficient_data() {
+                        return Err(JpegError::UnexpectedEof);
                     }
 
                     mcu_count += 1;

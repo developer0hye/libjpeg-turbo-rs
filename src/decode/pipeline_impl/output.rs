@@ -6,7 +6,7 @@ use crate::common::try_alloc::{
     try_clone_opt, try_clone_opt_string, try_clone_saved_markers, try_copy_of, try_filled_vec,
     try_reserved_vec, try_zeroed_bytes,
 };
-use crate::common::types::{ColorSpace, ComponentInfo, PixelFormat};
+use crate::common::types::{ColorSpace, ComponentInfo, FrameHeader, PixelFormat};
 use alloc::{
     borrow::Cow,
     format,
@@ -475,7 +475,15 @@ impl<'a> Decoder<'a> {
                 "cannot convert 12-bit JPEG to Cmyk".to_string(),
             ));
         }
-        let img12 = crate::api::precision::decompress_12bit(self.raw_data)?;
+        // Lenient decoding recovers from a short entropy segment as djpeg
+        // does, and reports it (P4-254).
+        let mut warnings: Vec<DecodeWarning> = Vec::new();
+        let img12 = crate::api::precision::decompress_12bit_impl(
+            self.raw_data,
+            &crate::common::types::DecodeLimits::default(),
+            self.lenient,
+            &mut warnings,
+        )?;
         let num_components: usize = img12.num_components;
 
         // Determine output format: default to Grayscale for 1-component,
@@ -595,7 +603,7 @@ impl<'a> Decoder<'a> {
                 comment: try_clone_opt_string(&self.metadata.comment, "COM comment")?,
                 density: self.metadata.density,
                 saved_markers: try_clone_saved_markers(&self.metadata.saved_markers)?,
-                warnings: Vec::new(),
+                warnings,
             })
         } else {
             // Color image: img12.data is interleaved RGB (3 values per pixel).
@@ -659,9 +667,63 @@ impl<'a> Decoder<'a> {
                 comment: try_clone_opt_string(&self.metadata.comment, "COM comment")?,
                 density: self.metadata.density,
                 saved_markers: try_clone_saved_markers(&self.metadata.saved_markers)?,
-                warnings: Vec::new(),
+                warnings,
             })
         }
+    }
+
+    /// The YCbCr colour path's refusal of a non-integer luma/chroma ratio
+    /// (e.g. Y=4x1 with Cb=3x1 → 4/3): the copy/upsample paths would read
+    /// luma-sized rows out of a smaller chroma plane (Fuzz Smoke run
+    /// 29977722126, P4-36). C rejects every fractional ratio up front with
+    /// ERREXIT(JERR_FRACT_SAMPLE_NOTIMPL) ("Fractional sampling not implemented
+    /// yet") in jdsample.c, in both strict and lenient modes (djpeg fails
+    /// fatally, so there is nothing more lenient to offer).
+    ///
+    /// Decided from the frame geometry alone, so it can run before entropy
+    /// decoding as C's does. `None` when the colour path would not refuse:
+    /// another path handles the frame, or its planes are zero or out-sample
+    /// luma, which the colour path refuses or recovers itself (P4-21).
+    fn fractional_chroma_sampling(
+        &self,
+        frame: &FrameHeader,
+        mcus_x: usize,
+        mcus_y: usize,
+        comp_block_sizes: &[usize; 4],
+    ) -> Option<JpegError> {
+        if frame.components.len() != 3
+            || self.effective_output_colorspace().is_some()
+            || self.detect_color_space() == ColorSpace::Rgb
+        {
+            return None;
+        }
+        let plane = |ci: usize| -> (usize, usize) {
+            let comp = &frame.components[ci];
+            (
+                mcus_x * comp.horizontal_sampling as usize * comp_block_sizes[ci],
+                mcus_y * comp.vertical_sampling as usize * comp_block_sizes[ci],
+            )
+        };
+        let (y_width, y_height) = plane(0);
+        let (cb_w, cb_h) = plane(1);
+        let (cr_w, cr_h) = plane(2);
+        if cb_w == 0 || cb_h == 0 || cr_w == 0 || cr_h == 0 {
+            return None;
+        }
+        if y_width < cb_w || y_height < cb_h || y_width < cr_w || y_height < cr_h {
+            return None;
+        }
+        if y_width.is_multiple_of(cb_w)
+            && y_height.is_multiple_of(cb_h)
+            && y_width.is_multiple_of(cr_w)
+            && y_height.is_multiple_of(cr_h)
+        {
+            return None;
+        }
+        Some(JpegError::Unsupported(format!(
+            "fractional chroma sampling ratio: luma {}x{} vs cb {}x{} cr {}x{}",
+            y_width, y_height, cb_w, cb_h, cr_w, cr_h
+        )))
     }
 
     /// `sink`: caller-provided output buffer for `decode_image_into`.
@@ -788,6 +850,14 @@ impl<'a> Decoder<'a> {
         let quant_table_arr: [&QuantTable; 4] =
             quant_table_refs.map(|slot| slot.unwrap_or(first_quant));
         let quant_tables: &[&QuantTable] = &quant_table_arr[..num_components];
+
+        // C refuses fractional sampling before it decodes anything; keep that
+        // order now that a short entropy segment is an error too (P4-254).
+        if let Some(error) =
+            self.fractional_chroma_sampling(frame, mcus_x, mcus_y, &comp_block_sizes)
+        {
+            return Err(error);
+        }
 
         // Decode component planes — different paths for baseline vs progressive vs arithmetic
         let (mut component_planes, warnings) =
@@ -1270,24 +1340,12 @@ impl<'a> Decoder<'a> {
                 });
             }
 
-            // Non-integer luma/chroma ratios (e.g. Y=4x1 with Cb=3x1 → 4/3)
-            // truncate to a wrong integer factor above; the copy/upsample
-            // paths below would then read luma-sized rows out of a smaller
-            // chroma plane (Fuzz Smoke run 29977722126, P4-36). C rejects
-            // every fractional ratio up front with
-            // ERREXIT(JERR_FRACT_SAMPLE_NOTIMPL) ("Fractional sampling not
-            // implemented yet") in jdsample.c — match it in both strict and
-            // lenient modes (djpeg fails fatally, so there is nothing more
-            // lenient to offer).
-            if !y_width.is_multiple_of(cb_w)
-                || !y_height.is_multiple_of(cb_h)
-                || !y_width.is_multiple_of(cr_w)
-                || !y_height.is_multiple_of(cr_h)
+            // Refused before entropy decoding (`fractional_chroma_sampling`);
+            // repeated here because the upsample paths below rely on it.
+            if let Some(error) =
+                self.fractional_chroma_sampling(frame, mcus_x, mcus_y, &comp_block_sizes)
             {
-                return Err(JpegError::Unsupported(format!(
-                    "fractional chroma sampling ratio: luma {}x{} vs cb {}x{} cr {}x{}",
-                    y_width, y_height, cb_w, cb_h, cr_w, cr_h
-                )));
+                return Err(error);
             }
 
             // When both chroma components have the same factors, use the shared

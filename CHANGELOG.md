@@ -10,6 +10,17 @@ and `git log` between tags.
 
 ### Added
 
+- **Lenient 12-bit and lossless decodes** (P4-254):
+  `precision::decompress_12bit_lenient`, `raw_data_12::decompress_raw_12_lenient`
+  and `precision::decompress_lossless_arbitrary_lenient` decode a stream whose
+  entropy-coded data ends before the last MCU as djpeg does, and return the
+  warnings with the image. Other corruption is still an error.
+- **`Decoder::decode_raw_with_warnings`** returns `decode_raw`'s component
+  planes together with the warnings `decode_image` reports for the same
+  stream: the blocks a lenient decode concealed (`HuffmanError`, capped by
+  `WarningsSuppressed`) and stray bytes between markers (`ExtraneousData`).
+  `decode_raw` drops them, so a caller decoding planes leniently could not
+  tell recovered output from clean output.
 - **`TjHandle::scaling_factor`** returns the factor `set_scaling_factor`
   set; `TjHandle::decompress_to_yuv_planes` now applies it (P4-234, #667).
 - **Supported root paths for module-only APIs** (P4-222): `libjpeg_turbo_rs::yuv`
@@ -326,6 +337,46 @@ and `git log` between tags.
   runs system/Rust bidirectional cross-decodes.
 
 ### Fixed
+- **Breaking (behaviour): a short entropy-coded segment is refused, or decoded
+  as djpeg decodes it** (P4-254). When the data ended before the last MCU —
+  the stream stopped, or an EOI came early — the sequential Huffman decoders
+  read the missing bits as zeros.
+  - Strict decoding returned `Ok` with wrong samples (`Decoder`,
+    `decompress_12bit`, `decompress_raw_12`, `decompress_16bit`,
+    `decompress_lossless_arbitrary`, `read_coefficients`); only the 8-bit
+    fast path refused a stream with no EOI. It now returns
+    `JpegError::UnexpectedEof`.
+  - The entry points with no lenient form follow: `read_coefficients` and the
+    transforms on it, `TjHandle::decompress*` (so `tj3Decompress*`), and the
+    classic C ABI's `jpeg_start_decompress` (`JERR_INPUT_EOF`). Stock decodes
+    these with a warning instead (P4-258).
+  - Lenient decoding gave no warning when an EOI followed the cut, and left
+    zero samples where djpeg greys. It now reports
+    `DecodeWarning::TruncatedData` once and leaves the rest of the segment
+    mid-grey, byte-identical to djpeg; a restart marker resumes decoding.
+  - Complete streams decode `Ok` with no warning, with or without an EOI. The
+    old fast path could refuse one with no EOI whose last MCUs fit in its
+    final bytes.
+  - The fractional-chroma-sampling refusal (P4-36) now runs before entropy
+    decoding, as C's does, so it still wins over a short segment.
+- **Breaking (behaviour): a short segment in a progressive scan is refused,
+  or decoded as djpeg decodes it** (P4-255). P4-254's check now covers the
+  progressive Huffman decoders: `Decoder` (`decode_image` and `decode_raw`),
+  `ProgressiveDecoder` and `read_coefficients`. A progressive stream cut short
+  with an EOI after the cut used to decode `Ok` with no warning.
+  - Strict decoding returns `JpegError::UnexpectedEof`. `ProgressiveDecoder`
+    and `read_coefficients` are strict.
+  - Lenient decoding reports `DecodeWarning::TruncatedData` once and leaves
+    the rest of the segment as the earlier scans left it, up to the next
+    restart marker. With block smoothing on, as djpeg decodes, the output is
+    byte-identical to djpeg's: smoothing uses the coefficient bits from
+    before the final scan for the rows that scan never reached
+    (`last_good_iMCU_row`).
+- **`ProgressiveDecoder` misplaced blocks in subsampled images with partial
+  MCUs** (P4-259). Its non-interleaved scans walked the MCU-padded block grid
+  rather than the component's own blocks, so a 227×149 4:2:0 progressive
+  image decoded with 89% of its samples wrong. It now matches `Decoder` and
+  djpeg.
 - **YCbCr output** (`Decoder::set_output_colorspace(ColorSpace::YCbCr)`, also
   `ScanlineDecoder`) of an 8-bit DCT frame is now libjpeg's `JCS_YCbCr` output
   byte for byte, crops included: each component goes through the same

@@ -1326,7 +1326,7 @@ impl TjHandle {
             out_height,
             subsampling,
         ))?;
-        let (raw, warnings) = decoder.decode_raw_with_warnings(block_size)?;
+        let (raw, warnings) = decoder.decode_raw_scaled_with_warnings(block_size)?;
         // Under TJPARAM_STOPONWARNING upstream's warning handler aborts the
         // decode. The raw decode is strict, so corrupt or truncated entropy
         // data is already an error here rather than a warning; this refuses

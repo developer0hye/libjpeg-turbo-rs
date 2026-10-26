@@ -82,6 +82,7 @@ src/api/yuv.rs	1	bounds-check	.saturating_mul(yuv_plane_height(dim_component, ou
 src/api/yuv.rs	1	bounds-check	let raw: u64 = (mcus_x * h as u64 * block).saturating_mul(mcus_y * v as u64 * block);
 src/api/yuv.rs	1	clamped-difference	let available: usize = scratch_len.saturating_sub(source).min(plane_width);
 src/api/yuv.rs	1	clamped-difference	let rows: usize = scratch_rows.min(plane_height.saturating_sub(first_row));
+src/decode/bitstream.rs	3	counter	self.stuffed_bits = self.stuffed_bits.saturating_add(8);
 src/decode/color.rs	1	value-saturation	let bd: u8 = b.saturating_add(d);
 src/decode/color.rs	1	value-saturation	let gd: u8 = g.saturating_add(d >> 1);
 src/decode/color.rs	1	value-saturation	let rd: u8 = r.saturating_add(d);

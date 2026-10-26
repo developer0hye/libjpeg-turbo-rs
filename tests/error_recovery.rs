@@ -185,11 +185,10 @@ fn parse_ppm_or_pgm(data: &[u8]) -> (usize, usize, Vec<u8>) {
 /// Cross-validate error recovery: compare Rust lenient decode vs C djpeg on
 /// truncated and corrupt JPEG inputs.
 ///
-/// Error recovery behavior can differ between implementations. djpeg fills
-/// unrecoverable regions with gray, our Rust lenient decoder does the same.
-/// We compare the recovered output and allow a reasonable tolerance for the
-/// intact portion of the image. If the behavior diverges significantly
-/// (e.g., djpeg fails entirely), we document and skip.
+/// djpeg and the Rust lenient decoder both grey the rest of a short entropy
+/// segment, so a truncated input must decode byte-identically (P4-254). For
+/// corrupt data in mid-stream the recovery can still differ between the two;
+/// that case documents and skips when djpeg fails.
 #[test]
 fn c_djpeg_error_recovery_diff_zero() {
     let djpeg: PathBuf = require_c_tool!("djpeg");
@@ -211,7 +210,8 @@ fn c_djpeg_error_recovery_diff_zero() {
         assert_eq!(rust_img.height, 240);
         assert_eq!(rust_img.data.len(), 320 * 240 * 3);
 
-        // C djpeg — may succeed (with partial output) or fail
+        // C djpeg decodes the truncated stream, greying what is missing, and
+        // exits with EXIT_WARNING (2) for its JWRN_JPEG_EOF / JWRN_HIT_MARKER.
         let output = std::process::Command::new(&djpeg)
             .arg("-ppm")
             .arg("-outfile")
@@ -219,68 +219,22 @@ fn c_djpeg_error_recovery_diff_zero() {
             .arg(&tmp_trunc_jpg.path)
             .output()
             .expect("failed to run djpeg");
-
-        if !output.status.success() {
-            // djpeg failed on truncated input — this is acceptable behavior.
-            // Document and skip the comparison.
-            eprintln!(
-                "NOTE: djpeg failed on truncated JPEG (exit code {:?}). \
-                 This is expected — C djpeg may refuse severely truncated inputs. \
-                 Rust lenient decoder succeeded with {} warnings.",
-                output.status.code(),
-                rust_img.warnings.len()
-            );
-        } else {
-            // djpeg succeeded — compare outputs
-            let c_ppm_data: Vec<u8> =
-                std::fs::read(&tmp_c_ppm.path).expect("read C PPM for truncated");
-            let (c_w, c_h, c_pixels) = parse_ppm_or_pgm(&c_ppm_data);
-            assert_eq!(c_w, 320, "C truncated width mismatch");
-            assert_eq!(c_h, 240, "C truncated height mismatch");
-
-            // For truncated JPEG, both decoders fill missing data with gray.
-            // The decoded region should match well; the filled region may differ
-            // depending on how each decoder fills.
-            // Measure the actual difference and assert a tight tolerance.
-            let mut max_diff: u8 = 0;
-            let mut diff_count: usize = 0;
-            for (i, (&r, &c)) in rust_img.data.iter().zip(c_pixels.iter()).enumerate() {
-                let diff: u8 = (r as i16 - c as i16).unsigned_abs() as u8;
-                if diff > max_diff {
-                    max_diff = diff;
-                }
-                if diff > 0 {
-                    diff_count += 1;
-                    if diff_count <= 3 {
-                        let pixel: usize = i / 3;
-                        let channel: &str = ["R", "G", "B"][i % 3];
-                        eprintln!(
-                            "  truncated pixel {} channel {}: rust={} c={} diff={}",
-                            pixel, channel, r, c, diff
-                        );
-                    }
-                }
-            }
-            // Truncated decode: the successfully decoded portion should match exactly.
-            // The gray-filled region may differ in fill values (e.g., 0 vs 128).
-            // Measured tolerance: max_diff can be up to 128 for gray fill differences.
-            // We assert that at least some pixels match (the decoded portion).
-            let total_pixels: usize = rust_img.data.len();
-            let match_ratio: f64 = 1.0 - (diff_count as f64 / total_pixels as f64);
-            eprintln!(
-                "  truncated: max_diff={}, diff_count={}/{}, match_ratio={:.2}%",
-                max_diff,
-                diff_count,
-                total_pixels,
-                match_ratio * 100.0
-            );
-            // At least 10% of pixels should match (the decoded portion before truncation)
-            assert!(
-                match_ratio > 0.10,
-                "truncated cross-validation: too few matching pixels ({:.2}%)",
-                match_ratio * 100.0
-            );
-        }
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "djpeg warns on the truncated JPEG: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let c_ppm_data: Vec<u8> = std::fs::read(&tmp_c_ppm.path).expect("read C PPM for truncated");
+        let (c_w, c_h, c_pixels) = parse_ppm_or_pgm(&c_ppm_data);
+        assert_eq!(c_w, 320, "C truncated width mismatch");
+        assert_eq!(c_h, 240, "C truncated height mismatch");
+        // Both grey the rest of the short segment, so the outputs are
+        // byte-identical (P4-254).
+        assert!(
+            rust_img.data == c_pixels,
+            "lenient truncated decode must equal djpeg's"
+        );
     }
 
     // --- Test 2: Corrupt-middle JPEG ---

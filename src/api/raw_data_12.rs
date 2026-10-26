@@ -7,10 +7,10 @@
 ///
 /// This mirrors `jpeg12_write_raw_data()` / `jpeg12_read_raw_data()` from
 /// libjpeg-turbo's 12-bit build (`jcapistd.c` / `jdapistd.c`).
-use crate::common::error::{JpegError, Result};
+use crate::common::error::{DecodeWarning, JpegError, Result};
 use crate::common::layout::checked_span;
 use crate::common::types::Subsampling;
-use crate::decode::bitstream::BitReader;
+use crate::decode::bitstream::{check_segment_end, short_segment_error, BitReader};
 use crate::decode::huffman;
 use crate::decode::marker::MarkerReader;
 use crate::encode::huff_opt;
@@ -206,8 +206,29 @@ fn scale_quant_for_fdct(table: &[u16; 64]) -> [u16; 64] {
 ///
 /// # Errors
 /// Returns an error if the JPEG is not 12-bit precision, is lossless,
-/// or the bitstream is corrupt.
+/// or the bitstream is corrupt — including entropy-coded data that ends
+/// before the last MCU ([`JpegError::UnexpectedEof`]), which
+/// [`decompress_raw_12_lenient`] decodes as djpeg does instead.
 pub fn decompress_raw_12(data: &[u8]) -> Result<RawImage12> {
+    decompress_raw_12_impl(data, false, &mut Vec::new())
+}
+
+/// [`decompress_raw_12`] that recovers from entropy-coded data ending before
+/// the last MCU, as djpeg does (`JWRN_HIT_MARKER`): every MCU after the end,
+/// up to the next restart marker, is mid-grey (2048), and the returned
+/// warnings include [`DecodeWarning::TruncatedData`]. Other corruption is
+/// still an error (P4-254).
+pub fn decompress_raw_12_lenient(data: &[u8]) -> Result<(RawImage12, Vec<DecodeWarning>)> {
+    let mut warnings: Vec<DecodeWarning> = Vec::new();
+    let image: RawImage12 = decompress_raw_12_impl(data, true, &mut warnings)?;
+    Ok((image, warnings))
+}
+
+fn decompress_raw_12_impl(
+    data: &[u8],
+    lenient: bool,
+    warnings: &mut Vec<DecodeWarning>,
+) -> Result<RawImage12> {
     let mut reader: MarkerReader<'_> = MarkerReader::new(data);
     let metadata = reader.read_markers()?;
     let frame = &metadata.frame;
@@ -340,6 +361,8 @@ pub fn decompress_raw_12(data: &[u8]) -> Result<RawImage12> {
                 prev_dc.fill(0);
             }
 
+            // Once the segment has run short, blocks stay zero: mid-grey (P4-254).
+            let segment_short: bool = bit_reader.insufficient_data();
             for (scan_idx, &frame_idx) in scan_to_frame.iter().enumerate() {
                 let h_samp: usize = comp_h_samp[frame_idx];
                 let v_samp: usize = comp_v_samp[frame_idx];
@@ -351,12 +374,16 @@ pub fn decompress_raw_12(data: &[u8]) -> Result<RawImage12> {
                 for v in 0..v_samp {
                     for h in 0..h_samp {
                         let mut block: [i16; 64] = [0i16; 64];
-                        let dc_diff: i16 =
-                            huffman::decode_dc_coefficient(&mut bit_reader, dc_table)?;
-                        // i32 DC accumulator to avoid overflow at 12-bit range
-                        prev_dc[frame_idx] += dc_diff as i32;
-                        block[0] = prev_dc[frame_idx].clamp(-32768, 32767) as i16;
-                        huffman::decode_ac_coefficients(&mut bit_reader, ac_table, &mut block)?;
+                        if !segment_short {
+                            let dc_diff: i16 =
+                                huffman::decode_dc_coefficient(&mut bit_reader, dc_table)
+                                    .map_err(|e| short_segment_error(&bit_reader, e))?;
+                            // i32 DC accumulator to avoid overflow at 12-bit range
+                            prev_dc[frame_idx] += dc_diff as i32;
+                            block[0] = prev_dc[frame_idx].clamp(-32768, 32767) as i16;
+                            huffman::decode_ac_coefficients(&mut bit_reader, ac_table, &mut block)
+                                .map_err(|e| short_segment_error(&bit_reader, e))?;
+                        }
 
                         // Dequantize
                         let mut deq: [i16; 64] = [0i16; 64];
@@ -382,6 +409,14 @@ pub fn decompress_raw_12(data: &[u8]) -> Result<RawImage12> {
                     }
                 }
             }
+            check_segment_end(
+                &bit_reader,
+                segment_short,
+                lenient,
+                mcu_count as usize,
+                mcus_x * mcus_y,
+                warnings,
+            )?;
             mcu_count += 1;
         }
     }
