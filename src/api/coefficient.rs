@@ -56,7 +56,8 @@ pub struct JpegCoefficients {
     pub data_precision: u8,
     /// Per-component coefficient data.
     pub components: Vec<ComponentCoefficients>,
-    /// Quantization tables (up to 4, in zigzag order).
+    /// Quantization tables (up to 4), in natural (row-major) order, unlike
+    /// the zigzag-ordered [`ComponentCoefficients::blocks`].
     pub quant_tables: Vec<[u16; 64]>,
     /// Restart interval from the source JPEG (0 = no restart markers).
     pub restart_interval: u16,
@@ -246,7 +247,7 @@ pub struct EncoderConfig {
     pub num_components: usize,
     /// Per-component sampling and quantization info.
     pub component_info: Vec<EncoderComponentInfo>,
-    /// Quantization tables (in zigzag order).
+    /// Quantization tables, in natural (row-major) order.
     pub quant_tables: Vec<[u16; 64]>,
 }
 
