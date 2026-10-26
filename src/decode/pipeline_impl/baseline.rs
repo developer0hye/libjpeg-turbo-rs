@@ -4,7 +4,7 @@ use crate::common::huffman_table::HuffmanTable;
 use crate::common::quant_table::QuantTable;
 use crate::common::try_alloc::{try_filled_vec, try_zeroed_bytes};
 use crate::common::types::FrameHeader;
-use crate::decode::bitstream::BitReader;
+use crate::decode::bitstream::{short_segment_error, BitReader};
 use crate::decode::entropy::{self, McuDecoder};
 use alloc::{format, string::ToString, vec::Vec};
 
@@ -44,6 +44,22 @@ impl WarningLog {
     /// Records a warning that occurs at most once per decode; never suppressed.
     fn once(&mut self, warning: DecodeWarning) {
         self.warnings.push(warning);
+    }
+
+    /// Records `TruncatedData` for the first entropy segment that runs short.
+    /// A later one, after a restart marker resumed decoding, adds nothing, so
+    /// the warning stays at most once per decode (P4-254).
+    fn truncated(&mut self, decoded_mcus: usize, total_mcus: usize) {
+        if !self
+            .warnings
+            .iter()
+            .any(|w| matches!(w, DecodeWarning::TruncatedData { .. }))
+        {
+            self.once(DecodeWarning::TruncatedData {
+                decoded_mcus,
+                total_mcus,
+            });
+        }
     }
 
     fn finish(mut self) -> Vec<DecodeWarning> {
@@ -201,13 +217,15 @@ impl<'a> Decoder<'a> {
 
                         for v in 0..layout.v_blocks {
                             for h in 0..layout.h_blocks {
-                                mcu_decoder.decode_block(
-                                    &mut bit_reader,
-                                    plan.comp_idx,
-                                    plan.dc_table,
-                                    plan.ac_table,
-                                    &mut coeffs,
-                                )?;
+                                mcu_decoder
+                                    .decode_block(
+                                        &mut bit_reader,
+                                        plan.comp_idx,
+                                        plan.dc_table,
+                                        plan.ac_table,
+                                        &mut coeffs,
+                                    )
+                                    .map_err(|e| short_segment_error(&bit_reader, e))?;
 
                                 let bs: usize = layout.block_size;
                                 let block_x: usize = (mcu_x * layout.h_blocks + h) * bs;
@@ -229,16 +247,17 @@ impl<'a> Decoder<'a> {
                         }
                     }
 
-                    mcu_count += 1;
-
-                    if bit_reader.is_eof() && (mcu_count as usize) < total_mcus {
+                    // This MCU read past the end of its entropy-coded
+                    // segment: djpeg's JWRN_HIT_MARKER, refused here (P4-254).
+                    if bit_reader.insufficient_data() {
                         return Err(JpegError::UnexpectedEof);
                     }
+                    mcu_count += 1;
                 }
             }
         } else {
             // General path: lenient mode with error recovery + crop support
-            'mcu_loop: for mcu_y in 0..mcus_y {
+            for mcu_y in 0..mcus_y {
                 for mcu_x in 0..mcus_x {
                     if self.metadata.restart_interval > 0
                         && mcu_count > 0
@@ -249,6 +268,10 @@ impl<'a> Decoder<'a> {
                     }
 
                     let mut mcu_error = false;
+                    // Once the segment has run short, every MCU up to the next
+                    // restart marker is left zero, so it decodes as mid-grey
+                    // (`decode_mcu`, jdhuff.c:787-799; P4-254).
+                    let segment_short: bool = bit_reader.insufficient_data();
 
                     for (comp_idx, layout) in comp_layouts.iter().enumerate() {
                         let qt_values = &quant_tables[comp_idx].values;
@@ -256,13 +279,18 @@ impl<'a> Decoder<'a> {
 
                         for v in 0..layout.v_blocks {
                             for h in 0..layout.h_blocks {
-                                let decode_result = mcu_decoder.decode_block(
-                                    &mut bit_reader,
-                                    plan.comp_idx,
-                                    plan.dc_table,
-                                    plan.ac_table,
-                                    &mut coeffs,
-                                );
+                                let decode_result = if segment_short {
+                                    coeffs = [0i16; 64];
+                                    Ok(())
+                                } else {
+                                    mcu_decoder.decode_block(
+                                        &mut bit_reader,
+                                        plan.comp_idx,
+                                        plan.dc_table,
+                                        plan.ac_table,
+                                        &mut coeffs,
+                                    )
+                                };
 
                                 match decode_result {
                                     Ok(()) => {}
@@ -272,19 +300,9 @@ impl<'a> Decoder<'a> {
                                             warnings.huffman_error(mcu_x, mcu_y, &e);
                                             mcu_error = true;
                                         }
-                                        if matches!(e, JpegError::UnexpectedEof) {
-                                            warnings.once(DecodeWarning::TruncatedData {
-                                                decoded_mcus: mcu_count as usize,
-                                                total_mcus,
-                                            });
-                                            for plane in &mut component_planes {
-                                                plane.fill(128);
-                                            }
-                                            break 'mcu_loop;
-                                        }
                                         mcu_decoder.reset();
                                     }
-                                    Err(e) => return Err(e),
+                                    Err(e) => return Err(short_segment_error(&bit_reader, e)),
                                 }
 
                                 if mcu_y >= mcu_y_start && mcu_y < mcu_y_end {
@@ -309,19 +327,16 @@ impl<'a> Decoder<'a> {
                         }
                     }
 
-                    mcu_count += 1;
-
-                    if bit_reader.is_eof() && (mcu_count as usize) < total_mcus {
-                        if self.lenient {
-                            warnings.once(DecodeWarning::TruncatedData {
-                                decoded_mcus: mcu_count as usize,
-                                total_mcus,
-                            });
-                            break 'mcu_loop;
-                        } else {
+                    // This MCU read past the end of its segment (djpeg's
+                    // JWRN_HIT_MARKER): refused in strict mode, reported once
+                    // in lenient mode, where the rest of the segment greys.
+                    if !segment_short && bit_reader.insufficient_data() {
+                        if !self.lenient {
                             return Err(JpegError::UnexpectedEof);
                         }
+                        warnings.truncated(mcu_count as usize, total_mcus);
                     }
+                    mcu_count += 1;
                 }
             }
         }
@@ -458,7 +473,8 @@ impl<'a> Decoder<'a> {
                 component_planes[comp_idx].fill(128);
             }
             let mut scan_error: bool = false;
-            'blocks: for by in 0..encoded_blocks_y {
+            let scan_blocks: usize = encoded_blocks_x * encoded_blocks_y;
+            for by in 0..encoded_blocks_y {
                 for bx in 0..encoded_blocks_x {
                     // Restart interval handling
                     if restart_interval > 0
@@ -474,14 +490,22 @@ impl<'a> Decoder<'a> {
                         mcu_decoder.reset();
                     }
 
-                    // Decode one 8x8 block
-                    match mcu_decoder.decode_block(
-                        &mut bit_reader,
-                        comp_idx,
-                        dc_table,
-                        ac_table,
-                        &mut coeffs,
-                    ) {
+                    // Decode one 8x8 block, or leave it zero (mid-grey) once
+                    // the segment has run short (jdhuff.c:787-799; P4-254).
+                    let segment_short: bool = bit_reader.insufficient_data();
+                    let decode_result = if segment_short {
+                        coeffs = [0i16; 64];
+                        Ok(())
+                    } else {
+                        mcu_decoder.decode_block(
+                            &mut bit_reader,
+                            comp_idx,
+                            dc_table,
+                            ac_table,
+                            &mut coeffs,
+                        )
+                    };
+                    match decode_result {
                         Ok(()) => {}
                         // Lenient recovery (P4-23), mirroring the interleaved
                         // general path in `decode_baseline_planes` and libjpeg
@@ -499,14 +523,9 @@ impl<'a> Decoder<'a> {
                                 warnings.huffman_error(bx, by, &e);
                                 scan_error = true;
                             }
-                            // Out of entropy data: remaining blocks keep the 128
-                            // plane init, so stop this scan.
-                            if matches!(e, JpegError::UnexpectedEof) {
-                                break 'blocks;
-                            }
                             mcu_decoder.reset();
                         }
-                        Err(e) => return Err(e),
+                        Err(e) => return Err(short_segment_error(&bit_reader, e)),
                     }
 
                     // IDCT and store into the component plane
@@ -519,6 +538,15 @@ impl<'a> Decoder<'a> {
                         self.idct_scaled_strided(&coeffs, qt_values, dst, comp_w, bs);
                     }
 
+                    // This block read past the end of its segment (djpeg's
+                    // JWRN_HIT_MARKER): refused in strict mode, reported once
+                    // in lenient mode.
+                    if !segment_short && bit_reader.insufficient_data() {
+                        if !self.lenient {
+                            return Err(JpegError::UnexpectedEof);
+                        }
+                        warnings.truncated(mcu_count as usize, scan_blocks);
+                    }
                     mcu_count += 1;
                 }
             }

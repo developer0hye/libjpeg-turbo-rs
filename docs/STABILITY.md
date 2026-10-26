@@ -105,7 +105,9 @@ An application that decodes untrusted uploads should set its own budget —
 `Decoder::set_max_pixels`, `set_max_memory` and `set_scan_limit`, or
 `DecodeLimits` — before decoding; for 12- and 16-bit frames use
 `precision::decompress_12bit_with_limits` / `decompress_16bit_with_limits`
-(the plain `decompress_12bit` / `decompress_16bit` apply the defaults).
+(the plain `decompress_12bit` / `decompress_16bit` apply the defaults, as do
+`decompress_12bit_lenient`, `decompress_raw_12_lenient` and
+`decompress_lossless_arbitrary_lenient`, which take no limits).
 
 On the `decompress` / `Decoder` paths under `src/decode/`, geometry-sized
 allocations report `JpegError::AllocationFailed` instead of aborting the

@@ -203,7 +203,9 @@ pub use api::quantize::requantize;
 pub use api::raw_data::{compress_raw, decompress_raw, RawImage};
 /// 12-bit raw planar encode/decode (YCbCr component planes at native resolution).
 pub mod raw_data_12 {
-    pub use crate::api::raw_data_12::{compress_raw_12, decompress_raw_12, RawImage12};
+    pub use crate::api::raw_data_12::{
+        compress_raw_12, decompress_raw_12, decompress_raw_12_lenient, RawImage12,
+    };
 }
 pub use api::raw_thumbnail::extract_embedded_jpeg;
 pub use encode::marker_writer::MarkerStreamWriter;
@@ -260,9 +262,10 @@ pub const fn simd_and_std_features_enabled() -> bool {
 pub mod precision {
     pub use crate::api::precision::{
         compress_12bit, compress_16bit, compress_lossless_arbitrary, decompress_12bit,
-        decompress_12bit_with_limits, decompress_16bit, decompress_16bit_with_limits,
-        decompress_lossless_arbitrary, read_scanlines_12, read_scanlines_16, write_scanlines_12,
-        write_scanlines_16, Image12, Image16,
+        decompress_12bit_lenient, decompress_12bit_with_limits, decompress_16bit,
+        decompress_16bit_with_limits, decompress_lossless_arbitrary,
+        decompress_lossless_arbitrary_lenient, read_scanlines_12, read_scanlines_16,
+        write_scanlines_12, write_scanlines_16, Image12, Image16,
     };
 }
 /// Planar and packed YUV encode/decode — the Rust counterparts of

@@ -111,6 +111,63 @@ pub fn compute_coef_bits(
     result
 }
 
+/// The coefficient bits each component had before the last scan that coded
+/// it, as C's `smoothing_ok()` latches them for block smoothing
+/// (`prev_coef_bits_latch`, jdcoefct.c:451-456). Block smoothing uses these
+/// instead of [`compute_coef_bits`] for the iMCU rows past the last one the
+/// final scan decoded with data, which a truncated stream leaves only partly
+/// coded (jdcoefct.c:556-563; P4-255).
+///
+/// `start_pass_phuff_decoder` (jdphuff.c:132-137) saves entries
+/// `min(Ss, 1)..=max(Se, 9)` before each scan updates its band, and saves
+/// 0 for the first scan; the latch is -1 throughout when the stream has a
+/// single scan. Only entries 1..=9 are latched, and only those are read;
+/// entry 0 is left at -1.
+pub(crate) fn compute_prev_coef_bits(
+    scans: &[crate::decode::marker::ScanInfo],
+    frame: &FrameHeader,
+) -> Vec<[i32; SAVED_COEFS]> {
+    let num_components: usize = frame.components.len();
+    let mut coef_bits: Vec<[i32; 64]> = vec![[-1i32; 64]; num_components];
+    let mut prev_coef_bits: Vec<[i32; 64]> = vec![[-1i32; 64]; num_components];
+
+    for (scan_index, scan_info) in scans.iter().enumerate() {
+        let scan: &ScanHeader = &scan_info.header;
+        let ss: usize = scan.spec_start as usize;
+        let se: usize = scan.spec_end as usize;
+        for scan_comp in &scan.components {
+            let Some(comp_idx) = frame
+                .components
+                .iter()
+                .position(|fc| fc.id == scan_comp.component_id)
+            else {
+                continue;
+            };
+            for coefi in ss.min(1)..=se.clamp(9, 63) {
+                prev_coef_bits[comp_idx][coefi] = if scan_index > 0 {
+                    coef_bits[comp_idx][coefi]
+                } else {
+                    0
+                };
+            }
+            for entry in coef_bits[comp_idx].iter_mut().take(se + 1).skip(ss) {
+                *entry = i32::from(scan.succ_low);
+            }
+        }
+    }
+
+    prev_coef_bits
+        .iter()
+        .map(|prev| {
+            let mut latch: [i32; SAVED_COEFS] = [-1i32; SAVED_COEFS];
+            if scans.len() > 1 {
+                latch[1..].copy_from_slice(&prev[1..SAVED_COEFS]);
+            }
+            latch
+        })
+        .collect()
+}
+
 /// Check the per-component prerequisites C's `smoothing_ok()` requires before
 /// any plane is smoothed.
 ///
@@ -231,6 +288,8 @@ pub fn apply_block_smoothing_coeffs(
         blocks_y,
         v_samp,
         coef_bits,
+        coef_bits,
+        usize::MAX,
         quant,
         &mut dc_snapshot,
     );
@@ -240,6 +299,12 @@ pub fn apply_block_smoothing_coeffs(
 /// `common::try_alloc`, so an allocator refusal is
 /// [`JpegError::AllocationFailed`] rather than an abort (P4-209). The
 /// snapshot holds one `i32` per block of the component's padded grid.
+///
+/// iMCU rows after `last_good_imcu_row` are smoothed with `prev_coef_bits`
+/// ([`compute_prev_coef_bits`]): the final scan ran short before reaching
+/// them, so they hold only what the scans before it coded (P4-255). Pass
+/// `usize::MAX` when every row was decoded.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn try_apply_block_smoothing_coeffs(
     coeff_buf: &mut [[i16; 64]],
     row_stride: usize,
@@ -247,6 +312,8 @@ pub(crate) fn try_apply_block_smoothing_coeffs(
     blocks_y: usize,
     v_samp: usize,
     coef_bits: &[i32; SAVED_COEFS],
+    prev_coef_bits: &[i32; SAVED_COEFS],
+    last_good_imcu_row: usize,
     quant: &QuantTable,
 ) -> Result<()> {
     let mut dc_snapshot: Vec<i32> = crate::common::try_alloc::try_with_capacity(
@@ -260,6 +327,8 @@ pub(crate) fn try_apply_block_smoothing_coeffs(
         blocks_y,
         v_samp,
         coef_bits,
+        prev_coef_bits,
+        last_good_imcu_row,
         quant,
         &mut dc_snapshot,
     );
@@ -287,47 +356,47 @@ fn smooth_with_dc_snapshot(
     blocks_x: usize,
     blocks_y: usize,
     v_samp: usize,
-    coef_bits: &[i32; SAVED_COEFS],
+    current_coef_bits: &[i32; SAVED_COEFS],
+    prev_coef_bits: &[i32; SAVED_COEFS],
+    last_good_imcu_row: usize,
     quant: &QuantTable,
     dc_snapshot: &mut Vec<i32>,
 ) {
-    // Determine if we do DC interpolation (all AC bits unknown)
-    let change_dc: bool = coef_bits[1] == -1
-        && coef_bits[2] == -1
-        && coef_bits[3] == -1
-        && coef_bits[4] == -1
-        && coef_bits[5] == -1
-        && coef_bits[6] == -1
-        && coef_bits[7] == -1
-        && coef_bits[8] == -1
-        && coef_bits[9] == -1;
-
     let q00: i64 = quant.values[Q00_POS] as i64;
     let q01: i64 = quant.values[Q01_POS] as i64;
     let q10: i64 = quant.values[Q10_POS] as i64;
     let q20: i64 = quant.values[Q20_POS] as i64;
     let q11: i64 = quant.values[Q11_POS] as i64;
     let q02: i64 = quant.values[Q02_POS] as i64;
-    let q03: i64 = if change_dc {
-        quant.values[Q03_POS] as i64
-    } else {
-        0
+
+    // C picks the coefficient bits per iMCU row: those latched from the
+    // previous scan for a row past `last_good_iMCU_row` (the final scan ran
+    // short before it), the current ones otherwise (jdcoefct.c:556-563).
+    // DC interpolation and the extra quantizers follow from that choice.
+    let row_params = |coef_bits: &[i32; SAVED_COEFS]| -> (bool, i64, i64, i64, i64) {
+        let change_dc: bool = coef_bits[1] == -1
+            && coef_bits[2] == -1
+            && coef_bits[3] == -1
+            && coef_bits[4] == -1
+            && coef_bits[5] == -1
+            && coef_bits[6] == -1
+            && coef_bits[7] == -1
+            && coef_bits[8] == -1
+            && coef_bits[9] == -1;
+        if change_dc {
+            (
+                true,
+                quant.values[Q03_POS] as i64,
+                quant.values[Q12_POS] as i64,
+                quant.values[Q21_POS] as i64,
+                quant.values[Q30_POS] as i64,
+            )
+        } else {
+            (false, 0, 0, 0, 0)
+        }
     };
-    let q12: i64 = if change_dc {
-        quant.values[Q12_POS] as i64
-    } else {
-        0
-    };
-    let q21: i64 = if change_dc {
-        quant.values[Q21_POS] as i64
-    } else {
-        0
-    };
-    let q30: i64 = if change_dc {
-        quant.values[Q30_POS] as i64
-    } else {
-        0
-    };
+    let current_params = row_params(current_coef_bits);
+    let prev_params = row_params(prev_coef_bits);
 
     // Nothing to smooth on a degenerate grid (e.g. a malformed SOF with
     // zero height reaches here with an empty coefficient buffer); bail
@@ -399,6 +468,11 @@ fn smooth_with_dc_snapshot(
         // plain +/-1/+/-2 rows in the padded buffer.
         let imcu_row: usize = by / v_samp;
         let block_row: usize = by % v_samp;
+        let (coef_bits, (change_dc, q03, q12, q21, q30)) = if imcu_row > last_good_imcu_row {
+            (prev_coef_bits, prev_params)
+        } else {
+            (current_coef_bits, current_params)
+        };
         let block_rows: usize = if imcu_row < last_imcu_row {
             v_samp
         } else {
@@ -815,5 +889,71 @@ mod tests {
         let coef_bits: [i32; SAVED_COEFS] = [0, 1, 1, 1, 1, 1, 1, 1, 1, 1];
         apply_block_smoothing_coeffs(&mut empty, 0, 0, 0, 1, &coef_bits, &quant);
         apply_block_smoothing_coeffs(&mut empty, 2, 2, 0, 4, &coef_bits, &quant);
+    }
+
+    fn scan(components: &[u8], ss: u8, se: u8, ah: u8, al: u8) -> crate::decode::marker::ScanInfo {
+        crate::decode::marker::ScanInfo {
+            header: ScanHeader {
+                components: components
+                    .iter()
+                    .map(
+                        |&component_id| crate::common::types::ScanComponentSelector {
+                            component_id,
+                            dc_table_index: 0,
+                            ac_table_index: 0,
+                        },
+                    )
+                    .collect(),
+                spec_start: ss,
+                spec_end: se,
+                succ_high: ah,
+                succ_low: al,
+            },
+            data_offset: 0,
+            dc_huffman_tables: Default::default(),
+            ac_huffman_tables: Default::default(),
+            restart_interval: 0,
+        }
+    }
+
+    /// `compute_prev_coef_bits` follows `start_pass_phuff_decoder`'s save
+    /// (jdphuff.c:132-137) and `smoothing_ok`'s latch (jdcoefct.c:451-456):
+    /// the bits from before each component's last scan, 0 when that was the
+    /// stream's first scan, -1 throughout for a single-scan stream (P4-255).
+    #[test]
+    fn prev_coef_bits_are_the_bits_before_each_components_last_scan() {
+        let frame = FrameHeader {
+            precision: 8,
+            height: 16,
+            width: 16,
+            components: [1u8, 2]
+                .iter()
+                .map(|&id| crate::common::types::ComponentInfo {
+                    id,
+                    horizontal_sampling: 1,
+                    vertical_sampling: 1,
+                    quant_table_index: 0,
+                })
+                .collect(),
+            is_progressive: true,
+            is_lossless: false,
+        };
+        let scans = [
+            scan(&[1, 2], 0, 0, 0, 1), // DC first, both components
+            scan(&[1], 1, 5, 0, 2),    // component 1: AC 1-5
+            scan(&[1], 1, 63, 2, 1),   // component 1: AC 1-63 refinement
+        ];
+        let current: Vec<[i32; SAVED_COEFS]> = compute_coef_bits(&scans, &frame);
+        let prev: Vec<[i32; SAVED_COEFS]> = compute_prev_coef_bits(&scans, &frame);
+        assert_eq!(current[0], [1, 1, 1, 1, 1, 1, 1, 1, 1, 1]);
+        // Before its last scan, component 1 had AC 1-5 at Al 2 and 6-9 unseen.
+        assert_eq!(prev[0], [-1, 2, 2, 2, 2, 2, -1, -1, -1, -1]);
+        // Component 2's last scan was the stream's first: C saves 0.
+        assert_eq!(prev[1], [-1, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        // A single-scan stream latches -1.
+        assert_eq!(
+            compute_prev_coef_bits(&scans[..1], &frame)[0],
+            [-1; SAVED_COEFS]
+        );
     }
 }

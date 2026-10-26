@@ -30,7 +30,13 @@ pub fn decode_dc_coefficient(reader: &mut BitReader, table: &HuffmanTable) -> Re
     let peek = reader.peek_bits(16);
     let (s, l) = table.lookup_fast(peek);
 
-    let (category, code_len) = if l > 0 { (s, l) } else { table.lookup(peek)? };
+    let (category, code_len) = if l > 0 {
+        (s, l)
+    } else {
+        table
+            .lookup(peek)
+            .inspect_err(|_| reader.note_failed_lookup())?
+    };
     reader.skip_bits(code_len);
 
     if category == 0 {
@@ -130,7 +136,9 @@ pub fn decode_ac_coefficients(
             index += 1;
         } else {
             // Slow path: code longer than LOOKUP_BITS.
-            let (symbol, code_len) = table.lookup(peek)?;
+            let (symbol, code_len) = table
+                .lookup(peek)
+                .inspect_err(|_| reader.note_failed_lookup())?;
             reader.skip_bits(code_len);
 
             let run_length: usize = (symbol >> 4) as usize;
@@ -160,4 +168,41 @@ pub fn decode_ac_coefficients(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decode_dc_coefficient;
+    use crate::common::huffman_table::HuffmanTable;
+    use crate::common::tables::{DC_LUMINANCE_BITS, DC_LUMINANCE_VALUES};
+    use crate::decode::bitstream::BitReader;
+
+    // P4-254: no luminance DC code starts with nine 1-bits, but libjpeg's
+    // bit-by-bit decode only rules a code out after 16 bits. When fewer than
+    // 16 of them are data, it reads stuffed bits first (JWRN_HIT_MARKER).
+
+    #[test]
+    fn failed_lookup_that_needs_stuffed_bits_marks_the_segment_short() {
+        let table = HuffmanTable::build(&DC_LUMINANCE_BITS, &DC_LUMINANCE_VALUES).unwrap();
+        // Four bits consumed, then twelve 1-bits and EOI.
+        let data = [0x0Fu8, 0xFF, 0x00, 0xFF, 0xD9];
+        let mut reader = BitReader::new(&data);
+        let _ = reader.read_bits(4);
+        assert!(decode_dc_coefficient(&mut reader, &table).is_err());
+        assert!(
+            reader.insufficient_data(),
+            "the decision needed stuffed bits"
+        );
+    }
+
+    #[test]
+    fn failed_lookup_on_data_alone_is_corruption_not_a_short_segment() {
+        let table = HuffmanTable::build(&DC_LUMINANCE_BITS, &DC_LUMINANCE_VALUES).unwrap();
+        // The same, but sixteen data bits follow, so the code is invalid data.
+        let data = [0x0Fu8, 0xFF, 0x00, 0xF0, 0xFF, 0xD9];
+        let mut reader = BitReader::new(&data);
+        let _ = reader.read_bits(4);
+        assert!(decode_dc_coefficient(&mut reader, &table).is_err());
+        assert!(!reader.insufficient_data(), "every bit examined was data");
+    }
 }
