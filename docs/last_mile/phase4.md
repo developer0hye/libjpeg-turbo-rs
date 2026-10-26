@@ -1884,6 +1884,14 @@ smoothing and both restart controls; and (6) invalid or incomplete tables fail
 through the classic error manager rather than panicking or silently falling
 back.
 
+**Also (2026-10-26, by reading, from the P4-264 docs audit):**
+`jpeg_set_linear_quality` passes `jcparam.c`'s standard tables to
+`jpeg_add_quant_table` in zigzag order (`16, 11, 12, 14, …`), while
+`jpeg_add_quant_table` takes `basic_table` in natural order, as C does. It is
+harmless only because the stored tables are never applied; wiring them in
+for this item must reorder those two constants to natural order (`16, 11, 10,
+16, 24, …`), or every `jpeg_set_quality` encode will scramble its tables.
+
 ## P4-86. Classic Lossy Scanline Compression Ignores Public DCT Method — **OPEN**
 
 **Motivation.** Filed 2026-08-02 during the P4-82 option-dispatch review.
@@ -2241,8 +2249,12 @@ that stock libjpeg does not permit while missing configured output behavior.
 the native full-image precision decoders directly from source bytes without
 requiring `jpeg_start_decompress`. They bypass `out_color_space`, scaling,
 DCT/upsampling controls, quantization and, on the 16-bit path, crop. The 12-bit
-helper always converts three-component input to RGB; current assertions are
-only grayscale or “some nonzero sample.”
+helper returns libjpeg's *default* output colour space for the source (RGB for
+YCbCr, CMYK for CMYK/YCCK, the stored samples otherwise; since P4-264), never
+the caller's `out_color_space`; current assertions are only grayscale or
+“some nonzero sample.” Because the row copy follows the decoded component
+count rather than `output_components`, a non-default request also overruns
+the caller's rows (P4-267).
 
 **Acceptance criteria.** Build real stock-C and Rust lifecycle matrices for
 12-bit lossy and 12/16-bit lossless inputs: read-header→start→batched
@@ -13692,6 +13704,12 @@ guard, and the interim refusal changes what a caller that happens to get
 lucky output sees; both deserve their own C cross-validation pass rather than
 a ride on P4-199's parameter work.
 
+**Also (2026-10-26, by reading, from the P4-264 review):** `decompress_12bit`
+never checks `is_arithmetic`, so a 12-bit arithmetic-coded (SOF9) stream is
+Huffman-decoded and usually fails with a misleading "missing DC table". It
+fails safely, but the acceptance above should cover it: decode it like
+`djpeg`, or refuse it with `Unsupported` naming arithmetic coding.
+
 ## P4-224. `Decoder`'s Memory Estimate Does Not Count the 12-Bit Staging When It Decodes a 12-Bit Frame — **OPEN**
 
 **Found 2026-10-07** while documenting what the memory budget covers for
@@ -15261,6 +15279,88 @@ cannot have both lenient recovery and a memory or dimension budget.
 Acceptance: each lenient entry point has a form that takes `&DecodeLimits`
 (or one options value carrying both), with a test that a limit refuses a
 stream the default admits, before the release that first ships them.
+
+## P4-263. 12-Bit Decode Upsampled the Last Chroma Column and Row From MCU Padding — **CLOSED 2026-10-26**
+
+Filed from [#693](https://github.com/developer0hye/libjpeg-turbo-rs/issues/693).
+`precision::decompress_12bit` bounded the fancy upsampler's input at
+`width / h_factor + 1` columns (`height / v_factor + 1` rows). That is libjpeg's
+`downsampled_width` (`jdinput.c`, `ceil(width / h_factor)`) only for an odd
+width; for an even width that is not a whole number of MCUs it counted one
+padding column as real, so the last real chroma sample was blended with
+padding instead of replicated (`jdsample.c` `h2v1_fancy_upsample` /
+`h2v2_fancy_upsample` / `h1v2_fancy_upsample`). Output column `width - 1` (row
+`height - 1`) came back wrong with `Ok` for 4:2:0, 4:2:2 and 4:4:0: a 62×46
+4:2:0 frame from `cjpeg -precision 12` differed from `djpeg` in 242 of 8,556
+samples. A second gap showed up in the same matrix: `jinit_upsampler` uses the
+h2v1/h2v2 triangle filters only for a component more than two samples wide and
+replicates a narrower one (`h2v1_upsample` / `h2v2_upsample`); the 12-bit path
+filtered it, so 3- and 4-pixel-wide 4:2:0 and 4:2:2 frames differed too
+(3×3 and 4×4 measured). By reading, the removed one-column branch also blended
+1- and 2-pixel-wide 4:2:0 frames vertically where libjpeg replicates. Every
+12-bit entry point goes through this function: `decompress_12bit*`,
+`TjHandle::decompress_12bit`, `tj3Decompress12`, `jpeg12_read_scanlines`, and
+`Decoder` on a 12-bit frame.
+
+**Status (2026-10-26): closed.** The bounds are `width.div_ceil(h_factor)` and
+`height.div_ceil(v_factor)`, and `fancy_upsample_12bit` filters h2v1/h2v2 only
+above two samples wide. `tests/regression_issue_693_12bit_chroma_edge.rs`
+decodes `cjpeg -precision 12` noise at 4:2:0, 4:2:2, 4:4:0, 4:1:1 and 4:1:0 over
+15 sizes (even, odd, whole-MCU, 2–6 pixels, and frames one or two samples tall
+or wide), diff=0 against `djpeg` (libjpeg-turbo 3.2.0), plus the reporter's
+padding-only chroma reproducer.
+
+## P4-264. 12-Bit Decode Never Classified the Source Colour Space — **CLOSED 2026-10-26**
+
+Filed from [#694](https://github.com/developer0hye/libjpeg-turbo-rs/issues/694).
+`precision::decompress_12bit` converted every three-component frame from YCbCr
+to RGB and passed every four-component frame through. libjpeg classifies the
+source first (`jdapimin.c` `default_decompress_parms`), as the 8-bit decoder
+does through `ColorSpace::classify_source`: an RGB-coded frame (`cjpeg -rgb`:
+Adobe transform 0, component IDs `R`, `G`, `B`) is output unconverted, and a
+YCCK frame (Adobe transform 2) is converted to CMYK (`jdcolor.c`
+`ycck_cmyk_convert`). Here the RGB frame was colour-converted a second time
+(`[3000, 1000, 500]` came back `[830, 4095, 1143]`) and a YCCK frame came back
+as YCCK, both with `Ok`. Reviewing the fix found a third case: `Decoder`'s
+12-to-8-bit path (`decode_12bit_as_8bit`) read every colour frame as three
+samples a pixel, so a 12-bit CMYK or YCCK frame came back from `decompress`
+as `Ok` with its pixels misread as RGB, and a two-component frame indexed past
+the samples.
+
+**Status (2026-10-26): closed.** `decompress_12bit` classifies the source with
+`ColorSpace::classify_source` and converts YCbCr to RGB and YCCK to CMYK,
+leaving everything else unchanged; `decode_12bit_as_8bit` refuses frames that
+are not one or three components with `Unsupported`.
+`tests/regression_issue_694_12bit_source_colorspace.rs` checks a
+`cjpeg -rgb -precision 12` frame and the reporter's flat RGB-coded planes
+against `djpeg`, and 12-bit YCCK and CMYK frames at three sizes against a new
+oracle, `examples/cmyk12_c_oracle.c` (neither `cjpeg` nor `djpeg` reads or
+writes four components), all diff=0; and that `decompress` refuses both
+four-component frames.
+
+## P4-267. Classic `jpeg12_read_scanlines` Writes More Samples a Row Than the Caller Sized — **OPEN**
+
+Found reviewing the P4-264 fix, by reading; not yet reproduced. P4-98 records
+that `jpeg12_read_scanlines` decodes through `precision::decompress_12bit` and
+ignores the caller's `out_color_space`. The consequence is memory unsafety,
+not only wrong output: `read_scanlines_12_inner`
+(`crates/libjpeg-turbo-rs-capi/src/jpeglib.rs`) copies
+`width × Decoded12::num_components` samples into each row, while the caller
+sizes its rows from `output_components`, which `jpeg_calc_output_dimensions`
+derives from `out_color_space`. A caller that asks for `JCS_GRAYSCALE` from a
+three-component 12-bit frame (`djpeg -grayscale` linked against the shim), or
+for `JCS_RGB` from a CMYK one, gets up to three or four times its row
+written: a heap overflow in the caller. With the default `out_color_space`
+the counts agree (P4-264 made YCCK come back as CMYK, four components, as
+libjpeg's default `JCS_CMYK` output does), so the default path is unaffected.
+The shim also still reports `jpeg_color_space = JCS_CMYK` for a YCCK stream.
+
+Acceptance: `jpeg12_read_scanlines` never writes more than
+`output_width × output_components` samples into a row. Until P4-98 honours
+`out_color_space`, a request it cannot honour fails through `error_exit`
+(as `JERR_CONVERSION_NOTIMPL` does upstream) before any row is written; a
+capi test asks for `JCS_GRAYSCALE` from a three-component 12-bit frame with a
+guard-page row buffer and asserts no write past it.
 
 ## P4-265. A Scaled, Fancy-Upsampled, Cropped YCbCr Decode Returns Two Wrong Cb Samples — **OPEN**
 

@@ -5694,8 +5694,9 @@ unsafe fn snapshot_src_for_copy(srcinfo: *mut c_void) -> Option<SrcCriticalSnaps
     // public `quant_tbl_ptrs` slots (the parser keeps tables internally
     // until `read_coefficients` runs). When a caller has already called
     // `jpeg_read_coefficients`, the parsed `JpegCoefficients.quant_tables`
-    // hold the canonical zigzag values — pull from there so jpegtran-style
-    // sequences (`read_header → read_coefficients → copy_critical_parameters`)
+    // hold the values in natural order, as `quantval` does — pull from
+    // there so jpegtran-style sequences
+    // (`read_header → read_coefficients → copy_critical_parameters`)
     // see non-zero quant tables on the dst cinfo.
     let priv_ptr: *mut c_void = decompress_private_of(src);
     if let Some(p) = unsafe { priv_from_ptr(priv_ptr) } {
@@ -11270,12 +11271,11 @@ fn materialize_foreign_coef_arrays(
     let comp_info_slice: &[JpegComponentInfoPublic] =
         unsafe { std::slice::from_raw_parts(c.comp_info, n) };
 
-    // Pull quant tables. Re-emit in zigzag order to match what the
-    // Rust encoder expects — `JpegCoefficients::quant_tables` is
-    // documented as zigzag (see the writer in
-    // `src/api/coefficient.rs::write_coefficients`). Stock libjpeg
-    // stores quantval in zigzag order too, so a verbatim copy is
-    // already in the right order.
+    // Pull quant tables. `JpegCoefficients::quant_tables` is in natural
+    // (row-major) order (see the writer in
+    // `src/api/coefficient.rs::write_coefficients`), and so is stock
+    // libjpeg's `quantval` (`jpeglib.h` `JQUANT_TBL`), so a verbatim copy
+    // is already in the right order.
     let mut quant_tables: Vec<[u16; 64]> = Vec::with_capacity(4);
     for slot in c.quant_tbl_ptrs.iter() {
         if slot.is_null() {

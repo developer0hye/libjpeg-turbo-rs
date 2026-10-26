@@ -455,3 +455,95 @@ pub fn encode_with_cmyk_c_oracle(oracle: &Path, pixels: &[u8], args: &[String]) 
     );
     output.stdout
 }
+
+/// Locate — building if necessary — the 12-bit CMYK / YCCK oracle
+/// (`examples/cmyk12_c_oracle.c`).
+///
+/// Issue #694: `cjpeg` reads no four-component input and `djpeg` writes no
+/// four-component output, so a 12-bit CMYK or YCCK stream can only be made
+/// and decoded through the library API. Same build-and-cache and
+/// `None`-means-skip contract as [`cmyk_c_oracle`].
+pub fn cmyk12_c_oracle() -> Option<PathBuf> {
+    build_libjpeg_oracle("cmyk12_c_oracle")
+}
+
+/// Encode interleaved 12-bit C, M, Y, K samples through the oracle; `ycck`
+/// stores them as YCCK (Adobe transform 2) rather than CMYK.
+pub fn encode_with_cmyk12_c_oracle(
+    oracle: &Path,
+    samples: &[i16],
+    width: usize,
+    height: usize,
+    quality: u8,
+    ycck: bool,
+) -> Vec<u8> {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    assert_eq!(samples.len(), width * height * 4, "CMYK sample count");
+    let mut child = Command::new(oracle)
+        .arg("encode")
+        .arg(width.to_string())
+        .arg(height.to_string())
+        .arg(quality.to_string())
+        .arg(if ycck { "ycck" } else { "cmyk" })
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|error| panic!("failed to spawn {oracle:?}: {error:?}"));
+    let mut stdin = child.stdin.take().expect("oracle stdin");
+    let payload: Vec<u8> = samples.iter().flat_map(|s| s.to_ne_bytes()).collect();
+    let writer = std::thread::spawn(move || {
+        let _ = stdin.write_all(&payload);
+    });
+    let output = child
+        .wait_with_output()
+        .unwrap_or_else(|error| panic!("failed to run {oracle:?}: {error:?}"));
+    let _ = writer.join();
+    assert!(
+        output.status.success() && !output.stdout.is_empty(),
+        "12-bit CMYK oracle failed to encode: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    output.stdout
+}
+
+/// Decode a 12-bit JPEG through the oracle at libjpeg's default output colour
+/// space, returning `(width, height, components, samples)`.
+pub fn decode_with_cmyk12_c_oracle(oracle: &Path, jpeg: &[u8]) -> (usize, usize, usize, Vec<i16>) {
+    let dir = tempfile::tempdir().expect("tempdir for the 12-bit CMYK oracle input");
+    let input: PathBuf = dir.path().join("cmyk12_oracle_input.jpg");
+    std::fs::write(&input, jpeg).expect("write the 12-bit CMYK oracle input");
+    let output = Command::new(oracle)
+        .arg("decode")
+        .arg(&input)
+        .output()
+        .unwrap_or_else(|error| panic!("failed to run {oracle:?}: {error:?}"));
+    assert!(
+        output.status.success(),
+        "12-bit CMYK oracle failed to decode: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let newline: usize = output
+        .stdout
+        .iter()
+        .position(|&byte| byte == b'\n')
+        .expect("12-bit CMYK oracle header line");
+    let header: String = String::from_utf8_lossy(&output.stdout[..newline]).into_owned();
+    let fields: Vec<usize> = header
+        .split_whitespace()
+        .map(|field| field.parse().expect("numeric oracle header field"))
+        .collect();
+    assert_eq!(fields.len(), 3, "malformed oracle header {header:?}");
+    let samples: Vec<i16> = output.stdout[newline + 1..]
+        .chunks_exact(2)
+        .map(|pair| i16::from_ne_bytes([pair[0], pair[1]]))
+        .collect();
+    assert_eq!(
+        samples.len(),
+        fields[0] * fields[1] * fields[2],
+        "12-bit CMYK oracle wrote a short image"
+    );
+    (fields[0], fields[1], fields[2], samples)
+}

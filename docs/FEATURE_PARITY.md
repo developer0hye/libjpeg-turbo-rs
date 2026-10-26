@@ -30,7 +30,7 @@
 ## 2. Sample Precision
 
 - [x] 8-bit (`JSAMPLE` / `u8`)
-- [x] Native 12-bit (`J12SAMPLE` / `i16`) — `compress_12bit`, `decompress_12bit`, `jpeg12_read_scanlines` (not wired through `TjHandle`)
+- [x] Native 12-bit (`J12SAMPLE` / `i16`) — `compress_12bit`, `decompress_12bit`, `jpeg12_read_scanlines`, `TjHandle::decompress_12bit`
 - [x] Native 16-bit (`J16SAMPLE` / `u16`, lossless only) — `compress_16bit`, `decompress_16bit`, `jpeg16_read_scanlines` (not wired through `TjHandle`)
 - [ ] Classic `jpeg12_write_scanlines` / `jpeg16_write_scanlines` finish pipeline — P4-94
 
