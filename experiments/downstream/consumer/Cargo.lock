@@ -26,7 +26,7 @@ version = "0.0.0"
 dependencies = [
  "image",
  "libjpeg-turbo-rs 0.8.0",
- "libjpeg-turbo-rs 0.8.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "libjpeg-turbo-rs 0.9.0",
  "libjpeg-turbo-rs-image",
  "zune-jpeg",
 ]
@@ -48,13 +48,6 @@ dependencies = [
 [[package]]
 name = "libjpeg-turbo-rs"
 version = "0.8.0"
-dependencies = [
- "thiserror",
-]
-
-[[package]]
-name = "libjpeg-turbo-rs"
-version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a0d8a1c652b51dbb85c3c3164b1da63b88dafcc3fc12ecceb52f7577738c21f1"
 dependencies = [
@@ -62,11 +55,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "libjpeg-turbo-rs"
+version = "0.9.0"
+dependencies = [
+ "thiserror",
+]
+
+[[package]]
 name = "libjpeg-turbo-rs-image"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "image",
- "libjpeg-turbo-rs 0.8.0",
+ "libjpeg-turbo-rs 0.9.0",
 ]
 
 [[package]]
