@@ -15147,6 +15147,13 @@ fourth scans of the `-restart 1` version. Lenient decoding returns
 `CorruptData`, where djpeg exits 2. djpeg prints only the first warning
 ("premature end of data segment"), as libjpeg does by default.
 
+#696 is a second way to reach it, without cutting a stream: files from before
+that fix whose chroma scans declare AC table 0 but were coded with table 1.
+With a band-split script on `photo_1280x720_420.jpg` (quality 90, 4:4:4),
+`decompress_lenient` returns `CorruptData("invalid Huffman code")`, while C
+libjpeg-turbo 3.1.3 through Pillow returns an image at 23.13 dB against the
+source; the repaired stream gives 37.91 dB in both decoders.
+
 Acceptance: lenient progressive decoding recovers from a bad code as libjpeg
 does, with a `DecodeWarning`, and matches djpeg on these inputs.
 

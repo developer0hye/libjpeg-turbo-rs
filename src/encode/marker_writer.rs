@@ -253,14 +253,16 @@ pub fn write_sof10_with_precision(
 
 /// Write SOS marker for progressive scan with spectral selection and successive approximation.
 ///
-/// Mirrors C `jcmarker.c::write_scan_header` table-hiding logic: zeroes
-/// `Td` / `Ta` in the per-component byte for scans that do not use the
-/// corresponding tables. Specifically:
+/// Mirrors C `jcmarker.c::emit_sos` table-hiding logic: zeroes `Td` / `Ta` in
+/// the per-component byte for scans that do not use the corresponding tables.
+/// Specifically:
 ///
 /// - `Td = 0` when `ss != 0` (no DC table needed for AC-only scans)
-/// - `Td = 0` when `ah != 0` (refinement scans don't reference Huffman tables)
-/// - `Ta = 0` when `se != 63` (no AC table needed for DC-only scans)
-/// - `Ta = 0` when `ah != 0 && ss == 0` (DC refinement)
+/// - `Td = 0` when `ah != 0` (DC refinement bits are not Huffman coded)
+/// - `Ta = 0` when `se == 0` (a DC scan has no AC coefficients). Every AC scan
+///   keeps its selector whatever its band: refinement codes EOBn and ZRL runs
+///   with it, and a band ending below 63 still reads its symbols through it
+///   (issue #696).
 ///
 /// Without this normalisation, our progressive SOS bytes diverge from cjpeg
 /// in the bytes where the upstream encoder hides table indices that the
@@ -282,7 +284,7 @@ pub fn write_sos_progressive(
     buf.push(components.len() as u8);
 
     let hide_dc: bool = ss != 0 || ah != 0;
-    let hide_ac: bool = se != 63 || (ah != 0 && ss == 0);
+    let hide_ac: bool = se == 0;
 
     for &(id, dc_tbl, ac_tbl) in components {
         let td: u8 = if hide_dc { 0 } else { dc_tbl };
@@ -688,6 +690,25 @@ impl MarkerStreamWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Issue #696: the selector byte per scan kind, for a component whose
+    /// tables are `Td = 1`, `Ta = 1`.
+    #[test]
+    fn progressive_sos_hides_only_unused_tables() {
+        let cases: [(u8, u8, u8, u8); 6] = [
+            (0, 0, 0, 0x10),  // DC first
+            (0, 0, 1, 0x00),  // DC refinement
+            (1, 63, 0, 0x01), // AC first, full band
+            (1, 2, 0, 0x01),  // AC first, band ending below 63
+            (3, 5, 2, 0x01),  // AC refinement, band ending below 63
+            (6, 63, 1, 0x01), // AC refinement, full band
+        ];
+        for (ss, se, ah, expected) in cases {
+            let mut buf: Vec<u8> = Vec::new();
+            write_sos_progressive(&mut buf, &[(2, 1, 1)], ss, se, ah, 0);
+            assert_eq!(buf[6], expected, "Ss={ss} Se={se} Ah={ah}");
+        }
+    }
 
     #[test]
     fn soi_marker() {

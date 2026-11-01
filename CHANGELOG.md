@@ -337,6 +337,12 @@ and `git log` between tags.
   runs system/Rust bidirectional cross-decodes.
 
 ### Fixed
+- **Progressive scans keep their AC table selector** (#696): an AC scan whose
+  band ended below coefficient 63 declared `Ta = 0` whatever table coded it.
+  A custom `scan_script` that splits chroma bands, and a default progressive
+  transcode of a YCCK frame, produced streams this crate rejected and djpeg
+  decoded with damaged chroma. Arithmetic streams decoded correctly but
+  differed from cjpeg in that byte. Files written before this fix stay damaged.
 - **12-bit decode matches libjpeg at the image edge and in colour**
   (`precision::decompress_12bit` and everything built on it: `TjHandle` and
   `tj3Decompress12`, `jpeg12_read_scanlines`, `Decoder` on a 12-bit frame).
