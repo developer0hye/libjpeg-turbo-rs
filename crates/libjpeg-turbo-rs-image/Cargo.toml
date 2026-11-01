@@ -1,6 +1,6 @@
 [package]
 name = "libjpeg-turbo-rs-image"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 # Higher than the workspace's 1.87 because image@0.25 requires rustc 1.88
 # (verified: `cargo +1.87 check -p libjpeg-turbo-rs-image` fails on the
@@ -20,7 +20,7 @@ categories = ["multimedia::images", "multimedia::encoding"]
 # (issue #381). `version` alongside `path` so the crate is publishable
 # (issue #380); the version must exist on crates.io before this crate
 # can be published.
-libjpeg-turbo-rs = { path = "../..", version = "0.8.0" }
+libjpeg-turbo-rs = { path = "../..", version = "0.9.0" }
 # default-features = false: the bridge only uses image's core traits
 # (ImageDecoder/ImageEncoder/ColorType/error types). The defaults would
 # drag the whole format-codec set — including avif→ravif→rav1e, whose

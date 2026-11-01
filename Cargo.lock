@@ -392,7 +392,7 @@ checksum = "b5b646652bf6661599e1da8901b3b9522896f01e736bad5f723fe7a3a27f899d"
 
 [[package]]
 name = "libjpeg-turbo-rs"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "criterion",
  "loom",
@@ -404,7 +404,7 @@ dependencies = [
 
 [[package]]
 name = "libjpeg-turbo-rs-capi"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "libjpeg-turbo-rs",
  "libloading",
@@ -413,7 +413,7 @@ dependencies = [
 
 [[package]]
 name = "libjpeg-turbo-rs-image"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "image",
  "libjpeg-turbo-rs",
@@ -421,7 +421,7 @@ dependencies = [
 
 [[package]]
 name = "libjpeg-turbo-rs-wasm"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "js-sys",
  "libjpeg-turbo-rs",
