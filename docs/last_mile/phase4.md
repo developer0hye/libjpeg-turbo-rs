@@ -15402,3 +15402,123 @@ Reproducer:
 
 Acceptance: the cause identified, and that input decoded byte-identically to
 libjpeg, or the divergence shown to be P4-66 and folded into it.
+
+## P4-268. Raw Component Planes Cannot Be Decoded Into Caller-Owned Buffers — **PARTIAL: Rust strip reader landed; C ABI and progressive streaming outstanding**
+
+**Motivation.** Filed 2026-11-09. Every raw-plane API returned owned
+planes: `decompress_raw` / `Decoder::decode_raw` give `Vec<Vec<u8>>` at the
+MCU-padded size, and `yuv::decompress_to_yuv_planes` trims those into a
+second owned set. A caller with its own buffer layout (I420 at its own
+stride, NV12, a GPU upload, a video encoder's input frame) paid a whole-image
+staging copy, and the decoder's working set was the whole frame. Issue #354
+gave the pixel path `decompress_into` but no plane variant. The C ABI's
+`tj3DecompressToYUVPlanes8` takes caller planes, but implements them as raw
+decode, then trimmed copy, then row copy into the caller (three copies,
+`crates/libjpeg-turbo-rs-capi/src/yuv.rs`).
+
+Survey of other Rust decoders (2026-11-09): only zenjpeg 0.8 exposes native
+planes into caller buffers (`ScanlineReader::read_rows_ycbcr_native_i16`,
+`i16` only, crop refused), plus a borrowed-row callback for RGB
+(`decode_rows`). zune-jpeg, jpeg-decoder and jpegli-rs have no raw-plane
+output; the `mozjpeg` binding wraps `jpeg_read_raw_data` but appends to
+`Vec`s and panics on unusual geometry; the `turbojpeg` binding wraps the
+whole-image `tj3DecompressToYUV*`.
+
+**Delivered (2026-11-09).**
+
+- `Decoder::into_raw_strips() -> RawStripReader`: lends one iMCU row of every
+  component per `next_strip()` (`RawStrip` / `RawStripPlane` borrow the
+  reader's scratch strip, so no sample buffer is allocated per strip), plus `for_each_strip` and `finish`
+  (warnings as `decode_raw_with_warnings` reports them). A single-scan
+  Huffman stream (interleaved, or single-component) is decoded one MCU row
+  at a time into a scratch strip, so the working set is one iMCU row:
+  2048x2048 4:2:0 peaks at 68 KB against `decode_raw`'s 6.3 MB.
+- `yuv::decompress_to_yuv_planes_into(data, &mut [YuvPlaneMut])`: the
+  `decompress_to_yuv_planes` samples written into caller planes at caller
+  strides, every destination checked before decoding.
+  `Decoder::decode_yuv_planes_into` is the same on a configured decoder, so
+  its limits, leniency and resync strategy apply.
+
+Proof: `tests/raw_strips.rs` (active rows byte-identical to libjpeg's
+`jpeg_read_raw_data` through `examples/raw_decode_c_oracle.c` across 16
+coding cases x 6 sizes; padded rows identical to `decode_raw`; lenient
+warnings identical; strict failure yields the clean strips first; the
+`_into` helper equals the owned planes and libjpeg's raw output, and never
+writes stride padding; corrupt streams equal `decode_raw` strict and
+lenient, with and without a resync strategy) and `tests/raw_strips_memory.rs`
+(peak heap within 24 KiB of one iMCU row on 4:2:0, 4:4:4 and grayscale).
+
+Found and fixed on the way: `yuv::decompress_to_yuv_planes` divided by zero
+(a panic) on a three- or four-component frame whose SOF height is 0, which
+libjpeg refuses as `JERR_EMPTY_IMAGE`; it and the reader now return
+`CorruptData` (`a_zero_height_frame_is_refused_like_libjpeg_not_a_panic`).
+The reader refuses a zero-height grayscale frame too; the other decode paths
+still accept one (P4-269).
+
+**Outstanding (why PARTIAL).**
+
+1. Progressive, arithmetic and multi-scan streams fall back to a whole-frame
+   `decode_raw` on the first strip. The progressive output pass could IDCT
+   one iMCU row per strip from the coefficient buffer, as libjpeg's
+   multi-pass `jdcoefct.c` controller does, which would also be the place
+   to honor block smoothing (P4-249).
+2. The C ABI still uses the three-copy path: `tj3DecompressToYUVPlanes8` /
+   `tj3DecompressToYUV8` and classic `jpeg_read_raw_data` (P4-195, P4-102)
+   should read strips. That needs the reader to accept the handle's scaling
+   factor (TurboJPEG's uniform scaled block size, P4-234); the public reader
+   refuses scales other than 1/1 today.
+3. Arithmetic-coded sequential streams could stream like Huffman ones.
+
+**Acceptance for closing.** Items 1 and 2 land with C cross-validation
+(libjpeg raw oracle for progressive, the existing TurboJPEG YUV tests for the
+C ABI), and `tests/raw_strips_memory.rs` gains a progressive case bounded by
+the coefficient buffer rather than the coefficient buffer plus sample planes.
+
+## P4-269. A Frame Whose SOF Height Is 0 Decodes to an Empty Image Where libjpeg Refuses It — **OPEN**
+
+Found 2026-11-09 by the P4-268 docs audit. libjpeg's `get_sof` refuses a
+frame whose height (or width) is 0 with `JERR_EMPTY_IMAGE` before any decoding
+(`jdmarker.c:275-277`), whatever its component count; this port has no
+`DNL` support either, so such a frame cannot be decoded. P4-268 made
+`Decoder::into_raw_strips` refuse it, and the three- and four-component
+`yuv::decompress_to_yuv_planes` / `decompress_to_yuv` now return `CorruptData`
+instead of dividing by zero. The other paths still accept it, measured on a
+16x16 frame with its SOF height patched to 0: `decompress_raw` /
+`Decoder::decode_raw` return `Ok` with zero-row planes for 4:2:0 and
+grayscale, `decompress_to_yuv_planes` and `decompress_to_yuv` return `Ok`
+with an empty plane for grayscale, and `decompress` returns a 16x0 grayscale
+image (its 4:2:0 refusal is the unrelated "zero chroma plane dimensions").
+
+Acceptance: every decode entry point refuses a zero width or height from the
+header, before allocating, with one error variant, as libjpeg does; a test
+cross-checks the refusal against `djpeg` for grayscale and 4:2:0.
+
+## P4-270. Lenient Baseline Decodes Ignore the Restart Resync Strategy, and Wiring It In Needs `apply_resync` to Skip Stray Bytes First — **OPEN**
+
+Found 2026-11-10 by the P4-268 review. `decode_baseline_planes` has a
+strict fast path that consults `Decoder::set_resync_strategy` at every
+restart boundary (`apply_resync`), and a general path (lenient decodes) that
+calls `BitReader::reset` and never consults it. A lenient decode therefore
+accepts any RST number even under an `Abort` strategy, while libjpeg calls
+`resync_to_restart` whatever the request. The single-component block-raster
+path consults it in both modes. The strip reader (`raw_strips.rs`) mirrors
+the asymmetry so its planes equal `decode_raw`'s.
+
+**Why it was not simply wired in.** Tried on the P4-268 branch and reverted:
+`apply_resync` reads the marker with `reset_and_consume_rst`, which skips
+only `0xFF` fill, while `reset` scans past stray data bytes to the marker
+the way libjpeg's `read_restart_marker` → `next_marker` does before it
+compares the RST number. On 299 randomly corrupted restart-marked 4:2:0
+streams, a lenient decode with `DefaultResyncStrategy` (documented as the
+historical behaviour) then differed from one with no strategy in 211, and
+matched `djpeg` exactly in 60 against 61. The same gap affects the strict
+path today whenever a strategy is set: a stream whose interval ends early
+leaves `pos` mid-data and is reported as a desync.
+
+**Acceptance.** `apply_resync` first skips to the next marker as `reset`
+does (counting the skipped bytes like `JWRN_EXTRANEOUS_DATA`), then compares
+and consults the strategy; with `DefaultResyncStrategy` every decode is
+byte-identical to the no-strategy decode on that corpus; the general path
+and the strip reader then consult the strategy, and the two `#[ignore]`d
+tests in `tests/a5_a6_worker.rs` (`a6_3_abort_strategy_surfaces_error_on_lenient_rst_mismatch`,
+`a6_3_skip_strategy_is_consulted_by_lenient_decodes`) pass.

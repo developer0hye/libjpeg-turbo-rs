@@ -13,11 +13,13 @@
 /// Packed YUV format: Y plane concatenated with Cb plane then Cr plane.
 /// For grayscale, only the Y plane is present.
 use crate::api::raw_data::{compress_raw, decompress_raw};
+use crate::api::raw_strips::{RawGeometry, RawStripReader};
 use crate::common::bufsize::{yuv_plane_height, yuv_plane_size, yuv_plane_width};
 use crate::common::error::{JpegError, Result};
 use crate::common::layout::ImageLayout;
 use crate::common::types::{PixelFormat, Subsampling};
 use crate::decode::color as decode_color;
+use crate::decode::pipeline::Decoder;
 use crate::encode::color as encode_color;
 #[allow(unused_imports)]
 use alloc::{format, vec};
@@ -539,6 +541,156 @@ pub(crate) fn yuv_planes_from_raw(
     Ok((planes, width, height, subsampling))
 }
 
+/// A caller-owned destination plane for [`decompress_to_yuv_planes_into`].
+#[derive(Debug)]
+pub struct YuvPlaneMut<'a> {
+    data: &'a mut [u8],
+    stride: usize,
+}
+
+impl<'a> YuvPlaneMut<'a> {
+    /// `data` receives the plane's rows `stride` bytes apart; `0` means
+    /// tightly packed (the TurboJPEG convention). Bytes between a row's end
+    /// and the next row's start are never written.
+    pub fn new(data: &'a mut [u8], stride: usize) -> Self {
+        Self { data, stride }
+    }
+}
+
+/// [`decompress_to_yuv_planes`] into planes the caller owns: the same
+/// samples, written row by row at each plane's stride.
+///
+/// Plane `i` must hold [`crate::yuv_plane_width`]`(i, width, subsampling)` x
+/// [`crate::yuv_plane_height`]`(i, height, subsampling)` samples at its
+/// stride (a 4-component frame's fourth plane is sized like the luma plane,
+/// as in `decompress_to_yuv_planes`). Read the header first
+/// ([`crate::Decoder::header`] / [`crate::Decoder::jpeg_subsampling`]) to
+/// size them. The decode runs through [`crate::Decoder::into_raw_strips`],
+/// so a single-scan Huffman stream is written one iMCU row at a time with no
+/// whole-image staging.
+///
+/// This decodes with the default limits and in strict mode; to set limits,
+/// leniency or a resync strategy, configure a [`crate::Decoder`] and call
+/// [`crate::Decoder::decode_yuv_planes_into`].
+///
+/// Returns `(width, height, subsampling)`, as `decompress_to_yuv_planes`
+/// does.
+///
+/// # Errors
+///
+/// Every destination is checked before any entropy decoding: a plane count
+/// other than the frame's component count, a stride below the plane width
+/// and a buffer too short for its plane are refused and nothing is written.
+/// A subsampling TurboJPEG cannot name is refused as in the owned form.
+pub fn decompress_to_yuv_planes_into(
+    data: &[u8],
+    planes: &mut [YuvPlaneMut<'_>],
+) -> Result<(usize, usize, Subsampling)> {
+    Decoder::new(data)?.decode_yuv_planes_into(planes)
+}
+
+/// The body of [`crate::Decoder::decode_yuv_planes_into`]: `reader`'s strips
+/// trimmed and edge-replicated into `planes` as `yuv_planes_from_raw` trims
+/// whole planes.
+pub(crate) fn yuv_planes_into(
+    mut reader: RawStripReader<'_>,
+    planes: &mut [YuvPlaneMut<'_>],
+) -> Result<(usize, usize, Subsampling)> {
+    let geometry: RawGeometry = reader.geometry().clone();
+    let n_comps: usize = geometry.components.len();
+    let padded_widths: Vec<usize> = geometry.components.iter().map(|c| c.padded_width).collect();
+    let padded_heights: Vec<usize> = geometry
+        .components
+        .iter()
+        .map(|c| geometry.strip_count * c.rows_per_strip)
+        .collect();
+    let subsampling: Subsampling =
+        detect_subsampling_from_planes(n_comps, &padded_widths, &padded_heights)?;
+    let (width, height): (usize, usize) = (geometry.width, geometry.height);
+
+    if planes.len() != n_comps {
+        return Err(JpegError::Unsupported(format!(
+            "{} destination planes for a {}-component frame",
+            planes.len(),
+            n_comps
+        )));
+    }
+    let mut targets: Vec<PlaneTarget> = Vec::with_capacity(n_comps);
+    for (comp, plane) in planes.iter().enumerate() {
+        // As in `yuv_planes_from_raw`: a fourth (K) component is full size.
+        let dim_component: usize = if comp == 0 || comp >= 3 { 0 } else { comp };
+        let target_w: usize = yuv_plane_width(dim_component, width, subsampling);
+        let target_h: usize = yuv_plane_height(dim_component, height, subsampling);
+        let layout: ImageLayout =
+            ImageLayout::strided(target_w, target_h, 1, plane.stride, "YUV destination plane")?;
+        if plane.data.len() < layout.total_bytes() {
+            return Err(JpegError::BufferTooSmall {
+                need: layout.total_bytes(),
+                got: plane.data.len(),
+            });
+        }
+        targets.push(PlaneTarget {
+            layout,
+            raw_width: padded_widths[comp],
+            raw_height: padded_heights[comp],
+        });
+    }
+
+    while let Some(strip) = reader.next_strip()? {
+        for source in strip.planes() {
+            let comp: usize = source.component();
+            let layout: ImageLayout = targets[comp].layout;
+            let copy_w: usize = layout.width().min(targets[comp].raw_width);
+            for (offset, row) in source.padded_rows().enumerate() {
+                let y: usize = source.first_row() + offset;
+                if y >= layout.height() {
+                    break;
+                }
+                write_yuv_row(&mut planes[comp], &layout, y, &row[..copy_w]);
+            }
+        }
+    }
+    reader.finish()?;
+
+    // A plane taller than the MCU-aligned raw plane repeats its last raw
+    // row, as `yuv_planes_from_raw` does.
+    for (comp, target) in targets.iter().enumerate() {
+        let layout: ImageLayout = target.layout;
+        let copy_h: usize = layout.height().min(target.raw_height);
+        if copy_h == 0 || copy_h == layout.height() {
+            continue;
+        }
+        let last: usize = layout.row_offset(copy_h - 1);
+        for y in copy_h..layout.height() {
+            let start: usize = layout.row_offset(y);
+            planes[comp]
+                .data
+                .copy_within(last..last + layout.row_bytes(), start);
+        }
+    }
+    Ok((width, height, subsampling))
+}
+
+/// One destination plane's geometry next to the raw plane it is cut from.
+struct PlaneTarget {
+    layout: ImageLayout,
+    /// MCU-padded width of the raw plane: how many samples a row can copy.
+    raw_width: usize,
+    /// MCU-padded height of the raw plane: rows past it repeat the last one.
+    raw_height: usize,
+}
+
+/// Row `y` of a destination plane: `samples`, then the last sample repeated
+/// to the plane width (`yuv_planes_from_raw`'s column rule).
+fn write_yuv_row(plane: &mut YuvPlaneMut<'_>, layout: &ImageLayout, y: usize, samples: &[u8]) {
+    let start: usize = layout.row_offset(y);
+    let row: &mut [u8] = &mut plane.data[start..start + layout.row_bytes()];
+    row[..samples.len()].copy_from_slice(samples);
+    if let Some(&last) = samples.last() {
+        row[samples.len()..].fill(last);
+    }
+}
+
 /// The geometry of one component in [`turbojpeg_yuv_planes`]: its sampling
 /// factors.
 pub(crate) type ComponentSampling = (usize, usize);
@@ -708,20 +860,37 @@ pub(crate) fn turbojpeg_yuv_planes(
 
 /// Detect chroma subsampling from raw plane dimensions.
 fn detect_subsampling(raw: &crate::api::raw_data::RawImage) -> Result<Subsampling> {
-    if raw.num_components == 1 {
+    detect_subsampling_from_planes(raw.num_components, &raw.plane_widths, &raw.plane_heights)
+}
+
+/// [`detect_subsampling`] from the MCU-padded plane dimensions alone, which a
+/// strip decode knows from the header before any plane exists.
+fn detect_subsampling_from_planes(
+    num_components: usize,
+    plane_widths: &[usize],
+    plane_heights: &[usize],
+) -> Result<Subsampling> {
+    if num_components == 1 {
         return Ok(Subsampling::S444);
     }
-    if raw.num_components < 3 {
+    if num_components < 3 {
         return Err(JpegError::CorruptData(format!(
             "unexpected component count: {}",
-            raw.num_components
+            num_components
         )));
     }
+    // A zero-height (DNL) frame has empty planes, and the ratios below would
+    // divide by zero; libjpeg refuses such a frame (`JERR_EMPTY_IMAGE`).
+    if plane_widths[..2].contains(&0) || plane_heights[..2].contains(&0) {
+        return Err(JpegError::CorruptData(
+            "empty JPEG image (DNL not supported)".to_string(),
+        ));
+    }
 
-    let y_w: usize = raw.plane_widths[0];
-    let y_h: usize = raw.plane_heights[0];
-    let cb_w: usize = raw.plane_widths[1];
-    let cb_h: usize = raw.plane_heights[1];
+    let y_w: usize = plane_widths[0];
+    let y_h: usize = plane_heights[0];
+    let cb_w: usize = plane_widths[1];
+    let cb_h: usize = plane_heights[1];
 
     // Compute ratios (use ceiling division for non-exact multiples)
     let h_ratio: usize = y_w.div_ceil(cb_w);

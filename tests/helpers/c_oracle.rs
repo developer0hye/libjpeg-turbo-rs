@@ -191,6 +191,78 @@ pub fn ycbcr_decode_c_oracle() -> Option<PathBuf> {
     build_libjpeg_oracle("ycbcr_decode_c_oracle")
 }
 
+/// Locate (building if necessary) the raw component-plane oracle
+/// (`examples/raw_decode_c_oracle.c`), which drives libjpeg's
+/// `jpeg_read_raw_data` with `raw_data_out = TRUE`. Same build-and-cache and
+/// `None`-means-skip contract as [`cmyk_c_oracle`].
+pub fn raw_decode_c_oracle() -> Option<PathBuf> {
+    build_libjpeg_oracle("raw_decode_c_oracle")
+}
+
+/// One component plane as libjpeg's raw output reports it: its
+/// `downsampled_width` x `downsampled_height` active area, row by row.
+pub struct CRawPlane {
+    pub width: usize,
+    pub height: usize,
+    pub samples: Vec<u8>,
+}
+
+/// Decode `jpeg` through the raw oracle. `smoothing` is libjpeg's
+/// `do_block_smoothing`, on by default there.
+///
+/// `Err(stderr)` is libjpeg refusing the stream, for the caller to assert on.
+pub fn decode_with_raw_c_oracle(
+    oracle: &Path,
+    jpeg: &[u8],
+    smoothing: bool,
+) -> Result<Vec<CRawPlane>, String> {
+    let dir = tempfile::tempdir().expect("tempdir for the raw oracle input");
+    let input: PathBuf = dir.path().join("raw_oracle_input.jpg");
+    std::fs::write(&input, jpeg).expect("write the raw oracle input");
+    let mut command = Command::new(oracle);
+    command.arg(&input);
+    if !smoothing {
+        command.arg("nosmooth");
+    }
+    let output = command
+        .output()
+        .unwrap_or_else(|error| panic!("failed to run {oracle:?}: {error:?}"));
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).into_owned());
+    }
+    let mut rest: &[u8] = &output.stdout;
+    fn next_line(rest: &mut &[u8]) -> Vec<usize> {
+        let newline: usize = rest
+            .iter()
+            .position(|&byte| byte == b'\n')
+            .expect("raw oracle header line");
+        let line: String = String::from_utf8_lossy(&rest[..newline]).into_owned();
+        *rest = &rest[newline + 1..];
+        line.split_whitespace()
+            .filter(|field| *field != "RAW")
+            .map(|field| field.parse().expect("raw oracle number"))
+            .collect()
+    }
+    let components: usize = next_line(&mut rest)[0];
+    let mut planes: Vec<CRawPlane> = Vec::with_capacity(components);
+    for _ in 0..components {
+        let dims: Vec<usize> = next_line(&mut rest);
+        let (width, height): (usize, usize) = (dims[0], dims[1]);
+        assert!(
+            rest.len() >= width * height,
+            "raw oracle wrote a short {width}x{height} plane"
+        );
+        planes.push(CRawPlane {
+            width,
+            height,
+            samples: rest[..width * height].to_vec(),
+        });
+        rest = &rest[width * height..];
+    }
+    assert!(rest.is_empty(), "raw oracle wrote trailing bytes");
+    Ok(planes)
+}
+
 /// libjpeg's YCbCr output for one decode request.
 pub struct CYcbcrRequest {
     /// `scale_num / scale_denom`.

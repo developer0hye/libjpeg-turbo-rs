@@ -28,6 +28,8 @@ mod output;
 mod progressive;
 #[path = "pipeline_impl/raw.rs"]
 mod raw;
+#[path = "pipeline_impl/raw_strips.rs"]
+mod raw_strips;
 #[path = "pipeline_impl/scan.rs"]
 mod scan;
 #[cfg(feature = "std")]
@@ -36,6 +38,7 @@ mod streaming;
 
 pub use api::probe;
 pub(crate) use color::upsample_generic_nearest;
+pub(crate) use raw_strips::RawStreamState;
 
 /// Decoded image data.
 ///

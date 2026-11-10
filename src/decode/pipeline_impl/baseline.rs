@@ -11,14 +11,14 @@ use alloc::{format, string::ToString, vec::Vec};
 /// A lenient decode's warnings, holding at most [`MAX_DECODE_WARNINGS`]
 /// Huffman errors and counting the rest (P4-215, #641). Without the cap a
 /// stream corrupt everywhere recorded one heap string per MCU.
-struct WarningLog {
+pub(super) struct WarningLog {
     warnings: Vec<DecodeWarning>,
     huffman_recorded: usize,
     huffman_suppressed: usize,
 }
 
 impl WarningLog {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             warnings: Vec::new(),
             huffman_recorded: 0,
@@ -28,7 +28,7 @@ impl WarningLog {
 
     /// Records a Huffman error, or only counts it once the cap is reached —
     /// before building its message, so a suppressed warning allocates nothing.
-    fn huffman_error(&mut self, mcu_x: usize, mcu_y: usize, error: &JpegError) {
+    pub(super) fn huffman_error(&mut self, mcu_x: usize, mcu_y: usize, error: &JpegError) {
         if self.huffman_recorded < MAX_DECODE_WARNINGS {
             self.warnings.push(DecodeWarning::HuffmanError {
                 mcu_x,
@@ -49,7 +49,7 @@ impl WarningLog {
     /// Records `TruncatedData` for the first entropy segment that runs short.
     /// A later one, after a restart marker resumed decoding, adds nothing, so
     /// the warning stays at most once per decode (P4-254).
-    fn truncated(&mut self, decoded_mcus: usize, total_mcus: usize) {
+    pub(super) fn truncated(&mut self, decoded_mcus: usize, total_mcus: usize) {
         if !self
             .warnings
             .iter()
@@ -62,7 +62,7 @@ impl WarningLog {
         }
     }
 
-    fn finish(mut self) -> Vec<DecodeWarning> {
+    pub(super) fn finish(mut self) -> Vec<DecodeWarning> {
         if self.huffman_suppressed > 0 {
             self.warnings.push(DecodeWarning::WarningsSuppressed {
                 count: self.huffman_suppressed,

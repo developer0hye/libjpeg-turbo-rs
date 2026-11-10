@@ -12,6 +12,7 @@ pub mod quality;
 pub mod quantize;
 pub mod raw_data;
 pub mod raw_data_12;
+pub mod raw_strips;
 pub mod raw_thumbnail;
 pub mod scanline;
 #[cfg(feature = "std")]

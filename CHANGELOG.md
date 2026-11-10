@@ -8,6 +8,28 @@ and `git log` between tags.
 
 ## [Unreleased]
 
+### Added
+
+- **`Decoder::into_raw_strips`** (P4-268): a `RawStripReader` that lends the raw
+  component planes one iMCU row at a time (`next_strip`, `for_each_strip`,
+  `finish`), so callers collect them into buffers they own. Single-scan
+  Huffman streams are decoded row by row, so the working set is one iMCU row
+  (68 KB against `decode_raw`'s 6.3 MB on a 2048x2048 4:2:0 frame). Active rows
+  match libjpeg's `jpeg_read_raw_data`.
+- **`yuv::decompress_to_yuv_planes_into`** and `yuv::YuvPlaneMut`: the
+  `decompress_to_yuv_planes` samples written into caller planes at caller
+  strides. Every destination is checked before decoding.
+  **`Decoder::decode_yuv_planes_into`** does the same with a configured
+  decoder, so limits, leniency, `stop_on_warning` and a resync strategy
+  apply.
+
+### Fixed
+
+- `yuv::decompress_to_yuv_planes` / `decompress_to_yuv` panicked (divide by
+  zero) on a three- or four-component frame whose SOF height is 0. They now
+  return `CorruptData`, as libjpeg refuses such a frame (`JERR_EMPTY_IMAGE`).
+  A grayscale one still returns an empty plane (P4-269).
+
 ## [0.9.0] - 2026-11-01
 
 ### Added

@@ -99,13 +99,14 @@ const UNSAFE_FREE_KERNELS: [&str; 5] = [
 /// Decode sources that legitimately hold `unsafe` — strided-IDCT destination
 /// pointers and their scan drivers. Owned by the criterion-4 inventory; this
 /// gate only insists they are classified, not that they are clean.
-const INVENTORY_OWNED: [&str; 7] = [
+const INVENTORY_OWNED: [&str; 8] = [
     "src/decode/idct_extended.rs",
     "src/decode/idct_scaled.rs",
     "src/decode/pipeline_impl/arithmetic.rs",
     "src/decode/pipeline_impl/baseline.rs",
     "src/decode/pipeline_impl/color.rs",
     "src/decode/pipeline_impl/progressive.rs",
+    "src/decode/pipeline_impl/raw_strips.rs",
     "src/decode/pipeline_impl/streaming.rs",
 ];
 
