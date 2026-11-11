@@ -6,7 +6,7 @@ use crate::common::try_alloc::{
 };
 use crate::common::types::{ColorSpace, DctMethod, FrameHeader, PixelFormat};
 use crate::decode::{idct_extended, idct_scaled};
-use alloc::{borrow::Cow, format, vec::Vec};
+use alloc::{borrow::Cow, format, string::String, vec::Vec};
 
 /// Generic nearest-neighbor upsampling for arbitrary h/v factor combinations.
 ///
@@ -189,95 +189,131 @@ impl<'a> Decoder<'a> {
         (self.routines.idct_islow)(coeffs, quant, output)
     }
 
-    /// IDCT writing directly to a strided destination buffer (no intermediate copy).
-    /// Dispatches to ISLOW/IFAST/Float based on `self.dct_method`.
+    /// IDCT one block into `plane`, its top-left sample at `offset`, rows
+    /// `stride` apart, dispatching on `block_size` (the scaled IDCT sizes
+    /// 1..=16) and, for 8x8, on `self.dct_method`: ISLOW stores straight into
+    /// the plane through the strided SIMD kernels where available; every
+    /// other case goes through a stack block and a checked row copy.
     ///
-    /// # Safety
-    /// `output` must point to at least `7 * stride + 8` writable bytes.
+    /// Every kernel writes `block_size` rows of `block_size` samples, which
+    /// span `(block_size - 1) * stride + block_size` bytes from `offset`.
+    /// That span is checked once per block (a compare next to a whole IDCT,
+    /// measured within noise on every decode path), so the decode loops need
+    /// no `unsafe` and a block that does not fit is an error rather than a
+    /// write outside the plane. This is the one place the decode pipeline
+    /// hands a raw pointer to an IDCT kernel, and only the 8x8 SIMD kernels
+    /// take one.
     #[inline(always)]
-    pub(super) unsafe fn idct_islow_strided(
+    pub(super) fn idct_block_into(
         &self,
         coeffs: &[i16; 64],
         quant: &[u16; 64],
-        output: *mut u8,
-        stride: usize,
-    ) {
-        unsafe {
-            // For ISLOW, use optimized strided SIMD paths when available.
-            if matches!(self.dct_method, DctMethod::IsLow) {
-                #[cfg(all(target_arch = "aarch64", feature = "simd"))]
-                {
-                    return crate::simd::aarch64::idct::neon_idct_islow_strided(
-                        coeffs, quant, output, stride,
-                    );
-                }
-
-                #[cfg(all(target_arch = "x86_64", feature = "simd"))]
-                {
-                    if crate::cpu_has!("avx2") {
-                        return crate::simd::x86_64::avx2_idct::avx2_idct_islow_strided(
-                            coeffs, quant, output, stride,
-                        );
-                    }
-                    if crate::cpu_has!("sse2") {
-                        return crate::simd::x86_64::idct::sse2_idct_islow_strided(
-                            coeffs, quant, output, stride,
-                        );
-                    }
-                }
-            }
-
-            // Generic path: IDCT into temp buffer, then copy row-by-row.
-            #[allow(unreachable_code)]
-            {
-                let idct = self.idct_fn();
-                let mut tmp = [0u8; 64];
-                idct(coeffs, quant, &mut tmp);
-                for row in 0..8 {
-                    core::ptr::copy_nonoverlapping(
-                        tmp.as_ptr().add(row * 8),
-                        output.add(row * stride),
-                        8,
-                    );
-                }
-            }
-        }
-    }
-
-    /// Scale-aware IDCT dispatch: picks 8x8, 4x4, 2x2, or 1x1 based on block_size.
-    ///
-    /// # Safety
-    /// `output` must point to sufficient writable bytes for the chosen block_size × stride.
-    #[inline(always)]
-    pub(super) unsafe fn idct_scaled_strided(
-        &self,
-        coeffs: &[i16; 64],
-        quant: &[u16; 64],
-        output: *mut u8,
+        plane: &mut [u8],
+        offset: usize,
         stride: usize,
         block_size: usize,
-    ) {
-        unsafe {
-            match block_size {
-                16 => idct_extended::idct_16x16_strided(coeffs, quant, output, stride),
-                15 => idct_extended::idct_15x15_strided(coeffs, quant, output, stride),
-                14 => idct_extended::idct_14x14_strided(coeffs, quant, output, stride),
-                13 => idct_extended::idct_13x13_strided(coeffs, quant, output, stride),
-                12 => idct_extended::idct_12x12_strided(coeffs, quant, output, stride),
-                11 => idct_extended::idct_11x11_strided(coeffs, quant, output, stride),
-                10 => idct_extended::idct_10x10_strided(coeffs, quant, output, stride),
-                9 => idct_extended::idct_9x9_strided(coeffs, quant, output, stride),
-                8 => self.idct_islow_strided(coeffs, quant, output, stride),
-                7 => idct_extended::idct_7x7_strided(coeffs, quant, output, stride),
-                6 => idct_extended::idct_6x6_strided(coeffs, quant, output, stride),
-                5 => idct_extended::idct_5x5_strided(coeffs, quant, output, stride),
-                4 => idct_scaled::idct_4x4_strided(coeffs, quant, output, stride),
-                3 => idct_extended::idct_3x3_strided(coeffs, quant, output, stride),
-                2 => idct_scaled::idct_2x2_strided(coeffs, quant, output, stride),
-                1 => idct_scaled::idct_1x1_strided(coeffs, quant, output, stride),
-                _ => unreachable!("invalid block_size: {}", block_size),
+    ) -> Result<()> {
+        let n: usize = block_size;
+        let span: Option<usize> = n
+            .checked_sub(1)
+            .and_then(|rows| rows.checked_mul(stride))
+            .and_then(|bytes| bytes.checked_add(n));
+        let dst: Option<&mut [u8]> = match span {
+            Some(span) if (1..=16).contains(&n) && stride >= n => offset
+                .checked_add(span)
+                .and_then(|end| plane.get_mut(offset..end)),
+            _ => None,
+        };
+        let Some(dst) = dst else {
+            return Err(JpegError::Unsupported(String::from(
+                "IDCT block does not fit its component plane",
+            )));
+        };
+        if n == 8 && matches!(self.dct_method, DctMethod::IsLow) {
+            #[cfg(all(feature = "simd", any(target_arch = "aarch64", target_arch = "x86_64")))]
+            {
+                let output: *mut u8 = dst.as_mut_ptr();
+                // SAFETY: `output` points at `dst`, which holds exactly
+                // `7 * stride + 8` writable bytes (checked above, `n == 8`),
+                // the contract of each strided ISLOW kernel. Each kernel is
+                // compiled only for its architecture (aarch64 NEON), and the
+                // x86_64 ones are reached only after `cpu_has!` detected
+                // AVX2 / SSE2 at runtime.
+                unsafe {
+                    #[cfg(target_arch = "aarch64")]
+                    {
+                        crate::simd::aarch64::idct::neon_idct_islow_strided(
+                            coeffs, quant, output, stride,
+                        );
+                        return Ok(());
+                    }
+                    #[cfg(target_arch = "x86_64")]
+                    {
+                        if crate::cpu_has!("avx2") {
+                            crate::simd::x86_64::avx2_idct::avx2_idct_islow_strided(
+                                coeffs, quant, output, stride,
+                            );
+                            return Ok(());
+                        }
+                        if crate::cpu_has!("sse2") {
+                            crate::simd::x86_64::idct::sse2_idct_islow_strided(
+                                coeffs, quant, output, stride,
+                            );
+                            return Ok(());
+                        }
+                    }
+                }
             }
         }
+        // Every other block: the kernel's safe fixed-size form writes a stack
+        // block, copied out row by row through `dst`. For sizes other than 8
+        // this is what the former raw-pointer `idct_{N}x{N}_strided` wrappers
+        // did internally (temp block, then a row copy), so it costs nothing;
+        // for 8x8 it is the IFAST / Float / no-SIMD path.
+        // Each arm's block is exactly `n * n` samples, so a small IDCT does
+        // not zero-fill more stack than it writes.
+        macro_rules! via_block {
+            ($len:literal, |$out:ident| $write:expr) => {{
+                let mut $out: [u8; $len] = [0u8; $len];
+                $write;
+                copy_block_rows(dst, stride, n, &$out);
+            }};
+        }
+        match n {
+            8 => via_block!(64, |out| (self.idct_fn())(coeffs, quant, &mut out)),
+            16 => via_block!(256, |out| idct_extended::idct_16x16(
+                coeffs, quant, &mut out
+            )),
+            15 => via_block!(225, |out| idct_extended::idct_15x15(
+                coeffs, quant, &mut out
+            )),
+            14 => via_block!(196, |out| idct_extended::idct_14x14(
+                coeffs, quant, &mut out
+            )),
+            13 => via_block!(169, |out| idct_extended::idct_13x13(
+                coeffs, quant, &mut out
+            )),
+            12 => via_block!(144, |out| idct_extended::idct_12x12(
+                coeffs, quant, &mut out
+            )),
+            11 => via_block!(121, |out| idct_extended::idct_11x11(
+                coeffs, quant, &mut out
+            )),
+            10 => via_block!(100, |out| idct_extended::idct_10x10(
+                coeffs, quant, &mut out
+            )),
+            9 => via_block!(81, |out| idct_extended::idct_9x9(coeffs, quant, &mut out)),
+            7 => via_block!(49, |out| idct_extended::idct_7x7(coeffs, quant, &mut out)),
+            6 => via_block!(36, |out| idct_extended::idct_6x6(coeffs, quant, &mut out)),
+            5 => via_block!(25, |out| idct_extended::idct_5x5(coeffs, quant, &mut out)),
+            4 => via_block!(16, |out| idct_scaled::idct_4x4(coeffs, quant, &mut out)),
+            3 => via_block!(9, |out| idct_extended::idct_3x3(coeffs, quant, &mut out)),
+            2 => via_block!(4, |out| idct_scaled::idct_2x2(coeffs, quant, &mut out)),
+            // `n` is in 1..=16 (checked above), so this arm is `n == 1`: one
+            // sample, stored directly.
+            _ => dst[0] = idct_scaled::idct_1x1(coeffs, quant),
+        }
+        Ok(())
     }
 
     /// Compute per-component IDCT block size for scaled decode.
@@ -1354,5 +1390,149 @@ impl<'a> Decoder<'a> {
             saved_markers: try_clone_saved_markers(&self.metadata.saved_markers)?,
             warnings,
         })
+    }
+}
+
+/// Copy an `n x n` IDCT block, row by row, into `dst`, whose rows are
+/// `stride` apart. `dst` spans `(n - 1) * stride + n` bytes, so
+/// `chunks_mut(stride)` yields exactly `n` rows, the last one `n` long.
+#[inline(always)]
+fn copy_block_rows(dst: &mut [u8], stride: usize, n: usize, block: &[u8]) {
+    for (row, samples) in dst.chunks_mut(stride).zip(block.chunks_exact(n)) {
+        row[..n].copy_from_slice(samples);
+    }
+}
+
+#[cfg(test)]
+mod idct_block_into_tests {
+    use super::Decoder;
+    use crate::common::types::{PixelFormat, Subsampling};
+    use crate::decode::{idct_extended, idct_scaled};
+    use alloc::vec;
+    use alloc::vec::Vec;
+
+    const CANARY: u8 = 0xA5;
+
+    /// A real decoder (default ISLOW, the build's SIMD routines) to call the
+    /// method on; the frame itself is irrelevant.
+    fn decoder_bytes() -> Vec<u8> {
+        let rgb: Vec<u8> = (0..16 * 16 * 3)
+            .map(|i: usize| (i * 7 % 251) as u8)
+            .collect();
+        crate::api::high_level::compress(&rgb, 16, 16, PixelFormat::Rgb, 90, Subsampling::S444)
+            .expect("encode")
+    }
+
+    /// The safe fixed-size kernel for `n`, as the reference block.
+    fn reference_block(
+        decoder: &Decoder<'_>,
+        coeffs: &[i16; 64],
+        quant: &[u16; 64],
+        n: usize,
+    ) -> Vec<u8> {
+        macro_rules! run {
+            ($kernel:path, $len:literal) => {{
+                let mut out: [u8; $len] = [0u8; $len];
+                $kernel(coeffs, quant, &mut out);
+                out.to_vec()
+            }};
+        }
+        match n {
+            8 => {
+                let mut out: [u8; 64] = [0u8; 64];
+                (decoder.idct_fn())(coeffs, quant, &mut out);
+                out.to_vec()
+            }
+            16 => run!(idct_extended::idct_16x16, 256),
+            15 => run!(idct_extended::idct_15x15, 225),
+            14 => run!(idct_extended::idct_14x14, 196),
+            13 => run!(idct_extended::idct_13x13, 169),
+            12 => run!(idct_extended::idct_12x12, 144),
+            11 => run!(idct_extended::idct_11x11, 121),
+            10 => run!(idct_extended::idct_10x10, 100),
+            9 => run!(idct_extended::idct_9x9, 81),
+            7 => run!(idct_extended::idct_7x7, 49),
+            6 => run!(idct_extended::idct_6x6, 36),
+            5 => run!(idct_extended::idct_5x5, 25),
+            4 => run!(idct_scaled::idct_4x4, 16),
+            3 => run!(idct_extended::idct_3x3, 9),
+            2 => run!(idct_scaled::idct_2x2, 4),
+            _ => vec![idct_scaled::idct_1x1(coeffs, quant)],
+        }
+    }
+
+    /// Every block size lands its `n` rows of `n` samples at `offset`,
+    /// `stride` apart, equal to the safe kernel (for 8x8 this pins the
+    /// strided SIMD kernel against the safe one), and touches nothing else.
+    #[test]
+    fn idct_block_into_writes_each_size_at_its_stride_and_nothing_else() {
+        let jpeg: Vec<u8> = decoder_bytes();
+        let decoder: Decoder<'_> = Decoder::new(&jpeg).expect("header");
+        let mut coeffs: [i16; 64] = [0; 64];
+        for (i, c) in coeffs.iter_mut().enumerate().take(20) {
+            *c = (i as i16 * 37 % 61) - 30;
+        }
+        coeffs[0] = 120;
+        let quant: [u16; 64] = core::array::from_fn(|i: usize| 1 + (i as u16 % 7));
+        for n in 1..=16usize {
+            let stride: usize = n + 5;
+            let offset: usize = stride + 2;
+            let span: usize = (n - 1) * stride + n;
+            let mut plane: Vec<u8> = vec![CANARY; offset + span + 4];
+            decoder
+                .idct_block_into(&coeffs, &quant, &mut plane, offset, stride, n)
+                .unwrap_or_else(|e| panic!("n={n}: {e}"));
+            let expected: Vec<u8> = reference_block(&decoder, &coeffs, &quant, n);
+            for (i, &byte) in plane.iter().enumerate() {
+                let in_block: Option<(usize, usize)> = i
+                    .checked_sub(offset)
+                    .map(|rel| (rel / stride, rel % stride))
+                    .filter(|&(row, col)| row < n && col < n);
+                match in_block {
+                    Some((row, col)) => {
+                        assert_eq!(byte, expected[row * n + col], "n={n} row {row} col {col}")
+                    }
+                    None => assert_eq!(byte, CANARY, "n={n}: byte {i} outside the block written"),
+                }
+            }
+        }
+    }
+
+    /// A block one byte too long for its plane, or a stride narrower than
+    /// the block, is an error and writes nothing.
+    #[test]
+    fn idct_block_into_refuses_a_block_that_does_not_fit() {
+        let jpeg: Vec<u8> = decoder_bytes();
+        let decoder: Decoder<'_> = Decoder::new(&jpeg).expect("header");
+        let coeffs: [i16; 64] = [64; 64];
+        let quant: [u16; 64] = [1; 64];
+        for n in [1usize, 4, 8, 16] {
+            let stride: usize = n + 3;
+            let span: usize = (n - 1) * stride + n;
+            let mut plane: Vec<u8> = vec![CANARY; span - 1];
+            assert!(decoder
+                .idct_block_into(&coeffs, &quant, &mut plane, 0, stride, n)
+                .is_err());
+            let mut plane2: Vec<u8> = vec![CANARY; span + 10];
+            assert!(decoder
+                .idct_block_into(&coeffs, &quant, &mut plane2, usize::MAX - 2, stride, n)
+                .is_err());
+            if n > 1 {
+                assert!(decoder
+                    .idct_block_into(&coeffs, &quant, &mut plane2, 0, n - 1, n)
+                    .is_err());
+            }
+            assert!(
+                plane.iter().chain(&plane2).all(|&b| b == CANARY),
+                "n={n} wrote on error"
+            );
+        }
+        let mut plane: Vec<u8> = vec![CANARY; 64];
+        assert!(decoder
+            .idct_block_into(&coeffs, &quant, &mut plane, 0, 8, 17)
+            .is_err());
+        assert!(decoder
+            .idct_block_into(&coeffs, &quant, &mut plane, 0, 8, 0)
+            .is_err());
     }
 }

@@ -232,17 +232,14 @@ impl<'a> Decoder<'a> {
                                 let block_y: usize = (mcu_y * layout.v_blocks + v) * bs;
                                 let dst_offset: usize = block_y * layout.comp_w + block_x;
 
-                                unsafe {
-                                    let dst: *mut u8 =
-                                        component_planes[comp_idx].as_mut_ptr().add(dst_offset);
-                                    self.idct_scaled_strided(
-                                        &coeffs,
-                                        qt_values,
-                                        dst,
-                                        layout.comp_w,
-                                        bs,
-                                    );
-                                }
+                                self.idct_block_into(
+                                    &coeffs,
+                                    qt_values,
+                                    &mut component_planes[comp_idx],
+                                    dst_offset,
+                                    layout.comp_w,
+                                    bs,
+                                )?;
                             }
                         }
                     }
@@ -311,17 +308,14 @@ impl<'a> Decoder<'a> {
                                     let block_y: usize = (mcu_y * layout.v_blocks + v) * bs;
                                     let dst_offset: usize = block_y * layout.comp_w + block_x;
 
-                                    unsafe {
-                                        let dst: *mut u8 =
-                                            component_planes[comp_idx].as_mut_ptr().add(dst_offset);
-                                        self.idct_scaled_strided(
-                                            &coeffs,
-                                            qt_values,
-                                            dst,
-                                            layout.comp_w,
-                                            bs,
-                                        );
-                                    }
+                                    self.idct_block_into(
+                                        &coeffs,
+                                        qt_values,
+                                        &mut component_planes[comp_idx],
+                                        dst_offset,
+                                        layout.comp_w,
+                                        bs,
+                                    )?;
                                 }
                             }
                         }
@@ -533,10 +527,14 @@ impl<'a> Decoder<'a> {
                     let block_y: usize = by * bs;
                     let dst_offset: usize = block_y * comp_w + block_x;
 
-                    unsafe {
-                        let dst: *mut u8 = component_planes[comp_idx].as_mut_ptr().add(dst_offset);
-                        self.idct_scaled_strided(&coeffs, qt_values, dst, comp_w, bs);
-                    }
+                    self.idct_block_into(
+                        &coeffs,
+                        qt_values,
+                        &mut component_planes[comp_idx],
+                        dst_offset,
+                        comp_w,
+                        bs,
+                    )?;
 
                     // This block read past the end of its segment (djpeg's
                     // JWRN_HIT_MARKER): refused in strict mode, reported once

@@ -161,11 +161,14 @@ impl<'a> Decoder<'a> {
                     arith.decode_ac_sequential(&mut coeffs, ac_tbl)?;
 
                     let bs = layout.block_size;
-                    let plane = &mut component_planes[comp_idx];
-                    unsafe {
-                        let out_ptr = plane.as_mut_ptr().add(by * bs * layout.comp_w + bx * bs);
-                        self.idct_scaled_strided(&coeffs, qt_values, out_ptr, layout.comp_w, bs);
-                    }
+                    self.idct_block_into(
+                        &coeffs,
+                        qt_values,
+                        &mut component_planes[comp_idx],
+                        by * bs * layout.comp_w + bx * bs,
+                        layout.comp_w,
+                        bs,
+                    )?;
 
                     if restart_interval > 0 {
                         restarts_to_go -= 1;
@@ -201,13 +204,15 @@ impl<'a> Decoder<'a> {
                             let x_offset = bx * bs;
                             let y_offset = by * bs;
 
-                            let plane = &mut component_planes[comp_idx];
-                            let stride = layout.comp_w;
-
-                            unsafe {
-                                let out_ptr = plane.as_mut_ptr().add(y_offset * stride + x_offset);
-                                self.idct_scaled_strided(&coeffs, qt_values, out_ptr, stride, bs);
-                            }
+                            let stride: usize = layout.comp_w;
+                            self.idct_block_into(
+                                &coeffs,
+                                qt_values,
+                                &mut component_planes[comp_idx],
+                                y_offset * stride + x_offset,
+                                stride,
+                                bs,
+                            )?;
                         }
                     }
                 }
@@ -345,11 +350,14 @@ impl<'a> Decoder<'a> {
                         arith.decode_dc_sequential(&mut coeffs, comp_idx, dc_tbl)?;
                         arith.decode_ac_sequential(&mut coeffs, ac_tbl)?;
                         let dst_offset: usize = (by * bs) * comp_w + (bx * bs);
-                        unsafe {
-                            let dst: *mut u8 =
-                                component_planes[comp_idx].as_mut_ptr().add(dst_offset);
-                            self.idct_scaled_strided(&coeffs, qt_values, dst, comp_w, bs);
-                        }
+                        self.idct_block_into(
+                            &coeffs,
+                            qt_values,
+                            &mut component_planes[comp_idx],
+                            dst_offset,
+                            comp_w,
+                            bs,
+                        )?;
                         if restart_interval > 0 {
                             restarts_to_go -= 1;
                         }
@@ -381,13 +389,14 @@ impl<'a> Decoder<'a> {
                                     let bx = mcu_x * h_blocks + h;
                                     let by = mcu_y * v_blocks + v;
                                     let dst_offset: usize = (by * bs) * comp_w + (bx * bs);
-                                    unsafe {
-                                        let dst: *mut u8 =
-                                            component_planes[comp_idx].as_mut_ptr().add(dst_offset);
-                                        self.idct_scaled_strided(
-                                            &coeffs, qt_values, dst, comp_w, bs,
-                                        );
-                                    }
+                                    self.idct_block_into(
+                                        &coeffs,
+                                        qt_values,
+                                        &mut component_planes[comp_idx],
+                                        dst_offset,
+                                        comp_w,
+                                        bs,
+                                    )?;
                                 }
                             }
                         }
@@ -618,10 +627,14 @@ impl<'a> Decoder<'a> {
                     let px_y = by * bs;
                     let dst_offset = px_y * ci.comp_w + px_x;
 
-                    unsafe {
-                        let dst = component_planes[comp_idx].as_mut_ptr().add(dst_offset);
-                        self.idct_scaled_strided(coeffs, qt_values, dst, ci.comp_w, bs);
-                    }
+                    self.idct_block_into(
+                        coeffs,
+                        qt_values,
+                        &mut component_planes[comp_idx],
+                        dst_offset,
+                        ci.comp_w,
+                        bs,
+                    )?;
                 }
             }
         }

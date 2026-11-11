@@ -232,16 +232,14 @@ impl<'a> Decoder<'a> {
                             let block_y: usize = (st.mcu_y * layout.v_blocks + v) * bs;
                             let dst_offset: usize = block_y * layout.comp_w + block_x;
 
-                            unsafe {
-                                let dst: *mut u8 = st.planes[comp_idx].as_mut_ptr().add(dst_offset);
-                                self.idct_scaled_strided(
-                                    &coeffs,
-                                    qt_values,
-                                    dst,
-                                    layout.comp_w,
-                                    bs,
-                                );
-                            }
+                            self.idct_block_into(
+                                &coeffs,
+                                qt_values,
+                                &mut st.planes[comp_idx],
+                                dst_offset,
+                                layout.comp_w,
+                                bs,
+                            )?;
                         }
                     }
                 }

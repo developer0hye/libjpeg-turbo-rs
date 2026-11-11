@@ -24,6 +24,24 @@ and `git log` between tags.
   apply (the strategy where `decode_raw` consults it: sequential Huffman
   scans, not lenient interleaved ones, P4-270).
 
+### Changed
+
+- The decode pipeline's IDCT writes go through one bounds-checked call
+  (`Decoder::idct_block_into`): the scan drivers (baseline, arithmetic,
+  progressive, incremental, raw strips) and `ProgressiveDecoder::output` no
+  longer form raw pointers, and a block outside its plane is an error rather
+  than an out-of-bounds write. Only 8x8 ISLOW blocks still reach a raw-pointer
+  (strided SIMD) kernel; every other size runs the safe kernels. Decode speed
+  is unchanged within measurement noise on every path and scale.
+
+### Removed
+
+- The `pub unsafe fn` strided IDCT wrappers in the low-level
+  `decode::idct_extended` (`idct_{3,5..7,9..16}x*_strided`) and
+  `decode::idct_scaled` (`idct_{4x4,2x2,1x1}_strided`) modules. Those module
+  paths are outside the supported API (`docs/STABILITY.md`); the safe
+  fixed-size kernels next to them remain.
+
 ### Fixed
 
 - `yuv::decompress_to_yuv_planes` / `decompress_to_yuv` panicked (divide by

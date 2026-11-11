@@ -11471,6 +11471,12 @@ sub-invariant or a CI leg, not an untested site) and are context.
    `idct_1x1_dc_only` covers the safe inner function, not the wrapper).
    **Delivered 2026-10-07** by `strided_islow_idct_writes_exactly_its_footprint`
    and `idct_1x1_strided_writes_one_byte_and_ignores_stride` (see *Progress*).
+   `idct_1x1_strided` and its test were deleted 2026-11-11, with every other
+   scalar `idct_{N}x{N}_strided` wrapper: the decode pipeline now calls the
+   safe fixed-size kernels through the bounds-checked
+   `Decoder::idct_block_into`, pinned by
+   `idct_block_into_writes_each_size_at_its_stride_and_nothing_else`
+   (`src/decode/pipeline_impl/color.rs`).
 5. **`avx2_merged_h2v2_ycbcr_to_rgb` / `avx2_merged_h2v2_inner`**
    (`src/simd/x86_64/avx2_merged.rs`, 2 sites) are exercised with an
    under-sized second luma row — the odd-height case their SAFETY contract
@@ -15538,3 +15544,38 @@ tests in `tests/a5_a6_worker.rs` (`a6_3_abort_strategy_surfaces_error_on_lenient
 `a6_3_abort_strategy_surfaces_error_on_partial_crop_rst_mismatch`) pass.
 Progressive, arithmetic and lossless decodes consult it too, or each is
 filed as its own item with the reason it cannot.
+
+## P4-271. The Streamed Raw Strip Decode Is About 30% Slower Than `decode_raw` on Photographic Content — **OPEN**
+
+Found 2026-11-11 while measuring the P4-141 IDCT consolidation. On a
+3840x2160 photo encoded by `cjpeg -quality 90` (decoded from
+`tests/fixtures/photo_3840x2160_420.jpg`), aarch64, best-of-15:
+
+| Input | `decode_raw` | `into_raw_strips`, all strips |
+|---|---:|---:|
+| 4:2:0 baseline | 48 ms | 62 ms |
+| grayscale baseline | 37 ms | 50 ms |
+
+The strip reader's own entropy and IDCT loop (`raw_stream_strip`, with the
+row functions inlined) takes about 1.5x the time of `decode_baseline_planes`
+for the same blocks, while IDCT time is similar. On the synthetic noise
+images first used (P4-268's 2048x2048 measurement), the strip reader was
+instead about 5% faster, so the gap depends on content: photos have many
+all-zero AC blocks, so per-MCU overhead in the row loop dominates.
+
+**Ruled out.** Threads (none in the decode); `decode_block` inlining (it is
+`#[inline(always)]` in both loops); the reader being spilled through `&mut
+RawStreamState` around each IDCT call (moving `BitReader` / `McuDecoder` into
+locals per row measured no change, `experiments/pipeline.tsv`).
+
+**Candidates not yet tried.** Per-MCU work the whole-frame loop hoists or
+does not do: the `Option` Huffman-table lookup and `ComponentPlan` copy per
+component, `mcu_count` / `warnings` updated through `&mut state`, the lenient
+`segment_short` branch evaluated in strict mode, and iterating
+`RawComponentGeometry` (seven fields) instead of a four-field layout. An
+instruction-level profile on an idle machine should come first.
+
+**Acceptance.** Within 5% of `decode_raw` on the two inputs above and on
+the decode matrix fixtures, with the strips still byte-identical to
+`decode_raw` and libjpeg (`tests/raw_strips.rs`), and the memory bound in
+`tests/raw_strips_memory.rs` still holding.

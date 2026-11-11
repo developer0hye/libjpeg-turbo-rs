@@ -307,11 +307,12 @@ impl<'a> Decoder<'a> {
         strip: usize,
         scratch: &mut [Vec<u8>],
     ) -> Result<()> {
-        // Every block write below lands inside its component's strip because
+        // Every block lands inside its component's strip because
         // `block_x + 8 <= padded_width` and `block_y + 8 <= rows_per_strip`.
-        // Those facts are checked here, against this state's own MCU count,
-        // so the SAFETY arguments in the row loops rest on this function
-        // alone and not on how its caller built `geometry`.
+        // `idct_block_into` checks each write anyway; checking the geometry
+        // here, against this state's own MCU count, turns a caller that built
+        // `geometry` elsewhere into one error up front rather than a panic in
+        // the 128-fill slices below or a misplaced block.
         let is_geometry_consistent: bool = scratch.len() == geometry.components.len()
             && geometry.components.len() <= 4
             && geometry
@@ -452,20 +453,14 @@ impl<'a> Decoder<'a> {
                         let block_x: usize = (mcu_x * comp.horizontal_sampling + h) * bs;
                         let block_y: usize = v * bs;
                         let dst_offset: usize = block_y * stride + block_x;
-                        // SAFETY: `raw_stream_strip` checked, just before
-                        // calling this, that this buffer holds exactly
-                        // `padded_width * rows_per_strip` bytes, with
-                        // `padded_width = state.mcus_x * h * 8` and
-                        // `rows_per_strip = v * 8`. Here `mcu_x < mcus_x` and
-                        // `h < horizontal_sampling`, so `block_x + 8 <=
-                        // padded_width`; `v < vertical_sampling`, so the
-                        // block's last row `block_y + 7 < rows_per_strip`.
-                        // The 8x8 write at `stride = padded_width` therefore
-                        // stays inside the buffer.
-                        unsafe {
-                            let dst: *mut u8 = scratch[comp_idx].as_mut_ptr().add(dst_offset);
-                            self.idct_scaled_strided(&coeffs, qt_values, dst, stride, bs);
-                        }
+                        self.idct_block_into(
+                            &coeffs,
+                            qt_values,
+                            &mut scratch[comp_idx],
+                            dst_offset,
+                            stride,
+                            bs,
+                        )?;
                     }
                 }
             }
@@ -568,16 +563,7 @@ impl<'a> Decoder<'a> {
                 }
 
                 let dst_offset: usize = v * bs * stride + bx * bs;
-                // SAFETY: `raw_stream_strip` checked, just before calling
-                // this, that `scratch` holds exactly `padded_width *
-                // rows_per_strip` bytes, `rows_per_strip = v_samp * 8` and
-                // `encoded_blocks_x * 8 <= padded_width`. Here
-                // `bx < encoded_blocks_x`, so `bx*8 + 8 <= padded_width`, and
-                // `v < v_samp`, so the block's last row is inside the strip.
-                unsafe {
-                    let dst: *mut u8 = scratch.as_mut_ptr().add(dst_offset);
-                    self.idct_scaled_strided(&coeffs, qt_values, dst, stride, bs);
-                }
+                self.idct_block_into(&coeffs, qt_values, scratch, dst_offset, stride, bs)?;
 
                 if !segment_short && state.bit_reader.insufficient_data() {
                     if !self.lenient {

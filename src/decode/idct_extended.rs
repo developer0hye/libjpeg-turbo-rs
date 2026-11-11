@@ -1118,36 +1118,3 @@ pub fn idct_16x16(coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 256])
         output[row * 16 + 8] = level_shift_clamp((tmp27 - tmp13) >> s);
     }
 }
-
-macro_rules! strided_wrapper {
-    ($name:ident, $inner:ident, $n:expr) => {
-        /// # Safety
-        /// `output` must point to at least `(N - 1) * stride + N` writable bytes,
-        /// where N is the block dimension for this IDCT variant.
-        pub unsafe fn $name(coeffs: &[i16; 64], quant: &[u16; 64], output: *mut u8, stride: usize) {
-            unsafe {
-                let mut tmp = [0u8; $n * $n];
-                $inner(coeffs, quant, &mut tmp);
-                for row in 0..$n {
-                    core::ptr::copy_nonoverlapping(
-                        tmp.as_ptr().add(row * $n),
-                        output.add(row * stride),
-                        $n,
-                    );
-                }
-            }
-        }
-    };
-}
-strided_wrapper!(idct_3x3_strided, idct_3x3, 3);
-strided_wrapper!(idct_5x5_strided, idct_5x5, 5);
-strided_wrapper!(idct_6x6_strided, idct_6x6, 6);
-strided_wrapper!(idct_7x7_strided, idct_7x7, 7);
-strided_wrapper!(idct_9x9_strided, idct_9x9, 9);
-strided_wrapper!(idct_10x10_strided, idct_10x10, 10);
-strided_wrapper!(idct_11x11_strided, idct_11x11, 11);
-strided_wrapper!(idct_12x12_strided, idct_12x12, 12);
-strided_wrapper!(idct_13x13_strided, idct_13x13, 13);
-strided_wrapper!(idct_14x14_strided, idct_14x14, 14);
-strided_wrapper!(idct_15x15_strided, idct_15x15, 15);
-strided_wrapper!(idct_16x16_strided, idct_16x16, 16);

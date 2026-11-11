@@ -294,10 +294,13 @@ impl ProgressiveDecoder {
                     let px_y: usize = by * block_size;
                     let dst_offset: usize = px_y * ci.comp_w + px_x;
 
-                    unsafe {
-                        let dst: *mut u8 = component_planes[comp_idx].as_mut_ptr().add(dst_offset);
-                        self.idct_islow_strided(coeffs, qt_values, dst, ci.comp_w);
-                    }
+                    self.idct_block_into(
+                        coeffs,
+                        qt_values,
+                        &mut component_planes[comp_idx],
+                        dst_offset,
+                        ci.comp_w,
+                    )?;
                 }
             }
         }
@@ -356,52 +359,74 @@ impl ProgressiveDecoder {
 
     // ---- Private helpers ----
 
-    /// IDCT writing directly to a strided destination buffer.
+    /// IDCT one 8x8 block into `plane` at `offset`, rows `stride` apart.
     ///
-    /// # Safety
-    /// `output` must point to at least `7 * stride + 8` writable bytes.
-    #[inline(always)]
-    unsafe fn idct_islow_strided(
+    /// The eight rows span `7 * stride + 8` bytes; that is checked once per
+    /// block, so the caller needs no `unsafe` and a block that does not fit
+    /// is an error. The strided SIMD kernels then store straight into the
+    /// plane: the fully safe form (the safe kernel into a stack block, then a
+    /// row copy) measured 8-10% slower on the 8K progressive fixture, so it is
+    /// only the fallback where no strided kernel exists.
+    fn idct_block_into(
         &self,
         coeffs: &[i16; 64],
         quant: &[u16; 64],
-        output: *mut u8,
+        plane: &mut [u8],
+        offset: usize,
         stride: usize,
-    ) {
-        unsafe {
-            #[cfg(all(target_arch = "aarch64", feature = "simd"))]
-            {
-                return crate::simd::aarch64::idct::neon_idct_islow_strided(
-                    coeffs, quant, output, stride,
-                );
-            }
-
-            #[cfg(all(target_arch = "x86_64", feature = "simd"))]
-            {
-                if crate::cpu_has!("avx2") {
-                    return crate::simd::x86_64::avx2_idct::avx2_idct_islow_strided(
+    ) -> Result<()> {
+        let dst: Option<&mut [u8]> = stride
+            .checked_mul(7)
+            .and_then(|bytes| bytes.checked_add(8))
+            .and_then(|span| offset.checked_add(span))
+            .filter(|_| stride >= 8)
+            .and_then(|end| plane.get_mut(offset..end));
+        let Some(dst) = dst else {
+            return Err(JpegError::Unsupported(alloc::string::String::from(
+                "IDCT block does not fit its component plane",
+            )));
+        };
+        #[cfg(all(feature = "simd", any(target_arch = "aarch64", target_arch = "x86_64")))]
+        {
+            let output: *mut u8 = dst.as_mut_ptr();
+            // SAFETY: `output` points at `dst`, which holds exactly
+            // `7 * stride + 8` writable bytes (checked above), the contract
+            // of each strided ISLOW kernel; each is only reached on the
+            // architecture (NEON) or the runtime-detected feature (AVX2,
+            // SSE2) it is compiled for.
+            unsafe {
+                #[cfg(target_arch = "aarch64")]
+                {
+                    crate::simd::aarch64::idct::neon_idct_islow_strided(
                         coeffs, quant, output, stride,
                     );
+                    return Ok(());
                 }
-                if crate::cpu_has!("sse2") {
-                    return crate::simd::x86_64::idct::sse2_idct_islow_strided(
-                        coeffs, quant, output, stride,
-                    );
-                }
-            }
-
-            #[allow(unreachable_code)]
-            {
-                let mut tmp = [0u8; 64];
-                (self.routines.idct_islow)(coeffs, quant, &mut tmp);
-                for row in 0..8 {
-                    core::ptr::copy_nonoverlapping(
-                        tmp.as_ptr().add(row * 8),
-                        output.add(row * stride),
-                        8,
-                    );
+                #[cfg(target_arch = "x86_64")]
+                {
+                    if crate::cpu_has!("avx2") {
+                        crate::simd::x86_64::avx2_idct::avx2_idct_islow_strided(
+                            coeffs, quant, output, stride,
+                        );
+                        return Ok(());
+                    }
+                    if crate::cpu_has!("sse2") {
+                        crate::simd::x86_64::idct::sse2_idct_islow_strided(
+                            coeffs, quant, output, stride,
+                        );
+                        return Ok(());
+                    }
                 }
             }
+        }
+        #[allow(unreachable_code)]
+        {
+            let mut block: [u8; 64] = [0u8; 64];
+            (self.routines.idct_islow)(coeffs, quant, &mut block);
+            for (row, samples) in dst.chunks_mut(stride).zip(block.chunks_exact(8)) {
+                row[..8].copy_from_slice(samples);
+            }
+            Ok(())
         }
     }
 
