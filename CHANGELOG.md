@@ -26,13 +26,15 @@ and `git log` between tags.
 
 ### Changed
 
-- The decode pipeline's IDCT writes go through one bounds-checked call
-  (`Decoder::idct_block_into`): the scan drivers (baseline, arithmetic,
-  progressive, incremental, raw strips) and `ProgressiveDecoder::output` no
-  longer form raw pointers, and a block outside its plane is an error rather
-  than an out-of-bounds write. Only 8x8 ISLOW blocks still reach a raw-pointer
-  (strided SIMD) kernel; every other size runs the safe kernels. Decode speed
-  is unchanged within measurement noise on every path and scale.
+- The decoder's IDCT writes are bounds-checked: the scan drivers (baseline,
+  arithmetic, progressive, incremental, raw strips) and
+  `ProgressiveDecoder::output` pass a plane slice instead of a raw pointer, and
+  a block outside its plane is a `CorruptData` error rather than an
+  out-of-bounds write. Only 8x8 ISLOW blocks still reach a raw-pointer
+  (strided SIMD) kernel, through one crate-internal function that checks the
+  destination length itself; every other size and DCT method runs the safe
+  kernels. Decode speed is unchanged within measurement noise on every path
+  and scale (measured on aarch64; x86_64 not measured).
 
 ### Removed
 

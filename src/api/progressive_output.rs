@@ -361,12 +361,13 @@ impl ProgressiveDecoder {
 
     /// IDCT one 8x8 block into `plane` at `offset`, rows `stride` apart.
     ///
-    /// The eight rows span `7 * stride + 8` bytes; that is checked once per
-    /// block, so the caller needs no `unsafe` and a block that does not fit
-    /// is an error. The strided SIMD kernels then store straight into the
-    /// plane: the fully safe form (the safe kernel into a stack block, then a
-    /// row copy) measured 8-10% slower on the 8K progressive fixture, so it is
-    /// only the fallback where no strided kernel exists.
+    /// The eight rows span `7 * stride + 8` bytes; that is checked per block
+    /// (and again inside `simd::idct_islow_8x8_strided`, which guards its own
+    /// raw store), so a block that does not fit is an error. The block then
+    /// goes to `simd::idct_islow_8x8_strided`, which stores straight into the
+    /// plane: the safe kernel into a stack block plus a row copy measured
+    /// 8-10% slower on the 8K progressive fixture, so it is only the
+    /// fallback where the build has no strided kernel.
     fn idct_block_into(
         &self,
         coeffs: &[i16; 64],
@@ -382,52 +383,19 @@ impl ProgressiveDecoder {
             .filter(|_| stride >= 8)
             .and_then(|end| plane.get_mut(offset..end));
         let Some(dst) = dst else {
-            return Err(JpegError::Unsupported(alloc::string::String::from(
+            return Err(JpegError::CorruptData(alloc::string::String::from(
                 "IDCT block does not fit its component plane",
             )));
         };
-        #[cfg(all(feature = "simd", any(target_arch = "aarch64", target_arch = "x86_64")))]
-        {
-            let output: *mut u8 = dst.as_mut_ptr();
-            // SAFETY: `output` points at `dst`, which holds exactly
-            // `7 * stride + 8` writable bytes (checked above), the contract
-            // of each strided ISLOW kernel; each is only reached on the
-            // architecture (NEON) or the runtime-detected feature (AVX2,
-            // SSE2) it is compiled for.
-            unsafe {
-                #[cfg(target_arch = "aarch64")]
-                {
-                    crate::simd::aarch64::idct::neon_idct_islow_strided(
-                        coeffs, quant, output, stride,
-                    );
-                    return Ok(());
-                }
-                #[cfg(target_arch = "x86_64")]
-                {
-                    if crate::cpu_has!("avx2") {
-                        crate::simd::x86_64::avx2_idct::avx2_idct_islow_strided(
-                            coeffs, quant, output, stride,
-                        );
-                        return Ok(());
-                    }
-                    if crate::cpu_has!("sse2") {
-                        crate::simd::x86_64::idct::sse2_idct_islow_strided(
-                            coeffs, quant, output, stride,
-                        );
-                        return Ok(());
-                    }
-                }
-            }
+        if crate::simd::idct_islow_8x8_strided(coeffs, quant, dst, stride) {
+            return Ok(());
         }
-        #[allow(unreachable_code)]
-        {
-            let mut block: [u8; 64] = [0u8; 64];
-            (self.routines.idct_islow)(coeffs, quant, &mut block);
-            for (row, samples) in dst.chunks_mut(stride).zip(block.chunks_exact(8)) {
-                row[..8].copy_from_slice(samples);
-            }
-            Ok(())
+        let mut block: [u8; 64] = [0u8; 64];
+        (self.routines.idct_islow)(coeffs, quant, &mut block);
+        for (row, samples) in dst.chunks_mut(stride).zip(block.chunks_exact(8)) {
+            row[..8].copy_from_slice(samples);
         }
+        Ok(())
     }
 
     /// Decode a single progressive scan's entropy data into coefficient buffers.
@@ -1134,6 +1102,59 @@ mod tests {
 
         let final_image: Image = decoder.finish().expect("finish");
         assert_eq!(final_image.data.len(), WIDTH * HEIGHT * 3);
+    }
+
+    /// `idct_block_into` writes the 8x8 block at `offset`, rows `stride`
+    /// apart, equal to the safe ISLOW kernel and nothing else; a block one
+    /// byte past the plane, an overflowing offset, or a stride narrower than
+    /// the block is an error that writes nothing.
+    #[test]
+    fn idct_block_into_writes_in_place_and_refuses_a_block_that_does_not_fit() {
+        let decoder: ProgressiveDecoder =
+            ProgressiveDecoder::new(PROGRESSIVE_16X16_420).expect("progressive decode");
+        let mut coeffs: [i16; 64] = [0; 64];
+        for (i, c) in coeffs.iter_mut().enumerate().take(24) {
+            *c = (i as i16 * 29 % 53) - 26;
+        }
+        coeffs[0] = 90;
+        let quant: [u16; 64] = core::array::from_fn(|i: usize| 1 + (i as u16 % 5));
+        let mut expected: [u8; 64] = [0u8; 64];
+        (decoder.routines.idct_islow)(&coeffs, &quant, &mut expected);
+        for canary in [0xA5u8, 0x5A] {
+            for stride in [8usize, 11] {
+                let offset: usize = stride + 3;
+                let span: usize = 7 * stride + 8;
+                let mut plane: Vec<u8> = vec![canary; offset + span + 2];
+                decoder
+                    .idct_block_into(&coeffs, &quant, &mut plane, offset, stride)
+                    .expect("block fits");
+                for (i, &byte) in plane.iter().enumerate() {
+                    let want: u8 = i
+                        .checked_sub(offset)
+                        .map(|rel| (rel / stride, rel % stride))
+                        .filter(|&(row, col)| row < 8 && col < 8)
+                        .map_or(canary, |(row, col)| expected[row * 8 + col]);
+                    assert_eq!(byte, want, "stride={stride} canary={canary:#04x} byte {i}");
+                }
+
+                let mut short: Vec<u8> = vec![canary; offset + span - 1];
+                assert!(matches!(
+                    decoder.idct_block_into(&coeffs, &quant, &mut short, offset, stride),
+                    Err(JpegError::CorruptData(_))
+                ));
+                let refusals: [(usize, usize); 3] =
+                    [(offset, stride), (usize::MAX - 2, stride), (0, 7)];
+                for (bad_offset, bad_stride) in refusals {
+                    assert!(
+                        decoder
+                            .idct_block_into(&coeffs, &quant, &mut short, bad_offset, bad_stride)
+                            .is_err(),
+                        "offset={bad_offset} stride={bad_stride} accepted"
+                    );
+                }
+                assert!(short.iter().all(|&b| b == canary), "a refused block wrote");
+            }
+        }
     }
 
     /// P4-136 criterion 4: a size the allocator cannot serve must surface as

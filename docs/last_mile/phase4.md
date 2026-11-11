@@ -1386,7 +1386,7 @@ C expands instead of ignoring: `djpeg -rgb` on a `cjpeg -precision 12` grayscale
 
 | Source | Result |
 |---|---|
-| 8-bit baseline YCbCr (4:2:0) | panic, now `pipeline_impl/color.rs:517` (`grayscale/cmyk handled separately`) |
+| 8-bit baseline YCbCr (4:2:0) | panic, now `Decoder::color_convert_row`'s grayscale/CMYK arm in `pipeline_impl/color.rs` (`grayscale/cmyk handled separately`) |
 | 8-bit baseline grayscale | panic, now `pipeline_impl/output.rs:1012` (grayscale expansion match) |
 | 8-bit lossless grayscale (SOF3) | panic, now `pipeline_impl/lossless.rs:376` (`lossless_output_grayscale` match) |
 | 12-bit grayscale | `Unsupported("cannot convert 12-bit JPEG to Cmyk")` — the #394 fix |
@@ -1429,9 +1429,9 @@ config with no kernels has no green tests claiming parity.
 
 ## P4-71. Scaled Decode Never Dispatches to SIMD Reduced-Size IDCT on Any Arch — **OPEN**
 
-**Motivation.** Filed 2026-07-28 by the #390 docs-drift audit, which caught `tests/simd_parity.rs` producing `unused_variables` hard-errors under the newly widened x86_64 clippy gate: the `parity_idct_4x4/2x2/1x1` comparison blocks are `cfg(target_arch = "aarch64")`-only because `src/simd/x86_64/` has no reduced-size IDCT kernels (`avx2_idct.rs`/`idct.rs` cover 8x8 only), and wasm32 likewise. C libjpeg-turbo ships SSE2 4x4/2x2 kernels (`jidctred-sse2.asm`). Worse (codex P2 on the fix commit): **even on aarch64 the `neon_idct_4x4/2x2/1x1` kernels have no production caller** — `Decoder::idct_scaled_strided` (now `src/decode/pipeline_impl/color.rs`, re-verified 2026-08-02) dispatches the sizes 4/2/1 unconditionally to the scalar `idct_scaled::*_strided` while its `8 =>` arm delegates to the SIMD `idct_islow_strided`, so the NEON routines are exercised only by the parity test. Note the scope precisely: components whose block size stays 8 during a scaled decode (e.g. Cb/Cr in 4:2:0 at 1/2 scale, per `compute_comp_block_size`) still take the SIMD 8x8 IDCT — it is exactly the reduced-size 4/2/1 branches that are always scalar, on every arch with a SIMD backend. The same audit found `avx2_rgba/bgr/bgra_to_ycbcr_row` existed but were never parity-tested — that half was fixed on the spot (the x86_64 block in `parity_rgb_to_ycbcr_rows` now mirrors the NEON/WASM four-format coverage).
+**Motivation.** Filed 2026-07-28 by the #390 docs-drift audit, which caught `tests/simd_parity.rs` producing `unused_variables` hard-errors under the newly widened x86_64 clippy gate: the `parity_idct_4x4/2x2/1x1` comparison blocks are `cfg(target_arch = "aarch64")`-only because `src/simd/x86_64/` has no reduced-size IDCT kernels (`avx2_idct.rs`/`idct.rs` cover 8x8 only), and wasm32 likewise. C libjpeg-turbo ships SSE2 4x4/2x2 kernels (`jidctred-sse2.asm`). Worse (codex P2 on the fix commit): **even on aarch64 the `neon_idct_4x4/2x2/1x1` kernels have no production caller** — `Decoder::idct_scaled_strided` (now `src/decode/pipeline_impl/color.rs`, re-verified 2026-08-02) dispatches the sizes 4/2/1 unconditionally to the scalar `idct_scaled::*_strided` while its `8 =>` arm delegates to the SIMD `idct_islow_strided`, so the NEON routines are exercised only by the parity test. (Since 2026-11-11 that dispatch is the `match n` in `Decoder::idct_block_through_stack`, reached from the bounds-checked `Decoder::idct_block_into`, and the sizes 4 and 2 run the safe `idct_scaled::idct_4x4` / `idct_2x2` into a stack block before a row copy, while size 1 stores `idct_scaled::idct_1x1`'s one sample directly; the NEON reduced-size kernels still have no production caller.) Note the scope precisely: components whose block size stays 8 during a scaled decode (e.g. Cb/Cr in 4:2:0 at 1/2 scale, per `compute_comp_block_size`) still take the SIMD 8x8 IDCT — it is exactly the reduced-size 4/2/1 branches that are always scalar, on every arch with a SIMD backend. The same audit found `avx2_rgba/bgr/bgra_to_ycbcr_row` existed but were never parity-tested — that half was fixed on the spot (the x86_64 block in `parity_rgb_to_ycbcr_rows` now mirrors the NEON/WASM four-format coverage).
 
-**Acceptance criteria.** (1) Wire the existing `neon_idct_*` kernels into the `idct_scaled_strided` dispatch (or reject them with a benchmark showing scalar wins on the strided shapes — the NEON kernels are contiguous-output, so a strided adapter's copy cost may eat the win). (2) Port the reduced-size kernels to x86_64 (SSE2 baseline per `jidctred-sse2.asm`; AVX2 optional) and wasm32, wired behind the same dispatch. (3) Extend the three parity tests' comparison blocks to those arches, deleting the `cfg_attr(not(aarch64), allow(unused_variables))` shims. (4) Record the per-arch perf delta in `experiments/idct.tsv`. Benchmark-gated per the experiment protocol, scoped to the three SIMD backends (aarch64/NEON, x86_64/SSE2+AVX2, wasm32/SIMD128 — intentionally scalar targets stay P4-60's business): a closure that leaves one of *those* backends scalar must cite the losing measurement, not silence.
+**Acceptance criteria.** (1) Wire the existing `neon_idct_*` kernels into the `match n` dispatch in `Decoder::idct_block_through_stack` (src/decode/pipeline_impl/color.rs), or reject them with a benchmark showing scalar wins. The NEON kernels are contiguous-output, which is now the shape sizes 4 and 2 already take (a stack block, then a row copy; size 1 is one direct store), so the adapter cost the original criterion worried about is gone. (2) Port the reduced-size kernels to x86_64 (SSE2 baseline per `jidctred-sse2.asm`; AVX2 optional) and wasm32, wired behind the same dispatch. (3) Extend the three parity tests' comparison blocks to those arches, deleting the `cfg_attr(not(aarch64), allow(unused_variables))` shims. (4) Record the per-arch perf delta in `experiments/idct.tsv`. Benchmark-gated per the experiment protocol, scoped to the three SIMD backends (aarch64/NEON, x86_64/SSE2+AVX2, wasm32/SIMD128 — intentionally scalar targets stay P4-60's business): a closure that leaves one of *those* backends scalar must cite the losing measurement, not silence.
 
 ## P4-72. Grayscale Colorspace Override Cannot Convert — It Only Copies a Full-Resolution Luma Plane — **CLOSED 2026-08-02**
 
@@ -8421,6 +8421,18 @@ the harness first would only pin current behaviour.
   still hold `unsafe`, but all ten sites are `idct_scaled_strided`
   destination pointers — strided IDCT dispatch, not parsing; they belong to
   the criterion-4 inventory.
+- **Criterion 5 – 2026-11-11:** every 8-bit decode IDCT write now goes through the
+  bounds-checked `Decoder::idct_block_into` (`pipeline_impl/color.rs`) or
+  `ProgressiveDecoder::idct_block_into` (`src/api/progressive_output.rs`),
+  which return `CorruptData` for a block that does not fit its plane. The
+  scalar `idct_{N}x{N}_strided` wrappers are deleted, and the only raw-pointer
+  IDCT store left is the safe `pub(crate) fn simd::idct_islow_8x8_strided`
+  (`src/simd/mod.rs`, one site, inventoried there). The gate now holds
+  thirty-two parser files (the five scan drivers and `color.rs` in
+  `pipeline_impl/` joined) and seven unsafe-free kernels (`idct_extended.rs`,
+  `idct_scaled.rs`); `INVENTORY_OWNED` is empty. The inventory lost 31 sites
+  and gained 1. Cost: within noise on every decode path and scale (aarch64,
+  `experiments/pipeline.tsv`, `idct.tsv`, `progressive.tsv`).
 - **Criterion 4 — 2026-09-08, root crate:** `docs/UNSAFE_INVENTORY.md`
   lists every code `unsafe` token under `src/` — 301 sites in 45 files,
   224 rows keyed by (file, enclosing item) — with the seven cells the
@@ -8898,7 +8910,11 @@ the harness first would only pin current behaviour.
     `idct_scaled_strided` — a raw destination pointer plus a stride, not
     feature-gated, one of the sites `docs/UNSAFE_INVENTORY.md` owns — and Miri
     checks each of those writes for bounds and provenance; the baseline decodes
-    reach the three equivalents in `pipeline_impl/baseline.rs`. *A tripwire:*
+    reach the three equivalents in `pipeline_impl/baseline.rs`. (Since
+    2026-11-11 all of those writes are bounds-checked slices through
+    `Decoder::idct_block_into` and `ProgressiveDecoder::idct_block_into`, the
+    three `baseline.rs` raw pointers are gone, and the one raw store left,
+    `simd::idct_islow_8x8_strided`, is not compiled in the Miri job.) *A tripwire:*
     reading every byte of the reconstruction does **not** test initialisation
     today, because both destinations are initialised by construction
     (`try_filled_vec` on the colour path, reserve-and-`extend_from_slice` on the
@@ -11404,7 +11420,7 @@ twins for legs without a sanitizer:
 
 `.github/workflows/sanitizers.yml`'s `asan` and `ubsan` jobs already ran every
 lib unit test; they now also fail on a runner without AVX2 (where these tests
-compare fallbacks) and re-run `-- kernel_bounds_tests`, requiring the six
+compare fallbacks) and re-run `-- kernel_bounds_tests`, requiring the six (seven since 2026-11-11)
 x86_64 tests to pass. `tests/sanitizer_coverage_gate.rs` holds that step's
 count to the modules' `#[test]`s and rejects, each driven over a mutation of
 the real workflow: a dropped `pull_request` trigger or an added `paths`
@@ -11476,7 +11492,11 @@ sub-invariant or a CI leg, not an untested site) and are context.
    safe fixed-size kernels through the bounds-checked
    `Decoder::idct_block_into`, pinned by
    `idct_block_into_writes_each_size_at_its_stride_and_nothing_else`
-   (`src/decode/pipeline_impl/color.rs`).
+   (`src/decode/pipeline_impl/color.rs`). The three strided SIMD kernels now
+   have one caller, the safe `simd::idct_islow_8x8_strided`, which checks the
+   destination's length itself; `strided_islow_dispatch_checks_the_footprint_before_any_kernel`
+   (`src/simd/kernel_bounds_tests.rs`) pins that check on exact-size
+   allocations.
 5. **`avx2_merged_h2v2_ycbcr_to_rgb` / `avx2_merged_h2v2_inner`**
    (`src/simd/x86_64/avx2_merged.rs`, 2 sites) are exercised with an
    under-sized second luma row — the odd-height case their SAFETY contract
@@ -15579,3 +15599,52 @@ instruction-level profile on an idle machine should come first.
 the decode matrix fixtures, with the strips still byte-identical to
 `decode_raw` and libjpeg (`tests/raw_strips.rs`), and the memory bound in
 `tests/raw_strips_memory.rs` still holding.
+
+## P4-272. `JSIMD_FORCENONE=1` Does Not Reach Most of the Decoder's SIMD Kernels — **OPEN**
+
+Found 2026-11-11 by the reviews of the P4-141 IDCT consolidation. `detect()`
+(`src/simd/mod.rs`) returns the scalar routine table when `JSIMD_FORCENONE=1`,
+and the module docs promise that this forces the scalar fallback. The
+decoder's hot paths choose their kernels by architecture instead of from that
+table, so they run SIMD anyway:
+
+- **8x8 ISLOW IDCT, every SIMD architecture.** `simd::idct_islow_8x8_strided`,
+  which every 8-bit 8x8 ISLOW block of a sequential, progressive, arithmetic,
+  incremental or raw-strip decode and of `ProgressiveDecoder::output` goes
+  through, picks NEON, AVX2 or SSE2 by `cfg` and `cpu_has!`.
+- **Color conversion, merged upsampling and fancy upsampling, aarch64 and
+  x86_64.** On aarch64, `Decoder::ycbcr_to_{rgb,rgba,bgr,bgra}_row` and
+  `color_convert_row` (its six extended 4-byte formats), `merged_h2v1` /
+  `merged_h2v2`, `fancy_upsample_h2v1` and `fancy_h2v2` in
+  `src/decode/pipeline_impl/color.rs`, and `ProgressiveDecoder`'s color and
+  upsample helpers in `src/api/progressive_output.rs`, call the `neon_*`
+  kernels directly under `cfg(target_arch = "aarch64")`. On x86_64,
+  `fancy_h2v2_row_dispatch` (and through it `fancy_h2v2_strided_dispatch`),
+  `ycbcr_to_{rgba,bgr,bgra}_row`, the same six arms of `color_convert_row`,
+  `merged_h2v1` / `merged_h2v2` and `fancy_h2v2` pick AVX2 or SSE2 by
+  `cpu_has!`. (wasm32 is not affected: `detect()` does not read the variable
+  there.)
+
+(A further `Decoder::idct_islow`, which called `neon_idct_islow` directly,
+had no caller and was deleted 2026-11-11.)
+
+This predates the consolidation (the dispatchers it replaced behaved the
+same) and does not change output where the kernels are bit-exact with their
+scalar twins. It does mean that `JSIMD_FORCENONE=1` cannot isolate a SIMD
+bug in any of these stages or measure the scalar decoder on aarch64, and any
+measurement taken under it that counted SIMD instructions in a decode ran
+these kernels.
+
+**Acceptance criteria.** With `JSIMD_FORCENONE=1`, a decode runs no SIMD
+kernel: the routine table records whether SIMD was selected (or the strided
+front and the direct-SIMD dispatchers read the same cached decision), and
+each path above takes its scalar form. A test pins it by mechanism, not
+output (for example a forced table injected in a unit test). Note that
+`strided_islow_dispatch_checks_the_footprint_before_any_kernel`
+(`src/simd/kernel_bounds_tests.rs`) asserts the strided kernel runs, while
+`neon_color_tests.rs`, `neon_idct_tests.rs`, `neon_upsample_tests.rs`,
+`simd_dispatch_tests.rs` and `simd_x86_tests.rs` (`src/simd/`) set
+`JSIMD_FORCENONE` for the whole test process; a fix that reads the
+variable must inject the decision or serialize those tests, or that
+assertion becomes racy. The decode matrix is re-measured to show the
+default path is unchanged.

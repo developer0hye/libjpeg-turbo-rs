@@ -356,8 +356,10 @@ jobs:
         timeout-minutes: 25
       # P4-141 criterion 1: the public API, from outside the crate.
       # `miri_public_api` walks each intermediate progressive reconstruction
-      # (P4-136), which under the interpreter checks the raw destination
-      # pointers `decode_progressive_planes` hands to `idct_scaled_strided`;
+      # (P4-136), whose block writes go through the bounds-checked
+      # `ProgressiveDecoder::idct_block_into` (safe code since 2026-11-11; the
+      # one raw SIMD store is not compiled without `simd`, so Miri does not
+      # see it);
       # reading the reconstruction back is a tripwire for a return to
       # `set_len`-over-spare-capacity rather than a live uninit check, because
       # today's destinations are initialised at allocation (see the suite's

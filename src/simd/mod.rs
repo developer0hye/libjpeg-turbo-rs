@@ -333,6 +333,64 @@ pub fn detect() -> SimdRoutines {
     scalar::routines()
 }
 
+/// IDCT (ISLOW) one 8x8 block straight into `dst`, rows `stride` apart, with
+/// the build's strided SIMD kernel. Returns `false`, having written nothing,
+/// when this build or CPU has no strided kernel, when `stride` is below 8, or
+/// when `dst` is shorter than the block's `7 * stride + 8` bytes; the caller
+/// then takes its safe path.
+///
+/// This is the decoder's one `unsafe` IDCT store. Every 8-bit decode path
+/// that writes an 8x8 ISLOW block into a plane (`Decoder::idct_block_into`,
+/// `ProgressiveDecoder::idct_block_into`) comes through here: the safe kernel
+/// into a stack block plus a row copy measured 8-17% slower on store-bound
+/// paths, so the store keeps its kernel and its bounds argument lives in one
+/// place.
+#[inline(always)]
+pub(crate) fn idct_islow_8x8_strided(
+    coeffs: &[i16; 64],
+    quant: &[u16; 64],
+    dst: &mut [u8],
+    stride: usize,
+) -> bool {
+    let span: Option<usize> = stride.checked_mul(7).and_then(|bytes| bytes.checked_add(8));
+    if stride < 8 || span.is_none_or(|span| dst.len() < span) {
+        return false;
+    }
+    #[cfg(all(feature = "simd", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    {
+        let output: *mut u8 = dst.as_mut_ptr();
+        // SAFETY: `dst` holds at least `7 * stride + 8` writable bytes
+        // (checked above), the footprint each strided ISLOW kernel writes.
+        // NEON is mandatory on aarch64. On x86_64, `cpu_has!` detects AVX2 /
+        // SSE2 at runtime with `std`, and without `std` reports whether the
+        // build enables the feature, so either way a kernel runs only where
+        // its instructions exist.
+        unsafe {
+            #[cfg(target_arch = "aarch64")]
+            {
+                aarch64::idct::neon_idct_islow_strided(coeffs, quant, output, stride);
+                return true;
+            }
+            #[cfg(target_arch = "x86_64")]
+            {
+                if crate::cpu_has!("avx2") {
+                    x86_64::avx2_idct::avx2_idct_islow_strided(coeffs, quant, output, stride);
+                    return true;
+                }
+                if crate::cpu_has!("sse2") {
+                    x86_64::idct::sse2_idct_islow_strided(coeffs, quant, output, stride);
+                    return true;
+                }
+            }
+        }
+    }
+    #[allow(unreachable_code)]
+    {
+        let _ = (coeffs, quant, dst);
+        false
+    }
+}
+
 /// Detect available SIMD features and return the best encoder dispatch table.
 pub fn detect_encoder() -> EncoderSimdRoutines {
     #[cfg(all(feature = "std", not(target_arch = "wasm32")))]

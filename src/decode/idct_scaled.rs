@@ -370,6 +370,17 @@ mod tests {
         );
     }
 
+    /// Fuzz Smoke runs 30420069849 / 30438301770 / 30461194331 /
+    /// 30485530878: corrupt streams decoded at a 1/2 `ScalingFactor`
+    /// drove the reduced IDCT's fixed-point intermediates past `i32` and
+    /// panicked on every arithmetic op in the block (`attempt to
+    /// {add,subtract,multiply} with overflow` at five distinct lines).
+    /// C's `JLONG` is `long` (`jpegint.h:62`), which is only required to
+    /// hold 32 bits, so wrapping here is the documented C contract: not
+    /// a bug to report to the caller.
+    ///
+    /// Extreme-but-legal encodings: `i16` coefficients and `u16` quant
+    /// values are both fully attacker-controlled through DQT/entropy.
     #[test]
     fn reduced_idct_wraps_instead_of_panicking_on_saturated_coefficients() {
         let extremes: [(i16, u16); 4] = [

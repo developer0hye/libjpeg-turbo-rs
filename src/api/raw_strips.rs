@@ -38,6 +38,7 @@
 use crate::common::error::{DecodeWarning, JpegError, Result};
 use crate::decode::pipeline::{Decoder, RawStreamState};
 use alloc::{
+    boxed::Box,
     format,
     string::{String, ToString},
     vec::Vec,
@@ -85,7 +86,9 @@ enum Source<'a> {
     /// Single-scan Huffman stream, decoded one row per call.
     Streaming {
         decoder: Decoder<'a>,
-        state: RawStreamState<'a>,
+        // Boxed so this variant is not a few hundred bytes larger than
+        // `Pending`; one fixed-size allocation per reader.
+        state: Box<RawStreamState<'a>>,
     },
     /// Progressive, arithmetic or multi-scan stream, whose whole-frame
     /// decode runs on the first strip.
@@ -152,7 +155,10 @@ impl<'a> RawStripReader<'a> {
         let (source, buffers): (Source<'a>, Vec<Vec<u8>>) =
             match decoder.raw_stream_begin(&geometry)? {
                 Some(state) => (
-                    Source::Streaming { decoder, state },
+                    Source::Streaming {
+                        decoder,
+                        state: Box::new(state),
+                    },
                     Decoder::raw_stream_scratch(&geometry)?,
                 ),
                 None => (Source::Pending(decoder), Vec::new()),

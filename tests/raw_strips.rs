@@ -822,24 +822,22 @@ fn decoder_yuv_planes_into_applies_the_decoders_settings() {
 /// does. A refactor once cleared them on every strip after the first.
 #[test]
 fn fallback_strips_keep_the_whole_frame_decodes_warnings() {
-    let jpeg: Vec<u8> = std::fs::read(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/fuzz_repro/corrupt_huffman_65x65_422.jpg"
-    ))
-    .expect("fixture");
-    let probe: Decoder<'_> = Decoder::new(&jpeg).unwrap();
+    // Embedded, not read at run time: the wasm32-wasip1 job runs this file under
+    // wasmtime, which cannot open the absolute fixture path.
+    let jpeg: &[u8] = include_bytes!("fixtures/fuzz_repro/corrupt_huffman_65x65_422.jpg");
+    let probe: Decoder<'_> = Decoder::new(jpeg).unwrap();
     assert!(
         probe.has_multiple_scans(),
         "fixture must take the fallback path"
     );
 
-    let mut decoder: Decoder<'_> = Decoder::new(&jpeg).unwrap();
+    let mut decoder: Decoder<'_> = Decoder::new(jpeg).unwrap();
     decoder.set_lenient(true);
     let (raw, expected): (RawImage, Vec<DecodeWarning>) =
         decoder.decode_raw_with_warnings().unwrap();
     assert!(!expected.is_empty(), "fixture must be corrupt");
 
-    let mut decoder: Decoder<'_> = Decoder::new(&jpeg).unwrap();
+    let mut decoder: Decoder<'_> = Decoder::new(jpeg).unwrap();
     decoder.set_lenient(true);
     let collected: Collected = collect(decoder.into_raw_strips().unwrap());
     assert!(collected.strips > 1, "the bug needed more than one strip");
