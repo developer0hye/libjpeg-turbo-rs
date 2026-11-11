@@ -23,7 +23,9 @@ impl<'a> Decoder<'a> {
 
     /// Decode into YUV planes the caller owns, with this decoder's settings:
     /// its limits, [`Self::set_lenient`], [`Self::set_stop_on_warning`] and
-    /// resync strategy all apply. Otherwise identical to
+    /// resync strategy all apply, the strategy only where [`Self::decode_raw`]
+    /// consults it (sequential Huffman scans, not lenient interleaved ones,
+    /// P4-270). Otherwise identical to
     /// [`crate::yuv::decompress_to_yuv_planes_into`], whose documentation
     /// gives the plane sizes and the checks made before decoding.
     ///

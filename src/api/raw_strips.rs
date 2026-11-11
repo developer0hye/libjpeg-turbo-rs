@@ -87,7 +87,8 @@ enum Source<'a> {
         decoder: Decoder<'a>,
         state: RawStreamState<'a>,
     },
-    /// Multi-scan stream whose whole-frame decode runs on the first strip.
+    /// Progressive, arithmetic or multi-scan stream, whose whole-frame
+    /// decode runs on the first strip.
     Pending(Decoder<'a>),
     /// The whole-frame decode's warnings; its planes are in `buffers`.
     Buffered(Vec<DecodeWarning>),

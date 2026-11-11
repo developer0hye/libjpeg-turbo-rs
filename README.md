@@ -286,7 +286,9 @@ let warnings = reader.finish()?;
 `yuv::decompress_to_yuv_planes_into(&jpeg, &mut planes)` uses the reader to
 fill caller planes (`yuv::YuvPlaneMut`, any stride) with the same samples
 as `yuv::decompress_to_yuv_planes`. `Decoder::decode_yuv_planes_into` does
-the same with a configured decoder (limits, leniency, resync strategy).
+the same with a configured decoder (limits, leniency, and a resync strategy
+where `decode_raw` consults it: sequential Huffman scans, not lenient
+interleaved ones).
 
 ### Compress
 

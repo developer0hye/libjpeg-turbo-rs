@@ -518,12 +518,15 @@ fn a6_3_abort_strategy_surfaces_error_on_rst_mismatch() {
     let _ = err;
 }
 
-// The interleaved baseline loop's general path (lenient decodes) resets at
-// a restart without consulting the strategy, where libjpeg calls
+// The interleaved baseline loop's general path (lenient decodes, and strict
+// ones whose crop, widened by one MCU row each side, leaves out an MCU row)
+// resets at a restart without consulting the strategy, where libjpeg calls
 // `resync_to_restart` whatever the request. Wiring it in is blocked on
 // `apply_resync` first skipping stray bytes before the marker, as libjpeg's
 // `next_marker` does: without that, consulting it degrades lenient recovery
-// (P4-270). The cropped case already honors the strategy and is pinned.
+// (P4-270). The cropped test below pins only the fast path: rows 8..24 of
+// this 32-row frame widen to every MCU row. A crop of rows 24..32 takes the
+// general path and decodes despite `AbortStrategy` (measured 2026-11-11).
 #[test]
 #[ignore = "P4-270: lenient baseline decodes do not consult the resync strategy"]
 fn a6_3_abort_strategy_surfaces_error_on_lenient_rst_mismatch() {
@@ -536,15 +539,30 @@ fn a6_3_abort_strategy_surfaces_error_on_lenient_rst_mismatch() {
         .expect_err("a lenient decode must still honor an abort strategy");
 }
 
+/// `mcu_row_range` widens a crop by one MCU row each side, so 8..24 on this
+/// 32-row frame covers every MCU row and takes the fast path.
 #[test]
-fn a6_3_abort_strategy_surfaces_error_on_cropped_rst_mismatch() {
+fn a6_3_abort_strategy_surfaces_error_on_full_frame_crop_rst_mismatch() {
     let jpeg = make_jpeg_with_corrupt_rst_number();
     let mut decoder = Decoder::new(&jpeg).expect("parse headers");
     decoder.set_crop_y(8, 16);
     decoder.set_resync_strategy(AbortStrategy);
     decoder
         .decode_image()
-        .expect_err("a cropped decode must still honor an abort strategy");
+        .expect_err("a crop widened to the whole frame honors an abort strategy");
+}
+
+/// 24..32 keeps MCU rows 1..3 only, so the decode takes the general path.
+#[test]
+#[ignore = "P4-270: decodes cropped to fewer MCU rows do not consult the resync strategy"]
+fn a6_3_abort_strategy_surfaces_error_on_partial_crop_rst_mismatch() {
+    let jpeg = make_jpeg_with_corrupt_rst_number();
+    let mut decoder = Decoder::new(&jpeg).expect("parse headers");
+    decoder.set_crop_y(24, 8);
+    decoder.set_resync_strategy(AbortStrategy);
+    decoder
+        .decode_image()
+        .expect_err("a partial crop must still honor an abort strategy");
 }
 
 #[test]

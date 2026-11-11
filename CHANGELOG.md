@@ -21,7 +21,8 @@ and `git log` between tags.
   strides. Every destination is checked before decoding.
   **`Decoder::decode_yuv_planes_into`** does the same with a configured
   decoder, so limits, leniency, `stop_on_warning` and a resync strategy
-  apply.
+  apply (the strategy where `decode_raw` consults it: sequential Huffman
+  scans, not lenient interleaved ones, P4-270).
 
 ### Fixed
 

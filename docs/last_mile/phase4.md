@@ -15437,7 +15437,8 @@ whole-image `tj3DecompressToYUV*`.
   `decompress_to_yuv_planes` samples written into caller planes at caller
   strides, every destination checked before decoding.
   `Decoder::decode_yuv_planes_into` is the same on a configured decoder, so
-  its limits, leniency and resync strategy apply.
+  its limits, leniency and resync strategy apply (the strategy where
+  `decode_raw` consults it, P4-270).
 
 Proof: `tests/raw_strips.rs` (active rows byte-identical to libjpeg's
 `jpeg_read_raw_data` through `examples/raw_decode_c_oracle.c` across 16
@@ -15497,21 +15498,33 @@ cross-checks the refusal against `djpeg` for grayscale and 4:2:0.
 
 Found 2026-11-10 by the P4-268 review. `decode_baseline_planes` has a
 strict fast path that consults `Decoder::set_resync_strategy` at every
-restart boundary (`apply_resync`), and a general path (lenient decodes) that
-calls `BitReader::reset` and never consults it. A lenient decode therefore
-accepts any RST number even under an `Abort` strategy, while libjpeg calls
-`resync_to_restart` whatever the request. The single-component block-raster
+restart boundary (`apply_resync`), and a general path (lenient decodes, and
+strict ones cropped to fewer MCU rows) that calls `BitReader::reset` and
+never consults it. A lenient decode therefore accepts any RST number even
+under an `Abort` strategy, while libjpeg calls `resync_to_restart` whatever
+the request; so does a strict `set_crop_y(24, 8)` decode of the 32-row
+fixture in `tests/a5_a6_worker.rs` (measured 2026-11-11, docs audit).
+`a6_3_abort_strategy_surfaces_error_on_cropped_rst_mismatch` crops rows
+8..24, which `mcu_row_range` widens by one MCU row each side to the whole
+frame, so it pins only the fast path. The single-component block-raster
 path consults it in both modes. The strip reader (`raw_strips.rs`) mirrors
-the asymmetry so its planes equal `decode_raw`'s.
+the asymmetry so its planes equal `decode_raw`'s. Progressive, arithmetic
+and lossless decodes never consult it in either mode (no `resync_strategy`
+reference outside `baseline.rs` and `raw_strips.rs`).
 
 **Why it was not simply wired in.** Tried on the P4-268 branch and reverted:
 `apply_resync` reads the marker with `reset_and_consume_rst`, which skips
 only `0xFF` fill, while `reset` scans past stray data bytes to the marker
 the way libjpeg's `read_restart_marker` → `next_marker` does before it
 compares the RST number. On 299 randomly corrupted restart-marked 4:2:0
-streams, a lenient decode with `DefaultResyncStrategy` (documented as the
-historical behaviour) then differed from one with no strategy in 211, and
-matched `djpeg` exactly in 60 against 61. The same gap affects the strict
+streams, a lenient decode with `DefaultResyncStrategy` then differed from
+one with no strategy in 211, and matched `djpeg` exactly in 60 against 61.
+(Measured 2026-11-10 with a throwaway probe: a 96x96 4:2:0 frame encoded by
+`Encoder` at quality 85 with `restart_blocks(3)`, three entropy bytes
+overwritten per seed 1..299 by an xorshift generator, decoded with
+`decode_image`, and each output compared with `djpeg -ppm`.) The
+`DefaultResyncStrategy` rustdoc used to claim it is what an unset strategy
+does; it now says the two differ until this item lands. The same gap affects the strict
 path today whenever a strategy is set: a stream whose interval ends early
 leaves `pos` mid-data and is reported as a desync.
 
@@ -15519,6 +15532,9 @@ leaves `pos` mid-data and is reported as a desync.
 does (counting the skipped bytes like `JWRN_EXTRANEOUS_DATA`), then compares
 and consults the strategy; with `DefaultResyncStrategy` every decode is
 byte-identical to the no-strategy decode on that corpus; the general path
-and the strip reader then consult the strategy, and the two `#[ignore]`d
+and the strip reader then consult the strategy, and the three `#[ignore]`d
 tests in `tests/a5_a6_worker.rs` (`a6_3_abort_strategy_surfaces_error_on_lenient_rst_mismatch`,
-`a6_3_skip_strategy_is_consulted_by_lenient_decodes`) pass.
+`a6_3_skip_strategy_is_consulted_by_lenient_decodes`,
+`a6_3_abort_strategy_surfaces_error_on_partial_crop_rst_mismatch`) pass.
+Progressive, arithmetic and lossless decodes consult it too, or each is
+filed as its own item with the reason it cannot.
