@@ -14,8 +14,9 @@ and `git log` between tags.
   component planes one iMCU row at a time (`next_strip`, `for_each_strip`,
   `finish`), so callers collect them into buffers they own. Single-scan
   Huffman streams are decoded row by row, so the working set is one iMCU row
-  (68 KB against `decode_raw`'s 6.3 MB on a 2048x2048 4:2:0 frame). Active rows
-  match libjpeg's `jpeg_read_raw_data`.
+  (68 KB against `decode_raw`'s 6.3 MB on a 2048x2048 4:2:0 frame), at
+  `decode_raw`'s speed on aarch64 (P4-271). Active rows match libjpeg's
+  `jpeg_read_raw_data`.
 - **`yuv::decompress_to_yuv_planes_into`** and `yuv::YuvPlaneMut`: the
   `decompress_to_yuv_planes` samples written into caller planes at caller
   strides. Every destination is checked before decoding.

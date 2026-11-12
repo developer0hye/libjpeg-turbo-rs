@@ -8,7 +8,7 @@ use alloc::{format, vec};
 use crate::common::error::{JpegError, Result};
 use crate::common::huffman_table::HuffmanTable;
 use crate::common::types::*;
-use crate::decode::bitstream::BitReader;
+use crate::decode::bitstream::{BitReader, HotBits};
 use crate::decode::huffman;
 
 /// Pre-resolved per-component decode plan for the MCU loop.
@@ -112,7 +112,10 @@ impl McuDecoder {
     ) -> Result<()> {
         *coeffs = [0i16; 64];
 
-        let dc_diff = huffman::decode_dc_coefficient(reader, dc_table)?;
+        // The cursor lives in locals for the block (P4-271); dropping it
+        // writes it back to `reader`, on the error paths as well.
+        let mut bits: HotBits<'_, '_> = HotBits::new(reader);
+        let dc_diff: i16 = huffman::decode_dc_from(&mut bits, dc_table)?;
         let dc_pred = &mut self.dc_pred[component_index];
         // libjpeg-turbo's jdhuff.c treats DC prediction as modular 16-bit
         // arithmetic (the result is masked by quantization anyway); use
@@ -121,7 +124,7 @@ impl McuDecoder {
         *dc_pred = dc_pred.wrapping_add(dc_diff);
         coeffs[0] = *dc_pred;
 
-        huffman::decode_ac_coefficients(reader, ac_table, coeffs)?;
+        huffman::decode_ac_from(&mut bits, ac_table, coeffs)?;
 
         Ok(())
     }
