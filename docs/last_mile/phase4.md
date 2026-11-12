@@ -10539,6 +10539,17 @@ the crop harness work that surfaced it (different crate, different subsystem).
 Diagnosing a release-only divergence in the classic source manager needs its own
 change with its own oracle traces.
 
+**Update (2026-11-12): it follows the optimizer.** Re-checked while verifying
+P4-271. The same two tests still fail in release on main (`a5fe11a3`) and on
+the commit before #701 (`a5fe11a3^1`), with the same trace diff. They also
+fail with `CARGO_PROFILE_RELEASE_LTO=false`, and in the dev profile with
+`CARGO_PROFILE_DEV_OPT_LEVEL=3` (debug assertions still on), so neither LTO
+nor `debug_assertions` is the trigger. No source in the shim or the root
+crate branches on `debug_assertions`, which leaves undefined behavior the
+optimizer exploits (an aliasing or lifetime violation in the shim's
+source-manager or decode path) as the leading explanation for acceptance
+criterion 1.
+
 ## P4-171. 8-Bit Lossy JPEG Cannot Be Decompressed to 12-Bit Output (3.2 beta1 note 8) — **OPEN**
 
 **GitHub:** [#561](https://github.com/developer0hye/libjpeg-turbo-rs/issues/561) — filed 2026-08-17 by the [P4-130](#p4-130-c-parity-oracle-is-pinned-to-3141-upstream-stable-is-320--partial-every-oracle-provisioning-job-is-pinned-checked-and-measured-and-the-submodule-is-at-320-two-jobs-still-on-one-release-and-the-four-filed-gaps-remain) 3.2 delta triage.
@@ -15467,13 +15478,15 @@ whole-image `tj3DecompressToYUV*`.
   `decode_raw` consults it, P4-270).
 
 Proof: `tests/raw_strips.rs` (active rows byte-identical to libjpeg's
-`jpeg_read_raw_data` through `examples/raw_decode_c_oracle.c` across 16
-coding cases x 6 sizes; padded rows identical to `decode_raw`; lenient
-warnings identical; strict failure yields the clean strips first; the
+`jpeg_read_raw_data` through `examples/raw_decode_c_oracle.c` across 18
+coding cases (two arithmetic ones since P4-274) x 6 sizes; padded rows
+identical to `decode_raw`; lenient warnings identical; strict failure
+yields the clean strips first; the
 `_into` helper equals the owned planes and libjpeg's raw output, and never
 writes stride padding; corrupt streams equal `decode_raw` strict and
 lenient, with and without a resync strategy) and `tests/raw_strips_memory.rs`
-(peak heap within 24 KiB of one iMCU row on 4:2:0, 4:4:4 and grayscale).
+(peak heap within 20 KiB of one iMCU row on 4:2:0 and 4:4:4, and 11 KiB on
+grayscale, since P4-274).
 
 Found and fixed on the way: `yuv::decompress_to_yuv_planes` divided by zero
 (a panic) on a three- or four-component frame whose SOF height is 0, which
@@ -15721,10 +15734,10 @@ variable must inject the decision or serialize those tests, or that
 assertion becomes racy. The decode matrix is re-measured to show the
 default path is unchanged.
 
-## P4-273. The Caller-Buffer YUV Decode Drops the Decode's Warnings — **OPEN**
+## P4-273. The Caller-Buffer YUV Decode Drops the Decode's Warnings — **CLOSED 2026-11-12**
 
 Found 2026-11-12 by the merge review of P4-268 (#701), by reading; nothing
-below was run.
+below was run. Line numbers are as of `a5fe11a3`.
 
 `yuv::yuv_planes_into` (`src/api/yuv.rs:653`) calls `reader.finish()?` and
 discards the `Vec<DecodeWarning>` it returns, so
@@ -15756,9 +15769,24 @@ is an error, with a test on a lenient corrupt stream) or is narrowed to the
 marker check; the partial-write behavior is documented and pinned by a test
 that decodes a truncated stream into canary-filled planes.
 
-## P4-274. The Raw Strip Reader's Recovery Paths Lack Tests That Can Fail — **OPEN**
+**Status (2026-11-12): closed.** `Decoder::decode_yuv_planes_into_with_warnings`
+returns the reader's warnings; `decode_yuv_planes_into` keeps its signature
+and delegates to it. The `stop_on_warning` sentence is narrowed to the marker
+check, as `into_raw_strips` and `decode_raw` behave. The decode-error partial
+write is documented on `yuv::decompress_to_yuv_planes_into` (the `Decoder`
+form refers to it). Tests in `tests/raw_strips.rs`:
+`decoder_yuv_planes_into_applies_the_decoders_settings` asserts a lenient,
+`stop_on_warning` decode of a corrupt stream succeeds with
+`decode_raw_with_warnings`' warnings, and
+`yuv_planes_into_keeps_the_strips_before_a_decode_error` decodes a truncated
+and a corrupt 4:2:0 stream strictly into canary planes and checks that the
+planes hold the rows a strict `RawStripReader` delivers before it fails, and
+that every later row is untouched.
 
-Found 2026-11-12 by the merge review of P4-268 (#701). The streamed loops
+## P4-274. The Raw Strip Reader's Recovery Paths Lack Tests That Can Fail — **CLOSED 2026-11-12**
+
+Found 2026-11-12 by the merge review of P4-268 (#701); line numbers are as
+of `a5fe11a3`. The streamed loops
 in `src/decode/pipeline_impl/raw_strips.rs` were compared statement by
 statement with `decode_baseline_planes` and
 `decode_non_interleaved_baseline_planes` and no divergence was found; these
@@ -15806,6 +15834,60 @@ Acceptance: each of 1-7 has a test that fails when the path it names is
 broken on purpose (1 is two assertions: strict `decompress_raw` is `Err`
 and the lenient decode reports a warning); 8 uses a per-layout bound of the
 measured overhead plus a small margin.
+
+**Status (2026-11-12): closed.** In `tests/raw_strips.rs`:
+
+1. The corrupt fixtures now write stuffed `FF 00 FF 00` (sixteen 1-bits,
+   which no Huffman code can be) after an RST, where the `0x3C` fill decoded
+   as valid codes in the mid-row and grayscale streams. Right after the RST
+   the interval's first DC lookup fails; two more fixtures, 4:2:0 and
+   grayscale, write it eight bytes in, so a symbol fails after coefficients
+   were written. `corrupt_streams_match_decode_raw_under_every_recovery_setting`
+   requires, under every resync setting (none, `Continue`, `Skip`), a strict
+   `Err` and a lenient decode that warns. The grayscale fixture is built
+   with the Rust encoder, so the test
+   no longer needs `cjpeg`, and the narrower
+   `lenient_strips_match_decode_raw_...` test it subsumed is gone.
+2. `CASES` gains `-sample 2x2 -arithmetic` and
+   `-grayscale -arithmetic -restart 2B`, against libjpeg and `decode_raw`.
+3. The matrix covers truncated clean 4:2:0 and grayscale streams, and
+   requires, under every resync setting, a strict `UnexpectedEof` and a
+   lenient `TruncatedData` warning, except that a lenient grayscale `Skip`
+   decode fails with no RST left to skip to (single-component decodes
+   consult the strategy in lenient mode, P4-270).
+4. A 4:2:0 stream restarting every four MCUs (six per row) is corrupted
+   after the RST before MCU 8, mid-way through the second strip.
+5. Two fixtures renumber (RST1 to RST5) or drop the RST at the second strip
+   boundary. The matrix installs a recording strategy (`Continue` and
+   `Skip`) and requires the strips to ask it the same `(expected, found)`
+   questions as `decode_raw`, and the damaged-RST fixtures to reach it on
+   strict decodes. `DefaultResyncStrategy` could not test this: it always
+   continues, so `expected_rst` never changes its output.
+6. `yuv_planes_into_minimum_length_at_a_padded_stride`: at `stride = width +
+   7`, `(h - 1) * stride + w` bytes per plane decode to the owned planes,
+   and each plane one byte shorter is refused with nothing written.
+7. `four_component_strips_match_libjpeg_raw_output`: CMYK at 1x1 and at
+   2x2,1x1,1x1,2x2 against the raw oracle.
+8. `tests/raw_strips_memory.rs` bounds the overhead per layout, at 20 KiB
+   for the three-component layouts (19,118 B measured) and 11 KiB for
+   grayscale (10,042 B), so one extra 2048-sample row exceeds either.
+   Measured on aarch64-darwin; the bound also holds under wasm32-wasip1,
+   and x86_64 was not measured.
+
+Each was broken on purpose in `pipeline_impl/raw_strips.rs` or `api/yuv.rs`
+and the suite failed: streaming arithmetic streams through the Huffman loop
+(2); never graying a short segment, interleaved or grayscale (3); restarting
+only at row starts (4); resetting `expected_rst` every strip, and consulting
+the strategy in lenient interleaved decodes (5); requiring `stride * height`
+bytes (6); decoding three components only (7); warning on every concealed
+grayscale block rather than once per scan, keeping a failed block's
+coefficients (interleaved or grayscale), and ignoring a grayscale
+segment's end in strict decodes (1, 3).
+
+The recording strategy surfaced P4-278: on a strict decode the Rust paths
+report no warning for a renumbered RST, and `ResyncAction::Continue`
+realigns the counter to the marker found, where libjpeg counts on from the
+one it expected.
 
 ## P4-275. Scaled Decode Is About 6% Slower on x86_64 After the Bounds-Checked IDCT Store — **OPEN**
 
@@ -16011,6 +16093,37 @@ the strict and lenient paths and in the C ABI with `JERR_BAD_HUFF_TABLE`'s
 behavior; a regression test builds such a stream and cross-checks djpeg's
 refusal. Decode throughput is unchanged, because the check runs once per
 table and not per symbol.
+
+## P4-278. Strict Decodes Pass a Restart-Marker Desync Silently, and `ResyncAction::Continue` Realigns Where libjpeg Does Not — **OPEN**
+
+Found 2026-11-12 by the P4-274 tests (`renumbered_rst_stream` in
+`tests/raw_strips.rs`, RST1 rewritten to RST5), confirmed by a probe of
+`decode_raw`; the strip reader behaves the same, as the tests require.
+
+- With no strategy, a strict `decode_raw_with_warnings` of that stream
+  returns `Ok` with no warning. libjpeg's `read_restart_marker`
+  (`jdmarker.c`) calls `resync_to_restart`, whose default emits
+  `JWRN_MUST_RESYNC` before acting; no `DecodeWarning` variant carries it,
+  so a strict Rust decode cannot report it and `stop_on_warning` cannot
+  stop on it. On the same stream djpeg prints `Corrupt JPEG data: found
+  marker 0xd5 instead of RST1` and exits 2, or 1 under `-strict`. (The C
+  ABI's `jpeg_resync_to_restart` emits it, P4-97.)
+- With a strategy returning `ResyncAction::Continue`, `apply_resync`
+  (`src/decode/pipeline_impl/api.rs`) sets the next expected number to the
+  found marker plus one, so the strategy is asked `(1, Some(5))` and then
+  `(6, Some(2))`. `read_restart_marker` increments `next_restart_num` from
+  the number it wanted, whatever `resync_to_restart` did, so libjpeg
+  expects RST2 next and sees no second desync. `ResyncAction::Continue`'s
+  rustdoc (`src/decode/resync.rs`) says it mirrors C's
+  `jpeg_resync_to_restart` returning `TRUE`.
+
+Acceptance: a strict decode of a stream with a renumbered or missing RST
+reports a warning (a new `DecodeWarning` variant, so `stop_on_warning`
+can escalate it, as djpeg's `-strict` does), compared with djpeg's
+`JWRN_MUST_RESYNC` on the same stream; the expected-number update after a
+desync either follows `read_restart_marker` or the `Continue` rustdoc
+states the difference; tests cover both `decode_raw` and the strip reader.
+Related: P4-270 (lenient decodes never consult the strategy).
 
 ## P4-279. The 12-Bit Huffman Block Loops Still Decode Through the Memory-Resident Bit Cursor — **OPEN**
 
