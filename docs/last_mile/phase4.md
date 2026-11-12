@@ -15648,3 +15648,83 @@ output (for example a forced table injected in a unit test). Note that
 variable must inject the decision or serialize those tests, or that
 assertion becomes racy. The decode matrix is re-measured to show the
 default path is unchanged.
+
+## P4-273. The Caller-Buffer YUV Decode Drops the Decode's Warnings — **OPEN**
+
+Found 2026-11-12 by the merge review of P4-268 (#701), by reading; nothing
+below was run.
+
+`yuv::yuv_planes_into` (`src/api/yuv.rs:653`) calls `reader.finish()?` and
+discards the `Vec<DecodeWarning>` it returns, so
+`Decoder::decode_yuv_planes_into` gives a lenient caller no way to tell
+concealed planes from clean ones. The reader itself does not have the gap:
+`into_raw_strips()` + `RawStripReader::finish()` returns the warnings. The
+strict free function `yuv::decompress_to_yuv_planes_into` has nothing to
+lose, since strict decodes fail instead of warning.
+
+Two rustdoc claims are wider than the code:
+
+- `Decoder::decode_yuv_planes_into` (`src/decode/pipeline_impl/raw.rs:25`)
+  says `set_stop_on_warning` applies. Only the marker check does
+  (`check_marker_warnings`, `raw_strips.rs:100`); a warning recovered while
+  decoding is not escalated. `decode_raw` behaves the same
+  (`raw.rs:109`), and `into_raw_strips`' own rustdoc words it correctly
+  ("`stop_on_warning` marker check"), while `decode_image` escalates every
+  warning (`output.rs:407`).
+- `yuv::decompress_to_yuv_planes_into` (`src/api/yuv.rs:583`) promises
+  "nothing is written" for destination errors only and is silent about a
+  decode error: a strict failure at strip *k* leaves strips `0..k` in the
+  caller's planes, which the owned form cannot do.
+
+Acceptance: a caller of the `Decoder` form can obtain the warnings (an
+additive `_with_warnings` twin, so the landed signature does not change);
+the `stop_on_warning` sentence either becomes true (the first decode warning
+is an error, with a test on a lenient corrupt stream) or is narrowed to the
+marker check; the partial-write behavior is documented and pinned by a test
+that decodes a truncated stream into canary-filled planes.
+
+## P4-274. The Raw Strip Reader's Recovery Paths Lack Tests That Can Fail — **OPEN**
+
+Found 2026-11-12 by the merge review of P4-268 (#701). The streamed loops
+in `src/decode/pipeline_impl/raw_strips.rs` were compared statement by
+statement with `decode_baseline_planes` and
+`decode_non_interleaved_baseline_planes` and no divergence was found; these
+are gaps in what `tests/raw_strips.rs` can detect, not known defects.
+
+1. **A fixture that never proves it is corrupt.**
+   `corrupt_grayscale_restart_stream` (`tests/raw_strips.rs:689`) overwrites
+   four entropy bytes and asserts nothing, and
+   `corrupt_streams_match_decode_raw_under_every_recovery_setting` (`:705`)
+   accepts `(Ok, Ok)` as well as `(Err, Err)`. If `0x3C` happens to decode
+   as valid codes, the single-component recovery paths never run and the
+   test still passes. The 4:2:0 fixture does assert. Not run: whether
+   today's bytes are in fact rejected.
+2. **No arithmetic case.** `CASES` (`:165`) has no `-arithmetic` entry, so
+   the arithmetic fallback the module documents is not exercised by this
+   suite.
+3. **No lenient truncation.** Only a strict truncation is tested (`:659`),
+   so the bit reader's short-segment state carried across strips, and the
+   fill of every later strip, are compared with `decode_raw` nowhere.
+4. **Corruption only where restarts sit on strip boundaries.**
+   `corrupt_restart_stream` uses `restart_rows(1)` (`:263`); the mid-row
+   restart cases (`-restart 3B`, `2B`) are clean streams.
+5. **RST markers are always intact.** Both fixtures overwrite entropy bytes
+   only, so a resync strategy only ever sees the expected marker and
+   `expected_rst` carried across strips is never decisive. A fixture that
+   drops or renumbers an RST at a strip boundary would test it.
+6. **`_into` minimum length at a padded stride.** The accepting test sizes
+   buffers `stride * height` (`:448`) and the refusing one uses
+   `stride == width` (`:507`), so "`(h - 1) * stride + w` is accepted and
+   one byte less is refused" is untested for `stride > width`.
+7. **Four components against libjpeg.** The 4-component interleaved case is
+   compared with the Rust owned path only.
+8. **The memory bound is loose for grayscale.**
+   `tests/raw_strips_memory.rs:128` allows `scratch + 24 KiB` on every
+   layout; with the 9.6 KiB the comment records for grayscale, about seven
+   extra 2048-sample rows fit under it, so "a few extra image rows would
+   exceed it" holds for the three-component layouts only.
+
+Acceptance: each of 1-7 has a test that fails when the path it names is
+broken on purpose (1 is two assertions: strict `decompress_raw` is `Err`
+and the lenient decode reports a warning); 8 uses a per-layout bound of the
+measured overhead plus a small margin.
