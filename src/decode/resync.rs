@@ -49,11 +49,14 @@ pub trait RestartResyncStrategy {
     fn on_desync(&mut self, expected: u8, found: Option<u8>) -> ResyncAction;
 }
 
-/// Default strategy: always `Continue` — preserves the historical Rust
-/// behavior of unconditionally skipping past any RST marker.
+/// Default strategy: always `Continue`, accepting whatever RST marker the
+/// decoder finds.
 ///
-/// Installed automatically when `Decoder::set_resync_strategy` is not
-/// called by the user.
+/// Not the same as installing no strategy. With none, the decoder resets at
+/// each restart by scanning forward past stray bytes to the next marker;
+/// with this one it consults the strategy at the marker position it is at,
+/// so on a corrupt stream whose interval ended early the two decode
+/// differently (P4-270).
 pub struct DefaultResyncStrategy;
 
 impl RestartResyncStrategy for DefaultResyncStrategy {

@@ -259,6 +259,37 @@ println!("{}x{} ({} bytes)", info.width, info.height, info.bytes_written);
 Marker recovery reports discarded bytes in `Image.warnings` (or `ImageInfo.warnings`).
 Set `Decoder::set_stop_on_warning(true)` to reject these recoverable inputs.
 
+### Raw YCbCr planes into your own buffers
+
+`Decoder::into_raw_strips` hands out the component planes (no upsampling, no
+color conversion) one iMCU row at a time, borrowed from the reader. Copy
+the rows into any layout you own. For single-scan Huffman streams (baseline
+or extended sequential) the decoder holds only one row of MCUs. Progressive,
+arithmetic and multi-scan streams decode the whole frame on the first strip.
+
+```rust
+use libjpeg_turbo_rs::Decoder;
+
+let mut reader = Decoder::new(&jpeg_bytes)?.into_raw_strips()?;
+let geometry = reader.geometry().clone(); // per-component width, height, sampling
+while let Some(strip) = reader.next_strip()? {
+    for plane in strip.planes() {
+        for (i, row) in plane.rows().enumerate() {
+            let y = plane.first_row() + i; // row `y` of component `plane.component()`
+            // copy `row` (geometry.components[c].width samples) wherever you like
+        }
+    }
+}
+let warnings = reader.finish()?;
+```
+
+`yuv::decompress_to_yuv_planes_into(&jpeg, &mut planes)` uses the reader to
+fill caller planes (`yuv::YuvPlaneMut`, any stride) with the same samples
+as `yuv::decompress_to_yuv_planes`. `Decoder::decode_yuv_planes_into` does
+the same with a configured decoder (limits, leniency, and a resync strategy
+where `decode_raw` consults it: sequential Huffman scans, not lenient
+interleaved ones).
+
 ### Compress
 
 ```rust

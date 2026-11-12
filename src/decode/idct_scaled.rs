@@ -253,59 +253,6 @@ pub fn idct_1x1(coeffs: &[i16; 64], quant: &[u16; 64]) -> u8 {
     level_shift_clamp(descale(dcval, 3))
 }
 
-/// 4x4 reduced IDCT writing directly to a strided buffer.
-///
-/// # Safety
-/// `output` must point to at least `3 * stride + 4` writable bytes.
-pub unsafe fn idct_4x4_strided(
-    coeffs: &[i16; 64],
-    quant: &[u16; 64],
-    output: *mut u8,
-    stride: usize,
-) {
-    unsafe {
-        let mut tmp = [0u8; 16];
-        idct_4x4(coeffs, quant, &mut tmp);
-        for row in 0..4 {
-            core::ptr::copy_nonoverlapping(tmp.as_ptr().add(row * 4), output.add(row * stride), 4);
-        }
-    }
-}
-
-/// 2x2 reduced IDCT writing directly to a strided buffer.
-///
-/// # Safety
-/// `output` must point to at least `stride + 2` writable bytes.
-pub unsafe fn idct_2x2_strided(
-    coeffs: &[i16; 64],
-    quant: &[u16; 64],
-    output: *mut u8,
-    stride: usize,
-) {
-    unsafe {
-        let mut tmp = [0u8; 4];
-        idct_2x2(coeffs, quant, &mut tmp);
-        for row in 0..2 {
-            core::ptr::copy_nonoverlapping(tmp.as_ptr().add(row * 2), output.add(row * stride), 2);
-        }
-    }
-}
-
-/// 1x1 reduced IDCT writing to a strided buffer.
-///
-/// # Safety
-/// `output` must point to at least 1 writable byte.
-pub unsafe fn idct_1x1_strided(
-    coeffs: &[i16; 64],
-    quant: &[u16; 64],
-    output: *mut u8,
-    _stride: usize,
-) {
-    unsafe {
-        *output = idct_1x1(coeffs, quant);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -423,114 +370,13 @@ mod tests {
         );
     }
 
-    #[test]
-    fn idct_4x4_strided_writes_correctly() {
-        let mut coeffs = [0i16; 64];
-        let quant = [1u16; 64];
-        coeffs[0] = 400;
-
-        let stride = 16;
-        let mut buf = vec![0xFFu8; stride * 4];
-        unsafe {
-            idct_4x4_strided(&coeffs, &quant, buf.as_mut_ptr(), stride);
-        }
-
-        // Check that 4 pixels are written per row at correct stride
-        let mut expected = [0u8; 16];
-        idct_4x4(&coeffs, &quant, &mut expected);
-
-        for row in 0..4 {
-            for col in 0..4 {
-                assert_eq!(buf[row * stride + col], expected[row * 4 + col]);
-            }
-            // Bytes beyond col 3 should be untouched
-            assert_eq!(buf[row * stride + 4], 0xFF);
-        }
-    }
-
-    /// P4-191 criterion 4 (#609): `idct_1x1_strided`'s whole contract is "one
-    /// writable byte at `output`" — `stride` is accepted for the uniform
-    /// dispatch signature and must be ignored. The plane here is exactly
-    /// `stride * rows` bytes, as `Decoder::idct_scaled_strided` sizes it at 1/8
-    /// scale, and every block position is written in turn, ending on the
-    /// plane's last byte. A store that honoured `stride` (`output.add(stride)`)
-    /// or widened to a second byte would leave the written byte wrong or
-    /// clobber a canary, and on the last position would land past the
-    /// allocation, where ASan and Miri report it. Measured 2026-10-07: adding
-    /// a second store at `output.add(1)` fails at "write at 0: byte 1". Being
-    /// a scalar unit test outside `simd::`, Miri runs it as well as ASan.
-    #[test]
-    fn idct_1x1_strided_writes_one_byte_and_ignores_stride() {
-        const CANARIES: [u8; 2] = [0xA5, 0x5A];
-        let quant: [u16; 64] = [3u16; 64];
-        let stride: usize = 5;
-        let rows: usize = 3;
-        for canary in CANARIES {
-            for dc in [-1024i16, -129, -1, 0, 1, 77, 1023] {
-                let mut coeffs: [i16; 64] = [0i16; 64];
-                coeffs[0] = dc;
-                // AC terms must not leak into a DC-only reduction.
-                coeffs[1] = 300;
-                coeffs[63] = -300;
-                let expected: u8 = idct_1x1(&coeffs, &quant);
-                for offset in 0..stride * rows {
-                    let mut plane: Vec<u8> = vec![canary; stride * rows];
-                    // SAFETY: `offset < plane.len()`, so one writable byte is
-                    // available at the pointer — the callee's whole contract.
-                    unsafe {
-                        idct_1x1_strided(&coeffs, &quant, plane.as_mut_ptr().add(offset), stride);
-                    }
-                    for (index, &byte) in plane.iter().enumerate() {
-                        let want: u8 = if index == offset { expected } else { canary };
-                        // When the output equals the canary, a missed write is
-                        // invisible here; the other canary catches it.
-                        assert_eq!(
-                            byte, want,
-                            "dc={dc} canary={canary:#04x} write at {offset}: byte {index}"
-                        );
-                    }
-                }
-                // The minimum allocation the contract allows: a single byte.
-                let mut single: Vec<u8> = vec![canary; 1];
-                // SAFETY: one writable byte, as documented.
-                unsafe {
-                    idct_1x1_strided(&coeffs, &quant, single.as_mut_ptr(), usize::MAX);
-                }
-                assert_eq!(single, [expected], "dc={dc}: single-byte destination");
-            }
-        }
-    }
-
-    #[test]
-    fn idct_2x2_strided_writes_correctly() {
-        let mut coeffs = [0i16; 64];
-        let quant = [1u16; 64];
-        coeffs[0] = 400;
-
-        let stride = 16;
-        let mut buf = vec![0xFFu8; stride * 2];
-        unsafe {
-            idct_2x2_strided(&coeffs, &quant, buf.as_mut_ptr(), stride);
-        }
-
-        let mut expected = [0u8; 4];
-        idct_2x2(&coeffs, &quant, &mut expected);
-
-        for row in 0..2 {
-            for col in 0..2 {
-                assert_eq!(buf[row * stride + col], expected[row * 2 + col]);
-            }
-            assert_eq!(buf[row * stride + 2], 0xFF);
-        }
-    }
-
     /// Fuzz Smoke runs 30420069849 / 30438301770 / 30461194331 /
     /// 30485530878: corrupt streams decoded at a 1/2 `ScalingFactor`
     /// drove the reduced IDCT's fixed-point intermediates past `i32` and
     /// panicked on every arithmetic op in the block (`attempt to
     /// {add,subtract,multiply} with overflow` at five distinct lines).
     /// C's `JLONG` is `long` (`jpegint.h:62`), which is only required to
-    /// hold 32 bits, so wrapping here is the documented C contract — not
+    /// hold 32 bits, so wrapping here is the documented C contract: not
     /// a bug to report to the caller.
     ///
     /// Extreme-but-legal encodings: `i16` coefficients and `u16` quant

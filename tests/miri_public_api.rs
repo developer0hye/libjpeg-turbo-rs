@@ -17,14 +17,21 @@
 //!   under the interpreter, and they are worth separating because one of them
 //!   is live and the other is a tripwire:
 //!
-//!   1. **Live.** Reconstructing a scan runs `decode_progressive_planes`
-//!      (`src/decode/pipeline_impl/progressive.rs:186`), which writes every
-//!      block through `component_planes[c].as_mut_ptr().add(dst_offset)` into
-//!      `idct_scaled_strided` — a raw destination pointer plus a stride, not
-//!      feature-gated, and one of the sites `docs/UNSAFE_INVENTORY.md` owns.
-//!      Miri checks each of those writes for bounds and provenance. The
-//!      baseline decodes this suite performs reach the three equivalents in
-//!      `pipeline_impl/baseline.rs`.
+//!   1. **Live, and now safe code.** Each `output()` writes every block
+//!      through `ProgressiveDecoder::idct_block_into`
+//!      (`src/api/progressive_output.rs`), and the one-shot `decompress` both
+//!      tests compare against runs `decode_progressive_planes`
+//!      (`src/decode/pipeline_impl/progressive.rs`), which writes through
+//!      `Decoder::idct_block_into`: in both, a bounds-checked slice of the
+//!      plane and a safe kernel into a stack block. Miri checks each of those
+//!      writes, but there is no `unsafe` left on either path to check. Until
+//!      2026-11-11 they were raw destination pointers into
+//!      `ProgressiveDecoder::idct_islow_strided` and `idct_scaled_strided`,
+//!      which is what this item first put under the interpreter. The one
+//!      raw-pointer IDCT store that remains, in `simd::idct_islow_8x8_strided`,
+//!      is an `unsafe` block compiled only with `simd` on aarch64 or x86_64;
+//!      the Miri job builds without `simd`, so there the function returns
+//!      `false` and the callers' stack-block path runs.
 //!   2. **A tripwire.** *Reading* every byte does not, today, test
 //!      initialisation: both destinations are initialised by construction —
 //!      the colour path allocates with `try_zeroed_bytes` (`alloc_zeroed`) and

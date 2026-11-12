@@ -195,10 +195,14 @@ impl<'a> Decoder<'a> {
                     let px_y = by * bs;
                     let dst_offset = px_y * ci.comp_w + px_x;
 
-                    unsafe {
-                        let dst = component_planes[comp_idx].as_mut_ptr().add(dst_offset);
-                        self.idct_scaled_strided(coeffs, qt_values, dst, ci.comp_w, bs);
-                    }
+                    self.idct_block_into(
+                        coeffs,
+                        qt_values,
+                        &mut component_planes[comp_idx],
+                        dst_offset,
+                        ci.comp_w,
+                        bs,
+                    )?;
                 }
             }
         }

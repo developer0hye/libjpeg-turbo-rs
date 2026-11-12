@@ -1386,7 +1386,7 @@ C expands instead of ignoring: `djpeg -rgb` on a `cjpeg -precision 12` grayscale
 
 | Source | Result |
 |---|---|
-| 8-bit baseline YCbCr (4:2:0) | panic, now `pipeline_impl/color.rs:517` (`grayscale/cmyk handled separately`) |
+| 8-bit baseline YCbCr (4:2:0) | panic, now `Decoder::color_convert_row`'s grayscale/CMYK arm in `pipeline_impl/color.rs` (`grayscale/cmyk handled separately`) |
 | 8-bit baseline grayscale | panic, now `pipeline_impl/output.rs:1012` (grayscale expansion match) |
 | 8-bit lossless grayscale (SOF3) | panic, now `pipeline_impl/lossless.rs:376` (`lossless_output_grayscale` match) |
 | 12-bit grayscale | `Unsupported("cannot convert 12-bit JPEG to Cmyk")` — the #394 fix |
@@ -1429,9 +1429,9 @@ config with no kernels has no green tests claiming parity.
 
 ## P4-71. Scaled Decode Never Dispatches to SIMD Reduced-Size IDCT on Any Arch — **OPEN**
 
-**Motivation.** Filed 2026-07-28 by the #390 docs-drift audit, which caught `tests/simd_parity.rs` producing `unused_variables` hard-errors under the newly widened x86_64 clippy gate: the `parity_idct_4x4/2x2/1x1` comparison blocks are `cfg(target_arch = "aarch64")`-only because `src/simd/x86_64/` has no reduced-size IDCT kernels (`avx2_idct.rs`/`idct.rs` cover 8x8 only), and wasm32 likewise. C libjpeg-turbo ships SSE2 4x4/2x2 kernels (`jidctred-sse2.asm`). Worse (codex P2 on the fix commit): **even on aarch64 the `neon_idct_4x4/2x2/1x1` kernels have no production caller** — `Decoder::idct_scaled_strided` (now `src/decode/pipeline_impl/color.rs`, re-verified 2026-08-02) dispatches the sizes 4/2/1 unconditionally to the scalar `idct_scaled::*_strided` while its `8 =>` arm delegates to the SIMD `idct_islow_strided`, so the NEON routines are exercised only by the parity test. Note the scope precisely: components whose block size stays 8 during a scaled decode (e.g. Cb/Cr in 4:2:0 at 1/2 scale, per `compute_comp_block_size`) still take the SIMD 8x8 IDCT — it is exactly the reduced-size 4/2/1 branches that are always scalar, on every arch with a SIMD backend. The same audit found `avx2_rgba/bgr/bgra_to_ycbcr_row` existed but were never parity-tested — that half was fixed on the spot (the x86_64 block in `parity_rgb_to_ycbcr_rows` now mirrors the NEON/WASM four-format coverage).
+**Motivation.** Filed 2026-07-28 by the #390 docs-drift audit, which caught `tests/simd_parity.rs` producing `unused_variables` hard-errors under the newly widened x86_64 clippy gate: the `parity_idct_4x4/2x2/1x1` comparison blocks are `cfg(target_arch = "aarch64")`-only because `src/simd/x86_64/` has no reduced-size IDCT kernels (`avx2_idct.rs`/`idct.rs` cover 8x8 only), and wasm32 likewise. C libjpeg-turbo ships SSE2 4x4/2x2 kernels (`jidctred-sse2.asm`). Worse (codex P2 on the fix commit): **even on aarch64 the `neon_idct_4x4/2x2/1x1` kernels have no production caller** — `Decoder::idct_scaled_strided` (now `src/decode/pipeline_impl/color.rs`, re-verified 2026-08-02) dispatches the sizes 4/2/1 unconditionally to the scalar `idct_scaled::*_strided` while its `8 =>` arm delegates to the SIMD `idct_islow_strided`, so the NEON routines are exercised only by the parity test. (Since 2026-11-11 that dispatch is the `match n` in `Decoder::idct_block_through_stack`, reached from the bounds-checked `Decoder::idct_block_into`, and the sizes 4 and 2 run the safe `idct_scaled::idct_4x4` / `idct_2x2` into a stack block before a row copy, while size 1 stores `idct_scaled::idct_1x1`'s one sample directly; the NEON reduced-size kernels still have no production caller.) Note the scope precisely: components whose block size stays 8 during a scaled decode (e.g. Cb/Cr in 4:2:0 at 1/2 scale, per `compute_comp_block_size`) still take the SIMD 8x8 IDCT — it is exactly the reduced-size 4/2/1 branches that are always scalar, on every arch with a SIMD backend. The same audit found `avx2_rgba/bgr/bgra_to_ycbcr_row` existed but were never parity-tested — that half was fixed on the spot (the x86_64 block in `parity_rgb_to_ycbcr_rows` now mirrors the NEON/WASM four-format coverage).
 
-**Acceptance criteria.** (1) Wire the existing `neon_idct_*` kernels into the `idct_scaled_strided` dispatch (or reject them with a benchmark showing scalar wins on the strided shapes — the NEON kernels are contiguous-output, so a strided adapter's copy cost may eat the win). (2) Port the reduced-size kernels to x86_64 (SSE2 baseline per `jidctred-sse2.asm`; AVX2 optional) and wasm32, wired behind the same dispatch. (3) Extend the three parity tests' comparison blocks to those arches, deleting the `cfg_attr(not(aarch64), allow(unused_variables))` shims. (4) Record the per-arch perf delta in `experiments/idct.tsv`. Benchmark-gated per the experiment protocol, scoped to the three SIMD backends (aarch64/NEON, x86_64/SSE2+AVX2, wasm32/SIMD128 — intentionally scalar targets stay P4-60's business): a closure that leaves one of *those* backends scalar must cite the losing measurement, not silence.
+**Acceptance criteria.** (1) Wire the existing `neon_idct_*` kernels into the `match n` dispatch in `Decoder::idct_block_through_stack` (src/decode/pipeline_impl/color.rs), or reject them with a benchmark showing scalar wins. The NEON kernels are contiguous-output, which is now the shape sizes 4 and 2 already take (a stack block, then a row copy; size 1 is one direct store), so the adapter cost the original criterion worried about is gone. (2) Port the reduced-size kernels to x86_64 (SSE2 baseline per `jidctred-sse2.asm`; AVX2 optional) and wasm32, wired behind the same dispatch. (3) Extend the three parity tests' comparison blocks to those arches, deleting the `cfg_attr(not(aarch64), allow(unused_variables))` shims. (4) Record the per-arch perf delta in `experiments/idct.tsv`. Benchmark-gated per the experiment protocol, scoped to the three SIMD backends (aarch64/NEON, x86_64/SSE2+AVX2, wasm32/SIMD128 — intentionally scalar targets stay P4-60's business): a closure that leaves one of *those* backends scalar must cite the losing measurement, not silence.
 
 ## P4-72. Grayscale Colorspace Override Cannot Convert — It Only Copies a Full-Resolution Luma Plane — **CLOSED 2026-08-02**
 
@@ -8421,6 +8421,18 @@ the harness first would only pin current behaviour.
   still hold `unsafe`, but all ten sites are `idct_scaled_strided`
   destination pointers — strided IDCT dispatch, not parsing; they belong to
   the criterion-4 inventory.
+- **Criterion 5 – 2026-11-11:** every 8-bit decode IDCT write now goes through the
+  bounds-checked `Decoder::idct_block_into` (`pipeline_impl/color.rs`) or
+  `ProgressiveDecoder::idct_block_into` (`src/api/progressive_output.rs`),
+  which return `CorruptData` for a block that does not fit its plane. The
+  scalar `idct_{N}x{N}_strided` wrappers are deleted, and the only raw-pointer
+  IDCT store left is the safe `pub(crate) fn simd::idct_islow_8x8_strided`
+  (`src/simd/mod.rs`, one site, inventoried there). The gate now holds
+  thirty-two parser files (the five scan drivers and `color.rs` in
+  `pipeline_impl/` joined) and seven unsafe-free kernels (`idct_extended.rs`,
+  `idct_scaled.rs`); `INVENTORY_OWNED` is empty. The inventory lost 31 sites
+  and gained 1. Cost: within noise on every decode path and scale (aarch64,
+  `experiments/pipeline.tsv`, `idct.tsv`, `progressive.tsv`).
 - **Criterion 4 — 2026-09-08, root crate:** `docs/UNSAFE_INVENTORY.md`
   lists every code `unsafe` token under `src/` — 301 sites in 45 files,
   224 rows keyed by (file, enclosing item) — with the seven cells the
@@ -8898,7 +8910,11 @@ the harness first would only pin current behaviour.
     `idct_scaled_strided` — a raw destination pointer plus a stride, not
     feature-gated, one of the sites `docs/UNSAFE_INVENTORY.md` owns — and Miri
     checks each of those writes for bounds and provenance; the baseline decodes
-    reach the three equivalents in `pipeline_impl/baseline.rs`. *A tripwire:*
+    reach the three equivalents in `pipeline_impl/baseline.rs`. (Since
+    2026-11-11 all of those writes are bounds-checked slices through
+    `Decoder::idct_block_into` and `ProgressiveDecoder::idct_block_into`, the
+    three `baseline.rs` raw pointers are gone, and the one raw store left,
+    `simd::idct_islow_8x8_strided`, is not compiled in the Miri job.) *A tripwire:*
     reading every byte of the reconstruction does **not** test initialisation
     today, because both destinations are initialised by construction
     (`try_filled_vec` on the colour path, reserve-and-`extend_from_slice` on the
@@ -11404,7 +11420,7 @@ twins for legs without a sanitizer:
 
 `.github/workflows/sanitizers.yml`'s `asan` and `ubsan` jobs already ran every
 lib unit test; they now also fail on a runner without AVX2 (where these tests
-compare fallbacks) and re-run `-- kernel_bounds_tests`, requiring the six
+compare fallbacks) and re-run `-- kernel_bounds_tests`, requiring the six (seven since 2026-11-11)
 x86_64 tests to pass. `tests/sanitizer_coverage_gate.rs` holds that step's
 count to the modules' `#[test]`s and rejects, each driven over a mutation of
 the real workflow: a dropped `pull_request` trigger or an added `paths`
@@ -11471,6 +11487,16 @@ sub-invariant or a CI leg, not an untested site) and are context.
    `idct_1x1_dc_only` covers the safe inner function, not the wrapper).
    **Delivered 2026-10-07** by `strided_islow_idct_writes_exactly_its_footprint`
    and `idct_1x1_strided_writes_one_byte_and_ignores_stride` (see *Progress*).
+   `idct_1x1_strided` and its test were deleted 2026-11-11, with every other
+   scalar `idct_{N}x{N}_strided` wrapper: the decode pipeline now calls the
+   safe fixed-size kernels through the bounds-checked
+   `Decoder::idct_block_into`, pinned by
+   `idct_block_into_writes_each_size_at_its_stride_and_nothing_else`
+   (`src/decode/pipeline_impl/color.rs`). The three strided SIMD kernels now
+   have one caller, the safe `simd::idct_islow_8x8_strided`, which checks the
+   destination's length itself; `strided_islow_dispatch_checks_the_footprint_before_any_kernel`
+   (`src/simd/kernel_bounds_tests.rs`) pins that check on exact-size
+   allocations.
 5. **`avx2_merged_h2v2_ycbcr_to_rgb` / `avx2_merged_h2v2_inner`**
    (`src/simd/x86_64/avx2_merged.rs`, 2 sites) are exercised with an
    under-sized second luma row — the odd-height case their SAFETY contract
@@ -15402,3 +15428,223 @@ Reproducer:
 
 Acceptance: the cause identified, and that input decoded byte-identically to
 libjpeg, or the divergence shown to be P4-66 and folded into it.
+
+## P4-268. Raw Component Planes Cannot Be Decoded Into Caller-Owned Buffers — **PARTIAL: Rust strip reader landed; C ABI and progressive streaming outstanding**
+
+**Motivation.** Filed 2026-11-09. Every raw-plane API returned owned
+planes: `decompress_raw` / `Decoder::decode_raw` give `Vec<Vec<u8>>` at the
+MCU-padded size, and `yuv::decompress_to_yuv_planes` trims those into a
+second owned set. A caller with its own buffer layout (I420 at its own
+stride, NV12, a GPU upload, a video encoder's input frame) paid a whole-image
+staging copy, and the decoder's working set was the whole frame. Issue #354
+gave the pixel path `decompress_into` but no plane variant. The C ABI's
+`tj3DecompressToYUVPlanes8` takes caller planes, but implements them as raw
+decode, then trimmed copy, then row copy into the caller (three copies,
+`crates/libjpeg-turbo-rs-capi/src/yuv.rs`).
+
+Survey of other Rust decoders (2026-11-09): only zenjpeg 0.8 exposes native
+planes into caller buffers (`ScanlineReader::read_rows_ycbcr_native_i16`,
+`i16` only, crop refused), plus a borrowed-row callback for RGB
+(`decode_rows`). zune-jpeg, jpeg-decoder and jpegli-rs have no raw-plane
+output; the `mozjpeg` binding wraps `jpeg_read_raw_data` but appends to
+`Vec`s and panics on unusual geometry; the `turbojpeg` binding wraps the
+whole-image `tj3DecompressToYUV*`.
+
+**Delivered (2026-11-09).**
+
+- `Decoder::into_raw_strips() -> RawStripReader`: lends one iMCU row of every
+  component per `next_strip()` (`RawStrip` / `RawStripPlane` borrow the
+  reader's scratch strip, so no sample buffer is allocated per strip), plus `for_each_strip` and `finish`
+  (warnings as `decode_raw_with_warnings` reports them). A single-scan
+  Huffman stream (interleaved, or single-component) is decoded one MCU row
+  at a time into a scratch strip, so the working set is one iMCU row:
+  2048x2048 4:2:0 peaks at 68 KB against `decode_raw`'s 6.3 MB.
+- `yuv::decompress_to_yuv_planes_into(data, &mut [YuvPlaneMut])`: the
+  `decompress_to_yuv_planes` samples written into caller planes at caller
+  strides, every destination checked before decoding.
+  `Decoder::decode_yuv_planes_into` is the same on a configured decoder, so
+  its limits, leniency and resync strategy apply (the strategy where
+  `decode_raw` consults it, P4-270).
+
+Proof: `tests/raw_strips.rs` (active rows byte-identical to libjpeg's
+`jpeg_read_raw_data` through `examples/raw_decode_c_oracle.c` across 16
+coding cases x 6 sizes; padded rows identical to `decode_raw`; lenient
+warnings identical; strict failure yields the clean strips first; the
+`_into` helper equals the owned planes and libjpeg's raw output, and never
+writes stride padding; corrupt streams equal `decode_raw` strict and
+lenient, with and without a resync strategy) and `tests/raw_strips_memory.rs`
+(peak heap within 24 KiB of one iMCU row on 4:2:0, 4:4:4 and grayscale).
+
+Found and fixed on the way: `yuv::decompress_to_yuv_planes` divided by zero
+(a panic) on a three- or four-component frame whose SOF height is 0, which
+libjpeg refuses as `JERR_EMPTY_IMAGE`; it and the reader now return
+`CorruptData` (`a_zero_height_frame_is_refused_like_libjpeg_not_a_panic`).
+The reader refuses a zero-height grayscale frame too; the other decode paths
+still accept one (P4-269).
+
+**Outstanding (why PARTIAL).**
+
+1. Progressive, arithmetic and multi-scan streams fall back to a whole-frame
+   `decode_raw` on the first strip. The progressive output pass could IDCT
+   one iMCU row per strip from the coefficient buffer, as libjpeg's
+   multi-pass `jdcoefct.c` controller does, which would also be the place
+   to honor block smoothing (P4-249).
+2. The C ABI still uses the three-copy path: `tj3DecompressToYUVPlanes8` /
+   `tj3DecompressToYUV8` and classic `jpeg_read_raw_data` (P4-195, P4-102)
+   should read strips. That needs the reader to accept the handle's scaling
+   factor (TurboJPEG's uniform scaled block size, P4-234); the public reader
+   refuses scales other than 1/1 today.
+3. Arithmetic-coded sequential streams could stream like Huffman ones.
+
+**Acceptance for closing.** Items 1 and 2 land with C cross-validation
+(libjpeg raw oracle for progressive, the existing TurboJPEG YUV tests for the
+C ABI), and `tests/raw_strips_memory.rs` gains a progressive case bounded by
+the coefficient buffer rather than the coefficient buffer plus sample planes.
+
+## P4-269. A Frame Whose SOF Height Is 0 Decodes to an Empty Image Where libjpeg Refuses It — **OPEN**
+
+Found 2026-11-09 by the P4-268 docs audit. libjpeg's `get_sof` refuses a
+frame whose height (or width) is 0 with `JERR_EMPTY_IMAGE` before any decoding
+(`jdmarker.c:275-277`), whatever its component count; this port has no
+`DNL` support either, so such a frame cannot be decoded. P4-268 made
+`Decoder::into_raw_strips` refuse it, and the three- and four-component
+`yuv::decompress_to_yuv_planes` / `decompress_to_yuv` now return `CorruptData`
+instead of dividing by zero. The other paths still accept it, measured on a
+16x16 frame with its SOF height patched to 0: `decompress_raw` /
+`Decoder::decode_raw` return `Ok` with zero-row planes for 4:2:0 and
+grayscale, `decompress_to_yuv_planes` and `decompress_to_yuv` return `Ok`
+with an empty plane for grayscale, and `decompress` returns a 16x0 grayscale
+image (its 4:2:0 refusal is the unrelated "zero chroma plane dimensions").
+
+Acceptance: every decode entry point refuses a zero width or height from the
+header, before allocating, with one error variant, as libjpeg does; a test
+cross-checks the refusal against `djpeg` for grayscale and 4:2:0.
+
+## P4-270. Lenient Baseline Decodes Ignore the Restart Resync Strategy, and Wiring It In Needs `apply_resync` to Skip Stray Bytes First — **OPEN**
+
+Found 2026-11-10 by the P4-268 review. `decode_baseline_planes` has a
+strict fast path that consults `Decoder::set_resync_strategy` at every
+restart boundary (`apply_resync`), and a general path (lenient decodes, and
+strict ones cropped to fewer MCU rows) that calls `BitReader::reset` and
+never consults it. A lenient decode therefore accepts any RST number even
+under an `Abort` strategy, while libjpeg calls `resync_to_restart` whatever
+the request; so does a strict `set_crop_y(24, 8)` decode of the 32-row
+fixture in `tests/a5_a6_worker.rs` (measured 2026-11-11, docs audit).
+`a6_3_abort_strategy_surfaces_error_on_cropped_rst_mismatch` crops rows
+8..24, which `mcu_row_range` widens by one MCU row each side to the whole
+frame, so it pins only the fast path. The single-component block-raster
+path consults it in both modes. The strip reader (`raw_strips.rs`) mirrors
+the asymmetry so its planes equal `decode_raw`'s. Progressive, arithmetic
+and lossless decodes never consult it in either mode (no `resync_strategy`
+reference outside `baseline.rs` and `raw_strips.rs`).
+
+**Why it was not simply wired in.** Tried on the P4-268 branch and reverted:
+`apply_resync` reads the marker with `reset_and_consume_rst`, which skips
+only `0xFF` fill, while `reset` scans past stray data bytes to the marker
+the way libjpeg's `read_restart_marker` → `next_marker` does before it
+compares the RST number. On 299 randomly corrupted restart-marked 4:2:0
+streams, a lenient decode with `DefaultResyncStrategy` then differed from
+one with no strategy in 211, and matched `djpeg` exactly in 60 against 61.
+(Measured 2026-11-10 with a throwaway probe: a 96x96 4:2:0 frame encoded by
+`Encoder` at quality 85 with `restart_blocks(3)`, three entropy bytes
+overwritten per seed 1..299 by an xorshift generator, decoded with
+`decode_image`, and each output compared with `djpeg -ppm`.) The
+`DefaultResyncStrategy` rustdoc used to claim it is what an unset strategy
+does; it now says the two differ until this item lands. The same gap affects the strict
+path today whenever a strategy is set: a stream whose interval ends early
+leaves `pos` mid-data and is reported as a desync.
+
+**Acceptance.** `apply_resync` first skips to the next marker as `reset`
+does (counting the skipped bytes like `JWRN_EXTRANEOUS_DATA`), then compares
+and consults the strategy; with `DefaultResyncStrategy` every decode is
+byte-identical to the no-strategy decode on that corpus; the general path
+and the strip reader then consult the strategy, and the three `#[ignore]`d
+tests in `tests/a5_a6_worker.rs` (`a6_3_abort_strategy_surfaces_error_on_lenient_rst_mismatch`,
+`a6_3_skip_strategy_is_consulted_by_lenient_decodes`,
+`a6_3_abort_strategy_surfaces_error_on_partial_crop_rst_mismatch`) pass.
+Progressive, arithmetic and lossless decodes consult it too, or each is
+filed as its own item with the reason it cannot.
+
+## P4-271. The Streamed Raw Strip Decode Is About 30% Slower Than `decode_raw` on Photographic Content — **OPEN**
+
+Found 2026-11-11 while measuring the P4-141 IDCT consolidation. On a
+3840x2160 photo encoded by `cjpeg -quality 90` (decoded from
+`tests/fixtures/photo_3840x2160_420.jpg`), aarch64, best-of-15:
+
+| Input | `decode_raw` | `into_raw_strips`, all strips |
+|---|---:|---:|
+| 4:2:0 baseline | 48 ms | 62 ms |
+| grayscale baseline | 37 ms | 50 ms |
+
+The strip reader's own entropy and IDCT loop (`raw_stream_strip`, with the
+row functions inlined) takes about 1.5x the time of `decode_baseline_planes`
+for the same blocks, while IDCT time is similar. On the synthetic noise
+images first used (P4-268's 2048x2048 measurement), the strip reader was
+instead about 5% faster, so the gap depends on content: photos have many
+all-zero AC blocks, so per-MCU overhead in the row loop dominates.
+
+**Ruled out.** Threads (none in the decode); `decode_block` inlining (it is
+`#[inline(always)]` in both loops); the reader being spilled through `&mut
+RawStreamState` around each IDCT call (moving `BitReader` / `McuDecoder` into
+locals per row measured no change, `experiments/pipeline.tsv`).
+
+**Candidates not yet tried.** Per-MCU work the whole-frame loop hoists or
+does not do: the `Option` Huffman-table lookup and `ComponentPlan` copy per
+component, `mcu_count` / `warnings` updated through `&mut state`, the lenient
+`segment_short` branch evaluated in strict mode, and iterating
+`RawComponentGeometry` (seven fields) instead of a four-field layout. An
+instruction-level profile on an idle machine should come first.
+
+**Acceptance.** Within 5% of `decode_raw` on the two inputs above and on
+the decode matrix fixtures, with the strips still byte-identical to
+`decode_raw` and libjpeg (`tests/raw_strips.rs`), and the memory bound in
+`tests/raw_strips_memory.rs` still holding.
+
+## P4-272. `JSIMD_FORCENONE=1` Does Not Reach Most of the Decoder's SIMD Kernels — **OPEN**
+
+Found 2026-11-11 by the reviews of the P4-141 IDCT consolidation. `detect()`
+(`src/simd/mod.rs`) returns the scalar routine table when `JSIMD_FORCENONE=1`,
+and the module docs promise that this forces the scalar fallback. The
+decoder's hot paths choose their kernels by architecture instead of from that
+table, so they run SIMD anyway:
+
+- **8x8 ISLOW IDCT, every SIMD architecture.** `simd::idct_islow_8x8_strided`,
+  which every 8-bit 8x8 ISLOW block of a sequential, progressive, arithmetic,
+  incremental or raw-strip decode and of `ProgressiveDecoder::output` goes
+  through, picks NEON, AVX2 or SSE2 by `cfg` and `cpu_has!`.
+- **Color conversion, merged upsampling and fancy upsampling, aarch64 and
+  x86_64.** On aarch64, `Decoder::ycbcr_to_{rgb,rgba,bgr,bgra}_row` and
+  `color_convert_row` (its six extended 4-byte formats), `merged_h2v1` /
+  `merged_h2v2`, `fancy_upsample_h2v1` and `fancy_h2v2` in
+  `src/decode/pipeline_impl/color.rs`, and `ProgressiveDecoder`'s color and
+  upsample helpers in `src/api/progressive_output.rs`, call the `neon_*`
+  kernels directly under `cfg(target_arch = "aarch64")`. On x86_64,
+  `fancy_h2v2_row_dispatch` (and through it `fancy_h2v2_strided_dispatch`),
+  `ycbcr_to_{rgba,bgr,bgra}_row`, the same six arms of `color_convert_row`,
+  `merged_h2v1` / `merged_h2v2` and `fancy_h2v2` pick AVX2 or SSE2 by
+  `cpu_has!`. (wasm32 is not affected: `detect()` does not read the variable
+  there.)
+
+(A further `Decoder::idct_islow`, which called `neon_idct_islow` directly,
+had no caller and was deleted 2026-11-11.)
+
+This predates the consolidation (the dispatchers it replaced behaved the
+same) and does not change output where the kernels are bit-exact with their
+scalar twins. It does mean that `JSIMD_FORCENONE=1` cannot isolate a SIMD
+bug in any of these stages or measure the scalar decoder on aarch64, and any
+measurement taken under it that counted SIMD instructions in a decode ran
+these kernels.
+
+**Acceptance criteria.** With `JSIMD_FORCENONE=1`, a decode runs no SIMD
+kernel: the routine table records whether SIMD was selected (or the strided
+front and the direct-SIMD dispatchers read the same cached decision), and
+each path above takes its scalar form. A test pins it by mechanism, not
+output (for example a forced table injected in a unit test). Note that
+`strided_islow_dispatch_checks_the_footprint_before_any_kernel`
+(`src/simd/kernel_bounds_tests.rs`) asserts the strided kernel runs, while
+`neon_color_tests.rs`, `neon_idct_tests.rs`, `neon_upsample_tests.rs`,
+`simd_dispatch_tests.rs` and `simd_x86_tests.rs` (`src/simd/`) set
+`JSIMD_FORCENONE` for the whole test process; a fix that reads the
+variable must inject the decision or serialize those tests, or that
+assertion becomes racy. The decode matrix is re-measured to show the
+default path is unchanged.

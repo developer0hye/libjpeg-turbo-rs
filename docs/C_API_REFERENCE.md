@@ -128,7 +128,7 @@
 | C Function | Description | Rust | Status |
 |---|---|---|---|
 | `tj3DecompressToYUV8(handle, jpeg, size, dst, align)` | JPEG → packed YUV | `TjHandle::decompress_to_yuv_planes()` publishes the thirteen and applies the handle's limits (P4-225, #652); `yuv::decompress_to_yuv()` is the handle-free form and not interchangeable: the C entry point rejects 4-component CMYK/YCCK frames (P4-125), the Rust function packs all four planes. Honours `tj3SetScalingFactor`: the scaled planes, byte-identical to stock at all sixteen factors (P4-234, #667) | ✅ |
-| `tj3DecompressToYUVPlanes8(handle, jpeg, size, planes, strides)` | JPEG → planar YUV | `TjHandle::decompress_to_yuv_planes()` (P4-225, #652); `yuv::decompress_to_yuv_planes()` — same divergence; the Rust function returns one plane per SOF component, so four for CMYK/YCCK. Scaled planes as stock writes them (P4-234); a stride shorter than its plane is refused as upstream does | ✅ |
+| `tj3DecompressToYUVPlanes8(handle, jpeg, size, planes, strides)` | JPEG → planar YUV | `TjHandle::decompress_to_yuv_planes()` (P4-225, #652); `yuv::decompress_to_yuv_planes()` — same divergence (`yuv::decompress_to_yuv_planes_into()` writes the same samples into caller planes at caller strides, P4-268); the Rust function returns one plane per SOF component, so four for CMYK/YCCK. Scaled planes as stock writes them (P4-234); a stride shorter than its plane is refused as upstream does | ✅ |
 
 ### Color Decode (YUV → RGB, no JPEG)
 
@@ -242,7 +242,7 @@
 | `jpeg_crop_scanline(cinfo, &xoffset, &width)` | Scanline-level crop | Native exact crop exists; classic iMCU alignment/state semantics remain P4-103 | 🔶 |
 | `jpeg12_crop_scanline(...)` | 12-bit crop | Private crop support exists; immediate-after-start/output proof remains P4-98 | 🔶 |
 | `jpeg_finish_decompress(cinfo)` | Finalize decompression | Lifecycle (state guard, EOI drain/suspend, exactly-once `term_source`, abort-reset) matches stock (P4-104 closed 2026-08-14, oracle-compared); classic error-reporting semantics remain P4-100 | 🔶 |
-| `jpeg_read_raw_data(cinfo, data, max_lines)` | Read raw downsampled data | Native raw decode exists; classic options/state/error semantics remain P4-102 | 🔶 |
+| `jpeg_read_raw_data(cinfo, data, max_lines)` | Read raw downsampled data | Native raw decode exists (`decompress_raw`; one iMCU row per call: `Decoder::into_raw_strips` → `RawStripReader::next_strip`, P4-268); classic options/state/error semantics remain P4-102 | 🔶 |
 | `jpeg12_read_raw_data(...)` | Read 12-bit raw data | Native raw decode exists; classic options/state/error semantics remain P4-102 | 🔶 |
 
 ### Buffered Image Mode (Progressive Output)

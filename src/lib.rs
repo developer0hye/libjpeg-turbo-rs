@@ -201,6 +201,9 @@ pub use api::precision::{
 pub use api::quality::quality_scaling;
 pub use api::quantize::requantize;
 pub use api::raw_data::{compress_raw, decompress_raw, RawImage};
+pub use api::raw_strips::{
+    RawComponentGeometry, RawGeometry, RawStrip, RawStripPlane, RawStripReader,
+};
 /// 12-bit raw planar encode/decode (YCbCr component planes at native resolution).
 pub mod raw_data_12 {
     pub use crate::api::raw_data_12::{
@@ -283,7 +286,8 @@ pub mod yuv {
     #[doc(inline)]
     pub use crate::api::yuv::{
         compress_from_yuv, compress_from_yuv_planes, decode_yuv, decode_yuv_planes,
-        decompress_to_yuv, decompress_to_yuv_planes, encode_yuv, encode_yuv_planes,
+        decompress_to_yuv, decompress_to_yuv_planes, decompress_to_yuv_planes_into, encode_yuv,
+        encode_yuv_planes, YuvPlaneMut,
     };
 }
 /// The row-streaming decoder with `skip_scanlines` (`jpeg_skip_scanlines`)

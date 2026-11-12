@@ -182,6 +182,69 @@ fn strided_islow_idct_writes_exactly_its_footprint() {
     }
 }
 
+/// `simd::idct_islow_8x8_strided`, the safe front every decode 8x8 ISLOW
+/// store goes through, writes the same block as the scalar kernel into a
+/// destination of exactly the footprint, and refuses (returning `false`,
+/// writing nothing) a destination one byte short, a stride below 8, or a
+/// stride whose footprint overflows `usize`, so no safe caller can hand a
+/// strided kernel less than `7 * stride + 8` bytes.
+#[test]
+fn strided_islow_dispatch_checks_the_footprint_before_any_kernel() {
+    let mut rng: Mulberry32 = Mulberry32::new(0xB0B0_0004);
+    let coeffs: [i16; 64] = random_coeffs(&mut rng);
+    let quant: [u16; 64] = random_quant(&mut rng);
+    let mut expected: [u8; 64] = [0u8; 64];
+    scalar::scalar_idct_islow(&coeffs, &quant, &mut expected);
+    for stride in STRIDES {
+        let footprint: usize = strided_footprint(stride);
+        for canary in CANARIES {
+            let mut exact: Vec<u8> = vec![canary; footprint];
+            assert!(
+                crate::simd::idct_islow_8x8_strided(&coeffs, &quant, &mut exact, stride),
+                "stride={stride}: this build has a strided kernel"
+            );
+            for (offset, &byte) in exact.iter().enumerate() {
+                let want: u8 = if offset % stride < 8 {
+                    expected[(offset / stride) * 8 + offset % stride]
+                } else {
+                    canary
+                };
+                assert_eq!(
+                    byte, want,
+                    "stride={stride} canary={canary:#04x}: byte {offset}"
+                );
+            }
+
+            let mut short: Vec<u8> = vec![canary; footprint - 1];
+            assert!(!crate::simd::idct_islow_8x8_strided(
+                &coeffs, &quant, &mut short, stride
+            ));
+            assert!(
+                short.iter().all(|&b| b == canary),
+                "stride={stride}: short dst written"
+            );
+        }
+    }
+    // A stride whose `7 * stride + 8` overflows: unchecked, the span would
+    // wrap to 13 and this 64-byte destination would pass.
+    let mut small: Vec<u8> = vec![0xA5; 64];
+    assert!(!crate::simd::idct_islow_8x8_strided(
+        &coeffs,
+        &quant,
+        &mut small,
+        usize::MAX / 7 + 1
+    ));
+    assert!(
+        small.iter().all(|&b| b == 0xA5),
+        "overflowing stride: dst written"
+    );
+    let mut roomy: Vec<u8> = vec![0xA5; 256];
+    assert!(!crate::simd::idct_islow_8x8_strided(
+        &coeffs, &quant, &mut roomy, 7
+    ));
+    assert!(roomy.iter().all(|&b| b == 0xA5), "stride 7: dst written");
+}
+
 /// Luma widths for the merged H2V2 checks: one full 32-pixel SIMD step, a step
 /// plus the scalar tail, odd widths (the extra right-hand column), and a
 /// width whose last step ends flush with the row.

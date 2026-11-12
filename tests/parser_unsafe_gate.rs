@@ -17,19 +17,22 @@
 //! unchanged, or justify with a benchmark" — so the property cannot quietly
 //! regress the way a SAFETY comment would. `decode/huffman.rs` (2026-08-10,
 //! #500) and `decode/progressive.rs` (this gate's first landing) were the two
-//! files that had unchecked zigzag indexing; the rest already qualified and
-//! are listed so they stay that way. The gate does not fail open on a new
-//! module either: every `.rs` under `src/decode/` must be classified into one
-//! of the three lists below, so adding a file is a conscious choice.
+//! files that had unchecked zigzag indexing, and the five `pipeline_impl/`
+//! scan drivers, `pipeline_impl/color.rs`, `idct_extended.rs` and
+//! `idct_scaled.rs` lost their strided-IDCT `unsafe` on 2026-11-11; the rest
+//! already qualified and are listed so they stay that way. The gate does not
+//! fail open on a new module either: every `.rs` under `src/decode/` must be
+//! classified into one of the three lists below, so adding a file is a
+//! conscious choice.
 //!
 //! Out of scope, deliberately: `common/huffman_table.rs` still holds the
 //! `OnceBox` lazy-init `unsafe` that P4-141 criterion 6 names as the blocker
 //! for `forbid(unsafe_code)` under `not(feature = "simd")`; it joins
-//! `PARSER_FILES` when that lands. The files in `INVENTORY_OWNED` hold
-//! strided-IDCT destination pointers and SIMD kernels — dispatch, not parsing
-//! — and are owned by the criterion-4 `unsafe` inventory
-//! (`docs/UNSAFE_INVENTORY.md`, gated by `tests/unsafe_inventory_gate.rs`),
-//! not by this gate.
+//! `PARSER_FILES` when that lands. A decode file that must hold `unsafe`
+//! (kernel dispatch, not parsing) goes in `INVENTORY_OWNED`, owned by the
+//! criterion-4 `unsafe` inventory (`docs/UNSAFE_INVENTORY.md`, gated by
+//! `tests/unsafe_inventory_gate.rs`) rather than by this gate; none does
+//! today, since the decoder's one strided-IDCT store lives in `src/simd/`.
 //!
 //! **What the scanner understands.** The lexer lives in
 //! `tests/helpers/unsafe_scan.rs`, shared with the criterion-4 inventory
@@ -56,7 +59,7 @@ use unsafe_scan::unsafe_token_lines;
 
 /// Parser and control-plane sources that must stay free of `unsafe`
 /// (P4-141 criterion 5). Repository-relative, forward slashes.
-const PARSER_FILES: [&str; 26] = [
+const PARSER_FILES: [&str; 32] = [
     "src/api/coefficient.rs",
     "src/api/encoder.rs",
     "src/common/quant_table.rs",
@@ -72,11 +75,17 @@ const PARSER_FILES: [&str; 26] = [
     "src/decode/mod.rs",
     "src/decode/pipeline.rs",
     "src/decode/pipeline_impl/api.rs",
+    "src/decode/pipeline_impl/arithmetic.rs",
+    "src/decode/pipeline_impl/baseline.rs",
+    "src/decode/pipeline_impl/color.rs",
     "src/decode/pipeline_impl/colorspace.rs",
     "src/decode/pipeline_impl/lossless.rs",
     "src/decode/pipeline_impl/output.rs",
+    "src/decode/pipeline_impl/progressive.rs",
     "src/decode/pipeline_impl/raw.rs",
+    "src/decode/pipeline_impl/raw_strips.rs",
     "src/decode/pipeline_impl/scan.rs",
+    "src/decode/pipeline_impl/streaming.rs",
     "src/decode/progressive.rs",
     "src/decode/resync.rs",
     "src/decode/toggles.rs",
@@ -88,26 +97,23 @@ const PARSER_FILES: [&str; 26] = [
 /// Scalar decode kernels that are `unsafe`-free today and must stay so —
 /// they are the reference every SIMD kernel is checked against, and the
 /// non-SIMD build aims at `forbid(unsafe_code)` (criterion 6).
-const UNSAFE_FREE_KERNELS: [&str; 5] = [
+const UNSAFE_FREE_KERNELS: [&str; 7] = [
     "src/decode/color.rs",
     "src/decode/dequant.rs",
     "src/decode/idct.rs",
+    "src/decode/idct_extended.rs",
+    "src/decode/idct_scaled.rs",
     "src/decode/merged_upsample.rs",
     "src/decode/upsample.rs",
 ];
 
-/// Decode sources that legitimately hold `unsafe` — strided-IDCT destination
-/// pointers and their scan drivers. Owned by the criterion-4 inventory; this
-/// gate only insists they are classified, not that they are clean.
-const INVENTORY_OWNED: [&str; 7] = [
-    "src/decode/idct_extended.rs",
-    "src/decode/idct_scaled.rs",
-    "src/decode/pipeline_impl/arithmetic.rs",
-    "src/decode/pipeline_impl/baseline.rs",
-    "src/decode/pipeline_impl/color.rs",
-    "src/decode/pipeline_impl/progressive.rs",
-    "src/decode/pipeline_impl/streaming.rs",
-];
+/// Decode sources that legitimately hold `unsafe`, owned by the criterion-4
+/// inventory; this gate only insists they are classified, not that they are
+/// clean. Empty since 2026-11-11: the last one, `pipeline_impl/color.rs`,
+/// handed its strided-IDCT store to `simd::idct_islow_8x8_strided` and moved
+/// to `PARSER_FILES`, as the scan drivers had the same day; the scalar IDCT
+/// kernels went to `UNSAFE_FREE_KERNELS`.
+const INVENTORY_OWNED: [&str; 0] = [];
 
 /// The directory whose every source must appear in one of the lists above.
 const CLASSIFIED_ROOT: &str = "src/decode";

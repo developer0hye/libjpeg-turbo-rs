@@ -179,7 +179,7 @@ jobs:
         # the step above would not notice. `tests/sanitizer_coverage_gate.rs`
         # holds EXPECTED to the number of tests those modules declare.
         env:
-          EXPECTED_KERNEL_BOUNDS_TESTS: "6"
+          EXPECTED_KERNEL_BOUNDS_TESTS: "7"
         run: |
           set -o pipefail
           cargo +nightly test --locked \
@@ -236,7 +236,7 @@ jobs:
       - name: Confirm the kernel_bounds_tests ran under ub-checks
         # Same check as the ASan job's twin step, against this job's build.
         env:
-          EXPECTED_KERNEL_BOUNDS_TESTS: "6"
+          EXPECTED_KERNEL_BOUNDS_TESTS: "7"
         run: |
           set -o pipefail
           cargo +nightly test --locked \

@@ -3,6 +3,45 @@ use crate::common::error::{JpegError, Result};
 use alloc::{format, vec, vec::Vec};
 
 impl<'a> Decoder<'a> {
+    /// Decode the raw component planes one iMCU row at a time, lending each
+    /// row to the caller instead of returning whole planes: see
+    /// [`crate::RawStripReader`] and the [`crate::api::raw_strips`] module.
+    ///
+    /// The samples are [`Self::decode_raw`]'s, so a caller can collect them
+    /// into buffers it owns, in any layout. On a single-scan Huffman stream
+    /// the reader holds one iMCU row of every component rather than the whole
+    /// frame.
+    ///
+    /// # Errors
+    ///
+    /// Refuses, before decoding anything, a crop region, a scale other than
+    /// 1/1, a lossless frame and a precision other than 8, and applies the
+    /// decoder's limits and `stop_on_warning` marker check.
+    pub fn into_raw_strips(self) -> Result<crate::api::raw_strips::RawStripReader<'a>> {
+        crate::api::raw_strips::RawStripReader::new(self)
+    }
+
+    /// Decode into YUV planes the caller owns, with this decoder's settings:
+    /// its limits, [`Self::set_lenient`], [`Self::set_stop_on_warning`] and
+    /// resync strategy all apply, the strategy only where [`Self::decode_raw`]
+    /// consults it (sequential Huffman scans, not lenient interleaved ones,
+    /// P4-270). Otherwise identical to
+    /// [`crate::yuv::decompress_to_yuv_planes_into`], whose documentation
+    /// gives the plane sizes and the checks made before decoding.
+    ///
+    /// Returns `(width, height, subsampling)`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::into_raw_strips`], and as
+    /// [`crate::yuv::decompress_to_yuv_planes_into`] for the destinations.
+    pub fn decode_yuv_planes_into(
+        self,
+        planes: &mut [crate::api::yuv::YuvPlaneMut<'_>],
+    ) -> Result<(usize, usize, crate::common::types::Subsampling)> {
+        crate::api::yuv::yuv_planes_into(self.into_raw_strips()?, planes)
+    }
+
     /// Decode JPEG to raw downsampled component planes.
     ///
     /// Returns component planes at their native (potentially subsampled)

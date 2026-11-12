@@ -11,14 +11,14 @@ use alloc::{format, string::ToString, vec::Vec};
 /// A lenient decode's warnings, holding at most [`MAX_DECODE_WARNINGS`]
 /// Huffman errors and counting the rest (P4-215, #641). Without the cap a
 /// stream corrupt everywhere recorded one heap string per MCU.
-struct WarningLog {
+pub(super) struct WarningLog {
     warnings: Vec<DecodeWarning>,
     huffman_recorded: usize,
     huffman_suppressed: usize,
 }
 
 impl WarningLog {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             warnings: Vec::new(),
             huffman_recorded: 0,
@@ -28,7 +28,7 @@ impl WarningLog {
 
     /// Records a Huffman error, or only counts it once the cap is reached —
     /// before building its message, so a suppressed warning allocates nothing.
-    fn huffman_error(&mut self, mcu_x: usize, mcu_y: usize, error: &JpegError) {
+    pub(super) fn huffman_error(&mut self, mcu_x: usize, mcu_y: usize, error: &JpegError) {
         if self.huffman_recorded < MAX_DECODE_WARNINGS {
             self.warnings.push(DecodeWarning::HuffmanError {
                 mcu_x,
@@ -49,7 +49,7 @@ impl WarningLog {
     /// Records `TruncatedData` for the first entropy segment that runs short.
     /// A later one, after a restart marker resumed decoding, adds nothing, so
     /// the warning stays at most once per decode (P4-254).
-    fn truncated(&mut self, decoded_mcus: usize, total_mcus: usize) {
+    pub(super) fn truncated(&mut self, decoded_mcus: usize, total_mcus: usize) {
         if !self
             .warnings
             .iter()
@@ -62,7 +62,7 @@ impl WarningLog {
         }
     }
 
-    fn finish(mut self) -> Vec<DecodeWarning> {
+    pub(super) fn finish(mut self) -> Vec<DecodeWarning> {
         if self.huffman_suppressed > 0 {
             self.warnings.push(DecodeWarning::WarningsSuppressed {
                 count: self.huffman_suppressed,
@@ -133,8 +133,7 @@ impl<'a> Decoder<'a> {
         // Determine MCU row range for IDCT
         let (mcu_y_start, mcu_y_end) = self.mcu_row_range(mcus_y, block_size, frame);
 
-        // Allocate component planes (full MCU-aligned size, uninitialized).
-        // SAFETY: The MCU decode loop + IDCT writes every pixel before reading.
+        // Allocate component planes (full MCU-aligned size, zero-filled).
         let mut component_planes: Vec<Vec<u8>> = frame
             .components
             .iter()
@@ -232,17 +231,14 @@ impl<'a> Decoder<'a> {
                                 let block_y: usize = (mcu_y * layout.v_blocks + v) * bs;
                                 let dst_offset: usize = block_y * layout.comp_w + block_x;
 
-                                unsafe {
-                                    let dst: *mut u8 =
-                                        component_planes[comp_idx].as_mut_ptr().add(dst_offset);
-                                    self.idct_scaled_strided(
-                                        &coeffs,
-                                        qt_values,
-                                        dst,
-                                        layout.comp_w,
-                                        bs,
-                                    );
-                                }
+                                self.idct_block_into(
+                                    &coeffs,
+                                    qt_values,
+                                    &mut component_planes[comp_idx],
+                                    dst_offset,
+                                    layout.comp_w,
+                                    bs,
+                                )?;
                             }
                         }
                     }
@@ -311,17 +307,14 @@ impl<'a> Decoder<'a> {
                                     let block_y: usize = (mcu_y * layout.v_blocks + v) * bs;
                                     let dst_offset: usize = block_y * layout.comp_w + block_x;
 
-                                    unsafe {
-                                        let dst: *mut u8 =
-                                            component_planes[comp_idx].as_mut_ptr().add(dst_offset);
-                                        self.idct_scaled_strided(
-                                            &coeffs,
-                                            qt_values,
-                                            dst,
-                                            layout.comp_w,
-                                            bs,
-                                        );
-                                    }
+                                    self.idct_block_into(
+                                        &coeffs,
+                                        qt_values,
+                                        &mut component_planes[comp_idx],
+                                        dst_offset,
+                                        layout.comp_w,
+                                        bs,
+                                    )?;
                                 }
                             }
                         }
@@ -533,10 +526,14 @@ impl<'a> Decoder<'a> {
                     let block_y: usize = by * bs;
                     let dst_offset: usize = block_y * comp_w + block_x;
 
-                    unsafe {
-                        let dst: *mut u8 = component_planes[comp_idx].as_mut_ptr().add(dst_offset);
-                        self.idct_scaled_strided(&coeffs, qt_values, dst, comp_w, bs);
-                    }
+                    self.idct_block_into(
+                        &coeffs,
+                        qt_values,
+                        &mut component_planes[comp_idx],
+                        dst_offset,
+                        comp_w,
+                        bs,
+                    )?;
 
                     // This block read past the end of its segment (djpeg's
                     // JWRN_HIT_MARKER): refused in strict mode, reported once
