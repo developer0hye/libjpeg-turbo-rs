@@ -15659,8 +15659,9 @@ discards the `Vec<DecodeWarning>` it returns, so
 `Decoder::decode_yuv_planes_into` gives a lenient caller no way to tell
 concealed planes from clean ones. The reader itself does not have the gap:
 `into_raw_strips()` + `RawStripReader::finish()` returns the warnings. The
-strict free function `yuv::decompress_to_yuv_planes_into` has nothing to
-lose, since strict decodes fail instead of warning.
+strict free function `yuv::decompress_to_yuv_planes_into` drops only
+`ExtraneousData` (a strict decode still reports stray bytes between markers,
+`raw.rs:62-63`), as its owned twin `decompress_to_yuv_planes` does.
 
 Two rustdoc claims are wider than the code:
 
@@ -15693,11 +15694,12 @@ are gaps in what `tests/raw_strips.rs` can detect, not known defects.
 
 1. **A fixture that never proves it is corrupt.**
    `corrupt_grayscale_restart_stream` (`tests/raw_strips.rs:689`) overwrites
-   four entropy bytes and asserts nothing, and
+   four entropy bytes and never checks that they are rejected, and
    `corrupt_streams_match_decode_raw_under_every_recovery_setting` (`:705`)
    accepts `(Ok, Ok)` as well as `(Err, Err)`. If `0x3C` happens to decode
    as valid codes, the single-component recovery paths never run and the
-   test still passes. The 4:2:0 fixture does assert. Not run: whether
+   test still passes. The 4:2:0 fixture is proven corrupt by the tests that
+   use it (`:293`, `:310`). Not run: whether
    today's bytes are in fact rejected.
 2. **No arithmetic case.** `CASES` (`:165`) has no `-arithmetic` entry, so
    the arithmetic fallback the module documents is not exercised by this
@@ -15705,16 +15707,20 @@ are gaps in what `tests/raw_strips.rs` can detect, not known defects.
 3. **No lenient truncation.** Only a strict truncation is tested (`:659`),
    so the bit reader's short-segment state carried across strips, and the
    fill of every later strip, are compared with `decode_raw` nowhere.
-4. **Corruption only where restarts sit on strip boundaries.**
-   `corrupt_restart_stream` uses `restart_rows(1)` (`:263`); the mid-row
-   restart cases (`-restart 3B`, `2B`) are clean streams.
+4. **Interleaved corruption only where restarts sit on strip boundaries.**
+   `corrupt_restart_stream` uses `restart_rows(1)` (`:263`), and the
+   interleaved mid-row case (`-restart 3B`) is a clean stream. The grayscale
+   fixture's `-restart 4B` (`:690`) does put a restart mid-row, but it counts
+   only once item 1 proves that fixture corrupt.
 5. **RST markers are always intact.** Both fixtures overwrite entropy bytes
-   only, so a resync strategy only ever sees the expected marker and
-   `expected_rst` carried across strips is never decisive. A fixture that
+   only, so every RST is present and correctly numbered: a strategy sees
+   no missing or renumbered marker (at most a `None` desync when a corrupt
+   interval leaves the reader short of its marker), and `expected_rst`
+   carried across strips is never compared against a wrong number. A fixture that
    drops or renumbers an RST at a strip boundary would test it.
 6. **`_into` minimum length at a padded stride.** The accepting test sizes
    buffers `stride * height` (`:448`) and the refusing one uses
-   `stride == width` (`:507`), so "`(h - 1) * stride + w` is accepted and
+   `stride == width` (`:514`), so "`(h - 1) * stride + w` is accepted and
    one byte less is refused" is untested for `stride > width`.
 7. **Four components against libjpeg.** The 4-component interleaved case is
    compared with the Rust owned path only.
