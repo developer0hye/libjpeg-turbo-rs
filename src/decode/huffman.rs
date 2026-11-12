@@ -1,14 +1,14 @@
 use crate::common::error::Result;
 use crate::common::huffman_table::HuffmanTable;
 use crate::common::quant_table::ZIGZAG_ORDER;
-use crate::decode::bitstream::BitReader;
+use crate::decode::bitstream::{BitReader, BitSource};
 
 /// Sign-extend a Huffman extra-bits value (JPEG Figure F.12).
 /// Uses the same branchless formula as C libjpeg-turbo's HUFF_EXTEND:
 ///   result = x + (((x - (1 << (s-1))) >> 31) & ((-1 << s) + 1))
 /// This correctly handles all category sizes 1-15 without overflow,
 /// which is needed for 12-bit JPEG where DC categories reach 15.
-/// Category 16 (lossless 16-bit) is handled separately in decode_dc_coefficient.
+/// Category 16 (lossless 16-bit) is handled separately in decode_dc_from.
 /// Callers must ensure `size` is in `1..=15` (the category-0 / category-16
 /// paths are handled before reaching here); we still clamp defensively so a
 /// malformed Huffman table can't panic the shifts.
@@ -27,6 +27,14 @@ fn extend(value: u16, size: u8) -> i16 {
 
 #[inline(always)]
 pub fn decode_dc_coefficient(reader: &mut BitReader, table: &HuffmanTable) -> Result<i16> {
+    decode_dc_from(reader, table)
+}
+
+/// [`decode_dc_coefficient`] over any [`BitSource`], so
+/// [`crate::decode::entropy::McuDecoder::decode_block`] can run it on a
+/// register-resident [`crate::decode::bitstream::HotBits`] cursor.
+#[inline(always)]
+pub(crate) fn decode_dc_from<R: BitSource>(reader: &mut R, table: &HuffmanTable) -> Result<i16> {
     let peek = reader.peek_bits(16);
     let (s, l) = table.lookup_fast(peek);
 
@@ -56,6 +64,16 @@ pub fn decode_dc_coefficient(reader: &mut BitReader, table: &HuffmanTable) -> Re
 #[inline(always)]
 pub fn decode_ac_coefficients(
     reader: &mut BitReader,
+    table: &HuffmanTable,
+    coeffs: &mut [i16; 64],
+) -> Result<()> {
+    decode_ac_from(reader, table, coeffs)
+}
+
+/// [`decode_ac_coefficients`] over any [`BitSource`]; see [`decode_dc_from`].
+#[inline(always)]
+pub(crate) fn decode_ac_from<R: BitSource>(
+    reader: &mut R,
     table: &HuffmanTable,
     coeffs: &mut [i16; 64],
 ) -> Result<()> {

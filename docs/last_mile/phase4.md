@@ -15565,7 +15565,7 @@ tests in `tests/a5_a6_worker.rs` (`a6_3_abort_strategy_surfaces_error_on_lenient
 Progressive, arithmetic and lossless decodes consult it too, or each is
 filed as its own item with the reason it cannot.
 
-## P4-271. The Streamed Raw Strip Decode Is About 30% Slower Than `decode_raw` on Photographic Content — **OPEN**
+## P4-271. The Streamed Raw Strip Decode Is About 30% Slower Than `decode_raw` on Photographic Content — **CLOSED 2026-11-12**
 
 Found 2026-11-11 while measuring the P4-141 IDCT consolidation. On a
 3840x2160 photo encoded by `cjpeg -quality 90` (decoded from
@@ -15581,7 +15581,8 @@ row functions inlined) takes about 1.5x the time of `decode_baseline_planes`
 for the same blocks, while IDCT time is similar. On the synthetic noise
 images first used (P4-268's 2048x2048 measurement), the strip reader was
 instead about 5% faster, so the gap depends on content: photos have many
-all-zero AC blocks, so per-MCU overhead in the row loop dominates.
+all-zero AC blocks, so per-MCU overhead in the row loop dominates. (Disproved
+2026-11-12; see Root cause.)
 
 **Ruled out.** Threads (none in the decode); `decode_block` inlining (it is
 `#[inline(always)]` in both loops); the reader being spilled through `&mut
@@ -15593,7 +15594,9 @@ does not do: the `Option` Huffman-table lookup and `ComponentPlan` copy per
 component, `mcu_count` / `warnings` updated through `&mut state`, the lenient
 `segment_short` branch evaluated in strict mode, and iterating
 `RawComponentGeometry` (seven fields) instead of a four-field layout. An
-instruction-level profile on an idle machine should come first.
+instruction-level profile on an idle machine should come first. (Not
+pursued: the Root cause below puts the gap in entropy decoding, not in this
+per-MCU work.)
 
 **Acceptance.** Within 5% of `decode_raw` on the two inputs above and on
 the decode matrix fixtures, with the strips still byte-identical to
@@ -15608,6 +15611,66 @@ workspace release profile and both decodes alternating inside one process
 ratio 1.08, range 1.077-1.082). The inputs are the downstream harness's
 synthetic corpus, not the 4K photo measured above, so the two figures are
 not a like-for-like aarch64/x86_64 comparison.
+
+**Root cause (2026-11-12).** Not the row loop. Counted, the two decodes do
+identical work (194,400 blocks, 7,220,358 AC symbols, two slow refills on the
+4:2:0 photo), and their Huffman AC loops are nearly the same instructions.
+The cost is the bit reader's cursor (`pos`, `bit_buffer`, `bits_left`): its
+address escapes to the out-of-line `fill_buffer_slow`, so it lives in memory,
+and every symbol runs a store-then-load chain through it. How much that chain
+costs depended on the code around the loop. `decode_baseline_planes`' fast
+path happened to get a cheap form; the strip loop did not, and neither did
+`decode_baseline_planes`' own loop once moved into a separate function (30.8
+to 40.5 ms, same source). Running `decode_raw` through `raw_stream_strip`
+gave it the strip reader's time, which isolated the cause to that code.
+
+Ruled out on the way, each measured at +28..+34% still: a strict-only copy of
+`decode_raw`'s loop, with the reader and MCU decoder by value or by
+reference; full-size or pre-touched destination planes; the IDCT disabled in
+both paths; one call over every row instead of one per strip; the boxed `RawStreamState`
+shifted by 64, 1024 and 2112 bytes; 64-byte loop alignment; the row
+functions out of line; `len` and `pos` kept out of one paired load; padding
+the fast function's frame.
+
+**Fix.** `McuDecoder::decode_block` runs the Huffman decode on
+`bitstream::HotBits`, which copies the cursor into locals for the block and
+writes it back before the slow refill and a failed-lookup note, and when
+dropped, so the
+symbol-to-symbol chain stays in registers whatever the caller looks like
+(`huffman::decode_dc_from` / `decode_ac_from` are the generic bodies; the
+public `decode_dc_coefficient` / `decode_ac_coefficients` keep their
+signatures). The cursor's fields live in a private `#[repr(C)] BitCursor`
+inside `BitReader`, with `bits_left` between `pos` and `bit_buffer` and a
+compile-time assertion that keeps those two apart (the public `BitReader`
+keeps the default layout): adjacent, LLVM's SLP vectorizer merged the cursor's paired copy into one
+128-bit load and store and kept the cursor in a stack slot (the same build
+with `-vectorize-slp=false` matched the reordered one).
+
+| aarch64, minimum of interleaved rounds (15 for the 4K photo, 4 for the matrix) | before | after |
+|---|---:|---:|
+| 4K photo, 4:2:0: strips (decode_raw) | 37.36 (28.68) ms | 28.72 (28.59) ms |
+| 4K photo, gray: strips (decode_raw) | 30.00 (22.49) ms | 21.52 (21.83) ms |
+| 4K photo, 4:4:4: strips (decode_raw) | 49.90 (38.60) ms | 38.16 (38.25) ms |
+| matrix: strips interleaved (decode_raw 420) | 38.31 (29.77) ms | 28.49 (28.59) ms |
+| matrix: strips single comp (decode_raw gray) | 30.32 (22.91) ms | 22.40 (23.28) ms |
+
+Every other decode path in the matrix, every IDCT scale and the 8K
+progressive fixture stayed within -5.8%..+2.3% on a host whose load reached
+41 during the first rounds; an earlier run of the same change on a quieter
+host had them within -2.4%..+1.5% (`experiments/pipeline.tsv`).
+
+The "before" column was re-measured alongside "after" on one build of each;
+the 48 / 62 ms table above is from the earlier run and not comparable in
+absolute terms.
+
+**Status (2026-11-12): closed.** On aarch64 the strip reader is at most 0.5%
+slower than `decode_raw` on the inputs above and the matrix fixtures:
+slower only on the 4K 4:2:0 photo (28.72 vs 28.59 ms), faster on the other four.
+x86_64 was not measured after the fix; the x86_64 data point above predates it. `tests/raw_strips.rs` (byte-identical to `decode_raw` and libjpeg)
+and `tests/raw_strips_memory.rs` pass; `decode::bitstream::tests::hot_bits_reads_and_leaves_the_reader_as_the_reader_alone_does`
+pins that the cursor reads the same bits and leaves the reader in the same
+state as the reader alone, on final readers and on non-final (P4-58
+windowed) ones that starve.
 
 ## P4-272. `JSIMD_FORCENONE=1` Does Not Reach Most of the Decoder's SIMD Kernels — **OPEN**
 
@@ -15925,3 +15988,53 @@ fix in progress matches the library unit through the fingerprint Cargo
 records for the test unit, which compiles nothing and also restores
 `--config`, custom profiles and custom target JSON (P4-73), which #704 had
 turned into refusals.
+
+## P4-277. Lossy Decodes Accept DC Huffman Symbols Above 15 Where libjpeg Raises `JERR_BAD_HUFF_TABLE` — **OPEN**
+
+Found 2026-11-12 by reading the code during the P4-271 review; not yet
+reproduced with a crafted stream. libjpeg-turbo validates a DC table's
+symbols when it builds the derived table: each must be in 0..=15 in lossy
+mode and 0..=16 in lossless mode, or the decode stops with
+`JERR_BAD_HUFF_TABLE` (`jdhuff.c` `jpeg_make_d_derived_tbl`, the
+"Validate symbols as being reasonable" block). Here neither the DHT parser
+(`src/decode/marker.rs`, DHT handling before `HuffmanTable::build`) nor
+`HuffmanTable::build` checks symbol range by class, and the lossy DC decode
+(`huffman::decode_dc_from`) takes any category: 16 decodes as -32768, and a
+larger one goes to `read_bits` (capped at 64 bits) and `extend`, which
+returns the raw value outside 1..=15. Only the lossless precision path
+(`src/api/precision.rs`, the category > 16 check from issue #382) refuses.
+So a stream djpeg rejects decodes here to some garbage image instead.
+
+**Acceptance.** A lossy decode whose scan uses a DC table with a symbol
+above 15 fails with `CorruptData` (16 allowed only for lossless frames), in
+the strict and lenient paths and in the C ABI with `JERR_BAD_HUFF_TABLE`'s
+behavior; a regression test builds such a stream and cross-checks djpeg's
+refusal. Decode throughput is unchanged, because the check runs once per
+table and not per symbol.
+
+## P4-279. The 12-Bit Huffman Block Loops Still Decode Through the Memory-Resident Bit Cursor — **OPEN**
+
+Found 2026-11-12 in the review of the P4-271 fix. That fix moved the
+Huffman decode of one block onto `bitstream::HotBits`, a register copy of
+the `BitReader` cursor, but only inside `McuDecoder::decode_block`, which
+the 8-bit sequential paths (`decode_raw`, the strip reader and the
+mainline decode) use. Two per-block loops call the `BitReader` wrappers
+`huffman::decode_dc_coefficient` / `decode_ac_coefficients` directly and
+so keep the store-then-load chain through the reader's memory that cost
+the 8-bit strip loop about 25% on aarch64:
+
+- `decompress_12bit_impl` (`src/api/precision.rs`), the 12-bit decode;
+- `decompress_raw_12_impl` (`src/api/raw_data_12.rs`), the 12-bit raw
+  decode.
+
+Not measured: whether the 12-bit loops got the fast codegen by luck, as
+`decode_baseline_planes` did before P4-271, or the slow one. Lossless
+(`pipeline_impl/lossless.rs`) and progressive DC-first
+(`progressive.rs`) also decode DC through the wrapper, with a shorter
+chain per block.
+
+Acceptance: a benchmark of the 12-bit sequential decode (and raw 12-bit)
+before and after decoding each block through `HotBits`
+(`huffman::decode_dc_from` / `decode_ac_from`), recorded in
+`experiments/pipeline.tsv`; the change kept only if it is faster and every
+12-bit C cross-validation test still passes.
