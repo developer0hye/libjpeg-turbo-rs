@@ -22,23 +22,45 @@ impl<'a> Decoder<'a> {
     }
 
     /// Decode into YUV planes the caller owns, with this decoder's settings:
-    /// its limits, [`Self::set_lenient`], [`Self::set_stop_on_warning`] and
-    /// resync strategy all apply, the strategy only where [`Self::decode_raw`]
-    /// consults it (sequential Huffman scans, not lenient interleaved ones,
-    /// P4-270). Otherwise identical to
+    /// its limits, [`Self::set_lenient`], the [`Self::set_stop_on_warning`]
+    /// marker check (as in [`Self::decode_raw`], a warning recovered while
+    /// decoding is not escalated) and the resync strategy, which applies only
+    /// where `decode_raw` consults it (sequential Huffman scans, not lenient
+    /// interleaved ones, P4-270). Otherwise identical to
     /// [`crate::yuv::decompress_to_yuv_planes_into`], whose documentation
     /// gives the plane sizes and the checks made before decoding.
     ///
-    /// Returns `(width, height, subsampling)`.
+    /// Returns `(width, height, subsampling)`. The warnings a lenient decode
+    /// recovers from are dropped; call
+    /// [`Self::decode_yuv_planes_into_with_warnings`] to keep them.
     ///
     /// # Errors
     ///
     /// As [`Self::into_raw_strips`], and as
-    /// [`crate::yuv::decompress_to_yuv_planes_into`] for the destinations.
+    /// [`crate::yuv::decompress_to_yuv_planes_into`] for the destinations and
+    /// for what a decode error leaves in them.
     pub fn decode_yuv_planes_into(
         self,
         planes: &mut [crate::api::yuv::YuvPlaneMut<'_>],
     ) -> Result<(usize, usize, crate::common::types::Subsampling)> {
+        self.decode_yuv_planes_into_with_warnings(planes)
+            .map(|(info, _warnings)| info)
+    }
+
+    /// [`Self::decode_yuv_planes_into`], also returning the warnings the
+    /// decode recovered from: those of [`Self::decode_raw_with_warnings`] for
+    /// the same stream and settings.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::decode_yuv_planes_into`].
+    pub fn decode_yuv_planes_into_with_warnings(
+        self,
+        planes: &mut [crate::api::yuv::YuvPlaneMut<'_>],
+    ) -> Result<(
+        (usize, usize, crate::common::types::Subsampling),
+        Vec<crate::common::error::DecodeWarning>,
+    )> {
         crate::api::yuv::yuv_planes_into(self.into_raw_strips()?, planes)
     }
 

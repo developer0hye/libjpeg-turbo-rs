@@ -21,9 +21,13 @@ and `git log` between tags.
   `decompress_to_yuv_planes` samples written into caller planes at caller
   strides. Every destination is checked before decoding.
   **`Decoder::decode_yuv_planes_into`** does the same with a configured
-  decoder, so limits, leniency, `stop_on_warning` and a resync strategy
-  apply (the strategy where `decode_raw` consults it: sequential Huffman
-  scans, not lenient interleaved ones, P4-270).
+  decoder, so limits, leniency, the `stop_on_warning` marker check and a
+  resync strategy apply (the strategy where `decode_raw` consults it:
+  sequential Huffman scans, not lenient interleaved ones, P4-270), and
+  **`Decoder::decode_yuv_planes_into_with_warnings`** also returns the
+  warnings a lenient decode recovered from (P4-273). A decode error can
+  leave the planes partly written: the iMCU rows decoded before it hold
+  their samples.
 
 ### Changed
 

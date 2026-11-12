@@ -15,7 +15,7 @@
 use crate::api::raw_data::{compress_raw, decompress_raw};
 use crate::api::raw_strips::{RawGeometry, RawStripReader};
 use crate::common::bufsize::{yuv_plane_height, yuv_plane_size, yuv_plane_width};
-use crate::common::error::{JpegError, Result};
+use crate::common::error::{DecodeWarning, JpegError, Result};
 use crate::common::layout::ImageLayout;
 use crate::common::types::{PixelFormat, Subsampling};
 use crate::decode::color as decode_color;
@@ -571,7 +571,9 @@ impl<'a> YuvPlaneMut<'a> {
 ///
 /// This decodes with the default limits and in strict mode; to set limits,
 /// leniency or a resync strategy, configure a [`crate::Decoder`] and call
-/// [`crate::Decoder::decode_yuv_planes_into`].
+/// [`crate::Decoder::decode_yuv_planes_into`] (or
+/// [`crate::Decoder::decode_yuv_planes_into_with_warnings`] to keep the
+/// warnings a lenient decode recovers from).
 ///
 /// Returns `(width, height, subsampling)`, as `decompress_to_yuv_planes`
 /// does.
@@ -582,6 +584,11 @@ impl<'a> YuvPlaneMut<'a> {
 /// other than the frame's component count, a stride below the plane width
 /// and a buffer too short for its plane are refused and nothing is written.
 /// A subsampling TurboJPEG cannot name is refused as in the owned form.
+///
+/// A decode error after those checks (a corrupt or truncated stream) can
+/// leave the planes partly written: the rows of every iMCU row decoded
+/// before the error hold their samples, and the rest of each plane is left
+/// as it was.
 pub fn decompress_to_yuv_planes_into(
     data: &[u8],
     planes: &mut [YuvPlaneMut<'_>],
@@ -589,13 +596,13 @@ pub fn decompress_to_yuv_planes_into(
     Decoder::new(data)?.decode_yuv_planes_into(planes)
 }
 
-/// The body of [`crate::Decoder::decode_yuv_planes_into`]: `reader`'s strips
-/// trimmed and edge-replicated into `planes` as `yuv_planes_from_raw` trims
-/// whole planes.
+/// The body of [`crate::Decoder::decode_yuv_planes_into_with_warnings`]:
+/// `reader`'s strips trimmed and edge-replicated into `planes` as
+/// `yuv_planes_from_raw` trims whole planes.
 pub(crate) fn yuv_planes_into(
     mut reader: RawStripReader<'_>,
     planes: &mut [YuvPlaneMut<'_>],
-) -> Result<(usize, usize, Subsampling)> {
+) -> Result<((usize, usize, Subsampling), Vec<DecodeWarning>)> {
     let geometry: RawGeometry = reader.geometry().clone();
     let n_comps: usize = geometry.components.len();
     let padded_widths: Vec<usize> = geometry.components.iter().map(|c| c.padded_width).collect();
@@ -650,7 +657,7 @@ pub(crate) fn yuv_planes_into(
             }
         }
     }
-    reader.finish()?;
+    let warnings: Vec<DecodeWarning> = reader.finish()?;
 
     // A plane taller than the MCU-aligned raw plane repeats its last raw
     // row, as `yuv_planes_from_raw` does.
@@ -668,7 +675,7 @@ pub(crate) fn yuv_planes_into(
                 .copy_within(last..last + layout.row_bytes(), start);
         }
     }
-    Ok((width, height, subsampling))
+    Ok(((width, height, subsampling), warnings))
 }
 
 /// One destination plane's geometry next to the raw plane it is cut from.
