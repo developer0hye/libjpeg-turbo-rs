@@ -189,11 +189,8 @@ impl<'a> Decoder<'a> {
     /// That span is checked per block (8x8 ISLOW blocks are checked again
     /// inside `simd::idct_islow_8x8_strided`, which guards its own raw
     /// store), so the decode loops need no `unsafe` and a block that does
-    /// not fit is an error rather than a write outside the plane. The check
-    /// measured within noise on aarch64 (P4-268). On x86_64 (i5-10400, Cargo's
-    /// default release profile) full-size decodes stayed 1-1.5% behind the
-    /// raw-pointer stores in grayscale and 8K 4:2:0 after P4-275, and within
-    /// noise at thin LTO; see P4-275.
+    /// not fit is an error rather than a write outside the plane. Its cost
+    /// on x86_64 is tracked in P4-275.
     #[inline(always)]
     pub(super) fn idct_block_into(
         &self,
@@ -234,10 +231,10 @@ impl<'a> Decoder<'a> {
             return Ok(());
         }
         // libjpeg's standard reduced scales (1/2, 1/4, 1/8) are the ones
-        // scaled decodes use; their blocks are a few samples, so the call and
-        // the size dispatch of the out-of-line path are a visible share of
-        // each block's work (P4-275). Kept inline here; every other size goes
-        // out of line.
+        // scaled decodes most often use; their blocks are a few samples, so
+        // the call and the size dispatch of the out-of-line path are a
+        // visible share of each block's work (P4-275). Kept inline here; the
+        // other scales (3/8, 5/8, 3/4, 7/8, and above 1) still pay the call.
         match n {
             4 => {
                 let mut block: [u8; 16] = [0u8; 16];
@@ -260,7 +257,8 @@ impl<'a> Decoder<'a> {
     }
 
     /// Every block size other than 8, 4, 2 and 1 (the less common scaled
-    /// decodes): the kernel's safe fixed-size form writes a stack block,
+    /// decodes; `idct_block_into` handles those four): the kernel's safe
+    /// fixed-size form writes a stack block,
     /// copied out row by row through `dst` (which already holds the block's
     /// span), as the former raw-pointer `idct_{N}x{N}_strided` wrappers did
     /// internally. Each arm's block is exactly `n * n` samples, so a small
@@ -296,12 +294,9 @@ impl<'a> Decoder<'a> {
             7 => via_block!(7, |out| idct_extended::idct_7x7(coeffs, quant, &mut out)),
             6 => via_block!(6, |out| idct_extended::idct_6x6(coeffs, quant, &mut out)),
             5 => via_block!(5, |out| idct_extended::idct_5x5(coeffs, quant, &mut out)),
-            4 => via_block!(4, |out| idct_scaled::idct_4x4(coeffs, quant, &mut out)),
             3 => via_block!(3, |out| idct_extended::idct_3x3(coeffs, quant, &mut out)),
-            2 => via_block!(2, |out| idct_scaled::idct_2x2(coeffs, quant, &mut out)),
-            1 => dst[0] = idct_scaled::idct_1x1(coeffs, quant),
-            // `idct_block_into` handles 8 and refuses any other size before
-            // calling.
+            // `idct_block_into` handles 8, 4, 2 and 1 and refuses any other
+            // size before calling.
             _ => {
                 return Err(JpegError::CorruptData(format!(
                     "IDCT block size {n} has no kernel"
@@ -1392,11 +1387,15 @@ impl<'a> Decoder<'a> {
 /// `stride` apart. `dst` spans `(N - 1) * stride + N` bytes.
 ///
 /// `N` is a constant so each row's copy is a fixed-size store the compiler
-/// inlines. With the size known only at run time every row was a call to
-/// `memcpy`, which for the 2- and 4-sample rows of a 1/4 or 1/2 scaled decode
-/// cost about 6% of the whole decode on x86_64 (P4-275).
+/// inlines. With the size known only at run time every row was a `memcpy`
+/// call; making it constant recovered about 3% of a 1/4-scale decode on
+/// x86_64 (P4-275).
 #[inline(always)]
 fn copy_block_rows<const N: usize>(dst: &mut [u8], stride: usize, block: &[u8]) {
+    // The caller sliced `dst` to the block's checked span; these hold by
+    // construction and guard a future caller that skips the check.
+    debug_assert_eq!(block.len(), N * N);
+    debug_assert!(dst.len() >= (N - 1) * stride + N);
     for (row, samples) in block.chunks_exact(N).enumerate() {
         let start: usize = row * stride;
         dst[start..start + N].copy_from_slice(samples);
