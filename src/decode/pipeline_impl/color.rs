@@ -181,8 +181,8 @@ impl<'a> Decoder<'a> {
     /// `stride` apart, dispatching on `block_size` (the scaled IDCT sizes
     /// 1..=16) and, for 8x8, on `self.dct_method`: ISLOW stores straight into
     /// the plane through `simd::idct_islow_8x8_strided` where the build has a
-    /// strided kernel; every other case goes through a stack block and a
-    /// checked row copy.
+    /// strided kernel; 1x1 is a single direct store; every other case goes
+    /// through a stack block and a checked row copy.
     ///
     /// Every kernel writes `block_size` rows of `block_size` samples, which
     /// span `(block_size - 1) * stride + block_size` bytes from `offset`.
@@ -295,8 +295,8 @@ impl<'a> Decoder<'a> {
             6 => via_block!(6, |out| idct_extended::idct_6x6(coeffs, quant, &mut out)),
             5 => via_block!(5, |out| idct_extended::idct_5x5(coeffs, quant, &mut out)),
             3 => via_block!(3, |out| idct_extended::idct_3x3(coeffs, quant, &mut out)),
-            // `idct_block_into` handles 8, 4, 2 and 1 and refuses any other
-            // size before calling.
+            // `idct_block_into` handles 8, 4, 2 and 1 and refuses sizes
+            // outside 1..=16 before calling, so this arm is unreachable.
             _ => {
                 return Err(JpegError::CorruptData(format!(
                     "IDCT block size {n} has no kernel"
