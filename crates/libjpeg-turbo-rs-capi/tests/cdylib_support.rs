@@ -20,9 +20,11 @@ fn cargo_built_cdylib_path_is_next_to_the_outer_test_executable() {
 }
 
 /// P4-276: on whichever layout the running Cargo uses, the helper resolves a
-/// loadable cdylib (up to 1.99 the `deps/` sibling; from 1.100 by asking
-/// Cargo). That it is *this* invocation's library is enforced by the
-/// refusals pinned below, not asserted here.
+/// loadable cdylib (up to 1.99 the `deps/` sibling; from 1.100 the unit
+/// this test's Cargo fingerprint names). That it is *this* build's library is
+/// enforced by the refusals pinned below, not asserted here. CI runs this
+/// test under an unfiltered `cargo test --workspace` as well as under `-p`,
+/// which select different library units.
 #[test]
 fn outer_cargo_invocation_resolves_its_own_cdylib() {
     let cdylib: PathBuf = cdylib::cargo_built_cdylib_path()
@@ -36,237 +38,209 @@ fn outer_cargo_invocation_resolves_its_own_cdylib() {
     cdylib::assert_library_exports(&cdylib, cdylib::REQUIRED_EXPORTS);
 }
 
-/// P4-276 (codex review): `cargo test --workspace`, the replacement gate's
-/// first item, unifies features across the workspace and so builds a
-/// different library unit from `cargo test -p libjpeg-turbo-rs-capi`. The
-/// helper must be able to ask for either; both name this test target.
-#[test]
-fn the_query_can_name_the_package_or_the_whole_workspace() {
-    let package: Vec<&str> = cdylib::cargo_query_arguments(cdylib::PackageSelection::Package, None);
-    let workspace: Vec<&str> =
-        cdylib::cargo_query_arguments(cdylib::PackageSelection::Workspace, None);
-
-    assert!(package
-        .windows(2)
-        .any(|pair| pair == ["-p", "libjpeg-turbo-rs-capi"]));
-    assert!(!package.contains(&"--workspace"));
-    assert!(workspace.contains(&"--workspace"));
-    assert!(!workspace.contains(&"-p"));
-    for arguments in [&package, &workspace] {
-        assert!(arguments
-            .windows(2)
-            .any(|pair| pair == ["--test", "cdylib_support"]));
-        assert!(arguments.contains(&"--no-run") && arguments.contains(&"--locked"));
-        assert_eq!(
-            arguments.contains(&"--release"),
-            !cfg!(debug_assertions),
-            "the query must ask for the profile this test was built with"
-        );
-        assert!(!arguments.contains(&"--target"), "no target was named");
-    }
-
-    let cross: Vec<&str> = cdylib::cargo_query_arguments(
-        cdylib::PackageSelection::Package,
-        Some("aarch64-unknown-linux-gnu"),
-    );
-    assert!(cross
-        .windows(2)
-        .any(|pair| pair == ["--target", "aarch64-unknown-linux-gnu"]));
-}
-
-/// P4-276 (codex review): a relative `CARGO_TARGET_DIR` is resolved against
-/// the outer invocation's working directory, which the test cannot see, so
-/// the query is given the build directory itself. It is recognised by the
-/// tag Cargo writes there, at any depth above the executable.
-#[test]
-fn the_build_root_is_the_directory_cargo_tagged() {
-    const TAG: &str = "Signature: 8a477f597d28d172789f06886806bc55\n";
-    let scratch: tempfile::TempDir = tempfile::tempdir().expect("temporary directory");
-    let root: PathBuf = scratch.path().join("outer").join("target");
-    let unit: PathBuf = root.join("debug/build/libjpeg-turbo-rs-capi/9e788ac3b2a830e4/out");
-    std::fs::create_dir_all(&unit).expect("unit directory");
-    let executable: PathBuf = unit.join("symbol_inventory-9e788ac3b2a830e4");
-
-    assert_eq!(
-        cdylib::cargo_build_root_of(&executable),
-        None,
-        "no tag, no claim about where the build directory is"
-    );
-
-    std::fs::write(root.join("CACHEDIR.TAG"), TAG).expect("tag");
-    assert_eq!(
-        cdylib::cargo_build_root_of(&executable),
-        Some(cdylib::CargoBuildRoot {
-            root: root.clone(),
-            target: None,
-        })
-    );
-}
-
-/// P4-276 (review): a build for a named target has the triple's directory
-/// between the build directory and the profile, and Cargo tags that one too.
-/// The nearest tag is then not the build directory: handing it to the query
-/// would nest a second tree inside the first. The helper must give the outer
-/// tagged directory and report the triple, so the query can name it.
-#[test]
-fn a_named_target_is_reported_and_is_not_mistaken_for_the_build_root() {
-    const TAG: &str = "Signature: 8a477f597d28d172789f06886806bc55\n";
-    let scratch: tempfile::TempDir = tempfile::tempdir().expect("temporary directory");
-    let root: PathBuf = scratch.path().join("target");
-    let triple_dir: PathBuf = root.join("aarch64-unknown-linux-gnu");
-    let unit: PathBuf = triple_dir.join("release/build/libjpeg-turbo-rs-capi/1111111111111111/out");
-    std::fs::create_dir_all(&unit).expect("unit directory");
-    std::fs::write(root.join("CACHEDIR.TAG"), TAG).expect("root tag");
-    std::fs::write(triple_dir.join("CACHEDIR.TAG"), TAG).expect("target tag");
-
-    assert_eq!(
-        cdylib::cargo_build_root_of(&unit.join("soname-1111111111111111")),
-        Some(cdylib::CargoBuildRoot {
-            root,
-            target: Some(String::from("aarch64-unknown-linux-gnu")),
-        })
-    );
-}
-
-/// `compiler-artifact` lines as Cargo 1.100.0 printed them for
-/// `cargo test --no-run --message-format=json` on macOS (2026-11-13), cut
-/// down to the fields the helper reads plus enough neighbours to show it does
-/// not depend on their order. The library's file name is the one of the
-/// platform running the test.
-fn cargo_1_100_messages(lib_unit: &str, test_executable: &str) -> String {
-    cargo_1_100_messages_with_freshness(lib_unit, test_executable, true)
-}
-
-/// The same lines, with the library reported as just compiled when
-/// `is_library_fresh` is false. Around them are the other messages a real
-/// query prints: a build script's result, whose `out_dir` holds the library's
-/// name only as a directory, and a diagnostic whose rendered text quotes the
-/// very keys the reader looks for.
-fn cargo_1_100_messages_with_freshness(
-    lib_unit: &str,
-    test_executable: &str,
-    is_library_fresh: bool,
-) -> String {
-    format!(
-        concat!(
-            r#"{{"reason":"build-script-executed","package_id":"path+file:///w/crates/libjpeg-turbo-rs-capi#0.2.0","#,
-            r#""linked_libs":[],"env":[["CAPI_VERSION_SCRIPT","/t/debug/build/libjpeg-turbo-rs-capi/de0225842e89a4b0/out/libjpeg.map"]],"#,
-            r#""out_dir":"/t/debug/build/libjpeg-turbo-rs-capi/de0225842e89a4b0/out"}}"#,
-            "\n",
-            r#"{{"reason":"compiler-message","message":{{"rendered":"warning: \"executable\":\"/elsewhere/t\" and \"filenames\":[\"/elsewhere/{lib}\"]\n","level":"warning"}}}}"#,
-            "\n",
-            r#"{{"reason":"compiler-artifact","package_id":"path+file:///w/crates/libjpeg-turbo-rs-capi#0.2.0","#,
-            r#""target":{{"kind":["rlib","cdylib","staticlib"],"name":"libjpeg_turbo_rs_capi"}},"features":[],"#,
-            r#""filenames":["{unit}/out/liblibjpeg_turbo_rs_capi.rlib","{unit}/out/{lib}","{unit}/out/liblibjpeg_turbo_rs_capi.a"],"#,
-            r#""executable":null,"fresh":{fresh}}}"#,
-            "\n",
-            r#"{{"reason":"compiler-artifact","target":{{"kind":["test"],"name":"symbol_inventory"}},"#,
-            r#""filenames":["{exe}"],"executable":"{exe}","fresh":true}}"#,
-            "\n",
-            r#"{{"reason":"build-finished","success":true}}"#,
-            "\n",
-        ),
-        unit = lib_unit,
-        lib = cdylib::cdylib_filename(),
-        exe = test_executable,
-        fresh = is_library_fresh,
+/// One library unit of a Cargo 1.100 package directory: its recorded
+/// fingerprint and, unless `has_cdylib` is false (a check-only build), the
+/// cdylib in its `out/`.
+fn library_unit(package: &Path, unit: &str, fingerprint_hex: &str, has_cdylib: bool) -> PathBuf {
+    let directory: PathBuf = package.join(unit);
+    std::fs::create_dir_all(directory.join("fingerprint")).expect("fingerprint directory");
+    std::fs::create_dir_all(directory.join("out")).expect("out directory");
+    std::fs::write(
+        directory.join("fingerprint/lib-libjpeg_turbo_rs_capi"),
+        fingerprint_hex,
     )
+    .expect("library fingerprint");
+    let cdylib: PathBuf = directory.join("out").join(cdylib::cdylib_filename());
+    if has_cdylib {
+        std::fs::write(&cdylib, b"library").expect("cdylib");
+    }
+    cdylib
 }
 
-const RUNNING_TEST: &str =
-    "/t/debug/build/libjpeg-turbo-rs-capi/9e788ac3b2a830e4/out/symbol_inventory-9e788ac3b2a830e4";
+/// A test unit whose fingerprint depends on a library with fingerprint
+/// `library_fingerprint`, laid out as Cargo 1.100 writes it (the JSON is cut
+/// from `symbol_inventory`'s, 2026-11-13). Returns the test executable.
+fn test_unit(package: &Path, library_fingerprint: u64) -> PathBuf {
+    let directory: PathBuf = package.join("9e788ac3b2a830e4");
+    std::fs::create_dir_all(directory.join("fingerprint")).expect("fingerprint directory");
+    std::fs::create_dir_all(directory.join("out")).expect("out directory");
+    let json: String = format!(
+        concat!(
+            r#"{{"rustc":4106920547260086991,"features":"[]","declared_features":"[\"png\"]","#,
+            r#""target":10547447312741522014,"profile":11751664268911691724,"#,
+            r#""path":12184988007399145868,"deps":[[7350845333435588724,"libloading",false,9639548321222082767],"#,
+            r#"[11932089159807619702,"libjpeg_turbo_rs",false,7064387275689026485],"#,
+            r#"[12812997960710357285,"libjpeg_turbo_rs_capi",false,{library}],"#,
+            r#"[12812997960710357285,"build_script_build",false,4392344171590827181]],"#,
+            r#""local":[{{"CheckDepInfo":{{"dep_info":"x","fingerprint":"mtime"}}}}],"rustflags":[]}}"#
+        ),
+        library = library_fingerprint,
+    );
+    std::fs::write(
+        directory.join("fingerprint/test-integration-test-symbol_inventory.json"),
+        json,
+    )
+    .expect("test fingerprint");
+    let executable: PathBuf = directory.join("out/symbol_inventory-9e788ac3b2a830e4");
+    std::fs::write(&executable, b"test").expect("test executable");
+    executable
+}
 
-/// P4-276: the library is taken from Cargo's own artifact messages, and only
-/// when the same messages name the running test executable, which is what
-/// ties the answer to this invocation's unit graph.
+/// The fingerprint Cargo 1.100 recorded for `symbol_inventory`'s library
+/// (17174420862757387360) and the same number as the library unit's file
+/// spells it, the hex of its little-endian bytes.
+const LIBRARY_FINGERPRINT: u64 = 17174420862757387360;
+const LIBRARY_FINGERPRINT_HEX: &str = "603cb6dbc7cc57ee";
+
+fn set_time(path: &Path, seconds_after_epoch: u64) {
+    let time: std::time::SystemTime =
+        std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds_after_epoch);
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .and_then(|file: std::fs::File| file.set_modified(time))
+        .expect("set the modification time");
+}
+
+/// P4-276: the test's own fingerprint names the library it was built
+/// against, and only that unit's cdylib is taken. The other unit, built
+/// later for another feature set, is newer than ours and, like ours, older
+/// than the test executable, so the time check alone would not exclude it;
+/// choosing the newest library would take it, and the test would load the
+/// wrong library and could pass.
 #[test]
-fn cdylib_is_read_from_cargo_messages_that_name_this_test_executable() {
-    let unit: &str = "/t/debug/build/libjpeg-turbo-rs-capi/701e8b7399e923b8";
-    let messages: String = cargo_1_100_messages(unit, RUNNING_TEST);
-
-    let cdylib: PathBuf = cdylib::cdylib_from_cargo_messages(&messages, Path::new(RUNNING_TEST))
-        .expect("the messages name both the library and this executable");
+fn the_library_is_the_unit_the_test_fingerprint_names() {
+    let scratch: tempfile::TempDir = tempfile::tempdir().expect("temporary directory");
+    let package: &Path = scratch.path();
+    let ours: PathBuf = library_unit(package, "701e8b7399e923b8", LIBRARY_FINGERPRINT_HEX, true);
+    let other: PathBuf = library_unit(package, "137613d0c220edb4", "217dd677f4072be4", true);
+    let executable: PathBuf = test_unit(package, LIBRARY_FINGERPRINT);
+    set_time(&ours, 1_000);
+    set_time(&other, 2_000);
+    set_time(&executable, 3_000);
 
     assert_eq!(
-        cdylib,
-        Path::new(unit).join("out").join(cdylib::cdylib_filename())
+        cdylib::cdylib_by_fingerprint(&executable, "symbol_inventory").expect("one match"),
+        ours
     );
 }
 
-/// P4-276: a query that resolved another configuration (other features,
-/// profile or target) reports a different test executable. Its library is
-/// then a different build and must be refused, not used: `ci.yml` builds the
-/// default and the `--features png` library into one profile directory in a
-/// single job, so a guess would load the wrong one and still pass.
+/// P4-276: the fingerprint is read from the dependency entry that names the
+/// library, not from a neighbour, and converted to the library file's
+/// spelling.
 #[test]
-fn messages_for_another_configuration_are_refused() {
-    let other_test: &str =
-        "/t/debug/build/libjpeg-turbo-rs-capi/2222222222222222/out/symbol_inventory-2222222222222222";
-    let messages: String = cargo_1_100_messages(
-        "/t/debug/build/libjpeg-turbo-rs-capi/1111111111111111",
-        other_test,
+fn the_test_fingerprint_is_read_and_spelled_as_the_library_file_spells_it() {
+    let json: &str = concat!(
+        r#"{"rustc":1,"deps":[[1,"libjpeg_turbo_rs",false,2],"#,
+        r#"[12812997960710357285,"libjpeg_turbo_rs_capi",false,17174420862757387360],"#,
+        r#"[12812997960710357285,"build_script_build",false,4]],"local":[]}"#,
     );
-
-    let error: String = cdylib::cdylib_from_cargo_messages(&messages, Path::new(RUNNING_TEST))
-        .expect_err("a different test executable is a different build");
-
+    assert_eq!(
+        cdylib::library_fingerprint_in(json).expect("one dependency"),
+        LIBRARY_FINGERPRINT_HEX
+    );
+    assert!(cdylib::library_fingerprint_in(r#"{"deps":[[1,"libloading",false,2]]}"#).is_err());
+    assert!(cdylib::library_fingerprint_in(r#"{"rustc":1}"#).is_err());
     assert!(
-        error.contains(cdylib::CDYLIB_OVERRIDE_ENV),
-        "the error must name the override: {error}"
+        cdylib::library_fingerprint_in(r#"{"deps":[[1,"libjpeg_turbo_rs_capi",false,x]]}"#)
+            .is_err()
     );
+    // A crate whose name only ends in the library's is not the library.
+    assert!(cdylib::library_fingerprint_in(
+        r#"{"deps":[[1,"foo_libjpeg_turbo_rs_capi",false,17174420862757387360]]}"#
+    )
+    .is_err());
+    // Two entries naming the library cannot both be the one linked.
+    let twice: &str = concat!(
+        r#"{"deps":[[1,"libjpeg_turbo_rs_capi",false,17174420862757387360],"#,
+        r#"[2,"libjpeg_turbo_rs_capi",false,4]]}"#,
+    );
+    let error: String = cdylib::library_fingerprint_in(twice).expect_err("two dependencies");
+    assert!(error.contains("2 dependencies"), "wrong refusal: {error}");
 }
 
-/// P4-276: no library line (a failed build, or a message format this helper
-/// does not know) is an error, never a fall back to scanning the build
-/// directory.
+/// P4-276: every outcome other than one unit with a cdylib that predates the
+/// test is a refusal, never a guess.
 #[test]
-fn messages_without_the_library_are_refused() {
-    let messages: String = format!(
-        r#"{{"reason":"compiler-artifact","target":{{"kind":["test"],"name":"symbol_inventory"}},"filenames":["{exe}"],"executable":"{exe}","fresh":true}}"#,
-        exe = RUNNING_TEST,
+fn anything_but_one_matching_library_is_refused() {
+    // No unit has the fingerprint.
+    let none: tempfile::TempDir = tempfile::tempdir().expect("temporary directory");
+    library_unit(none.path(), "137613d0c220edb4", "217dd677f4072be4", true);
+    let executable: PathBuf = test_unit(none.path(), LIBRARY_FINGERPRINT);
+    let error: String = cdylib::cdylib_by_fingerprint(&executable, "symbol_inventory")
+        .expect_err("no unit matches");
+    assert!(error.contains("no library unit"), "wrong refusal: {error}");
+
+    // Two units claim it.
+    let two: tempfile::TempDir = tempfile::tempdir().expect("temporary directory");
+    library_unit(
+        two.path(),
+        "701e8b7399e923b8",
+        LIBRARY_FINGERPRINT_HEX,
+        true,
     );
+    library_unit(
+        two.path(),
+        "1111111111111111",
+        LIBRARY_FINGERPRINT_HEX,
+        true,
+    );
+    let executable: PathBuf = test_unit(two.path(), LIBRARY_FINGERPRINT);
+    let error: String = cdylib::cdylib_by_fingerprint(&executable, "symbol_inventory")
+        .expect_err("two units match");
+    assert!(error.contains("several"), "wrong refusal: {error}");
 
-    let error: String = cdylib::cdylib_from_cargo_messages(&messages, Path::new(RUNNING_TEST))
-        .expect_err("no library was named");
-    assert!(error.contains("name no"), "wrong refusal: {error}");
-}
-
-/// P4-276 (review): a query that had to compile the library did not find the
-/// outer invocation's: either the outer build was another configuration
-/// (`cargo test --workspace` against the package query), or a source changed
-/// while the tests were running and Cargo rebuilt the unit in place, under
-/// the same path. Both must be refused although the executable matches.
-#[test]
-fn a_library_the_query_had_to_compile_is_refused() {
-    let messages: String = cargo_1_100_messages_with_freshness(
-        "/t/debug/build/libjpeg-turbo-rs-capi/701e8b7399e923b8",
-        RUNNING_TEST,
+    // The matching unit is a check-only build: metadata, no cdylib.
+    let check: tempfile::TempDir = tempfile::tempdir().expect("temporary directory");
+    library_unit(
+        check.path(),
+        "d867a76d8cc141da",
+        LIBRARY_FINGERPRINT_HEX,
         false,
     );
+    let executable: PathBuf = test_unit(check.path(), LIBRARY_FINGERPRINT);
+    let error: String = cdylib::cdylib_by_fingerprint(&executable, "symbol_inventory")
+        .expect_err("no cdylib in the match");
+    assert!(error.contains("holds no"), "wrong refusal: {error}");
 
-    let error: String = cdylib::cdylib_from_cargo_messages(&messages, Path::new(RUNNING_TEST))
-        .expect_err("a library compiled by the query is not the one under test");
-
-    assert!(error.contains("had to compile"), "wrong refusal: {error}");
-    assert!(error.contains(cdylib::CDYLIB_OVERRIDE_ENV));
+    // A test executable outside a unit's out/ directory.
+    let loose: tempfile::TempDir = tempfile::tempdir().expect("temporary directory");
+    let elsewhere: PathBuf = loose.path().join("symbol_inventory");
+    std::fs::write(&elsewhere, b"test").expect("executable");
+    let error: String =
+        cdylib::cdylib_by_fingerprint(&elsewhere, "symbol_inventory").expect_err("not in a unit");
+    assert!(error.contains("neither beside"), "wrong refusal: {error}");
 }
 
-/// P4-276: two different libraries in one answer cannot both be this
-/// invocation's.
+/// P4-276 (review): a library rebuilt in place after a source edit keeps its
+/// unit and its fingerprint, but the running test was linked against the
+/// earlier build. A cdylib newer than the test executable is therefore
+/// refused.
 #[test]
-fn messages_with_two_libraries_are_refused() {
-    let mut messages: String = cargo_1_100_messages(
-        "/t/debug/build/libjpeg-turbo-rs-capi/701e8b7399e923b8",
-        RUNNING_TEST,
+fn a_library_rebuilt_after_the_test_was_linked_is_refused() {
+    let scratch: tempfile::TempDir = tempfile::tempdir().expect("temporary directory");
+    let ours: PathBuf = library_unit(
+        scratch.path(),
+        "701e8b7399e923b8",
+        LIBRARY_FINGERPRINT_HEX,
+        true,
     );
-    messages.push_str(&cargo_1_100_messages(
-        "/t/debug/build/libjpeg-turbo-rs-capi/1111111111111111",
-        RUNNING_TEST,
-    ));
+    let executable: PathBuf = test_unit(scratch.path(), LIBRARY_FINGERPRINT);
+    set_time(&executable, 1_000);
+    set_time(&ours, 2_000);
 
-    let error: String = cdylib::cdylib_from_cargo_messages(&messages, Path::new(RUNNING_TEST))
-        .expect_err("two libraries were named");
-    assert!(error.contains("more than one"), "wrong refusal: {error}");
+    let error: String = cdylib::cdylib_by_fingerprint(&executable, "symbol_inventory")
+        .expect_err("rebuilt after the test");
+    assert!(error.contains("rebuilt after"), "wrong refusal: {error}");
+
+    // Equal times are accepted: filesystems with one- or two-second
+    // timestamps give a library and the test linked right after it the same
+    // time.
+    set_time(&ours, 1_000);
+    assert_eq!(
+        cdylib::cdylib_by_fingerprint(&executable, "symbol_inventory").expect("same second"),
+        ours
+    );
 }
 
 /// P4-276 (review): `scripts/install_capi.sh` relinks the Linux library with
@@ -288,42 +262,6 @@ fn the_version_script_of_this_build_is_handed_to_the_install_script() {
             .file_name()
             .and_then(|name: &OsStr| name.to_str()),
         Some("libjpeg.map")
-    );
-}
-
-/// P4-276: Cargo escapes Windows separators in its JSON and may print a
-/// character outside ASCII raw or as `\u` escapes (a surrogate pair above the
-/// basic plane); each must decode to the path Cargo meant.
-#[test]
-fn json_string_escapes_decode_to_the_path_cargo_meant() {
-    let line: &str = concat!(
-        r#"{"executable":"D:\\a\\target\\out\\t-9e78.exe","#,
-        r#""filenames":["C:\\d\u00e9p\\\"q\"\\lib.dll","/tmp/caf\u00e9/\ud83d\ude00/é"],"other":null}"#,
-    );
-
-    assert_eq!(
-        cdylib::json_string_field(line, "executable").expect("well-formed"),
-        Some(String::from(r"D:\a\target\out\t-9e78.exe"))
-    );
-    assert_eq!(
-        cdylib::json_string_array_field(line, "filenames").expect("well-formed"),
-        vec![
-            String::from("C:\\d\u{e9}p\\\"q\"\\lib.dll"),
-            String::from("/tmp/caf\u{e9}/\u{1f600}/\u{e9}"),
-        ]
-    );
-    assert_eq!(
-        cdylib::json_string_field(line, "other").expect("well-formed"),
-        None,
-        "null is not a string"
-    );
-    assert_eq!(
-        cdylib::json_string_field(line, "absent").expect("well-formed"),
-        None
-    );
-    assert!(
-        cdylib::json_string_field(r#"{"executable":"unterminated"#, "executable").is_err(),
-        "a cut-off string is an error, not an empty path"
     );
 }
 
