@@ -955,6 +955,13 @@ jobs:
       - name: Build every workspace test target
         run: cargo test --locked --workspace --no-run
         timeout-minutes: 30
+      # P4-276: an unfiltered `cargo test --workspace` builds the C-ABI
+      # library as a different unit from `-p libjpeg-turbo-rs-capi`, which
+      # every other capi step uses, so the cdylib lookup is exercised under
+      # both selections. The build above already paid for this one.
+      - name: C-ABI cdylib lookup under a workspace selection (P4-276)
+        run: cargo test --locked --workspace -- outer_cargo_invocation_resolves_its_own_cdylib --exact
+        timeout-minutes: 10
       - name: Printf-expansion oracle (issue #378 fix)
         run: cargo test --locked -p libjpeg-turbo-rs-capi --test format_message -- --nocapture
         timeout-minutes: 10
