@@ -186,12 +186,14 @@ impl<'a> Decoder<'a> {
     ///
     /// Every kernel writes `block_size` rows of `block_size` samples, which
     /// span `(block_size - 1) * stride + block_size` bytes from `offset`.
-    /// That span is checked per block (a compare next to a whole IDCT,
-    /// measured within noise on every decode path; 8x8 ISLOW blocks are
-    /// checked again inside `simd::idct_islow_8x8_strided`, which guards
-    /// its own raw store), so the decode loops need no `unsafe` and a
-    /// block that does not fit is an error rather than a write outside the
-    /// plane.
+    /// That span is checked per block (8x8 ISLOW blocks are checked again
+    /// inside `simd::idct_islow_8x8_strided`, which guards its own raw
+    /// store), so the decode loops need no `unsafe` and a block that does
+    /// not fit is an error rather than a write outside the plane. The check
+    /// measured within noise on aarch64 (P4-268). On x86_64 (i5-10400, Cargo's
+    /// default release profile) full-size decodes stayed 1-1.5% behind the
+    /// raw-pointer stores in grayscale and 8K 4:2:0 after P4-275, and within
+    /// noise at thin LTO; see P4-275.
     #[inline(always)]
     pub(super) fn idct_block_into(
         &self,
@@ -231,19 +233,41 @@ impl<'a> Decoder<'a> {
             copy_block_rows::<8>(dst, stride, &block);
             return Ok(());
         }
-        self.idct_block_through_stack(coeffs, quant, dst, stride, n)
+        // libjpeg's standard reduced scales (1/2, 1/4, 1/8) are the ones
+        // scaled decodes use; their blocks are a few samples, so the call and
+        // the size dispatch of the out-of-line path are a visible share of
+        // each block's work (P4-275). Kept inline here; every other size goes
+        // out of line.
+        match n {
+            4 => {
+                let mut block: [u8; 16] = [0u8; 16];
+                idct_scaled::idct_4x4(coeffs, quant, &mut block);
+                copy_block_rows::<4>(dst, stride, &block);
+                Ok(())
+            }
+            2 => {
+                let mut block: [u8; 4] = [0u8; 4];
+                idct_scaled::idct_2x2(coeffs, quant, &mut block);
+                copy_block_rows::<2>(dst, stride, &block);
+                Ok(())
+            }
+            1 => {
+                dst[0] = idct_scaled::idct_1x1(coeffs, quant);
+                Ok(())
+            }
+            _ => self.idct_block_through_stack(coeffs, quant, dst, stride, n),
+        }
     }
 
-    /// Every block size other than 8 (the scaled decodes): the kernel's safe
-    /// fixed-size form writes a stack block, copied out row by row through
-    /// `dst` (which already holds the block's span). The former raw-pointer
-    /// `idct_{N}x{N}_strided` wrappers did the same internally, so it costs
-    /// nothing. Each arm's block is exactly `n * n` samples, so a small IDCT
-    /// does not zero-fill more stack than it writes.
+    /// Every block size other than 8, 4, 2 and 1 (the less common scaled
+    /// decodes): the kernel's safe fixed-size form writes a stack block,
+    /// copied out row by row through `dst` (which already holds the block's
+    /// span), as the former raw-pointer `idct_{N}x{N}_strided` wrappers did
+    /// internally. Each arm's block is exactly `n * n` samples, so a small
+    /// IDCT does not zero-fill more stack than it writes.
     ///
-    /// Kept out of line so the fifteen-arm match is not inlined into each of
-    /// the decode loops that call `idct_block_into`; it costs one call per
-    /// block, as the wrappers did.
+    /// Kept out of line so the twelve-arm match is not inlined into each of
+    /// the decode loops that call `idct_block_into`.
     #[inline(never)]
     fn idct_block_through_stack(
         &self,
