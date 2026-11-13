@@ -90,7 +90,8 @@ fn script_command(script: &str) -> Command {
     command
         .arg(shell::script_arg(&root.join("scripts").join(script)))
         .args(["--root", &shell::script_arg(&root)])
-        .env("CAPI_TARGET_DIR", shell::script_arg(cdylib_dir));
+        .env("CAPI_TARGET_DIR", shell::script_arg(cdylib_dir))
+        .envs(cdylib_support::version_map_environment());
     command
 }
 

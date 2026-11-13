@@ -276,6 +276,7 @@ fn installed_library_exports_the_reference_version_nodes() {
         .args(["--prefix", prefix])
         .args(["--root", &root.to_string_lossy()])
         .env("CAPI_TARGET_DIR", cdylib_dir)
+        .envs(cdylib_support::version_map_environment())
         .output()
         .expect("invoke install_capi.sh");
     assert!(

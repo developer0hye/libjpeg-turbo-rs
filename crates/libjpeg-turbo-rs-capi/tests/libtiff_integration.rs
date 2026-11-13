@@ -143,6 +143,7 @@ fn libtiff_jpeg_roundtrip_via_shim() {
     let build_status: std::process::Output = Command::new("bash")
         .arg(&build_sh)
         .env("CAPI_TARGET_DIR", cdylib_dir)
+        .envs(cdylib_support::version_map_environment())
         .output()
         .expect("failed to spawn build.sh — bash must be on PATH");
 
@@ -195,6 +196,7 @@ fn libtiff_jpeg_roundtrip_via_shim() {
     let run_status: std::process::Output = Command::new("bash")
         .arg(&run_sh)
         .env("CAPI_TARGET_DIR", cdylib_dir)
+        .envs(cdylib_support::version_map_environment())
         .output()
         .expect("failed to spawn run.sh");
 

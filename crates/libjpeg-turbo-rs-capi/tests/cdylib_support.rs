@@ -35,18 +35,129 @@ fn outer_cargo_invocation_resolves_its_own_cdylib() {
     cdylib::assert_library_exports(&cdylib, cdylib::REQUIRED_EXPORTS);
 }
 
+/// P4-276 (codex review): `cargo test --workspace`, the replacement gate's
+/// first item, unifies features across the workspace and so builds a
+/// different library unit from `cargo test -p libjpeg-turbo-rs-capi`. The
+/// helper must be able to ask for either; both name this test target.
+#[test]
+fn the_query_can_name_the_package_or_the_whole_workspace() {
+    let package: Vec<&str> = cdylib::cargo_query_arguments(cdylib::PackageSelection::Package, None);
+    let workspace: Vec<&str> =
+        cdylib::cargo_query_arguments(cdylib::PackageSelection::Workspace, None);
+
+    assert!(package
+        .windows(2)
+        .any(|pair| pair == ["-p", "libjpeg-turbo-rs-capi"]));
+    assert!(!package.contains(&"--workspace"));
+    assert!(workspace.contains(&"--workspace"));
+    assert!(!workspace.contains(&"-p"));
+    for arguments in [&package, &workspace] {
+        assert!(arguments
+            .windows(2)
+            .any(|pair| pair == ["--test", "cdylib_support"]));
+        assert!(arguments.contains(&"--no-run") && arguments.contains(&"--locked"));
+        assert_eq!(
+            arguments.contains(&"--release"),
+            !cfg!(debug_assertions),
+            "the query must ask for the profile this test was built with"
+        );
+        assert!(!arguments.contains(&"--target"), "no target was named");
+    }
+
+    let cross: Vec<&str> = cdylib::cargo_query_arguments(
+        cdylib::PackageSelection::Package,
+        Some("aarch64-unknown-linux-gnu"),
+    );
+    assert!(cross
+        .windows(2)
+        .any(|pair| pair == ["--target", "aarch64-unknown-linux-gnu"]));
+}
+
+/// P4-276 (codex review): a relative `CARGO_TARGET_DIR` is resolved against
+/// the outer invocation's working directory, which the test cannot see, so
+/// the query is given the build directory itself. It is recognised by the
+/// tag Cargo writes there, at any depth above the executable.
+#[test]
+fn the_build_root_is_the_directory_cargo_tagged() {
+    const TAG: &str = "Signature: 8a477f597d28d172789f06886806bc55\n";
+    let scratch: tempfile::TempDir = tempfile::tempdir().expect("temporary directory");
+    let root: PathBuf = scratch.path().join("outer").join("target");
+    let unit: PathBuf = root.join("debug/build/libjpeg-turbo-rs-capi/9e788ac3b2a830e4/out");
+    std::fs::create_dir_all(&unit).expect("unit directory");
+    let executable: PathBuf = unit.join("symbol_inventory-9e788ac3b2a830e4");
+
+    assert_eq!(
+        cdylib::cargo_build_root_of(&executable),
+        None,
+        "no tag, no claim about where the build directory is"
+    );
+
+    std::fs::write(root.join("CACHEDIR.TAG"), TAG).expect("tag");
+    assert_eq!(
+        cdylib::cargo_build_root_of(&executable),
+        Some(cdylib::CargoBuildRoot {
+            root: root.clone(),
+            target: None,
+        })
+    );
+}
+
+/// P4-276 (review): a build for a named target has the triple's directory
+/// between the build directory and the profile, and Cargo tags that one too.
+/// The nearest tag is then not the build directory: handing it to the query
+/// would nest a second tree inside the first. The helper must give the outer
+/// tagged directory and report the triple, so the query can name it.
+#[test]
+fn a_named_target_is_reported_and_is_not_mistaken_for_the_build_root() {
+    const TAG: &str = "Signature: 8a477f597d28d172789f06886806bc55\n";
+    let scratch: tempfile::TempDir = tempfile::tempdir().expect("temporary directory");
+    let root: PathBuf = scratch.path().join("target");
+    let triple_dir: PathBuf = root.join("aarch64-unknown-linux-gnu");
+    let unit: PathBuf = triple_dir.join("release/build/libjpeg-turbo-rs-capi/1111111111111111/out");
+    std::fs::create_dir_all(&unit).expect("unit directory");
+    std::fs::write(root.join("CACHEDIR.TAG"), TAG).expect("root tag");
+    std::fs::write(triple_dir.join("CACHEDIR.TAG"), TAG).expect("target tag");
+
+    assert_eq!(
+        cdylib::cargo_build_root_of(&unit.join("soname-1111111111111111")),
+        Some(cdylib::CargoBuildRoot {
+            root,
+            target: Some(String::from("aarch64-unknown-linux-gnu")),
+        })
+    );
+}
+
 /// `compiler-artifact` lines as Cargo 1.100.0 printed them for
 /// `cargo test --no-run --message-format=json` on macOS (2026-11-13), cut
 /// down to the fields the helper reads plus enough neighbours to show it does
 /// not depend on their order. The library's file name is the one of the
 /// platform running the test.
 fn cargo_1_100_messages(lib_unit: &str, test_executable: &str) -> String {
+    cargo_1_100_messages_with_freshness(lib_unit, test_executable, true)
+}
+
+/// The same lines, with the library reported as just compiled when
+/// `is_library_fresh` is false. Around them are the other messages a real
+/// query prints: a build script's result, whose `out_dir` holds the library's
+/// name only as a directory, and a diagnostic whose rendered text quotes the
+/// very keys the reader looks for.
+fn cargo_1_100_messages_with_freshness(
+    lib_unit: &str,
+    test_executable: &str,
+    is_library_fresh: bool,
+) -> String {
     format!(
         concat!(
+            r#"{{"reason":"build-script-executed","package_id":"path+file:///w/crates/libjpeg-turbo-rs-capi#0.2.0","#,
+            r#""linked_libs":[],"env":[["CAPI_VERSION_SCRIPT","/t/debug/build/libjpeg-turbo-rs-capi/de0225842e89a4b0/out/libjpeg.map"]],"#,
+            r#""out_dir":"/t/debug/build/libjpeg-turbo-rs-capi/de0225842e89a4b0/out"}}"#,
+            "\n",
+            r#"{{"reason":"compiler-message","message":{{"rendered":"warning: \"executable\":\"/elsewhere/t\" and \"filenames\":[\"/elsewhere/{lib}\"]\n","level":"warning"}}}}"#,
+            "\n",
             r#"{{"reason":"compiler-artifact","package_id":"path+file:///w/crates/libjpeg-turbo-rs-capi#0.2.0","#,
             r#""target":{{"kind":["rlib","cdylib","staticlib"],"name":"libjpeg_turbo_rs_capi"}},"features":[],"#,
             r#""filenames":["{unit}/out/liblibjpeg_turbo_rs_capi.rlib","{unit}/out/{lib}","{unit}/out/liblibjpeg_turbo_rs_capi.a"],"#,
-            r#""executable":null,"fresh":true}}"#,
+            r#""executable":null,"fresh":{fresh}}}"#,
             "\n",
             r#"{{"reason":"compiler-artifact","target":{{"kind":["test"],"name":"symbol_inventory"}},"#,
             r#""filenames":["{exe}"],"executable":"{exe}","fresh":true}}"#,
@@ -57,6 +168,7 @@ fn cargo_1_100_messages(lib_unit: &str, test_executable: &str) -> String {
         unit = lib_unit,
         lib = cdylib::cdylib_filename(),
         exe = test_executable,
+        fresh = is_library_fresh,
     )
 }
 
@@ -113,7 +225,29 @@ fn messages_without_the_library_are_refused() {
         exe = RUNNING_TEST,
     );
 
-    assert!(cdylib::cdylib_from_cargo_messages(&messages, Path::new(RUNNING_TEST)).is_err());
+    let error: String = cdylib::cdylib_from_cargo_messages(&messages, Path::new(RUNNING_TEST))
+        .expect_err("no library was named");
+    assert!(error.contains("name no"), "wrong refusal: {error}");
+}
+
+/// P4-276 (review): a query that had to compile the library did not find the
+/// outer invocation's: either the outer build was another configuration
+/// (`cargo test --workspace` against the package query), or a source changed
+/// while the tests were running and Cargo rebuilt the unit in place, under
+/// the same path. Both must be refused although the executable matches.
+#[test]
+fn a_library_the_query_had_to_compile_is_refused() {
+    let messages: String = cargo_1_100_messages_with_freshness(
+        "/t/debug/build/libjpeg-turbo-rs-capi/701e8b7399e923b8",
+        RUNNING_TEST,
+        false,
+    );
+
+    let error: String = cdylib::cdylib_from_cargo_messages(&messages, Path::new(RUNNING_TEST))
+        .expect_err("a library compiled by the query is not the one under test");
+
+    assert!(error.contains("had to compile"), "wrong refusal: {error}");
+    assert!(error.contains(cdylib::CDYLIB_OVERRIDE_ENV));
 }
 
 /// P4-276: two different libraries in one answer cannot both be this
@@ -129,7 +263,29 @@ fn messages_with_two_libraries_are_refused() {
         RUNNING_TEST,
     ));
 
-    assert!(cdylib::cdylib_from_cargo_messages(&messages, Path::new(RUNNING_TEST)).is_err());
+    let error: String = cdylib::cdylib_from_cargo_messages(&messages, Path::new(RUNNING_TEST))
+        .expect_err("two libraries were named");
+    assert!(error.contains("more than one"), "wrong refusal: {error}");
+}
+
+/// P4-276 (review): `scripts/install_capi.sh` relinks the Linux library with
+/// the version script the build script wrote. On the 1.100 layout that file
+/// is no longer below or beside the library's directory, so the staging
+/// tests hand the script the path Cargo compiled into them. It must be a
+/// real file wherever the build script ran, which is every platform.
+#[test]
+fn the_version_script_of_this_build_is_handed_to_the_install_script() {
+    let (variable, map): (&str, &str) = cdylib::version_map_environment()
+        .expect("build.rs publishes CAPI_VERSION_SCRIPT for every target of the package");
+
+    assert_eq!(variable, "CAPI_VERSION_MAP");
+    assert!(Path::new(map).is_file(), "no version script at {map}");
+    assert_eq!(
+        Path::new(map)
+            .file_name()
+            .and_then(|name: &OsStr| name.to_str()),
+        Some("libjpeg.map")
+    );
 }
 
 /// P4-276: Cargo escapes Windows separators in its JSON and may print a

@@ -45,6 +45,13 @@
 #                     (or `$ROOT/target`) using CAPI_BUILD_TARGET.
 #   CAPI_BUILD_TARGET Cargo target passed explicitly to nested builds. Defaults
 #                     to CARGO_BUILD_TARGET when set, otherwise Cargo's host.
+#   CAPI_VERSION_MAP  The GNU version script (`libjpeg.map`) of the build being
+#                     staged, for the Linux relink (P4-81). Optional: without
+#                     it the newest map below `CAPI_TARGET_DIR/build` or its
+#                     parent's `build` is used. Needed when CAPI_TARGET_DIR is
+#                     a Cargo 1.100 unit directory, which has no `build` below
+#                     or beside it (P4-276). A path that is not a file is an
+#                     error.
 #
 # Layout produced under ${DESTDIR}${PREFIX} (defaults — v8):
 #   lib/libjpeg.so.8.X.Y           actual cdylib
@@ -126,6 +133,7 @@ done
 if [[ -n "$DESTDIR" ]]; then DESTDIR="$(posix_path "$DESTDIR")"; fi
 ROOT="$(posix_path "$ROOT")"
 if [[ -n "${CAPI_TARGET_DIR:-}" ]]; then CAPI_TARGET_DIR="$(posix_path "$CAPI_TARGET_DIR")"; fi
+if [[ -n "${CAPI_VERSION_MAP:-}" ]]; then CAPI_VERSION_MAP="$(posix_path "$CAPI_VERSION_MAP")"; fi
 CARGO_BIN="$(posix_path "$CARGO_BIN")"
 
 OS_NAME="$(uname -s)"
@@ -314,12 +322,21 @@ if [[ "$PLATFORM" == "linux" && "${CAPI_SKIP_SYMBOL_VERSIONS:-0}" != "1" ]]; the
         # point CAPI_TARGET_DIR at `<profile>/deps` (that is where the test
         # harness finds the cdylib), so `build/` can be one level up. Prefer the
         # newest when several build-script hashes are present.
-        VERSION_MAP=""
-        for _dir in "$RELEASE_DIR" "$(dirname "$RELEASE_DIR")"; do
-            [[ -d "$_dir/build" ]] || continue
-            VERSION_MAP="$(find "$_dir/build" -type f -name libjpeg.map -exec ls -t {} + 2>/dev/null | head -1)"
-            [[ -n "$VERSION_MAP" ]] && break
-        done
+        # A caller that knows which build it is staging names the map
+        # (CAPI_VERSION_MAP); nothing else ties a map to a library once
+        # Cargo 1.100 puts them in separate unit directories.
+        VERSION_MAP="${CAPI_VERSION_MAP:-}"
+        if [[ -n "$VERSION_MAP" && ! -f "$VERSION_MAP" ]]; then
+            echo "ERROR: CAPI_VERSION_MAP is not a file: $VERSION_MAP" >&2
+            exit 1
+        fi
+        if [[ -z "$VERSION_MAP" ]]; then
+            for _dir in "$RELEASE_DIR" "$(dirname "$RELEASE_DIR")"; do
+                [[ -d "$_dir/build" ]] || continue
+                VERSION_MAP="$(find "$_dir/build" -type f -name libjpeg.map -exec ls -t {} + 2>/dev/null | head -1)"
+                [[ -n "$VERSION_MAP" ]] && break
+            done
+        fi
         STATIC_LIB=""
         for _dir in "$RELEASE_DIR" "$(dirname "$RELEASE_DIR")"; do
             if [[ -f "$_dir/liblibjpeg_turbo_rs_capi.a" ]]; then
