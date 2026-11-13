@@ -15863,7 +15863,7 @@ measurement contradicts are corrected: `idct_block_into`'s "measured within
 noise on every decode path" and `idct_block_through_stack`'s "it costs
 nothing" were aarch64 results.
 
-## P4-276. Rust 1.100.0 Breaks CI on Main Through a New Clippy Finding and the capi Tests' cdylib Lookup — **CLOSED 2026-11-13**
+## P4-276. Rust 1.100.0 Breaks CI on Main Through a New Clippy Finding and the capi Tests' cdylib Lookup — **PARTIAL: CI green; the unfiltered workspace run still fails**
 
 Found 2026-11-13 on #702, a docs-only pull request. Its run 43357915927
 failed seven jobs that had passed on `main` (`a5fe11a`) the day before in
@@ -15899,34 +15899,29 @@ lookup no longer depends on where Cargo places test executables (one shared
 helper, the per-file copies removed) and still passes on 1.99.1; the Clippy
 finding is fixed, not allowed.
 
-**Status (2026-11-13): closed** by #704 (merge `40d8b7b`). Cause 1 was
-Cargo 1.100's new build-directory layout: every unit has its own
-`target/<profile>/build/<pkg>/<hash>/out/`, so the test executable and the
-cdylib are no longer siblings in `deps/`, and Cargo calls the layout "not a
-stable interface". `crates/libjpeg-turbo-rs-capi/tests/support/cdylib.rs`
-now takes the override, else the `deps/` sibling (Cargo up to 1.99), else
-asks Cargo (`cargo test --no-run --message-format=json`, `-p` then
-`--workspace`, with the build directory found by `CACHEDIR.TAG` and any
-target triple passed on) and uses the library only when the answer names
-the running executable and every unit is fresh. The 31 per-file lookups
-call it. `scripts/install_capi.sh` takes `CAPI_VERSION_MAP`, which the
-staging tests pass, because the map is no longer below or beside the
-library on 1.100; without it the Linux P4-81 relink was skipped. Cause 2,
-Clippy 1.100, flagged three `needless_range_loop`s in library code
-(`pipeline_impl/lossless.rs` and two in `jpeglib.rs`), not one.
+**Status (2026-11-13): partial.** #704 (merge `40d8b7b`) made every `ci.yml`
+job green on stable 1.100.0 (42 checks on Linux, macOS and Windows) and
+fixed cause 2: Clippy 1.100 flagged three `needless_range_loop`s in library
+code (`pipeline_impl/lossless.rs` and two in `jpeglib.rs`), not one.
+`scripts/install_capi.sh` also takes `CAPI_VERSION_MAP` now, which the
+staging tests pass; without it the Linux P4-81 relink was skipped on 1.100,
+where the map is no longer below or beside the library.
 
-Proof: #704's CI, all 42 checks green on stable 1.100.0 (Linux, macOS,
-Windows). Locally: capi suite 407 passed / 0 failed on 1.100.0 and 1.98.0
-(macOS); on Linux x86_64, 405 of 407 on 1.100.0 including
-`capi_symbol_versions`, the other two failing identically on 1.97.1 for
-host reasons (no `patchelf`, system libjpeg 2.1.5). Exactly 1.99.1 was not
-run; 1.98.0 and 1.97.1 cover the old layout.
+Cause 1, Cargo 1.100's build-directory layout, is not fully fixed. Every
+unit now has its own `target/<profile>/build/<pkg>/<hash>/out/`, so the test
+executable and the cdylib are no longer siblings in `deps/`. #704's
+`tests/support/cdylib.rs` asks Cargo (`cargo test --no-run
+--message-format=json` for the running test target) and refuses any answer
+that does not name the running executable or that had to compile. That
+cannot reproduce an unfiltered `cargo test --workspace`, the replacement
+gate's first item: it builds the library as a different unit from any
+per-target query, so on `main` with 1.100.0 that run fails 164 capi tests,
+every one with this refusal. #704 was verified only with `--test` filters,
+and `ci.yml` runs every capi step with `-p`, so nothing caught it.
 
-What changed for callers: P4-73's closing note says the tests follow custom
-JSON targets and CLI-only settings such as `--config` or `-Z build-std`
-automatically. On Cargo 1.100 those outer invocations cannot be reproduced
-from inside the test; they end in a refusal naming
-`CARGO_CDYLIB_FILE_LIBJPEG_TURBO_RS_CAPI`, which must then be set. No
-`ci.yml` job uses them. #703 proposed choosing the newest cdylib by
-modification time instead; it was not taken because that rule can pick
-another feature set's library without failing.
+Acceptance (unchanged, plus): `cargo test --workspace --no-fail-fast`
+passes on 1.100.0, and a CI step runs the lookup under that selection. The
+fix in progress matches the library unit through the fingerprint Cargo
+records for the test unit, which compiles nothing and also restores
+`--config`, custom profiles and custom target JSON (P4-73), which #704 had
+turned into refusals.
