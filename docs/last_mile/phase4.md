@@ -15734,3 +15734,59 @@ Acceptance: each of 1-7 has a test that fails when the path it names is
 broken on purpose (1 is two assertions: strict `decompress_raw` is `Err`
 and the lenient decode reports a warning); 8 uses a per-layout bound of the
 measured overhead plus a small margin.
+
+## P4-275. x86_64 Progressive Decode Reads 1 to 2% Slower After the Bounds-Checked IDCT Store — **OPEN**
+
+Found 2026-11-13. P4-268 (#701) moved every decode IDCT write behind
+`Decoder::idct_block_into` and measured it on aarch64 only; its x86_64 cost
+was recorded as not measured. This is that measurement.
+
+**Method.** `downstream-bench.yml` (x86_64-linux leg, default variant, 30
+iterations) dispatched six times on `v0.9.0` (`47ff06c`, the commit #701
+merged onto) and six times on `main` (`a5fe11a`). Each run times the
+checkout (`candidate-*`) beside the published 0.8.0 crate (`baseline-*`) on
+one runner, so the figure compared is the candidate/baseline median-time
+ratio, and only between runs on the same CPU model. Harness, consumer source
+(`b29ea58b`) and `rustc` 1.100.0 are identical in both arms. The runner pool
+gave EPYC 9V45 4 before / 1 after, EPYC 7763 1 / 2, EPYC 9V74 1 / 1, and two
+"after" runs on a Xeon Platinum 8573C with no "before" counterpart, which
+are unused.
+Runs: 43355217125, 43355235769, 43355252911, 43356657589, 43356675915,
+43356694143 (before); 43355226890, 43355244323, 43355261506, 43356666589
+(after); 43356647199, 43356684983 (Intel, unused).
+
+**Result** (after/before change in that ratio; negative is faster):
+
+| Case | EPYC 9V45 | EPYC 7763 | EPYC 9V74 |
+|---|---|---|---|
+| progressive 1080p 4:2:0 | +1.8% / +1.8% | +1.7% / +1.1% | +1.0% / +1.2% |
+| grayscale 1080p | +2.0% / +1.2% | -0.6% / -3.9% | +4.7% / +5.0% |
+| 12 MP baseline 4:2:0 | -3.0% / -5.5% | -2.9% / -4.0% | +1.6% / -1.8% |
+| 8K baseline 4:2:0 | -2.3% / -3.8% | -3.0% / -4.6% | -0.2% / -2.7% |
+| 12 MP at scale 1/4 | -0.1% / 0.0% | -1.2% / +2.4% | +1.8% / +1.9% |
+| 64x64 4:2:0 | +0.6% / +0.6% | -0.8% / -2.2% | -0.7% / +0.2% |
+
+Each cell is `decompress_to` / `decompress_into`. `testorig` and
+`testimgint` read -0.7% to -6.5% on all three.
+
+- **Progressive** is the one consistent signal: slower on every model, in
+  both buffer modes, and outside the repeat spread. On the 9V45 the four
+  "before" ratios span 0.987-0.996 and the "after" one is 1.011; on the 7763
+  the two "after" ratios are 1.018 and 1.020 against 1.002.
+- **Baseline colour** is not slower; it reads faster on the two models with
+  repeats.
+- **Grayscale** is undecided: slower on two models, faster on the third,
+  whose two "after" runs disagree by 7.8%.
+- Nothing is near the 8-17% the fully safe store cost on aarch64.
+
+**What this does not show.** Cells have one to four samples; same-commit
+repeats differ by up to 7.8% on some rows; and a 1 to 2% shift between two
+builds can be code layout rather than the added check. The raw strip reader
+itself is not timed by this harness (P4-271).
+
+Acceptance: an interleaved same-runner A/B (the `main-portable` pattern of
+`perf-portable-vs-native.yml`, applied to a decode matrix) decides whether
+the progressive and grayscale deltas are real. If they are, the cost is
+either recovered (for example by hoisting the per-block span check out of
+`decode_progressive_planes`' inner loop) or accepted here as the price of the
+safe store, with the number recorded.
