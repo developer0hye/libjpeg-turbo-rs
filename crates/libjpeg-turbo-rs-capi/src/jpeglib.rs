@@ -5375,8 +5375,7 @@ pub unsafe extern "C" fn jpeg_read_coefficients(cinfo: *mut c_void) -> *mut c_vo
         // are already iMCU-padded by the parser (see `read_coefficients`
         // in `src/api/coefficient.rs`), so we can pass them straight
         // through as the requested barray dimensions.
-        for ci in 0..n {
-            let comp: &libjpeg_turbo_rs::ComponentCoefficients = &inner.components[ci];
+        for (ci, comp) in inner.components.iter().enumerate() {
             let blocks_x: JDimension = comp.blocks_x as JDimension;
             let blocks_y: JDimension = comp.blocks_y as JDimension;
             let v_samp: JDimension = comp.v_sampling as JDimension;
@@ -5410,8 +5409,7 @@ pub unsafe extern "C" fn jpeg_read_coefficients(cinfo: *mut c_void) -> *mut c_vo
         // Populate each barray with the parsed coefficient blocks, copying
         // through `access_virt_barray` so we use the same access pattern
         // a foreign caller would.
-        for ci in 0..n {
-            let comp: &libjpeg_turbo_rs::ComponentCoefficients = &inner.components[ci];
+        for (ci, comp) in inner.components.iter().enumerate() {
             let blocks_x_u: usize = comp.blocks_x;
             let blocks_y_u: usize = comp.blocks_y;
             let blocks_x: JDimension = blocks_x_u as JDimension;

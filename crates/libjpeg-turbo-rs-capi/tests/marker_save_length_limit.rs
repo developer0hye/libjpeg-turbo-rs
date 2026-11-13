@@ -21,38 +21,13 @@ const JPEG_HEADER_OK: c_int = 1;
 // Standard JPEG marker codes (per jpeglib.h).
 const JPEG_COM: c_int = 0xFE;
 
-fn dlext() -> &'static str {
-    if cfg!(target_os = "windows") {
-        "dll"
-    } else if cfg!(target_os = "macos") {
-        "dylib"
-    } else {
-        "so"
-    }
-}
+#[path = "support/cdylib.rs"]
+mod cdylib_support;
 
-fn lib_prefix() -> &'static str {
-    if cfg!(target_os = "windows") {
-        ""
-    } else {
-        "lib"
-    }
-}
-
+/// The cdylib this Cargo invocation built; see `support/cdylib.rs` for how
+/// it is found on each Cargo build-directory layout (P4-276).
 fn cdylib_path() -> PathBuf {
-    if let Ok(p) = std::env::var("CARGO_CDYLIB_FILE_LIBJPEG_TURBO_RS_CAPI") {
-        return PathBuf::from(p);
-    }
-    let exe: PathBuf = std::env::current_exe().expect("current_exe");
-    let mut dir: PathBuf = exe.clone();
-    while dir.pop() {
-        let candidate: PathBuf =
-            dir.join(format!("{}libjpeg_turbo_rs_capi.{}", lib_prefix(), dlext()));
-        if candidate.exists() {
-            return candidate;
-        }
-    }
-    panic!("could not locate cdylib near {}", exe.display());
+    cdylib_support::cdylib_path()
 }
 
 /// Layout of `jpeg_marker_struct` as used by the shim's `cinfo->marker_list`.

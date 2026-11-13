@@ -55,8 +55,8 @@ impl<'a> Decoder<'a> {
 
         // Resolve DC Huffman tables for each scan component
         let mut dc_tables: Vec<&HuffmanTable> = Vec::with_capacity(num_components);
-        for i in 0..scan.components.len().min(num_components) {
-            let dc_tbl_idx = scan.components[i].dc_table_index as usize;
+        for component in scan.components.iter().take(num_components) {
+            let dc_tbl_idx = component.dc_table_index as usize;
             let dc_table = self.metadata.dc_huffman_tables[dc_tbl_idx]
                 .as_ref()
                 .ok_or_else(|| {
