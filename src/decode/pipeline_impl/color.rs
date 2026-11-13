@@ -228,7 +228,7 @@ impl<'a> Decoder<'a> {
             // still the common size there, so kept inline.
             let mut block: [u8; 64] = [0u8; 64];
             (self.idct_fn())(coeffs, quant, &mut block);
-            copy_block_rows(dst, stride, 8, &block);
+            copy_block_rows::<8>(dst, stride, &block);
             return Ok(());
         }
         self.idct_block_through_stack(coeffs, quant, dst, stride, n)
@@ -254,41 +254,27 @@ impl<'a> Decoder<'a> {
         n: usize,
     ) -> Result<()> {
         macro_rules! via_block {
-            ($len:literal, |$out:ident| $write:expr) => {{
-                let mut $out: [u8; $len] = [0u8; $len];
+            ($n:literal, |$out:ident| $write:expr) => {{
+                let mut $out: [u8; $n * $n] = [0u8; $n * $n];
                 $write;
-                copy_block_rows(dst, stride, n, &$out);
+                copy_block_rows::<$n>(dst, stride, &$out);
             }};
         }
         match n {
-            16 => via_block!(256, |out| idct_extended::idct_16x16(
-                coeffs, quant, &mut out
-            )),
-            15 => via_block!(225, |out| idct_extended::idct_15x15(
-                coeffs, quant, &mut out
-            )),
-            14 => via_block!(196, |out| idct_extended::idct_14x14(
-                coeffs, quant, &mut out
-            )),
-            13 => via_block!(169, |out| idct_extended::idct_13x13(
-                coeffs, quant, &mut out
-            )),
-            12 => via_block!(144, |out| idct_extended::idct_12x12(
-                coeffs, quant, &mut out
-            )),
-            11 => via_block!(121, |out| idct_extended::idct_11x11(
-                coeffs, quant, &mut out
-            )),
-            10 => via_block!(100, |out| idct_extended::idct_10x10(
-                coeffs, quant, &mut out
-            )),
-            9 => via_block!(81, |out| idct_extended::idct_9x9(coeffs, quant, &mut out)),
-            7 => via_block!(49, |out| idct_extended::idct_7x7(coeffs, quant, &mut out)),
-            6 => via_block!(36, |out| idct_extended::idct_6x6(coeffs, quant, &mut out)),
-            5 => via_block!(25, |out| idct_extended::idct_5x5(coeffs, quant, &mut out)),
-            4 => via_block!(16, |out| idct_scaled::idct_4x4(coeffs, quant, &mut out)),
-            3 => via_block!(9, |out| idct_extended::idct_3x3(coeffs, quant, &mut out)),
-            2 => via_block!(4, |out| idct_scaled::idct_2x2(coeffs, quant, &mut out)),
+            16 => via_block!(16, |out| idct_extended::idct_16x16(coeffs, quant, &mut out)),
+            15 => via_block!(15, |out| idct_extended::idct_15x15(coeffs, quant, &mut out)),
+            14 => via_block!(14, |out| idct_extended::idct_14x14(coeffs, quant, &mut out)),
+            13 => via_block!(13, |out| idct_extended::idct_13x13(coeffs, quant, &mut out)),
+            12 => via_block!(12, |out| idct_extended::idct_12x12(coeffs, quant, &mut out)),
+            11 => via_block!(11, |out| idct_extended::idct_11x11(coeffs, quant, &mut out)),
+            10 => via_block!(10, |out| idct_extended::idct_10x10(coeffs, quant, &mut out)),
+            9 => via_block!(9, |out| idct_extended::idct_9x9(coeffs, quant, &mut out)),
+            7 => via_block!(7, |out| idct_extended::idct_7x7(coeffs, quant, &mut out)),
+            6 => via_block!(6, |out| idct_extended::idct_6x6(coeffs, quant, &mut out)),
+            5 => via_block!(5, |out| idct_extended::idct_5x5(coeffs, quant, &mut out)),
+            4 => via_block!(4, |out| idct_scaled::idct_4x4(coeffs, quant, &mut out)),
+            3 => via_block!(3, |out| idct_extended::idct_3x3(coeffs, quant, &mut out)),
+            2 => via_block!(2, |out| idct_scaled::idct_2x2(coeffs, quant, &mut out)),
             1 => dst[0] = idct_scaled::idct_1x1(coeffs, quant),
             // `idct_block_into` handles 8 and refuses any other size before
             // calling.
@@ -1378,13 +1364,18 @@ impl<'a> Decoder<'a> {
     }
 }
 
-/// Copy an `n x n` IDCT block, row by row, into `dst`, whose rows are
-/// `stride` apart. `dst` spans `(n - 1) * stride + n` bytes, so
-/// `chunks_mut(stride)` yields exactly `n` rows, the last one `n` long.
+/// Copy an `N x N` IDCT block, row by row, into `dst`, whose rows are
+/// `stride` apart. `dst` spans `(N - 1) * stride + N` bytes.
+///
+/// `N` is a constant so each row's copy is a fixed-size store the compiler
+/// inlines. With the size known only at run time every row was a call to
+/// `memcpy`, which for the 2- and 4-sample rows of a 1/4 or 1/2 scaled decode
+/// cost about 6% of the whole decode on x86_64 (P4-275).
 #[inline(always)]
-fn copy_block_rows(dst: &mut [u8], stride: usize, n: usize, block: &[u8]) {
-    for (row, samples) in dst.chunks_mut(stride).zip(block.chunks_exact(n)) {
-        row[..n].copy_from_slice(samples);
+fn copy_block_rows<const N: usize>(dst: &mut [u8], stride: usize, block: &[u8]) {
+    for (row, samples) in block.chunks_exact(N).enumerate() {
+        let start: usize = row * stride;
+        dst[start..start + N].copy_from_slice(samples);
     }
 }
 
