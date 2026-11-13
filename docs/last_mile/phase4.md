@@ -15895,7 +15895,7 @@ LTO, 8K and 12 MP full-size after these changes, aarch64 at a reduced scale,
 and any other x86_64 CPU (not measured); and the 3/8, 5/8, 3/4, 7/8 and
 above-1 scales, which still take the out-of-line call.
 
-## P4-276. Rust 1.100.0 Breaks CI on Main Through a New Clippy Finding and the capi Tests' cdylib Lookup — **PARTIAL: CI green; the unfiltered workspace run still fails**
+## P4-276. Rust 1.100.0 Breaks CI on Main Through a New Clippy Finding and the capi Tests' cdylib Lookup — **CLOSED 2026-11-14**
 
 Found 2026-11-13 on #702, a docs-only pull request. Its run 43357915927
 failed seven jobs that had passed on `main` (`a5fe11a`) the day before in
@@ -15933,13 +15933,13 @@ finding is fixed, not allowed.
 
 **Status (2026-11-13): partial.** #704 (merge `40d8b7b`) made every `ci.yml`
 job green on stable 1.100.0 (42 checks on Linux, macOS and Windows) and
-fixed cause 2: Clippy 1.100 flagged three `needless_range_loop`s in library
+fixed cause 1: Clippy 1.100 flagged three `needless_range_loop`s in library
 code (`pipeline_impl/lossless.rs` and two in `jpeglib.rs`), not one.
 `scripts/install_capi.sh` also takes `CAPI_VERSION_MAP` now, which the
 staging tests pass; without it the Linux P4-81 relink was skipped on 1.100,
 where the map is no longer below or beside the library.
 
-Cause 1, Cargo 1.100's build-directory layout, is not fully fixed. Every
+Cause 2, Cargo 1.100's build-directory layout, is not fully fixed. Every
 unit now has its own `target/<profile>/build/<pkg>/<hash>/out/`, so the test
 executable and the cdylib are no longer siblings in `deps/`. #704's
 `tests/support/cdylib.rs` asks Cargo (`cargo test --no-run
@@ -15957,3 +15957,37 @@ fix in progress matches the library unit through the fingerprint Cargo
 records for the test unit, which compiles nothing and also restores
 `--config`, custom profiles and custom target JSON (P4-73), which #704 had
 turned into refusals.
+
+**Status (2026-11-14): closed.** #705 (merge `a9e5801`) replaced the Cargo
+query in `crates/libjpeg-turbo-rs-capi/tests/support/cdylib.rs`. Under the
+1.100 layout the test executable's own unit records, in
+`fingerprint/test-integration-test-<name>.json`, the fingerprint of the
+`libjpeg_turbo_rs_capi` library it was compiled against. The lookup takes the
+one sibling unit whose `fingerprint/lib-libjpeg_turbo_rs_capi` matches,
+requires that unit to hold a cdylib, and refuses it if the cdylib is newer
+than the executable (an in-place rebuild keeps the fingerprint). The older
+`deps/` layout still uses the sibling file, and
+`CARGO_CDYLIB_FILE_LIBJPEG_TURBO_RS_CAPI` overrides both. Nothing is
+compiled from inside a test, so `--config`, custom profiles and custom target
+JSON work again.
+
+- Run and passed: `cargo test --locked --workspace --no-fail-fast` on macOS
+  aarch64 with 1.100.0, 3077 passed and 0 failed; the capi package on 1.100.0
+  and 1.98.0, 402 passed and 0 failed each (1.98.0 stands in for the
+  acceptance's 1.99.1: both use the `deps/` layout, and 1.99.1 itself was not
+  run); `tests/cdylib_support.rs`
+  covers the match, no match, several matches, a check-only unit, an
+  executable outside `out/`, a cdylib rebuilt after linking, and a real outer
+  invocation. On #705's head all 41 checks passed on 1.100.0, including the
+  new Windows step "C-ABI cdylib lookup under a workspace selection
+  (P4-276)", which runs that last test under `cargo test --workspace`.
+- Not covered: the unfiltered workspace run was not repeated on Linux or
+  Windows hosts. On a Linux x86_64 host the capi package passed 400 of 402;
+  the two failures need `patchelf` and a newer system libjpeg than the host
+  has, and fail the same way on 1.97.1.
+- Not run, by reading only: Cargo calls the build-directory layout "not a
+  stable interface". If a later Cargo renames or reformats the fingerprint
+  files, every error from the layout search ends with "set
+  CARGO_CDYLIB_FILE_LIBJPEG_TURBO_RS_CAPI to the library to test"
+  (`cdylib.rs:100`), so the tests fail loudly rather than load another
+  unit's library.
