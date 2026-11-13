@@ -15744,7 +15744,7 @@ broken on purpose (1 is two assertions: strict `decompress_raw` is `Err`
 and the lenient decode reports a warning); 8 uses a per-layout bound of the
 measured overhead plus a small margin.
 
-## P4-275. Scaled Decode Is About 6% Slower on x86_64 After the Bounds-Checked IDCT Store — **OPEN**
+## P4-275. Scaled Decode Is About 6% Slower on x86_64 After the Bounds-Checked IDCT Store — **PARTIAL: 1/4 scale down to about +2%; grayscale and 8K +1-1.5% at the default profile**
 
 Found 2026-11-13. P4-268 (#701) moved every decode IDCT write behind
 `Decoder::idct_block_into` and measured it on aarch64 only; its x86_64 cost
@@ -15795,7 +15795,7 @@ The same four cases with both arms rebuilt at `lto = "thin"`:
   price of the span check.
 - **Making the out-of-line fallback inlinable does not help.** A third arm,
   `a5fe11a` with `idct_block_through_stack`
-  (`src/decode/pipeline_impl/color.rs:248`) changed from `#[inline(never)]`
+  (`src/decode/pipeline_impl/color.rs:248` at `a5fe11a`) changed from `#[inline(never)]`
   to `#[inline(always)]`, was 1.4 to 1.8% slower again than `a5fe11a` on the
   scaled case (12 of 12), 8.2% behind "before". The attribute is not the
   cause.
@@ -15862,6 +15862,38 @@ number stated. Either way the 1/2, 1/4 and 1/8 scales are measured, not only
 measurement contradicts are corrected: `idct_block_into`'s "measured within
 noise on every decode path" and `idct_block_through_stack`'s "it costs
 nothing" were aarch64 results.
+
+**Status (2026-11-14): partial.** Two changes in `pipeline_impl/color.rs`,
+measured on the same i5-10400 by the same interleaved method (default
+release profile, fresh pinned processes, judged per pair against the
+published-0.8.0 rows):
+
+1. `copy_block_rows` takes the row length as a const generic, so each row
+   of a reduced-size block is an inlined fixed-size store instead of a
+   `memcpy` call with a run-time length. Against `a5fe11a`: scale 1/4
+   -3.10% / -3.25% (12 of 12 pairs).
+2. The 4x4, 2x2 and 1x1 sizes (scales 1/2, 1/4, 1/8) are handled inside
+   `idct_block_into`; only the other scaled sizes go out of line. Against
+   change 1: scale 1/4 -1.14% / -1.26% (12 of 12).
+
+Together, against `a5fe11a`: scale 1/4 -4.28% / -4.45% (40.6 to 38.9 ms),
+progressive 1080p -1.54% / -1.68% (6 of 6), grayscale 1080p within the
+control. Composed with the earlier `a5fe11a`-against-`v0.9.0` batches (not a
+direct pair), that leaves scale 1/4 about +2%, grayscale about +1.2-1.3%
+and progressive back at `v0.9.0`. The progressive move is very likely code
+layout, not a recovery: the 8x8 ISLOW store did not change. 8K was not
+re-measured (+1.0-1.2% before these changes). Making the whole out-of-line
+path inlinable was measured first and was slower (with the run-time copy
+still in it), so only the three small sizes are inlined. Both comments the
+acceptance names are corrected. `experiments/idct.tsv` has the rows.
+Measured at `d3910c9`; `e51365e` then dropped the three unreachable arms
+and was not re-measured.
+
+Still open: the remaining scale-1/4 cost and the grayscale/8K cost (not
+profiled: the machine has no `perf` access); the 1/2 and 1/8 scales, thin
+LTO, 8K and 12 MP full-size after these changes, aarch64 at a reduced scale,
+and any other x86_64 CPU (not measured); and the 3/8, 5/8, 3/4, 7/8 and
+above-1 scales, which still take the out-of-line call.
 
 ## P4-276. Rust 1.100.0 Breaks CI on Main Through a New Clippy Finding and the capi Tests' cdylib Lookup — **PARTIAL: CI green; the unfiltered workspace run still fails**
 
