@@ -8,43 +8,13 @@ use std::path::PathBuf;
 
 type TjHandle = *mut c_void;
 
-/// Locate the freshly-built cdylib. `CARGO_CDYLIB_FILE_*` is set by Cargo
-/// for tests that depend on the crate's cdylib artifact; for a normal
-/// `cargo test -p libjpeg-turbo-rs-capi` we derive the path from
-/// `CARGO_MANIFEST_DIR` + `target/<profile>/lib<name><dlext>`.
+#[path = "support/cdylib.rs"]
+mod cdylib_support;
+
+/// The cdylib this Cargo invocation built; see `support/cdylib.rs` for how
+/// it is found on each Cargo build-directory layout (P4-276).
 fn cdylib_path() -> PathBuf {
-    if let Ok(p) = std::env::var("CARGO_CDYLIB_FILE_LIBJPEG_TURBO_RS_CAPI") {
-        return PathBuf::from(p);
-    }
-
-    let dlext: &str = if cfg!(target_os = "windows") {
-        "dll"
-    } else if cfg!(target_os = "macos") {
-        "dylib"
-    } else {
-        "so"
-    };
-
-    let prefix: &str = if cfg!(target_os = "windows") {
-        ""
-    } else {
-        "lib"
-    };
-
-    // Walk up from the test exe toward `target/{debug,release}`.
-    let exe: PathBuf = std::env::current_exe().expect("current_exe");
-    let mut dir: PathBuf = exe.clone();
-    while dir.pop() {
-        let candidate: PathBuf = dir.join(format!("{prefix}libjpeg_turbo_rs_capi.{dlext}"));
-        if candidate.exists() {
-            return candidate;
-        }
-    }
-
-    panic!(
-        "could not locate cdylib for libjpeg_turbo_rs_capi near {}",
-        exe.display()
-    );
+    cdylib_support::cdylib_path()
 }
 
 // TJPARAM constants — match turbojpeg.h numeric ordering.

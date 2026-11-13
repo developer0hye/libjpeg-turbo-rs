@@ -270,6 +270,7 @@ fn install_capi_sh_produces_complete_layout() {
         .args(["--prefix", prefix])
         .args(["--root", &shell::script_arg(&root)])
         .env("CAPI_TARGET_DIR", shell::script_arg(cdylib_dir))
+        .envs(cdylib_support::version_map_environment())
         .output()
         .expect("invoke install_capi.sh");
     assert!(
@@ -424,6 +425,7 @@ fn install_capi_sh_honors_soname_override() {
         .args(["--root", &shell::script_arg(&root)])
         .args(["--soname", override_soname])
         .env("CAPI_TARGET_DIR", shell::script_arg(cdylib_dir))
+        .envs(cdylib_support::version_map_environment())
         .output()
         .expect("invoke install_capi.sh");
     assert!(
@@ -525,6 +527,7 @@ fn install_capi_sh_stages_the_platform_default_prefix_below_destdir() {
         .args(["--destdir", &shell::script_arg(destdir)])
         .args(["--root", &shell::script_arg(&root)])
         .env("CAPI_TARGET_DIR", shell::script_arg(cdylib_dir))
+        .envs(cdylib_support::version_map_environment())
         .output()
         .expect("invoke install_capi.sh");
     assert!(

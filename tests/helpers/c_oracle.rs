@@ -87,12 +87,13 @@ fn find_libjpeg_dev() -> Option<LibjpegDevInstall> {
     None
 }
 
-/// Directory holding the test executables — a writable, per-profile location
-/// that is already gitignored, so the compiled oracle lands beside the binaries
-/// that use it rather than in the source tree.
+/// A directory two levels above the test executable: `target/<profile>/` up
+/// to Cargo 1.99 (`deps/<test-binary>`), the test's own unit directory from
+/// 1.100 (`build/<pkg>/<hash>/out/<test-binary>`). Either way it is inside
+/// the build directory, writable and gitignored, so the compiled oracle stays
+/// out of the source tree.
 fn artifact_dir() -> Option<PathBuf> {
     let mut path: PathBuf = std::env::current_exe().ok()?;
-    // .../target/<profile>/deps/<test-binary>
     path.pop();
     path.pop();
     Some(path)

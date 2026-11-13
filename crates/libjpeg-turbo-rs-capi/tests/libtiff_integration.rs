@@ -41,9 +41,9 @@ fn repo_root() -> PathBuf {
 /// Return the cdylib emitted by the same Cargo invocation as this test.
 ///
 /// The test must be able to find the cdylib that run.sh will stage as the
-/// JPEG provider. Resolving it beside the current test executable means a
-/// stale artifact in another Cargo profile or target directory cannot
-/// silently satisfy the gate.
+/// JPEG provider. Resolving the library this Cargo invocation built
+/// (`support/cdylib.rs`) means a stale artifact in another Cargo profile or
+/// target directory cannot silently satisfy the gate.
 fn cdylib_path() -> PathBuf {
     cdylib_support::cdylib_path()
 }

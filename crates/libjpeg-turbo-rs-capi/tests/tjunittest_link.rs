@@ -47,9 +47,10 @@ fn turbojpeg_short_name() -> &'static str {
     }
 }
 
-/// Use the exact cdylib emitted beside this outer Cargo test executable.
-fn cargo_built_cdylib_path() -> Option<PathBuf> {
-    cdylib_support::cargo_built_cdylib_path().ok()
+/// The cdylib this outer Cargo invocation built, or why it could not be
+/// resolved (see `support/cdylib.rs`).
+fn cargo_built_cdylib_path() -> Result<PathBuf, String> {
+    cdylib_support::cargo_built_cdylib_path()
 }
 
 fn find_cc() -> Option<PathBuf> {
@@ -115,12 +116,8 @@ fn build_tjunittest() -> Result<(PathBuf, PathBuf), String> {
         None => return Err("no C compiler (cc/clang/gcc) on PATH".to_string()),
     };
 
-    let cdylib: PathBuf = match cargo_built_cdylib_path() {
-        Some(p) => p,
-        None => {
-            return Err("outer Cargo test build did not emit the sibling C-ABI cdylib".to_string())
-        }
-    };
+    let cdylib: PathBuf = cargo_built_cdylib_path()
+        .map_err(|error| format!("could not resolve the C-ABI cdylib of this build: {error}"))?;
 
     let out_dir: PathBuf = root.join("examples/tjunittest_link/build");
     let link_dir: PathBuf = out_dir.join("linkdir");
@@ -227,14 +224,12 @@ fn tjunittest_link_symbols_resolve() {
             return;
         }
     };
-    // Load the sibling cdylib produced by the same outer Cargo invocation, not
-    // a release artifact left by a prior run or CI cache.
-    let cdylib: PathBuf = match cargo_built_cdylib_path() {
-        Some(p) => p,
-        None => {
-            panic!("tjunittest_link_symbols_resolve: outer Cargo did not emit the sibling cdylib");
-        }
-    };
+    // Load the cdylib produced by the same outer Cargo invocation (see
+    // `support/cdylib.rs`), not a release artifact left by a prior run or CI
+    // cache.
+    let cdylib: PathBuf = cargo_built_cdylib_path().unwrap_or_else(|error| {
+        panic!("tjunittest_link_symbols_resolve: could not resolve the C-ABI cdylib: {error}")
+    });
 
     let out_dir: PathBuf = root.join("examples/tjunittest_link/build_symbols");
     let link_dir: PathBuf = out_dir.join("linkdir");
@@ -350,8 +345,9 @@ int main(void) {
 /// All error paths panic — the original soft-skip on missing
 /// submodule / cc / cdylib was the soft-skip pattern called out in
 /// `docs/LAST_MILE.md` → P1 (a green test that doesn't actually
-/// exercise the gate). `build_tjunittest` links the cdylib emitted beside the
-/// current test executable, so a stale release artifact cannot let this pass
+/// exercise the gate). `build_tjunittest` links the cdylib the same outer
+/// Cargo invocation built (resolved by `support/cdylib.rs`), so a stale
+/// release artifact cannot let this pass
 /// against bits that no longer reflect the working tree.
 #[cfg(unix)]
 #[test]
