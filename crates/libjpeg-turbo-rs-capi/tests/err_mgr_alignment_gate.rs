@@ -13,7 +13,8 @@
 //!
 //! **Why a source gate rather than the Miri run the item asked for.** Every one
 //! of the eleven affected suites locates and `dlopen`s the cdylib through
-//! `libloading`, so none of them runs under Miri at all:
+//! `libloading`, so none of them runs under Miri at all. When this gate was
+//! written (the lookup has since moved to `support/cdylib.rs`, P4-276):
 //!
 //! ```text
 //! $ cargo +nightly miri test -p libjpeg-turbo-rs-capi --test arith_code_flag
