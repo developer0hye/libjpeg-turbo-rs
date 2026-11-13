@@ -15600,6 +15600,15 @@ the decode matrix fixtures, with the strips still byte-identical to
 `decode_raw` and libjpeg (`tests/raw_strips.rs`), and the memory bound in
 `tests/raw_strips_memory.rs` still holding.
 
+**x86_64 data point (2026-11-13).** On the i5-10400 of P4-275, with the
+workspace release profile and both decodes alternating inside one process
+(six processes, 30 iterations each), the reader is 3% slower than
+`decode_raw` on 4:2:0 (12 MP 36.4 vs 37.5 ms, 8K 99.3 vs 102.0 ms; ratio
+1.03, range 1.025-1.032) and 8% slower on grayscale 1080p (4.49 vs 4.86 ms;
+ratio 1.08, range 1.077-1.082). The inputs are the downstream harness's
+synthetic corpus, not the 4K photo measured above, so the two figures are
+not a like-for-like aarch64/x86_64 comparison.
+
 ## P4-272. `JSIMD_FORCENONE=1` Does Not Reach Most of the Decoder's SIMD Kernels — **OPEN**
 
 Found 2026-11-11 by the reviews of the P4-141 IDCT consolidation. `detect()`
@@ -15648,3 +15657,271 @@ output (for example a forced table injected in a unit test). Note that
 variable must inject the decision or serialize those tests, or that
 assertion becomes racy. The decode matrix is re-measured to show the
 default path is unchanged.
+
+## P4-273. The Caller-Buffer YUV Decode Drops the Decode's Warnings — **OPEN**
+
+Found 2026-11-12 by the merge review of P4-268 (#701), by reading; nothing
+below was run.
+
+`yuv::yuv_planes_into` (`src/api/yuv.rs:653`) calls `reader.finish()?` and
+discards the `Vec<DecodeWarning>` it returns, so
+`Decoder::decode_yuv_planes_into` gives a lenient caller no way to tell
+concealed planes from clean ones. The reader itself does not have the gap:
+`into_raw_strips()` + `RawStripReader::finish()` returns the warnings. The
+strict free function `yuv::decompress_to_yuv_planes_into` drops only
+`ExtraneousData` (a strict decode still reports stray bytes between markers,
+`raw.rs:62-63`), as its owned twin `decompress_to_yuv_planes` does.
+
+Two rustdoc claims are wider than the code:
+
+- `Decoder::decode_yuv_planes_into` (`src/decode/pipeline_impl/raw.rs:25`)
+  says `set_stop_on_warning` applies. Only the marker check does
+  (`check_marker_warnings`, `raw_strips.rs:100`); a warning recovered while
+  decoding is not escalated. `decode_raw` behaves the same
+  (`raw.rs:109`), and `into_raw_strips`' own rustdoc words it correctly
+  ("`stop_on_warning` marker check"), while `decode_image` escalates every
+  warning (`output.rs:407`).
+- `yuv::decompress_to_yuv_planes_into` (`src/api/yuv.rs:583`) promises
+  "nothing is written" for destination errors only and is silent about a
+  decode error: a strict failure at strip *k* leaves strips `0..k` in the
+  caller's planes, which the owned form cannot do.
+
+Acceptance: a caller of the `Decoder` form can obtain the warnings (an
+additive `_with_warnings` twin, so the landed signature does not change);
+the `stop_on_warning` sentence either becomes true (the first decode warning
+is an error, with a test on a lenient corrupt stream) or is narrowed to the
+marker check; the partial-write behavior is documented and pinned by a test
+that decodes a truncated stream into canary-filled planes.
+
+## P4-274. The Raw Strip Reader's Recovery Paths Lack Tests That Can Fail — **OPEN**
+
+Found 2026-11-12 by the merge review of P4-268 (#701). The streamed loops
+in `src/decode/pipeline_impl/raw_strips.rs` were compared statement by
+statement with `decode_baseline_planes` and
+`decode_non_interleaved_baseline_planes` and no divergence was found; these
+are gaps in what `tests/raw_strips.rs` can detect, not known defects.
+
+1. **A fixture that never proves it is corrupt.**
+   `corrupt_grayscale_restart_stream` (`tests/raw_strips.rs:689`) overwrites
+   four entropy bytes and never checks that they are rejected, and
+   `corrupt_streams_match_decode_raw_under_every_recovery_setting` (`:705`)
+   accepts `(Ok, Ok)` as well as `(Err, Err)`. If `0x3C` happens to decode
+   as valid codes, the single-component recovery paths never run and the
+   test still passes. The 4:2:0 fixture is proven corrupt by the tests that
+   use it (`:293`, `:310`). Not run: whether
+   today's bytes are in fact rejected.
+2. **No arithmetic case.** `CASES` (`:165`) has no `-arithmetic` entry, so
+   the arithmetic fallback the module documents is not exercised by this
+   suite.
+3. **No lenient truncation.** Only a strict truncation is tested (`:659`),
+   so the bit reader's short-segment state carried across strips, and the
+   fill of every later strip, are compared with `decode_raw` nowhere.
+4. **Interleaved corruption only where restarts sit on strip boundaries.**
+   `corrupt_restart_stream` uses `restart_rows(1)` (`:263`), and the
+   interleaved mid-row case (`-restart 3B`) is a clean stream. The grayscale
+   fixture's `-restart 4B` (`:690`) does put a restart mid-row, but it counts
+   only once item 1 proves that fixture corrupt.
+5. **RST markers are always intact.** Both fixtures overwrite entropy bytes
+   only, so every RST is present and correctly numbered: a strategy sees
+   no missing or renumbered marker (at most a `None` desync when a corrupt
+   interval leaves the reader short of its marker), and `expected_rst`
+   carried across strips is never compared against a wrong number. A fixture that
+   drops or renumbers an RST at a strip boundary would test it.
+6. **`_into` minimum length at a padded stride.** The accepting test sizes
+   buffers `stride * height` (`:448`) and the refusing one uses
+   `stride == width` (`:514`), so "`(h - 1) * stride + w` is accepted and
+   one byte less is refused" is untested for `stride > width`.
+7. **Four components against libjpeg.** The 4-component interleaved case is
+   compared with the Rust owned path only.
+8. **The memory bound is loose for grayscale.**
+   `tests/raw_strips_memory.rs:128` allows `scratch + 24 KiB` on every
+   layout; with the 9.6 KiB the comment records for grayscale, about seven
+   extra 2048-sample rows fit under it, so "a few extra image rows would
+   exceed it" holds for the three-component layouts only.
+
+Acceptance: each of 1-7 has a test that fails when the path it names is
+broken on purpose (1 is two assertions: strict `decompress_raw` is `Err`
+and the lenient decode reports a warning); 8 uses a per-layout bound of the
+measured overhead plus a small margin.
+
+## P4-275. Scaled Decode Is About 6% Slower on x86_64 After the Bounds-Checked IDCT Store — **OPEN**
+
+Found 2026-11-13. P4-268 (#701) moved every decode IDCT write behind
+`Decoder::idct_block_into` and measured it on aarch64 only; its x86_64 cost
+was recorded as not measured. This is that measurement: first on hosted
+runners, which could not resolve it, then on an idle dedicated machine,
+which did.
+
+**Dedicated machine (decisive).** Intel Core i5-10400 (Comet Lake, AVX2),
+Ubuntu 24.04, `rustc` 1.100.0, 1-minute load under 0.10 at the start and no
+login during either batch. Turbo was on and the governor `powersave` (no
+root on that machine to change either, so not the fixed-clock setup
+of `README.md`'s i5-10400 decoding table); the pinned core read 4.0 to 4.3 GHz before and
+after every process but the first. The `experiments/downstream` consumer was built
+once from `v0.9.0` (`47ff06c`, "before") and once from `a5fe11a` ("after"),
+and the two binaries were run alternately, one fresh process per
+measurement, pinned to one core, order swapped every round, 30 iterations
+after 5 warm-ups. Each figure is the per-pair change in the candidate's
+median time relative to the published-0.8.0 rows timed in the same process;
+the control is the same ratio for `zune-jpeg`, whose code is identical in
+both binaries, so it shows what a different binary alone moves.
+
+Cargo's default release profile (what a downstream crate gets):
+
+| Case | `decompress_to` | `decompress_into` | Pairs slower | Control |
+|---|---|---|---|---|
+| 12 MP 4:2:0 at scale 1/4 | +6.43% | +6.75% | 12 of 12 | none (no scaled zune row) |
+| progressive 1080p 4:2:0 | +1.36% | +1.45% | 24 of 24 | +0.09% / +0.01% |
+| grayscale 1080p | +1.43% | +1.38% | 24 of 24 | +0.35% / +0.31% |
+| 8K baseline 4:2:0 | +1.01% | +1.23% | 8 of 8 | +0.19% / +0.26% |
+
+The same four cases with both arms rebuilt at `lto = "thin"`:
+
+| Case | `decompress_to` | `decompress_into` | Pairs slower | Control |
+|---|---|---|---|---|
+| 12 MP 4:2:0 at scale 1/4 | +5.88% | +6.20% | 8 of 8 | none |
+| progressive 1080p 4:2:0 | +0.68% | +0.88% | 10 of 10 | +0.57% / +0.59% |
+| grayscale 1080p | +0.26% | +0.32% | 7 and 8 of 10 | -0.26% / -0.20% |
+| 8K baseline 4:2:0 | -0.01% | +0.22% | 2 and 4 of 4 | +0.05% / +0.06% |
+
+- **Scaled decode is slower by about 6% in both builds**, in every pair. A
+  second default-profile batch repeated it (+6.29% / +6.74%, 12 of 12). In
+  the candidate's own time that is 38.2 ms before and 40.7 ms after
+  (`decompress_to`; 38.1 and 40.8 ms with `decompress_into`). The
+  published-0.8.0 rows moved by 0.4% or less at the median in every batch.
+- **The 8x8 paths are 1.0 to 1.5% slower in the default-profile build and
+  within 0.3 points of the control at thin LTO.** So that cost is real for the build most
+  consumers use, but it is a property of the generated code, not a fixed
+  price of the span check.
+- **Making the out-of-line fallback inlinable does not help.** A third arm,
+  `a5fe11a` with `idct_block_through_stack`
+  (`src/decode/pipeline_impl/color.rs:248`) changed from `#[inline(never)]`
+  to `#[inline(always)]`, was 1.4 to 1.8% slower again than `a5fe11a` on the
+  scaled case (12 of 12), 8.2% behind "before". The attribute is not the
+  cause.
+- Not established: which part of the new path costs the 6% (the per-block
+  span check and reslice in `idct_block_into`, the zero-filled stack block,
+  or `copy_block_rows`' row copy at a runtime length where the removed
+  wrappers copied a constant one). No profile was taken. Also not measured:
+  aarch64 at a reduced scale with this method, other scales than 1/4, and
+  any x86_64 CPU other than this one.
+
+**Hosted runners, first attempt (inconclusive).** `downstream-bench.yml`
+(x86_64-linux leg, default variant, 30 iterations) dispatched six times on `v0.9.0` (`47ff06c`, the commit #701
+merged onto) and six times on `main` (`a5fe11a`). Each run times the
+checkout (`candidate-*`) beside the published 0.8.0 crate (`baseline-*`) on
+one runner, so the figure compared is the candidate/baseline median-time
+ratio, and only between runs on the same CPU model. Harness, consumer source
+(`b29ea58b`) and `rustc` 1.100.0 are identical in both arms. The runner pool
+gave EPYC 9V45 4 before / 1 after, EPYC 7763 1 / 2, EPYC 9V74 1 / 1, and two
+"after" runs on a Xeon Platinum 8573C with no "before" counterpart, which
+are unused.
+Runs: 43355217125, 43355235769, 43355252911, 43356657589, 43356675915,
+43356694143 (before); 43355226890, 43355244323, 43355261506, 43356666589
+(after); 43356647199, 43356684983 (Intel, unused).
+
+Result (after/before change in that ratio; negative is faster):
+
+| Case | EPYC 9V45 | EPYC 7763 | EPYC 9V74 |
+|---|---|---|---|
+| progressive 1080p 4:2:0 | +1.8% / +1.8% | +1.7% / +1.1% | +1.0% / +1.2% |
+| grayscale 1080p | +2.0% / +1.2% | -0.6% / -3.9% | +4.7% / +5.0% |
+| 12 MP baseline 4:2:0 | -3.0% / -5.5% | -2.9% / -4.0% | +1.6% / -1.8% |
+| 8K baseline 4:2:0 | -2.3% / -3.8% | -3.0% / -4.6% | -0.2% / -2.7% |
+| 12 MP at scale 1/4 | -0.1% / 0.0% | -1.2% / +2.4% | +1.8% / +1.9% |
+| 64x64 4:2:0 | +0.6% / +0.6% | -0.8% / -2.2% | -0.7% / +0.2% |
+
+Each cell is `decompress_to` / `decompress_into`. `testorig` and
+`testimgint` read -0.7% to -6.5% on all three.
+
+- **Progressive** is the one consistent signal: slower on every model, in
+  both buffer modes, and outside the repeat spread. On the 9V45 the four
+  "before" ratios span 0.987-0.996 and the "after" one is 1.011; on the 7763
+  the two "after" ratios are 1.018 and 1.020 against 1.002.
+- **Baseline colour** is not slower; it reads faster on the two models with
+  repeats.
+- **Grayscale** is undecided: slower on two models, faster on the third,
+  whose two "after" runs disagree by 7.8%.
+- In these hosted figures nothing is near the 8-17% the fully safe store
+  cost on aarch64.
+
+The hosted figures disagree with the dedicated machine where it matters:
+they read the scaled case as flat, 8K baseline colour as faster and
+grayscale as undecided, where the dedicated machine has +6%, +1% and +1.4%.
+That was noise (one to four samples per cell, same-commit repeats up to 7.8%
+apart), so `downstream-bench.yml` dispatches cannot gate a change of this
+size. The 12 MP full-size, `testorig` and `testimgint` cases were not
+repeated on the dedicated machine.
+
+Acceptance: the scaled-decode cost is profiled and recovered, shown by the
+same interleaved method on an idle x86_64 machine (pairs within the control,
+default profile and thin LTO), with the full-size cases no slower than they
+are now; or it is accepted here as the price of the safe store, with the
+number stated. Either way the 1/2, 1/4 and 1/8 scales are measured, not only
+1/4, and the two comments in `src/decode/pipeline_impl/color.rs` that this
+measurement contradicts are corrected: `idct_block_into`'s "measured within
+noise on every decode path" and `idct_block_through_stack`'s "it costs
+nothing" were aarch64 results.
+
+## P4-276. Rust 1.100.0 Breaks CI on Main Through a New Clippy Finding and the capi Tests' cdylib Lookup — **PARTIAL: CI green; the unfiltered workspace run still fails**
+
+Found 2026-11-13 on #702, a docs-only pull request. Its run 43357915927
+failed seven jobs that had passed on `main` (`a5fe11a`) the day before in
+run 43235832414. The difference is the toolchain: the green run's Clippy
+job reports `rustc 1.99.1`, the red one `rustc 1.100.0`. Every pull request
+against `main` now fails the same way.
+
+1. **Clippy** (`-D warnings`): `needless_range_loop` at
+   `src/decode/pipeline_impl/lossless.rs:58`
+   (`for i in 0..scan.components.len().min(num_components)`), a file no
+   recent change touched.
+2. **The capi tests cannot find the cdylib.**
+   `cargo_built_cdylib_path_for_executable`
+   (`crates/libjpeg-turbo-rs-capi/tests/support/cdylib.rs:23`) assumes Cargo
+   puts the cdylib in the directory that holds the integration-test
+   executable. Under 1.100.0 the executable was at
+   `target/<profile>/build/libjpeg-turbo-rs-capi/<hash>/out/`, and the
+   lookup fails with "Cargo did not emit the C-ABI cdylib next to the
+   integration test" (`cdylib.rs:39`).
+   Thirty test files keep their own lookup, which walks the executable's
+   ancestor directories and fails the same way ("could not locate cdylib
+   near ..."), for example
+   `crates/libjpeg-turbo-rs-capi/tests/capi_jpeglib_encode.rs:68`. Jobs:
+   Integration Tests (both oracle legs), CAPI ABI Checks (ubuntu, macos,
+   windows), Workspace build + targeted tests (windows).
+
+Read from the job logs only; nothing was reproduced locally (the local
+stable is 1.98.0), and Cargo's release notes were not consulted for why the
+executable moved.
+
+Acceptance: every job in `ci.yml` is green on stable 1.100.0; the cdylib
+lookup no longer depends on where Cargo places test executables (one shared
+helper, the per-file copies removed) and still passes on 1.99.1; the Clippy
+finding is fixed, not allowed.
+
+**Status (2026-11-13): partial.** #704 (merge `40d8b7b`) made every `ci.yml`
+job green on stable 1.100.0 (42 checks on Linux, macOS and Windows) and
+fixed cause 2: Clippy 1.100 flagged three `needless_range_loop`s in library
+code (`pipeline_impl/lossless.rs` and two in `jpeglib.rs`), not one.
+`scripts/install_capi.sh` also takes `CAPI_VERSION_MAP` now, which the
+staging tests pass; without it the Linux P4-81 relink was skipped on 1.100,
+where the map is no longer below or beside the library.
+
+Cause 1, Cargo 1.100's build-directory layout, is not fully fixed. Every
+unit now has its own `target/<profile>/build/<pkg>/<hash>/out/`, so the test
+executable and the cdylib are no longer siblings in `deps/`. #704's
+`tests/support/cdylib.rs` asks Cargo (`cargo test --no-run
+--message-format=json` for the running test target) and refuses any answer
+that does not name the running executable or that had to compile. That
+cannot reproduce an unfiltered `cargo test --workspace`, the replacement
+gate's first item: it builds the library as a different unit from any
+per-target query, so on `main` with 1.100.0 that run fails 164 capi tests,
+every one with this refusal. #704 was verified only with `--test` filters,
+and `ci.yml` runs every capi step with `-p`, so nothing caught it.
+
+Acceptance (unchanged, plus): `cargo test --workspace --no-fail-fast`
+passes on 1.100.0, and a CI step runs the lookup under that selection. The
+fix in progress matches the library unit through the fingerprint Cargo
+records for the test unit, which compiles nothing and also restores
+`--config`, custom profiles and custom target JSON (P4-73), which #704 had
+turned into refusals.
