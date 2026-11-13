@@ -224,8 +224,9 @@ fn tjunittest_link_symbols_resolve() {
             return;
         }
     };
-    // Load the sibling cdylib produced by the same outer Cargo invocation, not
-    // a release artifact left by a prior run or CI cache.
+    // Load the cdylib produced by the same outer Cargo invocation (see
+    // `support/cdylib.rs`), not a release artifact left by a prior run or CI
+    // cache.
     let cdylib: PathBuf = cargo_built_cdylib_path().unwrap_or_else(|error| {
         panic!("tjunittest_link_symbols_resolve: could not resolve the C-ABI cdylib: {error}")
     });
@@ -344,8 +345,9 @@ int main(void) {
 /// All error paths panic — the original soft-skip on missing
 /// submodule / cc / cdylib was the soft-skip pattern called out in
 /// `docs/LAST_MILE.md` → P1 (a green test that doesn't actually
-/// exercise the gate). `build_tjunittest` links the cdylib emitted beside the
-/// current test executable, so a stale release artifact cannot let this pass
+/// exercise the gate). `build_tjunittest` links the cdylib the same outer
+/// Cargo invocation built (resolved by `support/cdylib.rs`), so a stale
+/// release artifact cannot let this pass
 /// against bits that no longer reflect the working tree.
 #[cfg(unix)]
 #[test]

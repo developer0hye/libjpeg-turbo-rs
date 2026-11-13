@@ -52,9 +52,10 @@ pub fn cargo_built_cdylib_path_for_executable(executable: &Path) -> Result<PathB
 ///
 /// A query that resolves anything else is an error naming
 /// [`CDYLIB_OVERRIDE_ENV`]: flags that exist only on the outer command line
-/// (`--target`, `--config`, a custom profile) are not visible from inside
-/// the test, and guessing among the libraries in the build directory is how
-/// a wrong one gets tested.
+/// (`--config`, a custom profile, a custom target JSON) are not visible from
+/// inside the test, and guessing among the libraries in the build directory
+/// is how a wrong one gets tested. A built-in `--target` is read off the
+/// build directory and passed on.
 pub fn cargo_built_cdylib_path() -> Result<PathBuf, String> {
     static RESOLVED: OnceLock<Result<PathBuf, String>> = OnceLock::new();
     RESOLVED.get_or_init(resolve_cargo_built_cdylib).clone()
@@ -107,7 +108,7 @@ fn resolve_cargo_built_cdylib() -> Result<PathBuf, String> {
             .map_err(|error| format!("could not run {cargo:?} {arguments:?}: {error}"))?;
         if !output.status.success() {
             refusals.push(format!(
-                "`cargo {}` failed ({}):\n{}",
+                "`cargo {}` failed ({}); set {CDYLIB_OVERRIDE_ENV} to the library to test:\n{}",
                 arguments.join(" "),
                 output.status,
                 String::from_utf8_lossy(&output.stderr)
@@ -140,8 +141,9 @@ pub enum PackageSelection {
 /// a query must never be what re-resolves dependencies.
 ///
 /// When the outer invocation was `--workspace`, the package query asked
-/// first does not match and compiles that variant once per build directory;
-/// it is refused for not being fresh and the workspace query answers.
+/// first does not match: the first time it compiles that variant and is
+/// refused for not being fresh, after that it names another executable and
+/// is refused for that. The workspace query then answers.
 pub fn cargo_query_arguments<'a>(
     selection: PackageSelection,
     target: Option<&'a str>,
@@ -222,7 +224,8 @@ pub fn version_map_environment() -> Option<(&'static str, &'static str)> {
 }
 
 /// Pick the cdylib out of Cargo's `compiler-artifact` messages, provided the
-/// same messages name `executable` as a test executable.
+/// same messages name `executable` as a test executable, every unit is
+/// reported fresh, and exactly one library is named.
 pub fn cdylib_from_cargo_messages(messages: &str, executable: &Path) -> Result<PathBuf, String> {
     let running: PathBuf = canonical(executable);
     let mut names_running_executable: bool = false;
@@ -264,8 +267,8 @@ pub fn cdylib_from_cargo_messages(messages: &str, executable: &Path) -> Result<P
     if !names_running_executable {
         return Err(format!(
             "Cargo resolved a different build than the one running: this test is {}, the query \
-             reported {reported_executables:?}. The outer invocation used a profile, target or \
-             configuration the query cannot see; set {CDYLIB_OVERRIDE_ENV} to the library to test",
+             reported {reported_executables:?}. The outer invocation used a profile, configuration \
+             or custom target JSON the query cannot see; set {CDYLIB_OVERRIDE_ENV} to the library to test",
             executable.display()
         ));
     }
@@ -276,7 +279,8 @@ pub fn cdylib_from_cargo_messages(messages: &str, executable: &Path) -> Result<P
             cdylib_filename()
         )),
         several => Err(format!(
-            "Cargo's messages name more than one {}: {several:?}",
+            "Cargo's messages name more than one {}: {several:?}; set {CDYLIB_OVERRIDE_ENV} to \
+             the library to test",
             cdylib_filename()
         )),
     }
@@ -291,7 +295,7 @@ fn canonical(path: &Path) -> PathBuf {
 /// The string value of `"key":"…"` in one line of Cargo's JSON, `None` when
 /// the key is absent or its value is not a string (`null`).
 ///
-/// A JSON parser would be a new dev-dependency for two fields; Cargo prints
+/// A JSON parser would be a new dev-dependency for four keys; Cargo prints
 /// each message on one line and these keys occur once in it.
 pub fn json_string_field(line: &str, key: &str) -> Result<Option<String>, String> {
     let Some(value) = json_value_after_key(line, key) else {

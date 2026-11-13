@@ -669,7 +669,8 @@ fn release_bundle_records_the_platform_default_prefix() {
 }
 
 /// The release job passes `--target <triple>`, which the other tests here do
-/// not: they pin `CAPI_TARGET_DIR` at the host's `deps/` directory, so
+/// not: they pin `CAPI_TARGET_DIR` at the directory holding the cdylib under
+/// test (`deps/` up to Cargo 1.99, the library's unit directory on 1.100), so
 /// `install_capi.sh` never derives a target-qualified path and never builds.
 ///
 /// Driving the full `--target … --build` path would mean a fresh release

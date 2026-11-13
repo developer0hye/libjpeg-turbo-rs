@@ -41,9 +41,9 @@ fn repo_root() -> PathBuf {
 /// Return the cdylib emitted by the same Cargo invocation as this test.
 ///
 /// The test must be able to find the cdylib that run.sh will stage as the
-/// JPEG provider. Resolving it beside the current test executable means a
-/// stale artifact in another Cargo profile or target directory cannot
-/// silently satisfy the gate.
+/// JPEG provider. Resolving the library this Cargo invocation built
+/// (`support/cdylib.rs`) means a stale artifact in another Cargo profile or
+/// target directory cannot silently satisfy the gate.
 fn cdylib_path() -> PathBuf {
     cdylib_support::cdylib_path()
 }
@@ -143,7 +143,6 @@ fn libtiff_jpeg_roundtrip_via_shim() {
     let build_status: std::process::Output = Command::new("bash")
         .arg(&build_sh)
         .env("CAPI_TARGET_DIR", cdylib_dir)
-        .envs(cdylib_support::version_map_environment())
         .output()
         .expect("failed to spawn build.sh — bash must be on PATH");
 
@@ -196,7 +195,6 @@ fn libtiff_jpeg_roundtrip_via_shim() {
     let run_status: std::process::Output = Command::new("bash")
         .arg(&run_sh)
         .env("CAPI_TARGET_DIR", cdylib_dir)
-        .envs(cdylib_support::version_map_environment())
         .output()
         .expect("failed to spawn run.sh");
 

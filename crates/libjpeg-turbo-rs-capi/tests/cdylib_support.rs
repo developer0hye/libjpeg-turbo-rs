@@ -4,6 +4,7 @@ mod cdylib;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
+/// Cargo up to 1.99: the library is the sibling in `deps/`.
 #[test]
 fn cargo_built_cdylib_path_is_next_to_the_outer_test_executable() {
     let executable: &Path = Path::new("/cargo-target/custom-board/debug/deps/cdylib_support-hash");
@@ -18,10 +19,10 @@ fn cargo_built_cdylib_path_is_next_to_the_outer_test_executable() {
         .is_some_and(|name: &str| name.contains("libjpeg_turbo_rs_capi")));
 }
 
-/// P4-276: whatever layout the running Cargo uses, the helper must hand back
-/// the cdylib of *this* invocation. Up to Cargo 1.99 that is the sibling in
-/// `deps/`; from 1.100 the test executable and the library live in different
-/// unit directories and the helper asks Cargo instead.
+/// P4-276: on whichever layout the running Cargo uses, the helper resolves a
+/// loadable cdylib (up to 1.99 the `deps/` sibling; from 1.100 by asking
+/// Cargo). That it is *this* invocation's library is enforced by the
+/// refusals pinned below, not asserted here.
 #[test]
 fn outer_cargo_invocation_resolves_its_own_cdylib() {
     let cdylib: PathBuf = cdylib::cargo_built_cdylib_path()
@@ -272,7 +273,9 @@ fn messages_with_two_libraries_are_refused() {
 /// the version script the build script wrote. On the 1.100 layout that file
 /// is no longer below or beside the library's directory, so the staging
 /// tests hand the script the path Cargo compiled into them. It must be a
-/// real file wherever the build script ran, which is every platform.
+/// real file wherever the build script ran, which is every platform. This
+/// pins the pair the staging tests pass; that `install_capi.sh` uses it is
+/// checked on Linux by `capi_symbol_versions`.
 #[test]
 fn the_version_script_of_this_build_is_handed_to_the_install_script() {
     let (variable, map): (&str, &str) = cdylib::version_map_environment()
