@@ -69,9 +69,12 @@ pub(crate) fn check_segment_end(
 /// All read/peek operations are infallible — they return 0 at EOF.
 pub struct BitReader<'a> {
     data: &'a [u8],
-    pos: usize,
-    bit_buffer: u64,
-    bits_left: u8,
+    cur: BitCursor,
+    /// Zero bits at the bottom of `bit_buffer` that did not come from the
+    /// data: the reader sat at a marker, or past the end of a final window,
+    /// and filled with zeros. Stuffed bits are always the buffer's suffix,
+    /// so `bits_left < stuffed_bits` means a read consumed some (P4-254).
+    stuffed_bits: u32,
     /// False when `data` is a partial window of a longer stream
     /// (P4-58 incremental decode). EOF-class events then flag
     /// starvation instead of being treated as the true end of stream.
@@ -81,11 +84,6 @@ pub struct BitReader<'a> {
     /// checkpoint is unreliable and must be discarded, the window
     /// extended, and the work retried. Never set when `is_final`.
     starved: bool,
-    /// Zero bits at the bottom of `bit_buffer` that did not come from the
-    /// data: the reader sat at a marker, or past the end of a final window,
-    /// and filled with zeros. Stuffed bits are always the buffer's suffix,
-    /// so `bits_left < stuffed_bits` means a read consumed some (P4-254).
-    stuffed_bits: u32,
     /// libjpeg's `insufficient_data`, carried across a [`Self::reset`] that
     /// found no restart marker to resume from (`process_restart`,
     /// jdhuff.c:533-539). See [`Self::insufficient_data`].
@@ -100,6 +98,29 @@ pub struct BitReader<'a> {
     #[cfg(test)]
     scan_bytes_examined: usize,
 }
+
+/// The reader's hot cursor: the byte position and the bit buffer.
+///
+/// The field order is load-bearing (P4-271), hence `repr(C)`: `pos` and
+/// `bit_buffer` must not be adjacent, in either order. Adjacent, LLVM's SLP
+/// vectorizer merges `HotBits`' paired copy of the two into one 128-bit load
+/// and store and keeps the cursor in a stack slot, which cost the Huffman
+/// decode about 13% on aarch64. The assertion below pins the order `pos`,
+/// `bits_left`, `bit_buffer`, so a reordering or a new field cannot undo
+/// that silently.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct BitCursor {
+    pos: usize,
+    bits_left: u8,
+    bit_buffer: u64,
+}
+
+const _: () = assert!(
+    core::mem::offset_of!(BitCursor, pos) < core::mem::offset_of!(BitCursor, bits_left)
+        && core::mem::offset_of!(BitCursor, bits_left)
+            < core::mem::offset_of!(BitCursor, bit_buffer)
+);
 
 /// Resumable byte/bit cursor for windowed decoding (P4-58): captures
 /// everything needed to re-create a `BitReader` over a grown window at
@@ -119,9 +140,11 @@ impl<'a> BitReader<'a> {
     pub fn new(data: &'a [u8]) -> Self {
         Self {
             data,
-            pos: 0,
-            bit_buffer: 0,
-            bits_left: 0,
+            cur: BitCursor {
+                pos: 0,
+                bits_left: 0,
+                bit_buffer: 0,
+            },
             is_final: true,
             starved: false,
             stuffed_bits: 0,
@@ -138,9 +161,11 @@ impl<'a> BitReader<'a> {
     pub fn resume_windowed(data: &'a [u8], state: BitReaderState, is_final: bool) -> Self {
         Self {
             data,
-            pos: state.pos,
-            bit_buffer: state.bit_buffer,
-            bits_left: state.bits_left,
+            cur: BitCursor {
+                pos: state.pos,
+                bits_left: state.bits_left,
+                bit_buffer: state.bit_buffer,
+            },
             is_final,
             starved: false,
             stuffed_bits: state.stuffed_bits,
@@ -156,9 +181,9 @@ impl<'a> BitReader<'a> {
     #[doc(hidden)]
     pub fn state(&self) -> BitReaderState {
         BitReaderState {
-            pos: self.pos,
-            bit_buffer: self.bit_buffer,
-            bits_left: self.bits_left,
+            pos: self.cur.pos,
+            bit_buffer: self.cur.bit_buffer,
+            bits_left: self.cur.bits_left,
             stuffed_bits: self.stuffed_bits,
             insufficient: self.insufficient,
         }
@@ -182,7 +207,7 @@ impl<'a> BitReader<'a> {
     /// `process_restart` clears it only then (jdhuff.c:533-539), or the
     /// reader moves to a new scan with [`Self::set_position`] (P4-254).
     pub fn insufficient_data(&self) -> bool {
-        self.insufficient || u32::from(self.bits_left) < self.stuffed_bits
+        self.insufficient || u32::from(self.cur.bits_left) < self.stuffed_bits
     }
 
     /// Call when a Huffman lookup fails on the 16-bit window just peeked. If
@@ -191,7 +216,7 @@ impl<'a> BitReader<'a> {
     /// stuffed bits first and raised `JWRN_HIT_MARKER`, so the segment counts
     /// as short even though nothing was consumed (P4-254).
     pub(crate) fn note_failed_lookup(&mut self) {
-        if self.stuffed_bits > 0 && u32::from(self.bits_left) < self.stuffed_bits + 16 {
+        if self.stuffed_bits > 0 && u32::from(self.cur.bits_left) < self.stuffed_bits + 16 {
             self.insufficient = true;
         }
     }
@@ -201,8 +226,8 @@ impl<'a> BitReader<'a> {
     /// marker is found to clear it.
     fn discard_bits_for_restart(&mut self) {
         self.insufficient = self.insufficient_data();
-        self.bit_buffer = 0;
-        self.bits_left = 0;
+        self.cur.bit_buffer = 0;
+        self.cur.bits_left = 0;
         self.stuffed_bits = 0;
     }
 
@@ -236,53 +261,68 @@ impl<'a> BitReader<'a> {
         }
     }
 
+    /// The refill's fast path, on a cursor held anywhere (the reader's own, or
+    /// `HotBits`' locals). Returns false when [`Self::fill_buffer_slow`] must
+    /// finish the refill: under 16 bytes remain, or a marker or fill run
+    /// stopped it, with `*pos` on that byte.
+    ///
+    /// The 16-byte window keeps every access in bounds. Unrolled like C
+    /// libjpeg-turbo's FILL_BIT_BUFFER_FAST: up to seven bytes in straight-line
+    /// code, avoiding loop overhead.
+    #[inline(always)]
+    fn fill_fast(data: &[u8], pos: &mut usize, buf: &mut u64, bits: &mut u8, needed: u8) -> bool {
+        let start: usize = *pos;
+        if start + 16 > data.len() {
+            return false;
+        }
+        let window: &[u8] = &data[start..start + 16];
+        let mut off: usize = 0;
+        // Each call returns usize::MAX on a multi-FF run or marker that the
+        // fast path can't classify; bail to the slow path in that case.
+        macro_rules! step {
+            () => {
+                if *bits < needed.max(56) && off < 15 {
+                    let next: usize = Self::get_byte(window, off, buf, bits);
+                    if next == usize::MAX {
+                        *pos = start + off;
+                        return false;
+                    }
+                    off = next;
+                }
+            };
+        }
+        step!();
+        step!();
+        step!();
+        step!();
+        step!();
+        step!();
+        step!();
+        *pos = start + off;
+        true
+    }
+
     #[inline(always)]
     fn fill_buffer(&mut self, needed: u8) {
-        // Fast path: 16-byte window guarantees all accesses are in-bounds.
-        // Unrolled like C libjpeg-turbo's FILL_BIT_BUFFER_FAST: read up to 7 bytes
-        // in straight-line code, avoiding loop overhead.
-        let data: &[u8] = self.data;
-        let start: usize = self.pos;
-        if start + 16 <= data.len() {
-            let window: &[u8] = &data[start..start + 16];
-            let buf: &mut u64 = &mut self.bit_buffer;
-            let bl: &mut u8 = &mut self.bits_left;
-            let mut off: usize = 0;
-            // Each call returns usize::MAX on a multi-FF run that the
-            // fast path can't classify; bail to slow path in that case.
-            macro_rules! step {
-                () => {
-                    if *bl < needed.max(56) && off < 15 {
-                        let next = Self::get_byte(window, off, buf, bl);
-                        if next == usize::MAX {
-                            self.pos = start + off;
-                            self.fill_buffer_slow(needed);
-                            return;
-                        }
-                        off = next;
-                    }
-                };
-            }
-            step!();
-            step!();
-            step!();
-            step!();
-            step!();
-            step!();
-            step!();
-            self.pos = start + off;
-        } else {
+        let cur: &mut BitCursor = &mut self.cur;
+        if !Self::fill_fast(
+            self.data,
+            &mut cur.pos,
+            &mut cur.bit_buffer,
+            &mut cur.bits_left,
+            needed,
+        ) {
             self.fill_buffer_slow(needed);
         }
     }
 
     #[inline(never)]
     fn fill_buffer_slow(&mut self, needed: u8) {
-        while self.bits_left < needed.max(56) {
-            if self.bits_left > 56 {
+        while self.cur.bits_left < needed.max(56) {
+            if self.cur.bits_left > 56 {
                 break;
             }
-            let pos: usize = self.pos;
+            let pos: usize = self.cur.pos;
             let byte: u8 = match self.data.get(pos) {
                 Some(&b) => b,
                 None => {
@@ -291,15 +331,15 @@ impl<'a> BitReader<'a> {
                     } else {
                         self.starved = true;
                     }
-                    self.bit_buffer <<= 8;
-                    self.bits_left += 8;
+                    self.cur.bit_buffer <<= 8;
+                    self.cur.bits_left += 8;
                     continue;
                 }
             };
             if byte != 0xFF {
-                self.pos = pos + 1;
-                self.bit_buffer = (self.bit_buffer << 8) | byte as u64;
-                self.bits_left += 8;
+                self.cur.pos = pos + 1;
+                self.cur.bit_buffer = (self.cur.bit_buffer << 8) | byte as u64;
+                self.cur.bits_left += 8;
                 continue;
             }
             // Walk past any run of 0xFF (libjpeg-turbo treats consecutive
@@ -320,9 +360,9 @@ impl<'a> BitReader<'a> {
             }
             match self.data.get(scan) {
                 Some(&0x00) => {
-                    self.pos = scan + 1;
-                    self.bit_buffer = (self.bit_buffer << 8) | 0xFF_u64;
-                    self.bits_left += 8;
+                    self.cur.pos = scan + 1;
+                    self.cur.bit_buffer = (self.cur.bit_buffer << 8) | 0xFF_u64;
+                    self.cur.bits_left += 8;
                 }
                 Some(_) => {
                     // Marker found at `scan`. Park pos at the FF
@@ -330,9 +370,9 @@ impl<'a> BitReader<'a> {
                     // single `FF <marker>` pair and the next refill
                     // classifies it in O(1) instead of re-walking the
                     // fill run.
-                    self.pos = scan - 1;
-                    self.bit_buffer <<= 8;
-                    self.bits_left += 8;
+                    self.cur.pos = scan - 1;
+                    self.cur.bit_buffer <<= 8;
+                    self.cur.bits_left += 8;
                     self.stuffed_bits = self.stuffed_bits.saturating_add(8);
                 }
                 None => {
@@ -343,13 +383,13 @@ impl<'a> BitReader<'a> {
                     // depends on bytes not buffered yet: starve WITHOUT
                     // moving pos, so the retry re-examines the run.
                     if self.is_final {
-                        self.pos = self.data.len();
+                        self.cur.pos = self.data.len();
                         self.stuffed_bits = self.stuffed_bits.saturating_add(8);
                     } else {
                         self.starved = true;
                     }
-                    self.bit_buffer <<= 8;
-                    self.bits_left += 8;
+                    self.cur.bit_buffer <<= 8;
+                    self.cur.bits_left += 8;
                 }
             }
         }
@@ -357,39 +397,17 @@ impl<'a> BitReader<'a> {
 
     #[inline(always)]
     pub fn peek_bits(&mut self, count: u8) -> u16 {
-        if self.bits_left < count {
-            self.fill_buffer(count);
-        }
-        let shift = self.bits_left - count;
-        ((self.bit_buffer >> shift) & ((1u64 << count) - 1)) as u16
+        <Self as BitSource>::peek_bits(self, count)
     }
 
     #[inline(always)]
     pub fn read_bits(&mut self, count: u8) -> u16 {
-        // JPEG entropy codes never exceed 16 bits. Larger counts can only
-        // arrive from malformed Huffman tables / scan headers; cap at the
-        // 64-bit buffer capacity so the shift below stays defined, and
-        // saturating_sub the cursor so the panic path in libFuzzer
-        // corpora (e.g. count > bits_left after fill_buffer couldn't top
-        // up past the 56-bit high-water mark) becomes a clean zero-read.
-        let count = count.min(64);
-        if self.bits_left < count {
-            self.fill_buffer(count);
-        }
-        let take = count.min(self.bits_left);
-        self.bits_left -= take;
-        let mask = if count == 64 {
-            u64::MAX
-        } else {
-            (1u64 << count) - 1
-        };
-        ((self.bit_buffer >> self.bits_left) & mask) as u16
+        <Self as BitSource>::read_bits(self, count)
     }
 
     #[inline(always)]
     pub fn skip_bits(&mut self, count: u8) {
-        debug_assert!(count <= self.bits_left);
-        self.bits_left -= count;
+        <Self as BitSource>::skip_bits(self, count)
     }
 
     /// Restart-interval handler: discard the partial bit buffer and consume the
@@ -419,26 +437,26 @@ impl<'a> BitReader<'a> {
         // stuffing and `0xFF 0xFF` fill runs are walked like data; any
         // non-restart marker (EOI/SOS/…) stops the scan without being
         // consumed so end-of-scan handling still sees it.
-        while self.pos + 1 < self.data.len() {
+        while self.cur.pos + 1 < self.data.len() {
             #[cfg(test)]
             {
                 self.scan_bytes_examined += 1;
             }
-            if self.data[self.pos] != 0xFF {
-                self.pos += 1;
+            if self.data[self.cur.pos] != 0xFF {
+                self.cur.pos += 1;
                 continue;
             }
-            match self.data[self.pos + 1] {
+            match self.data[self.cur.pos + 1] {
                 0xD0..=0xD7 => {
-                    self.pos += 2; // consume the restart marker
-                                   // A new data segment starts (process_restart,
-                                   // jdhuff.c:533-539).
+                    self.cur.pos += 2; // consume the restart marker
+                                       // A new data segment starts (process_restart,
+                                       // jdhuff.c:533-539).
                     self.insufficient = false;
                     return;
                 }
-                0x00 => self.pos += 2, // stuffed literal 0xFF data byte
-                0xFF => self.pos += 1, // fill-byte run — re-examine next byte
-                _ => return,           // other marker: restart marker absent
+                0x00 => self.cur.pos += 2, // stuffed literal 0xFF data byte
+                0xFF => self.cur.pos += 1, // fill-byte run — re-examine next byte
+                _ => return,               // other marker: restart marker absent
             }
         }
         // Ran off the end of the buffered bytes without classifying a
@@ -459,17 +477,17 @@ impl<'a> BitReader<'a> {
         self.discard_bits_for_restart();
 
         // Skip padding 0xFF bytes first (byte stuffing at segment boundaries).
-        while self.pos + 1 < self.data.len() && self.data[self.pos] == 0xFF {
-            let marker = self.data[self.pos + 1];
+        while self.cur.pos + 1 < self.data.len() && self.data[self.cur.pos] == 0xFF {
+            let marker = self.data[self.cur.pos + 1];
             if (0xD0..=0xD7).contains(&marker) {
                 let rst_num: u8 = marker - 0xD0;
-                self.pos += 2;
+                self.cur.pos += 2;
                 self.insufficient = false;
                 return Some(rst_num);
             }
             if marker == 0xFF {
                 // Fill-byte padding between markers — keep scanning.
-                self.pos += 1;
+                self.cur.pos += 1;
                 continue;
             }
             // Any other non-RST marker: stop without consuming so caller
@@ -490,19 +508,19 @@ impl<'a> BitReader<'a> {
     /// Bit state is reset regardless of whether a marker is found.
     pub fn scan_to_next_rst(&mut self) -> Option<u8> {
         self.discard_bits_for_restart();
-        while self.pos + 1 < self.data.len() {
-            if self.data[self.pos] == 0xFF {
-                let marker = self.data[self.pos + 1];
+        while self.cur.pos + 1 < self.data.len() {
+            if self.data[self.cur.pos] == 0xFF {
+                let marker = self.data[self.cur.pos + 1];
                 if (0xD0..=0xD7).contains(&marker) {
                     let rst_num: u8 = marker - 0xD0;
-                    self.pos += 2;
+                    self.cur.pos += 2;
                     self.insufficient = false;
                     return Some(rst_num);
                 }
                 if marker == 0x00 {
                     // Byte-stuffing: 0xFF 0x00 means literal 0xFF in the
                     // entropy stream. Skip both bytes and keep scanning.
-                    self.pos += 2;
+                    self.cur.pos += 2;
                     continue;
                 }
                 if marker == 0xD9 {
@@ -510,10 +528,10 @@ impl<'a> BitReader<'a> {
                     return None;
                 }
                 // Unknown marker: skip it and continue searching.
-                self.pos += 2;
+                self.cur.pos += 2;
                 continue;
             }
-            self.pos += 1;
+            self.cur.pos += 1;
         }
         if !self.is_final {
             self.starved = true;
@@ -526,16 +544,16 @@ impl<'a> BitReader<'a> {
     /// new scan is a new data segment (libjpeg clears the flag per scan,
     /// jdhuff.c:128).
     pub fn set_position(&mut self, pos: usize) {
-        self.pos = pos;
-        self.bit_buffer = 0;
-        self.bits_left = 0;
+        self.cur.pos = pos;
+        self.cur.bit_buffer = 0;
+        self.cur.bits_left = 0;
         self.stuffed_bits = 0;
         self.insufficient = false;
     }
 
     /// Return current byte position in the underlying data.
     pub fn position(&self) -> usize {
-        self.pos
+        self.cur.pos
     }
 
     /// True once every input byte has been loaded into the bit buffer
@@ -543,13 +561,323 @@ impl<'a> BitReader<'a> {
     /// still be unread. A short segment is [`Self::insufficient_data`]
     /// (P4-254).
     pub fn is_eof(&self) -> bool {
-        self.pos >= self.data.len()
+        self.cur.pos >= self.data.len()
+    }
+}
+
+/// The bit operations the Huffman decoders need, so one decoder body serves
+/// both a [`BitReader`] and a block-scoped [`HotBits`] cursor. Implementors
+/// supply the cursor and the refill; the reads are written once, here.
+pub(crate) trait BitSource {
+    // `bits_left`, `bit_buffer` and `set_bits_left` are plumbing for the
+    // default methods below; decoders call `read_bits` / `skip_bits`, since
+    // `insufficient_data` relies on `bits_left` only falling by reads
+    // (P4-254).
+    fn bits_left(&self) -> u8;
+    fn bit_buffer(&self) -> u64;
+    fn set_bits_left(&mut self, bits_left: u8);
+    /// Top the buffer up to at least `needed.max(56)` bits where the data
+    /// allows, as [`BitReader::fill_buffer`].
+    fn refill(&mut self, needed: u8);
+    fn note_failed_lookup(&mut self);
+
+    #[inline(always)]
+    fn peek_bits(&mut self, count: u8) -> u16 {
+        if self.bits_left() < count {
+            self.refill(count);
+        }
+        let shift: u8 = self.bits_left() - count;
+        ((self.bit_buffer() >> shift) & ((1u64 << count) - 1)) as u16
+    }
+
+    #[inline(always)]
+    fn read_bits(&mut self, count: u8) -> u16 {
+        // JPEG entropy codes never exceed 16 bits. Larger counts can only
+        // arrive from malformed Huffman tables / scan headers; cap at the
+        // 64-bit buffer capacity so the shift below stays defined, and
+        // clamp what is taken to what is buffered, so a count the refill
+        // could not cover (it stops at the 56-bit high-water mark) is a
+        // clean short read instead of an underflow panic (libFuzzer).
+        let count: u8 = count.min(64);
+        if self.bits_left() < count {
+            self.refill(count);
+        }
+        let take: u8 = count.min(self.bits_left());
+        let bits_left: u8 = self.bits_left() - take;
+        self.set_bits_left(bits_left);
+        let mask: u64 = if count == 64 {
+            u64::MAX
+        } else {
+            (1u64 << count) - 1
+        };
+        ((self.bit_buffer() >> bits_left) & mask) as u16
+    }
+
+    #[inline(always)]
+    fn skip_bits(&mut self, count: u8) {
+        debug_assert!(count <= self.bits_left());
+        let bits_left: u8 = self.bits_left() - count;
+        self.set_bits_left(bits_left);
+    }
+}
+
+impl BitSource for BitReader<'_> {
+    #[inline(always)]
+    fn bits_left(&self) -> u8 {
+        self.cur.bits_left
+    }
+    #[inline(always)]
+    fn bit_buffer(&self) -> u64 {
+        self.cur.bit_buffer
+    }
+    #[inline(always)]
+    fn set_bits_left(&mut self, bits_left: u8) {
+        self.cur.bits_left = bits_left;
+    }
+    #[inline(always)]
+    fn refill(&mut self, needed: u8) {
+        self.fill_buffer(needed)
+    }
+    #[inline(always)]
+    fn note_failed_lookup(&mut self) {
+        BitReader::note_failed_lookup(self)
+    }
+}
+
+/// A [`BitReader`]'s cursor (`pos`, `bit_buffer`, `bits_left`) copied into
+/// locals for the length of one block, so the Huffman decode's
+/// symbol-to-symbol dependency chain runs in registers instead of through
+/// the reader's memory (P4-271). Written back before the slow refill and
+/// before `note_failed_lookup`, which need the reader itself, and when
+/// dropped.
+pub(crate) struct HotBits<'r, 'a> {
+    reader: &'r mut BitReader<'a>,
+    data: &'a [u8],
+    pos: usize,
+    buf: u64,
+    bits: u8,
+}
+
+impl<'r, 'a> HotBits<'r, 'a> {
+    #[inline(always)]
+    pub(crate) fn new(reader: &'r mut BitReader<'a>) -> Self {
+        let data: &'a [u8] = reader.data;
+        let pos: usize = reader.cur.pos;
+        let buf: u64 = reader.cur.bit_buffer;
+        let bits: u8 = reader.cur.bits_left;
+        Self {
+            reader,
+            data,
+            pos,
+            buf,
+            bits,
+        }
+    }
+
+    #[inline(always)]
+    fn store(&mut self) {
+        self.reader.cur.pos = self.pos;
+        self.reader.cur.bit_buffer = self.buf;
+        self.reader.cur.bits_left = self.bits;
+    }
+
+    #[inline(always)]
+    fn load(&mut self) {
+        self.pos = self.reader.cur.pos;
+        self.buf = self.reader.cur.bit_buffer;
+        self.bits = self.reader.cur.bits_left;
+    }
+
+    /// [`BitReader::fill_buffer`] on the local cursor.
+    #[inline(always)]
+    fn fill(&mut self, needed: u8) {
+        if !BitReader::fill_fast(
+            self.data,
+            &mut self.pos,
+            &mut self.buf,
+            &mut self.bits,
+            needed,
+        ) {
+            self.fill_slow(needed);
+        }
+    }
+
+    #[inline(always)]
+    fn fill_slow(&mut self, needed: u8) {
+        self.store();
+        self.reader.fill_buffer_slow(needed);
+        self.load();
+    }
+}
+
+impl Drop for HotBits<'_, '_> {
+    #[inline(always)]
+    fn drop(&mut self) {
+        self.store();
+    }
+}
+
+impl BitSource for HotBits<'_, '_> {
+    #[inline(always)]
+    fn bits_left(&self) -> u8 {
+        self.bits
+    }
+    #[inline(always)]
+    fn bit_buffer(&self) -> u64 {
+        self.buf
+    }
+    #[inline(always)]
+    fn set_bits_left(&mut self, bits_left: u8) {
+        self.bits = bits_left;
+    }
+    #[inline(always)]
+    fn refill(&mut self, needed: u8) {
+        self.fill(needed)
+    }
+    #[inline(always)]
+    fn note_failed_lookup(&mut self) {
+        self.store();
+        self.reader.note_failed_lookup();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::BitReader;
+    use super::{BitSource, HotBits};
+
+    /// P4-271: `HotBits` copies the cursor into locals for one block, so it
+    /// must read exactly the bits, and leave the reader exactly where, the
+    /// reader on its own would. Streams mix every byte value (a lone `FF`
+    /// included, also as the last byte), `FF 00` stuffing, `FF FF` fill runs,
+    /// restart markers mid-stream and `FF FF D9`, so the fast refill meets a
+    /// marker at every offset and parks on it; most are long enough for the
+    /// 16-byte fast path, and every fourth may be shorter, so the slow path
+    /// alone serves it. All end mid-read, on final readers (zero stuffing,
+    /// `insufficient`) and on non-final windows (P4-58), which starve. Reads
+    /// go up to 69 bits, past the 64 that `read_bits` caps, as a bogus DHT
+    /// category can ask. The cursor is dropped and re-created every few
+    /// reads, as `decode_block` does per block, with an occasional restart
+    /// `reset()` between.
+    #[test]
+    fn hot_bits_reads_and_leaves_the_reader_as_the_reader_alone_does() {
+        let mut seed: u32 = 0x2545_F491;
+        let mut next = move || -> u32 {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed
+        };
+        // Safe code throughout, so Miri only needs a sample; natively the
+        // full sweep takes a fraction of a second.
+        let cases: u32 = if cfg!(miri) { 8 } else { 2000 };
+        let mut starved_cases: u32 = 0;
+        let mut insufficient_cases: u32 = 0;
+        for case in 0..cases {
+            let len: usize = (next() % 96) as usize + if case.is_multiple_of(4) { 0 } else { 16 };
+            let mut data: Vec<u8> = Vec::with_capacity(len + 4);
+            // A marker parks the reader before the window ends, so every
+            // fourth case (windowed, see below) has none and starves instead.
+            let has_markers: bool = case % 4 != 1;
+            while data.len() < len {
+                if !has_markers {
+                    match next() % 8 {
+                        0 => data.extend_from_slice(&[0xFF, 0x00]),
+                        _ => data.push((next() % 0xFF) as u8),
+                    }
+                    continue;
+                }
+                match next() % 24 {
+                    0 => data.extend_from_slice(&[0xFF, 0x00]),
+                    1 => data.extend_from_slice(&[0xFF, 0xFF, 0x00]),
+                    2 => data.extend_from_slice(&[0xFF, 0xD0 + (next() % 8) as u8]),
+                    3 => data.extend_from_slice(&[0xFF, 0xFF, 0xD9]),
+                    4 => data.push(0xFF),
+                    _ => data.push(next() as u8),
+                }
+            }
+            if has_markers && next().is_multiple_of(5) {
+                data.push(0xFF);
+            }
+            // The odd cases are a non-final window cut short (the P4-58
+            // incremental decode), so reads past its end starve.
+            let is_final: bool = case.is_multiple_of(2);
+            let window: &[u8] = if is_final {
+                &data
+            } else {
+                &data[..data.len() * 2 / 3]
+            };
+            let mut plain: BitReader<'_> =
+                BitReader::resume_windowed(window, BitReader::new(window).state(), is_final);
+            let mut hot_reader: BitReader<'_> =
+                BitReader::resume_windowed(window, BitReader::new(window).state(), is_final);
+            let mut ops: u32 = 0;
+            let mut case_starved: bool = false;
+            let mut case_insufficient: bool = false;
+            while ops < 400 {
+                let mut hot: HotBits<'_, '_> = HotBits::new(&mut hot_reader);
+                for _ in 0..(next() % 12 + 1) {
+                    let count: u8 = (next() % 70) as u8;
+                    match next() % 3 {
+                        0 => assert_eq!(
+                            BitSource::peek_bits(&mut plain, 16),
+                            hot.peek_bits(16),
+                            "case {case}, op {ops}: peek"
+                        ),
+                        1 => assert_eq!(
+                            BitSource::read_bits(&mut plain, count),
+                            hot.read_bits(count),
+                            "case {case}, op {ops}: read {count}"
+                        ),
+                        _ => {
+                            let peeked: u16 = BitSource::peek_bits(&mut plain, 16);
+                            assert_eq!(peeked, hot.peek_bits(16), "case {case}, op {ops}");
+                            let skip: u8 = count.min(16);
+                            BitSource::skip_bits(&mut plain, skip);
+                            hot.skip_bits(skip);
+                        }
+                    }
+                    if ops.is_multiple_of(7) {
+                        BitSource::note_failed_lookup(&mut plain);
+                        hot.note_failed_lookup();
+                    }
+                    ops += 1;
+                }
+                drop(hot);
+                let (a, b) = (plain.state(), hot_reader.state());
+                assert_eq!(
+                    (
+                        a.pos,
+                        a.bit_buffer,
+                        a.bits_left,
+                        a.stuffed_bits,
+                        a.insufficient
+                    ),
+                    (
+                        b.pos,
+                        b.bit_buffer,
+                        b.bits_left,
+                        b.stuffed_bits,
+                        b.insufficient
+                    ),
+                    "case {case}, op {ops}: reader state"
+                );
+                assert_eq!(plain.insufficient_data(), hot_reader.insufficient_data());
+                assert_eq!(plain.starved(), hot_reader.starved());
+                case_starved |= plain.starved();
+                case_insufficient |= plain.insufficient_data();
+                if next().is_multiple_of(9) {
+                    plain.reset();
+                    hot_reader.reset();
+                }
+            }
+            starved_cases += u32::from(case_starved);
+            insufficient_cases += u32::from(case_insufficient);
+        }
+        // The sweep must reach the states it claims to cover.
+        assert!(starved_cases > 0, "no windowed case starved");
+        assert!(insufficient_cases > 0, "no final case ran short");
+    }
 
     /// Regression: on a corrupt stream the entropy decode of a restart
     /// interval can terminate early, leaving trailing data byte(s) between the

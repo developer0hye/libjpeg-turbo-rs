@@ -288,7 +288,8 @@ fill caller planes (`yuv::YuvPlaneMut`, any stride) with the same samples
 as `yuv::decompress_to_yuv_planes`. `Decoder::decode_yuv_planes_into` does
 the same with a configured decoder (limits, leniency, and a resync strategy
 where `decode_raw` consults it: sequential Huffman scans, not lenient
-interleaved ones).
+interleaved ones); `Decoder::decode_yuv_planes_into_with_warnings` also
+returns the warnings a lenient decode recovered from.
 
 ### Compress
 

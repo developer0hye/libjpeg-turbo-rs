@@ -14,15 +14,20 @@ and `git log` between tags.
   component planes one iMCU row at a time (`next_strip`, `for_each_strip`,
   `finish`), so callers collect them into buffers they own. Single-scan
   Huffman streams are decoded row by row, so the working set is one iMCU row
-  (68 KB against `decode_raw`'s 6.3 MB on a 2048x2048 4:2:0 frame). Active rows
-  match libjpeg's `jpeg_read_raw_data`.
+  (68 KB against `decode_raw`'s 6.3 MB on a 2048x2048 4:2:0 frame), at
+  `decode_raw`'s speed on aarch64 (P4-271). Active rows match libjpeg's
+  `jpeg_read_raw_data`.
 - **`yuv::decompress_to_yuv_planes_into`** and `yuv::YuvPlaneMut`: the
   `decompress_to_yuv_planes` samples written into caller planes at caller
   strides. Every destination is checked before decoding.
   **`Decoder::decode_yuv_planes_into`** does the same with a configured
-  decoder, so limits, leniency, `stop_on_warning` and a resync strategy
-  apply (the strategy where `decode_raw` consults it: sequential Huffman
-  scans, not lenient interleaved ones, P4-270).
+  decoder, so limits, leniency, the `stop_on_warning` marker check and a
+  resync strategy apply (the strategy where `decode_raw` consults it:
+  sequential Huffman scans, not lenient interleaved ones, P4-270), and
+  **`Decoder::decode_yuv_planes_into_with_warnings`** also returns the
+  warnings a lenient decode recovered from (P4-273). A decode error can
+  leave the planes partly written: the iMCU rows decoded before it hold
+  their samples.
 
 ### Changed
 
