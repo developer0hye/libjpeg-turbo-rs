@@ -2,6 +2,7 @@
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::SystemTime;
 
 /// An explicit library to test instead of the one Cargo built. The path must
@@ -64,7 +65,19 @@ pub fn cargo_built_cdylib_path_for_executable(executable: &Path) -> Result<PathB
 /// unfiltered `cargo test --workspace` builds a different unit graph from
 /// any per-target query, and a query that does not match compiles a second
 /// build in the middle of the run.
+///
+/// Step 3 builds the fingerprint file name from `CARGO_CRATE_NAME`, which
+/// equals the test target's name only while test file names have no hyphen;
+/// a `tests/foo-bar.rs` would always be refused.
+///
+/// The answer is computed once per test process: the running executable
+/// cannot be relinked under it.
 pub fn cargo_built_cdylib_path() -> Result<PathBuf, String> {
+    static RESOLVED: OnceLock<Result<PathBuf, String>> = OnceLock::new();
+    RESOLVED.get_or_init(resolve_cargo_built_cdylib).clone()
+}
+
+fn resolve_cargo_built_cdylib() -> Result<PathBuf, String> {
     if let Some(explicit) = std::env::var_os(CDYLIB_OVERRIDE_ENV) {
         let path: PathBuf = PathBuf::from(explicit);
         if path.is_file() {
@@ -75,14 +88,16 @@ pub fn cargo_built_cdylib_path() -> Result<PathBuf, String> {
             path.display()
         ));
     }
-    let executable: PathBuf = std::env::current_exe()
-        .map_err(|error| format!("could not resolve current test executable: {error}"))?;
-    let sibling: PathBuf = cargo_built_cdylib_path_for_executable(&executable)?;
-    if sibling.is_file() {
-        return Ok(sibling);
-    }
-    cdylib_by_fingerprint(&executable, env!("CARGO_CRATE_NAME"))
-        .map_err(|error| format!("{error}; set {CDYLIB_OVERRIDE_ENV} to the library to test"))
+    let located = || -> Result<PathBuf, String> {
+        let executable: PathBuf = std::env::current_exe()
+            .map_err(|error| format!("could not resolve current test executable: {error}"))?;
+        let sibling: PathBuf = cargo_built_cdylib_path_for_executable(&executable)?;
+        if sibling.is_file() {
+            return Ok(sibling);
+        }
+        cdylib_by_fingerprint(&executable, env!("CARGO_CRATE_NAME"))
+    };
+    located().map_err(|error| format!("{error}; set {CDYLIB_OVERRIDE_ENV} to the library to test"))
 }
 
 /// Step 3 of [`cargo_built_cdylib_path`] for the integration test
@@ -98,9 +113,13 @@ pub fn cdylib_by_fingerprint(executable: &Path, test_name: &str) -> Result<PathB
                 executable.display()
             )
         })?;
-    let unit: &Path = out_dir.parent().ok_or("unit directory")?;
-    let package: &Path = unit.parent().ok_or("package directory")?;
-    let test_fingerprint: PathBuf = unit
+    let test_unit: &Path = out_dir
+        .parent()
+        .ok_or_else(|| format!("{} has no unit directory above it", out_dir.display()))?;
+    let package: &Path = test_unit
+        .parent()
+        .ok_or_else(|| format!("{} has no package directory above it", test_unit.display()))?;
+    let test_fingerprint: PathBuf = test_unit
         .join("fingerprint")
         .join(format!("test-integration-test-{test_name}.json"));
     let json: String = std::fs::read_to_string(&test_fingerprint)

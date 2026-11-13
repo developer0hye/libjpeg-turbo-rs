@@ -960,7 +960,14 @@ jobs:
       # every other capi step uses, so the cdylib lookup is exercised under
       # both selections. The build above already paid for this one.
       - name: C-ABI cdylib lookup under a workspace selection (P4-276)
-        run: cargo test --locked --workspace -- outer_cargo_invocation_resolves_its_own_cdylib --exact
+        # The name filter reaches every test binary and libtest exits 0 when
+        # nothing matches, so the step checks that the test actually ran:
+        # a renamed or moved test must turn this red, not quietly green.
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --locked --workspace -- outer_cargo_invocation_resolves_its_own_cdylib --exact 2>&1 | tee p4276.log
+          grep -q '^test outer_cargo_invocation_resolves_its_own_cdylib \.\.\. ok' p4276.log
         timeout-minutes: 10
       - name: Printf-expansion oracle (issue #378 fix)
         run: cargo test --locked -p libjpeg-turbo-rs-capi --test format_message -- --nocapture

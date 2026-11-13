@@ -104,8 +104,9 @@ fn set_time(path: &Path, seconds_after_epoch: u64) {
 
 /// P4-276: the test's own fingerprint names the library it was built
 /// against, and only that unit's cdylib is taken. The other unit, built
-/// later for another feature set, is newer than the test executable too:
-/// choosing by modification time would take it, and the test would load the
+/// later for another feature set, is newer than ours and, like ours, older
+/// than the test executable, so the time check alone would not exclude it;
+/// choosing the newest library would take it, and the test would load the
 /// wrong library and could pass.
 #[test]
 fn the_library_is_the_unit_the_test_fingerprint_names() {
@@ -144,6 +145,18 @@ fn the_test_fingerprint_is_read_and_spelled_as_the_library_file_spells_it() {
         cdylib::library_fingerprint_in(r#"{"deps":[[1,"libjpeg_turbo_rs_capi",false,x]]}"#)
             .is_err()
     );
+    // A crate whose name only ends in the library's is not the library.
+    assert!(cdylib::library_fingerprint_in(
+        r#"{"deps":[[1,"foo_libjpeg_turbo_rs_capi",false,17174420862757387360]]}"#
+    )
+    .is_err());
+    // Two entries naming the library cannot both be the one linked.
+    let twice: &str = concat!(
+        r#"{"deps":[[1,"libjpeg_turbo_rs_capi",false,17174420862757387360],"#,
+        r#"[2,"libjpeg_turbo_rs_capi",false,4]]}"#,
+    );
+    let error: String = cdylib::library_fingerprint_in(twice).expect_err("two dependencies");
+    assert!(error.contains("2 dependencies"), "wrong refusal: {error}");
 }
 
 /// P4-276: every outcome other than one unit with a cdylib that predates the
@@ -194,7 +207,9 @@ fn anything_but_one_matching_library_is_refused() {
     let loose: tempfile::TempDir = tempfile::tempdir().expect("temporary directory");
     let elsewhere: PathBuf = loose.path().join("symbol_inventory");
     std::fs::write(&elsewhere, b"test").expect("executable");
-    assert!(cdylib::cdylib_by_fingerprint(&elsewhere, "symbol_inventory").is_err());
+    let error: String =
+        cdylib::cdylib_by_fingerprint(&elsewhere, "symbol_inventory").expect_err("not in a unit");
+    assert!(error.contains("neither beside"), "wrong refusal: {error}");
 }
 
 /// P4-276 (review): a library rebuilt in place after a source edit keeps its
@@ -217,6 +232,15 @@ fn a_library_rebuilt_after_the_test_was_linked_is_refused() {
     let error: String = cdylib::cdylib_by_fingerprint(&executable, "symbol_inventory")
         .expect_err("rebuilt after the test");
     assert!(error.contains("rebuilt after"), "wrong refusal: {error}");
+
+    // Equal times are accepted: filesystems with one- or two-second
+    // timestamps give a library and the test linked right after it the same
+    // time.
+    set_time(&ours, 1_000);
+    assert_eq!(
+        cdylib::cdylib_by_fingerprint(&executable, "symbol_inventory").expect("same second"),
+        ours
+    );
 }
 
 /// P4-276 (review): `scripts/install_capi.sh` relinks the Linux library with
