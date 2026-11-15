@@ -653,6 +653,9 @@ impl BitSource for BitReader<'_> {
 /// the reader's memory (P4-271). Written back before the slow refill and
 /// before `note_failed_lookup`, which need the reader itself, and when
 /// dropped.
+///
+/// Must be dropped, never `mem::forget`-ed: `Drop` is the write-back, so a
+/// forgotten cursor leaves the reader where the block started.
 pub(crate) struct HotBits<'r, 'a> {
     reader: &'r mut BitReader<'a>,
     data: &'a [u8],
@@ -776,6 +779,10 @@ mod tests {
         let cases: u32 = if cfg!(miri) { 8 } else { 2000 };
         let mut starved_cases: u32 = 0;
         let mut insufficient_cases: u32 = 0;
+        // Failed-lookup notes that set the reader's flag: the note decides
+        // from `bits_left`, so these are the ones that catch a `HotBits`
+        // that did not store its cursor first.
+        let mut note_flips: u32 = 0;
         for case in 0..cases {
             let len: usize = (next() % 96) as usize + if case.is_multiple_of(4) { 0 } else { 16 };
             let mut data: Vec<u8> = Vec::with_capacity(len + 4);
@@ -841,8 +848,10 @@ mod tests {
                         }
                     }
                     if ops.is_multiple_of(7) {
+                        let was_insufficient: bool = plain.state().insufficient;
                         BitSource::note_failed_lookup(&mut plain);
                         hot.note_failed_lookup();
+                        note_flips += u32::from(!was_insufficient && plain.state().insufficient);
                     }
                     ops += 1;
                 }
@@ -880,6 +889,7 @@ mod tests {
         // The sweep must reach the states it claims to cover.
         assert!(starved_cases > 0, "no windowed case starved");
         assert!(insufficient_cases > 0, "no final case ran short");
+        assert!(note_flips > 0, "no failed-lookup note set the flag");
     }
 
     /// Regression: on a corrupt stream the entropy decode of a restart

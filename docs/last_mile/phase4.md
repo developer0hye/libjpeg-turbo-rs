@@ -15951,6 +15951,29 @@ report no warning for a renumbered RST, and `ResyncAction::Continue`
 realigns the counter to the marker found, where libjpeg counts on from the
 one it expected.
 
+Tightened after the #703 review (2026-11-15):
+
+- The matrix gains a renumbered RST in the grayscale stream, and requires
+  the damaged-RST fixtures to reach the strategy wherever a decode
+  consults it (strict decodes and lenient single-component ones), so the
+  grayscale cases can no longer pass on two empty call lists. A lenient
+  grayscale truncation with a strategy must also have asked it.
+- The lenient grayscale `Skip` truncation must fail ("no further RST
+  marker"), as item 3 says; it previously accepted success as well.
+- The subsampled four-component case asserts the sampling factors it
+  encoded, not only the component count.
+- `stop_on_warning_refuses_marker_warnings_before_any_strip`: three stray
+  bytes before the SOS make `decode_raw`, `into_raw_strips` and
+  `decode_yuv_planes_into_with_warnings` fail with the same
+  `stop_on_warning` error before any strip, with the YUV planes untouched;
+  without the flag `decode_raw_with_warnings` and the YUV decode both report
+  `ExtraneousData { bytes: 3 }`.
+- `hot_bits_reads_and_leaves_the_reader_as_the_reader_alone_does` counts
+  the failed-lookup notes that set the reader's flag and requires one;
+  dropping the `store()` from `HotBits::note_failed_lookup` now fails it
+  (checked by mutation).
+- The new tests cite P4-274.
+
 ## P4-275. Scaled Decode Is About 6% Slower on x86_64 After the Bounds-Checked IDCT Store — **PARTIAL: 1/4 scale down to about +2%; grayscale and 8K +1-1.5% at the default profile**
 
 Found 2026-11-13. P4-268 (#701) moved every decode IDCT write behind

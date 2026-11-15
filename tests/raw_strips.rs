@@ -163,7 +163,7 @@ fn assert_matches_decode_raw(collected: &Collected, raw: &RawImage, label: &str)
 /// on: every standard subsampling, an unusual 3:1 ratio, restart intervals in
 /// rows and in MCUs, optimized tables, grayscale (a non-interleaved scan),
 /// and the progressive and arithmetic-coded streams that the reader serves
-/// from a whole-frame decode.
+/// from a whole-frame decode (the arithmetic ones since P4-274).
 const CASES: &[&[&str]] = &[
     &["-sample", "1x1"],
     &["-sample", "2x1"],
@@ -353,10 +353,10 @@ fn truncated(mut jpeg: Vec<u8>) -> Vec<u8> {
     jpeg
 }
 
-/// [`restart_rows_stream`] with the RST at its second strip boundary
-/// renumbered (RST1 becomes RST5), so the decoder meets the wrong marker.
-fn renumbered_rst_stream() -> Vec<u8> {
-    let mut jpeg: Vec<u8> = restart_rows_stream();
+/// `jpeg` with its second RST renumbered (RST1 becomes RST5), so the
+/// decoder meets the wrong marker; in [`restart_rows_stream`] that RST sits
+/// at the second strip boundary.
+fn renumbered_rst_stream(mut jpeg: Vec<u8>) -> Vec<u8> {
     let rst: usize = rst_offsets(&jpeg)[1];
     assert_eq!(jpeg[rst + 1], 0xD1);
     jpeg[rst + 1] = 0xD5;
@@ -767,8 +767,9 @@ enum Damage {
     /// report `TruncatedData`.
     Truncated,
     /// The RST markers are damaged, not the entropy data: the outcome depends
-    /// on how a restart is handled, so only agreement is required.
-    Restart,
+    /// on how a restart is handled, so only agreement is required, plus the
+    /// first `(expected, found)` desync a consulted strategy must be asked.
+    Restart { first_desync: (u8, Option<u8>) },
 }
 
 /// Padded planes and the warnings of the decode that produced them.
@@ -806,10 +807,11 @@ impl RestartResyncStrategy for RecordingStrategy {
 /// Every recovery path the strip loops copy from `decode_raw` (concealment,
 /// the gray tail of a short segment, restart resets and the resync strategy,
 /// with the reader's state carried across strips) must give `decode_raw`'s
-/// planes, warnings or error, and ask the strategy the same questions.
+/// planes, warnings or error, and ask the strategy the same questions
+/// (P4-274).
 #[test]
 fn corrupt_streams_match_decode_raw_under_every_recovery_setting() {
-    let streams: [(&str, Vec<u8>, Damage); 9] = [
+    let streams: [(&str, Vec<u8>, Damage); 10] = [
         (
             "4:2:0 restart rows",
             corrupt_restart_stream(),
@@ -849,10 +851,27 @@ fn corrupt_streams_match_decode_raw_under_every_recovery_setting() {
         ),
         (
             "4:2:0 renumbered RST",
-            renumbered_rst_stream(),
-            Damage::Restart,
+            renumbered_rst_stream(restart_rows_stream()),
+            Damage::Restart {
+                first_desync: (1, Some(5)),
+            },
         ),
-        ("4:2:0 dropped RST", dropped_rst_stream(), Damage::Restart),
+        (
+            "grayscale renumbered RST",
+            renumbered_rst_stream(grayscale_restart_stream()),
+            Damage::Restart {
+                first_desync: (1, Some(5)),
+            },
+        ),
+        (
+            "4:2:0 dropped RST",
+            dropped_rst_stream(),
+            // The boundary meets the next interval's entropy bytes, not a
+            // marker, so the strategy is told none was found.
+            Damage::Restart {
+                first_desync: (1, None),
+            },
+        ),
     ];
     for (label, jpeg, damage) in &streams {
         let is_single_component: bool = Decoder::new(jpeg).unwrap().header().components.len() == 1;
@@ -895,9 +914,12 @@ fn corrupt_streams_match_decode_raw_under_every_recovery_setting() {
                         ),
                         Err(e) => assert!(!lenient, "[{case}] lenient decode failed: {e}"),
                     },
+                    // A lenient decode recovers and reports the truncation,
+                    // except a lenient single-component `Skip`, which fails.
                     Damage::Truncated => match &expected {
                         Ok((_, warnings)) => assert!(
                             lenient
+                                && !(is_single_component && resync == Some(ResyncAction::Skip))
                                 && warnings
                                     .iter()
                                     .any(|w| matches!(w, DecodeWarning::TruncatedData { .. })),
@@ -912,15 +934,33 @@ fn corrupt_streams_match_decode_raw_under_every_recovery_setting() {
                             "[{case}] {e:?}"
                         ),
                     },
-                    // Strict decodes consult the strategy (lenient interleaved
-                    // ones, as both 4:2:0 fixtures are, do not, P4-270), and it
-                    // must have met the damaged marker.
-                    Damage::Restart => assert_eq!(
-                        resync.is_some() && !lenient,
+                    // Strict decodes consult the strategy, and so do lenient
+                    // single-component ones (lenient interleaved ones do not,
+                    // P4-270); it must have met the damaged marker.
+                    Damage::Restart { first_desync } => {
+                        let calls = raw_calls.lock().unwrap();
+                        assert_eq!(
+                            resync.is_some() && (!lenient || is_single_component),
+                            !calls.is_empty(),
+                            "[{case}] strategy calls {calls:?}"
+                        );
+                        if let Some(&first) = calls.first() {
+                            assert_eq!(first, *first_desync, "[{case}] first desync");
+                        }
+                    }
+                }
+                // A strict decode of the truncated grayscale stream fails at
+                // the end of the data; a lenient one decodes on and meets the
+                // missing RST, so it must have asked the strategy.
+                if matches!(damage, Damage::Truncated)
+                    && lenient
+                    && is_single_component
+                    && resync.is_some()
+                {
+                    assert!(
                         !raw_calls.lock().unwrap().is_empty(),
-                        "[{case}] strategy calls {:?}",
-                        raw_calls.lock().unwrap()
-                    ),
+                        "[{case}] the strategy was never consulted"
+                    );
                 }
                 assert_eq!(
                     *strip_calls.lock().unwrap(),
@@ -1107,7 +1147,7 @@ fn yuv_planes_into_keeps_the_strips_before_a_decode_error() {
 
 /// A plane at a stride wider than its width needs `(height - 1) * stride +
 /// width` bytes, the last row unpadded: that length is accepted and one byte
-/// less is refused.
+/// less is refused (P4-274).
 #[test]
 fn yuv_planes_into_minimum_length_at_a_padded_stride() {
     let jpeg: Vec<u8> = libjpeg_turbo_rs::compress(
@@ -1170,7 +1210,7 @@ fn yuv_planes_into_minimum_length_at_a_padded_stride() {
 
 /// Four-component frames (CMYK, full size and with two subsampled
 /// components) against libjpeg's raw output, which `cjpeg` cannot encode from
-/// a PPM, so the Rust encoder writes them.
+/// a PPM, so the Rust encoder writes them (P4-274).
 #[test]
 fn four_component_strips_match_libjpeg_raw_output() {
     // Without the oracle the `decode_raw` comparison still runs.
@@ -1192,7 +1232,17 @@ fn four_component_strips_match_libjpeg_raw_output() {
                 .unwrap_or_else(|e| panic!("[{label}] encode: {e}"));
             let collected: Collected =
                 collect(Decoder::new(&jpeg).unwrap().into_raw_strips().unwrap());
-            assert_eq!(collected.geometry.components.len(), 4, "[{label}]");
+            let sampled: Vec<(usize, usize)> = collected
+                .geometry
+                .components
+                .iter()
+                .map(|c| (c.horizontal_sampling, c.vertical_sampling))
+                .collect();
+            let expected_factors: Vec<(usize, usize)> = factors
+                .iter()
+                .map(|&(h, v)| (usize::from(h), usize::from(v)))
+                .collect();
+            assert_eq!(sampled, expected_factors, "[{label}] sampling factors");
             assert!(
                 collected.warnings.is_empty(),
                 "[{label}] clean stream warned"
@@ -1206,4 +1256,70 @@ fn four_component_strips_match_libjpeg_raw_output() {
             assert_matches_decode_raw(&collected, &raw, &label);
         }
     }
+}
+
+/// `stop_on_warning` refuses a stream whose markers needed recovery, before
+/// any strip and before any destination is written, as `decode_raw` does
+/// (P4-273, P4-274; that a warning recovered while decoding is not escalated
+/// is `decoder_yuv_planes_into_applies_the_decoders_settings`). Three
+/// stray bytes before the SOS are `JWRN_EXTRANEOUS_DATA` in libjpeg.
+#[test]
+fn stop_on_warning_refuses_marker_warnings_before_any_strip() {
+    let mut jpeg: Vec<u8> = libjpeg_turbo_rs::compress(
+        &textured_rgb(64, 64),
+        64,
+        64,
+        PixelFormat::Rgb,
+        85,
+        Subsampling::S420,
+    )
+    .unwrap();
+    let sos: usize = jpeg
+        .windows(2)
+        .position(|w| w == [0xFF, 0xDA])
+        .expect("SOS");
+    jpeg.splice(sos..sos, [0x00, 0x11, 0x22]);
+    let decoder = |stop: bool| -> Decoder<'_> {
+        let mut decoder: Decoder<'_> = Decoder::new(&jpeg).unwrap();
+        decoder.set_stop_on_warning(stop);
+        decoder
+    };
+
+    let raw_error: String = decoder(true).decode_raw().unwrap_err().to_string();
+    assert!(raw_error.contains("stop_on_warning"), "{raw_error}");
+    let strips_error: JpegError = match decoder(true).into_raw_strips() {
+        Err(e) => e,
+        Ok(_) => panic!("into_raw_strips accepted a stream with stray bytes"),
+    };
+    assert_eq!(strips_error.to_string(), raw_error);
+
+    let mut buffers: Vec<Vec<u8>> = vec![
+        vec![CANARY; 64 * 64],
+        vec![CANARY; 32 * 32],
+        vec![CANARY; 32 * 32],
+    ];
+    let mut planes: Vec<YuvPlaneMut<'_>> = buffers
+        .iter_mut()
+        .zip([64, 32, 32])
+        .map(|(data, stride)| YuvPlaneMut::new(data, stride))
+        .collect();
+    let yuv_error: JpegError = decoder(true)
+        .decode_yuv_planes_into_with_warnings(&mut planes)
+        .expect_err("stop_on_warning YUV decode of a stream with stray bytes");
+    assert_eq!(yuv_error.to_string(), raw_error);
+    assert!(buffers.iter().flatten().all(|&b| b == CANARY));
+
+    // Without the flag the decode succeeds and reports the stray bytes.
+    let (_, raw_warnings): (RawImage, Vec<DecodeWarning>) =
+        decoder(false).decode_raw_with_warnings().unwrap();
+    assert_eq!(raw_warnings, [DecodeWarning::ExtraneousData { bytes: 3 }]);
+    let mut planes: Vec<YuvPlaneMut<'_>> = buffers
+        .iter_mut()
+        .zip([64, 32, 32])
+        .map(|(data, stride)| YuvPlaneMut::new(data, stride))
+        .collect();
+    let (_, warnings): ((usize, usize, Subsampling), Vec<DecodeWarning>) = decoder(false)
+        .decode_yuv_planes_into_with_warnings(&mut planes)
+        .unwrap();
+    assert_eq!(warnings, raw_warnings);
 }
