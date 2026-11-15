@@ -30,9 +30,10 @@ pub fn decode_dc_coefficient(reader: &mut BitReader, table: &HuffmanTable) -> Re
     decode_dc_from(reader, table)
 }
 
-/// [`decode_dc_coefficient`] over any [`BitSource`], so
-/// [`crate::decode::entropy::McuDecoder::decode_block`] can run it on a
-/// register-resident [`crate::decode::bitstream::HotBits`] cursor.
+/// [`decode_dc_coefficient`] over any [`BitSource`], so one body serves both
+/// a [`BitReader`] and a register-resident
+/// [`crate::decode::bitstream::HotBits`] cursor (`McuDecoder::decode_block`
+/// and `decode_block_hot`).
 #[inline(always)]
 pub(crate) fn decode_dc_from<R: BitSource>(reader: &mut R, table: &HuffmanTable) -> Result<i16> {
     let peek = reader.peek_bits(16);

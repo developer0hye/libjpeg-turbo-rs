@@ -346,7 +346,23 @@ impl<'a> Decoder<'a> {
         let quant_tables: [&QuantTable; 4] = self.raw_strip_quant_tables()?;
         match state.layout {
             StreamLayout::Interleaved => {
-                self.raw_stream_interleaved_row(state, geometry, strip, scratch, &quant_tables)
+                if self.lenient {
+                    self.raw_stream_interleaved_row::<true>(
+                        state,
+                        geometry,
+                        strip,
+                        scratch,
+                        &quant_tables,
+                    )
+                } else {
+                    self.raw_stream_interleaved_row::<false>(
+                        state,
+                        geometry,
+                        strip,
+                        scratch,
+                        &quant_tables,
+                    )
+                }
             }
             StreamLayout::SingleComponent {
                 encoded_blocks_x,
@@ -367,7 +383,12 @@ impl<'a> Decoder<'a> {
     /// it: its fast path when strict (restart resync consulted), its general
     /// path when lenient (plain restart reset, concealed blocks, grayed
     /// segments; P4-270).
-    fn raw_stream_interleaved_row(
+    ///
+    /// `LENIENT` is `self.lenient` as a constant, so the strict instance is
+    /// compiled without the recovery branches, as `decode_baseline_planes`'
+    /// strict fast path is. With them in the loop, the strips were 7.7% slower
+    /// than `decode_raw` on a 4K 4:2:0 photo in an LTO build (P4-271).
+    fn raw_stream_interleaved_row<const LENIENT: bool>(
         &self,
         state: &mut RawStreamState<'a>,
         geometry: &RawGeometry,
@@ -398,7 +419,7 @@ impl<'a> Decoder<'a> {
             {
                 // Lenient decodes reset without consulting the strategy, as
                 // `decode_baseline_planes`' general path does (P4-270).
-                if !self.lenient && self.resync_strategy.borrow().is_some() {
+                if !LENIENT && self.resync_strategy.borrow().is_some() {
                     let mut strategy = self.resync_strategy.borrow_mut();
                     Self::apply_resync(
                         &mut state.bit_reader,
@@ -415,7 +436,7 @@ impl<'a> Decoder<'a> {
             // Once a segment has run short, every MCU up to the next restart
             // marker is left zero, so it decodes as mid-gray (jdhuff.c:787-799;
             // P4-254). Strict decodes have already refused it.
-            let segment_short: bool = self.lenient && state.bit_reader.insufficient_data();
+            let segment_short: bool = LENIENT && state.bit_reader.insufficient_data();
 
             for (comp_idx, comp) in geometry.components.iter().enumerate() {
                 let qt_values: &[u16; 64] = &quant_tables[comp_idx].values;
@@ -429,7 +450,7 @@ impl<'a> Decoder<'a> {
                             coeffs = [0i16; 64];
                             Ok(())
                         } else {
-                            state.mcu_decoder.decode_block(
+                            state.mcu_decoder.decode_block_hot(
                                 &mut state.bit_reader,
                                 plan.dc_predictor,
                                 dc_table,
@@ -439,7 +460,7 @@ impl<'a> Decoder<'a> {
                         };
                         match decode_result {
                             Ok(()) => {}
-                            Err(e) if self.lenient => {
+                            Err(e) if LENIENT => {
                                 coeffs = [0i16; 64];
                                 if !mcu_error {
                                     state.warnings.huffman_error(mcu_x, mcu_y, &e);
@@ -469,7 +490,7 @@ impl<'a> Decoder<'a> {
             // JWRN_HIT_MARKER): refused in strict mode, reported once in
             // lenient mode, where the rest of the segment decodes gray.
             if !segment_short && state.bit_reader.insufficient_data() {
-                if !self.lenient {
+                if !LENIENT {
                     return Err(JpegError::UnexpectedEof);
                 }
                 state
@@ -541,7 +562,7 @@ impl<'a> Decoder<'a> {
                     coeffs = [0i16; 64];
                     Ok(())
                 } else {
-                    state.mcu_decoder.decode_block(
+                    state.mcu_decoder.decode_block_hot(
                         &mut state.bit_reader,
                         0,
                         dc_table,
