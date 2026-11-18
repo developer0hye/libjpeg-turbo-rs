@@ -1569,7 +1569,7 @@ mod fancy_h2v2_row_dispatch_tests {
 
     /// P4-285: the row dispatch reaches the NEON kernel on aarch64 and the AVX2
     /// or SSE2 one on x86_64 (wasm32 has no arm, P4-287), whose output must be
-    /// the scalar filter's byte for byte, at every width the decoders pass (one
+    /// the scalar filter's byte for byte, at widths 1-70 (one
     /// and two samples included, which the kernels hand to the scalar path),
     /// and must not write past the `2 * width` samples the scalar filter writes.
     #[test]

@@ -113,8 +113,8 @@ impl McuDecoder {
     /// slower on x86_64, and on the reader, a change to IDCT code those
     /// decodes never execute (#706) cost a Cortex-A53 4-5% on every
     /// baseline decode. Here the loop gets its registers to itself; the one
-    /// call per 64 coefficients measured as noise on aarch64 (native x86_64
-    /// is P4-280; P4-282).
+    /// call per 64 coefficients measured as noise on aarch64 and on native
+    /// x86_64 (P4-280, P4-282).
     #[inline(never)]
     pub fn decode_block(
         &mut self,
