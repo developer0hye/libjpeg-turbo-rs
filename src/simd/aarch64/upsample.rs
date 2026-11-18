@@ -176,7 +176,7 @@ pub fn neon_fancy_upsample_h2v2(
 ///
 /// Computes colsum = cur * 3 + neighbor in u16, then blends horizontally
 /// in u16 with a single >>4, matching C libjpeg-turbo exactly.
-fn neon_fancy_h2v2_row(cur: &[u8], neighbor: &[u8], output: &mut [u8], in_width: usize) {
+pub(crate) fn neon_fancy_h2v2_row(cur: &[u8], neighbor: &[u8], output: &mut [u8], in_width: usize) {
     // Small widths: delegate to scalar (handles edge cases correctly)
     if in_width < 3 {
         crate::decode::upsample::fancy_h2v2_row(cur, neighbor, output, in_width);

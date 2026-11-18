@@ -199,7 +199,7 @@
 - [ ] Classic `out_color_space` translation and error contract — P4-98/P4-99
 - [x] YCbCr/YUV raw output (skip color conversion) (`decompress_raw()`)
 - [x] `raw_data_out` — Raw downsampled component output (`decompress_raw()`)
-- [x] Raw component output one iMCU row per call into caller buffers (`jpeg_read_raw_data` row semantics): `Decoder::into_raw_strips()`, `Decoder::decode_yuv_planes_into()`, `yuv::decompress_to_yuv_planes_into()`; single-scan Huffman streams stream row by row, progressive/arithmetic/multi-scan decode the whole frame first (P4-268)
+- [x] Raw component output one iMCU row per call into caller buffers (`jpeg_read_raw_data` row semantics): `Decoder::into_raw_strips()`, `Decoder::decode_yuv_planes_into()` (and `_with_warnings`, P4-273), `yuv::decompress_to_yuv_planes_into()`; single-scan Huffman streams stream row by row, progressive/arithmetic/multi-scan decode the whole frame first (P4-268)
 
 ### Upsampling / DCT
 - [x] Fancy upsampling (default, always on)

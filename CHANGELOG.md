@@ -14,15 +14,20 @@ and `git log` between tags.
   component planes one iMCU row at a time (`next_strip`, `for_each_strip`,
   `finish`), so callers collect them into buffers they own. Single-scan
   Huffman streams are decoded row by row, so the working set is one iMCU row
-  (68 KB against `decode_raw`'s 6.3 MB on a 2048x2048 4:2:0 frame). Active rows
-  match libjpeg's `jpeg_read_raw_data`.
+  (68 KB against `decode_raw`'s 6.3 MB on a 2048x2048 4:2:0 frame), at
+  `decode_raw`'s speed on aarch64 (P4-271). Active rows match libjpeg's
+  `jpeg_read_raw_data`.
 - **`yuv::decompress_to_yuv_planes_into`** and `yuv::YuvPlaneMut`: the
   `decompress_to_yuv_planes` samples written into caller planes at caller
   strides. Every destination is checked before decoding.
   **`Decoder::decode_yuv_planes_into`** does the same with a configured
-  decoder, so limits, leniency, `stop_on_warning` and a resync strategy
-  apply (the strategy where `decode_raw` consults it: sequential Huffman
-  scans, not lenient interleaved ones, P4-270).
+  decoder, so limits, leniency, the `stop_on_warning` marker check and a
+  resync strategy apply (the strategy where `decode_raw` consults it:
+  sequential Huffman scans, not lenient interleaved ones, P4-270), and
+  **`Decoder::decode_yuv_planes_into_with_warnings`** also returns the
+  warnings a lenient decode recovered from (P4-273). A decode error can
+  leave the planes partly written: the iMCU rows decoded before it hold
+  their samples.
 
 ### Changed
 
@@ -34,7 +39,31 @@ and `git log` between tags.
   (strided SIMD) kernel, through one crate-internal function that checks the
   destination length itself; every other size and DCT method runs the safe
   kernels. Decode speed is unchanged within measurement noise on every path
-  and scale (measured on aarch64; x86_64 not measured).
+  and scale on Apple aarch64. On x86_64, 1/4-scale decodes are about 2%
+  slower and grayscale and 8K 1-1.5% at the default profile (P4-275); on a
+  Cortex-A53 the change shifted the Huffman loop's codegen by 4-5% until
+  P4-282.
+- 8-bit sequential Huffman decodes are faster on in-order ARM cores
+  (P4-282): each block's Huffman decode now runs out of line with the bit
+  cursor in registers, so its codegen no longer depends on the surrounding
+  decode loop. On a Cortex-A53 with Rust 1.100, baseline `decode_raw` was
+  then 5-8.5% faster than 0.8.0 (4.7-7.1% with LTO), where the unreleased
+  tree before this change was 4-6% slower, and `decompress` 7-12% faster
+  than that tree; baseline decodes on Apple M-series were 1.4-3.2% faster.
+  The refill change below sets the current figures.
+  Progressive decodes are unchanged (their A53 gap is P4-283).
+- The bit reader's refill takes the bytes it needs with one 8-byte load
+  when none of them is `0xFF` (P4-284), which keeps the Huffman loop's
+  codegen the same across compilers: with Rust 1.99 the change above had
+  left the A53 strip decode 4% slower than before it. Pinned on a
+  Cortex-A53 with Rust 1.99 and 1.100, `decode_raw` is 4-7% faster than
+  0.8.0 and the strips within 0.8% of their speed before the change above
+  or faster; Apple M-series decodes gain another 2-4%.
+- aarch64 4:2:0 RGB decodes use the NEON fancy upsample, which the row
+  dispatch lacked, and the grayscale expansion to RGB, RGBA and RGB565
+  walks whole pixels instead of matching the format per pixel (P4-285): on
+  a Cortex-A53 grayscale `decompress_into` RGB is 19% faster and 4:2:0
+  3-4% faster; on Apple M-series 20% and 4% (only RGB output was timed).
 
 ### Removed
 

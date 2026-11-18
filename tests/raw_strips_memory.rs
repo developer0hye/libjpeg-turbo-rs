@@ -85,10 +85,19 @@ fn strip_reader_working_set_is_one_imcu_row_on_sequential_streams() {
     const HEIGHT: usize = 2048;
     let pixels: Vec<u8> = noise_rgb(WIDTH, HEIGHT);
 
-    for (label, subsampling, format) in [
-        ("4:2:0", Subsampling::S420, PixelFormat::Rgb),
-        ("4:4:4", Subsampling::S444, PixelFormat::Rgb),
-        ("grayscale", Subsampling::S444, PixelFormat::Grayscale),
+    // The scratch strip plus fixed overhead (Huffman lookup tables, the MCU
+    // plan, the decoder), measured on aarch64-darwin (2026-11-12) at 19,118 B
+    // for the three-component layouts and 10,042 B for grayscale. Each bound
+    // leaves under 1.4 KiB of margin, so one extra 2048-sample row exceeds it.
+    for (label, subsampling, format, overhead_bound) in [
+        ("4:2:0", Subsampling::S420, PixelFormat::Rgb, 20 * 1024),
+        ("4:4:4", Subsampling::S444, PixelFormat::Rgb, 20 * 1024),
+        (
+            "grayscale",
+            Subsampling::S444,
+            PixelFormat::Grayscale,
+            11 * 1024,
+        ),
     ] {
         let source: Vec<u8> = if format == PixelFormat::Grayscale {
             pixels.iter().step_by(3).copied().collect()
@@ -120,12 +129,7 @@ fn strip_reader_working_set_is_one_imcu_row_on_sequential_streams() {
         let strip_peak: usize = peak_during(|| {
             drain_strips(&jpeg);
         });
-        // The scratch strip plus fixed overhead (Huffman lookup tables, the
-        // MCU plan, the decoder): measured at 18.6 KiB for the three-component
-        // layouts and 9.6 KiB for grayscale (aarch64-darwin, 2026-11-09), so
-        // 24 KiB leaves a small margin. A
-        // regression that kept even a few extra image rows would exceed it.
-        let bound: usize = scratch + 24 * 1024;
+        let bound: usize = scratch + overhead_bound;
         eprintln!("[{label}] decode_raw peak {raw_peak} B, strip peak {strip_peak} B");
         assert!(
             strip_peak <= bound,

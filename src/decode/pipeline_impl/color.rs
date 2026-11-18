@@ -43,7 +43,8 @@ pub(crate) fn upsample_generic_nearest(
     }
 }
 
-/// Dispatch fancy_h2v2_row to AVX2, SSE2, or scalar based on CPU features.
+/// Dispatch fancy_h2v2_row to NEON, AVX2, SSE2, or scalar based on CPU
+/// features.
 #[inline]
 pub(super) fn fancy_h2v2_row_dispatch(
     cur: &[u8],
@@ -51,6 +52,16 @@ pub(super) fn fancy_h2v2_row_dispatch(
     output: &mut [u8],
     in_width: usize,
 ) {
+    // The row-at-a-time 4:2:0 output paths (the fused upsample + color
+    // convert in `output.rs`, and the strided one) come through here, so
+    // without this arm aarch64 ran them on the scalar filter (P4-285).
+    #[cfg(all(target_arch = "aarch64", feature = "simd"))]
+    {
+        return crate::simd::aarch64::upsample::neon_fancy_h2v2_row(
+            cur, neighbor, output, in_width,
+        );
+    }
+
     #[cfg(all(target_arch = "x86_64", feature = "simd"))]
     {
         if crate::cpu_has!("avx2") {
@@ -65,10 +76,11 @@ pub(super) fn fancy_h2v2_row_dispatch(
         }
     }
 
+    #[allow(unreachable_code)]
     crate::decode::upsample::fancy_h2v2_row(cur, neighbor, output, in_width);
 }
 
-/// Dispatch fancy_h2v2_strided to AVX2 row function or scalar.
+/// Run `fancy_h2v2_row_dispatch` (NEON, AVX2, SSE2, or scalar) on each row of a strided plane.
 #[inline]
 pub(super) fn fancy_h2v2_strided_dispatch(
     input: &[u8],
@@ -1548,5 +1560,37 @@ mod idct_block_into_tests {
         assert!(decoder
             .idct_block_into(&coeffs, &quant, &mut plane, 0, 8, 0)
             .is_err());
+    }
+}
+
+#[cfg(test)]
+mod fancy_h2v2_row_dispatch_tests {
+    use super::fancy_h2v2_row_dispatch;
+
+    /// P4-285: the row dispatch reaches the NEON kernel on aarch64 and the AVX2
+    /// or SSE2 one on x86_64 (wasm32 has no arm, P4-287), whose output must be
+    /// the scalar filter's byte for byte, at every width the decoders pass (one
+    /// and two samples included, which the kernels hand to the scalar path),
+    /// and must not write past the `2 * width` samples the scalar filter writes.
+    #[test]
+    fn the_row_dispatch_matches_the_scalar_filter_at_every_width() {
+        let mut seed: u32 = 0x1234_5678;
+        let mut next = move || -> u8 {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            (seed >> 24) as u8
+        };
+        for width in 1..=70usize {
+            for _ in 0..8 {
+                let cur: Vec<u8> = (0..width).map(|_| next()).collect();
+                let neighbor: Vec<u8> = (0..width).map(|_| next()).collect();
+                let mut expected: Vec<u8> = vec![0xA5; width * 2 + 16];
+                crate::decode::upsample::fancy_h2v2_row(&cur, &neighbor, &mut expected, width);
+                let mut actual: Vec<u8> = vec![0xA5; width * 2 + 16];
+                fancy_h2v2_row_dispatch(&cur, &neighbor, &mut actual, width);
+                assert_eq!(actual, expected, "width {width}");
+            }
+        }
     }
 }
