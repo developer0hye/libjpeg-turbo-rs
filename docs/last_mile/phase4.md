@@ -15645,7 +15645,7 @@ shifted by 64, 1024 and 2112 bytes; 64-byte loop alignment; the row
 functions out of line; `len` and `pos` kept out of one paired load; padding
 the fast function's frame.
 
-**Fix.** Every 8-bit sequential caller decodes each block through
+**Fix.** Every 8-bit sequential Huffman decode runs each block through
 `McuDecoder::decode_block` (out of line since P4-282; see **Out of line**
 below), which runs the Huffman decode on `bitstream::HotBits`: it copies the cursor into locals for the block and
 writes it back before the slow refill and a failed-lookup note, and when
@@ -15713,7 +15713,7 @@ The default `BitCursor` layout was measured as well during the narrowing
 aarch64 without LTO), so `repr(C)` stayed; since P4-282 every 8-bit
 sequential decode runs on `HotBits` again, so the original 13% `decode_raw`
 cost (`bitstream.rs`, `BitCursor` doc) is the reason it stays. The native
-x86_64 rerun of the downstream batch is P4-280.
+x86_64 rerun of the downstream batch is in P4-280 (closed 2026-11-19).
 
 **Interleaved strips against `decode_raw` (2026-11-15).** The narrowing put
 `decode_raw` back on the reader, so the strips were measured against it
@@ -16131,7 +16131,11 @@ Measured at `d3910c9`; `e51365e` then dropped the three unreachable arms
 and was not re-measured.
 
 Still open: the remaining scale-1/4 cost and the grayscale/8K cost (not
-profiled: the machine has no `perf` access); the 1/2 and 1/8 scales, thin
+profiled: the machine has no `perf` access). #703 (P4-280, 2026-11-19)
+then measured 1/4 scale 3.2-3.6% and 8K 1.7-2.5% faster than `main`
+(`6bf28f9f`) on the same machine in the default profile, with grayscale
++0.1-0.3%. That is against `main`, not against this item's `v0.9.0`
+baseline, so it does not close the item; the 1/2 and 1/8 scales, thin
 LTO, 8K and 12 MP full-size after these changes, aarch64 at a reduced scale,
 and any other x86_64 CPU (not measured); and the 3/8, 5/8, 3/4, 7/8 and
 above-1 scales, which still take the out-of-line call.
@@ -16337,7 +16341,7 @@ aarch64 and on x86_64 under Rosetta 2, plus a static count of
 `decode_baseline_planes`' `%rsp`/`%rbp` memory operands in an
 `x86_64-apple-darwin` build (1,760 on `main`, 2,174 with the first fix,
 1,766 after). Rosetta has no AVX2, so the SIMD kernels around the loop
-differ from the review's machine, and no native x86_64 run has been made.
+differ from the review's machine, and no native x86_64 run had been made.
 
 P4-282 (2026-11-18) replaced the narrowing with an out-of-line
 `McuDecoder::decode_block` on `HotBits` for every caller. It too was
@@ -16378,14 +16382,16 @@ agree within 0.4 points on every row.
 
 Head against `main`, median over pairs of (candidate / 0.8.0 in the same
 process). The 22% grayscale loss the first P4-271 fix had in the default
-profile is gone (+0.1..+0.3%, -0.7..+0.9% per pair). The thin-LTO
+profile is gone (+0.1..+0.3%, -0.7..+0.8% per pair). The thin-LTO
 gray row is +1.0-1.1% (8 of 8 pairs slower), but the `zune-jpeg` rows,
 which are the same code in both binaries, moved +0.7% / +1.05% against
 0.8.0 in those processes, so it is not separable from binary layout; the
 default-profile gray control was -0.4% / +0.3%.
 
 In-tree (workspace profile, `lto = true`), `decode_raw` and the strips
-alternating in one process, median of 7 clean rounds (12 rounds agree):
+alternating in one process, 7 clean rounds (12 rounds agree). The %
+columns are medians of per-round head/`main` ratios and the ms the median of
+each side, so the two need not match:
 
 | Input | `decode_raw` head / `main` | strips head / `main` | strips / `decode_raw`, `main` → head |
 |---|---:|---:|---|
@@ -16400,8 +16406,13 @@ are unmeasured on every machine (P4-279).
 
 **Status (2026-11-19): closed.** Grayscale `decompress_to` and
 `decompress_into` are within noise of `main` on native x86_64 in the
-default profile, no case is more than 1% slower in both profiles, and the
-in-tree strips are 0.98-1.01 of `decode_raw` (1.04-1.05 on `main`). Raw
+default profile. The only case above +1% is thin-LTO gray (+1.0-1.1%),
+which the `zune-jpeg` control matches (+0.7% / +1.05%). The in-tree strips
+are at or below `decode_raw` on gray (0.983) and 0.8-1.3% above it on 4:2:0
+(1.008 / 1.013, against 4.4-4.8% above on `main`). That misses this item's
+"at or below" on 4:2:0. It is not filed separately: P4-271's own bar is
+within 5%, and the per-round ratios on 4:2:0 span 0.993-1.018 (12 MP) and
+0.996-1.012 (8K), so the gap is near this harness's resolution. Raw
 reports, scripts and logs: `~/ljt-ab/runs703`, `batch703.sh` on the
 measuring machine; summary row in `experiments/pipeline.tsv`.
 
@@ -16450,7 +16461,9 @@ inlined into the same loop, 22% slower without LTO).
 coefficient reader. The Huffman loop gets a function and a register file
 of its own, so the caller's inlining no longer reaches it, and the cursor
 stays in registers. One call per block (64 coefficients) measured as noise
-on aarch64, and on native x86_64 (P4-280). Out of line on the reader alone was
+on aarch64. On native x86_64 the whole #703 bundle measured as noise in the
+default profile (thin LTO gray +1.1%, matched by the `zune-jpeg` control;
+P4-280). Out of line on the reader alone was
 measured too: it only brought the A53 back to 0.8.0 (gray +1.2%, 4:2:0
 0.0%, 4:4:4 -1.3%, 4K +0.2%). That matches the P4-271 attempt with
 `decode_block` out of line on the reader (`experiments/pipeline.tsv`), which
