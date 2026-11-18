@@ -1431,7 +1431,7 @@ config with no kernels has no green tests claiming parity.
 
 **Motivation.** Filed 2026-07-28 by the #390 docs-drift audit, which caught `tests/simd_parity.rs` producing `unused_variables` hard-errors under the newly widened x86_64 clippy gate: the `parity_idct_4x4/2x2/1x1` comparison blocks are `cfg(target_arch = "aarch64")`-only because `src/simd/x86_64/` has no reduced-size IDCT kernels (`avx2_idct.rs`/`idct.rs` cover 8x8 only), and wasm32 likewise. C libjpeg-turbo ships SSE2 4x4/2x2 kernels (`jidctred-sse2.asm`). Worse (codex P2 on the fix commit): **even on aarch64 the `neon_idct_4x4/2x2/1x1` kernels have no production caller** — `Decoder::idct_scaled_strided` (now `src/decode/pipeline_impl/color.rs`, re-verified 2026-08-02) dispatches the sizes 4/2/1 unconditionally to the scalar `idct_scaled::*_strided` while its `8 =>` arm delegates to the SIMD `idct_islow_strided`, so the NEON routines are exercised only by the parity test. (Since 2026-11-11 that dispatch is the `match n` in `Decoder::idct_block_through_stack`, reached from the bounds-checked `Decoder::idct_block_into`, and the sizes 4 and 2 run the safe `idct_scaled::idct_4x4` / `idct_2x2` into a stack block before a row copy, while size 1 stores `idct_scaled::idct_1x1`'s one sample directly; the NEON reduced-size kernels still have no production caller.) Note the scope precisely: components whose block size stays 8 during a scaled decode (e.g. Cb/Cr in 4:2:0 at 1/2 scale, per `compute_comp_block_size`) still take the SIMD 8x8 IDCT — it is exactly the reduced-size 4/2/1 branches that are always scalar, on every arch with a SIMD backend. The same audit found `avx2_rgba/bgr/bgra_to_ycbcr_row` existed but were never parity-tested — that half was fixed on the spot (the x86_64 block in `parity_rgb_to_ycbcr_rows` now mirrors the NEON/WASM four-format coverage).
 
-**Acceptance criteria.** (1) Wire the existing `neon_idct_*` kernels into the `match n` dispatch in `Decoder::idct_block_through_stack` (src/decode/pipeline_impl/color.rs), or reject them with a benchmark showing scalar wins. The NEON kernels are contiguous-output, which is now the shape sizes 4 and 2 already take (a stack block, then a row copy; size 1 is one direct store), so the adapter cost the original criterion worried about is gone. (2) Port the reduced-size kernels to x86_64 (SSE2 baseline per `jidctred-sse2.asm`; AVX2 optional) and wasm32, wired behind the same dispatch. (3) Extend the three parity tests' comparison blocks to those arches, deleting the `cfg_attr(not(aarch64), allow(unused_variables))` shims. (4) Record the per-arch perf delta in `experiments/idct.tsv`. Benchmark-gated per the experiment protocol, scoped to the three SIMD backends (aarch64/NEON, x86_64/SSE2+AVX2, wasm32/SIMD128 — intentionally scalar targets stay P4-60's business): a closure that leaves one of *those* backends scalar must cite the losing measurement, not silence.
+**Acceptance criteria.** (1) Wire the existing `neon_idct_*` kernels into the `match n` dispatch in `Decoder::idct_block_into` (src/decode/pipeline_impl/color.rs; since P4-275 the sizes 4, 2 and 1 are matched there, ahead of `idct_block_through_stack`), or reject them with a benchmark showing scalar wins. The NEON kernels are contiguous-output, which is now the shape sizes 4 and 2 already take (a stack block, then a row copy; size 1 is one direct store), so the adapter cost the original criterion worried about is gone. (2) Port the reduced-size kernels to x86_64 (SSE2 baseline per `jidctred-sse2.asm`; AVX2 optional) and wasm32, wired behind the same dispatch. (3) Extend the three parity tests' comparison blocks to those arches, deleting the `cfg_attr(not(aarch64), allow(unused_variables))` shims. (4) Record the per-arch perf delta in `experiments/idct.tsv`. Benchmark-gated per the experiment protocol, scoped to the three SIMD backends (aarch64/NEON, x86_64/SSE2+AVX2, wasm32/SIMD128 — intentionally scalar targets stay P4-60's business): a closure that leaves one of *those* backends scalar must cite the losing measurement, not silence.
 
 ## P4-72. Grayscale Colorspace Override Cannot Convert — It Only Copies a Full-Resolution Luma Plane — **CLOSED 2026-08-02**
 
@@ -15769,7 +15769,8 @@ table, so they run SIMD anyway:
 - **Color conversion, merged upsampling and fancy upsampling, aarch64 and
   x86_64.** On aarch64, `Decoder::ycbcr_to_{rgb,rgba,bgr,bgra}_row` and
   `color_convert_row` (its six extended 4-byte formats), `merged_h2v1` /
-  `merged_h2v2`, `fancy_upsample_h2v1` and `fancy_h2v2` in
+  `merged_h2v2`, `fancy_upsample_h2v1`, `fancy_h2v2` and (since P4-285)
+  `fancy_h2v2_row_dispatch` in
   `src/decode/pipeline_impl/color.rs`, and `ProgressiveDecoder`'s color and
   upsample helpers in `src/api/progressive_output.rs`, call the `neon_*`
   kernels directly under `cfg(target_arch = "aarch64")`. On x86_64,
@@ -16538,3 +16539,99 @@ between those batches, so the downstream bench resolves only "not slower".
 8a9add09 or faster, and `decode_raw` is 4.1-7.0% faster than 0.8.0 in
 every cell. `cargo test --workspace` passes (3,082 passed, 0 failed, 7
 ignored), and the new equivalence test passes under Miri.
+
+## P4-285. aarch64 Ran the Scalar 4:2:0 Fancy Upsample, and Grayscale RGB Output Did Not Vectorize — **CLOSED 2026-11-18**
+
+Found 2026-11-18 profiling `decompress_into` (RGB, reused buffer) on the
+Cortex-A53 of P4-282 against C libjpeg-turbo 3.2.0 (NEON, built for the
+same device). The raw strips beat C there (gray -13.5..-13.9%, 4:2:0 -1.1..-2.3%,
+4:4:4 -3.8..-4.2%, 4K -2.7..-4.8%), but the RGB decodes were 14-29%
+slower, so the gap was in the output stage:
+
+- `fancy_h2v2_row_dispatch` (`pipeline_impl/color.rs`), which the
+  row-at-a-time 4:2:0 output paths call (the fused upsample and color
+  conversion in `output.rs`, and `fancy_h2v2_strided_dispatch`), had AVX2
+  and SSE2 arms and no NEON one, so every aarch64 build ran the scalar
+  filter: 8.4% of a 1080p 4:2:0 RGB decode on the A53. The NEON row kernel
+  (`simd::aarch64::upsample::neon_fancy_h2v2_row`, a safe wrapper that
+  checks its slices) already existed behind `neon_fancy_upsample_h2v2`.
+- The 8-bit grayscale expansion to RGB, RGBA and RGB565 matched the output
+  format per pixel with indexed stores and did not vectorize: 20% of a
+  1080p grayscale RGB decode on the A53.
+
+**Fix.** The dispatch gained the NEON arm, and the expansion matches the
+format once per row and walks whole pixels (`chunks_exact_mut`), which
+LLVM turns into interleaved stores.
+`pipeline_impl::color::fancy_h2v2_row_dispatch_tests::the_row_dispatch_matches_the_scalar_filter_at_every_width`
+checks the dispatch against the scalar filter at widths 1-70 with a canary
+past the written samples; it shows equal output, not which arm ran, which
+the profile and the timings below do.
+
+| `decompress_into` RGB, reused buffer | before | after | C 3.2.0 |
+|---|---:|---:|---:|
+| A53, gray 1080p, Rust 1.99.1 | 44.49 ms | 35.95 ms (-19.2%) | 34.50 ms |
+| A53, 1080p 4:2:0, Rust 1.99.1 | 57.16 ms | 54.99 ms (-3.8%) | 47.29 ms |
+| A53, 4K 4:2:0, Rust 1.99.1 | 226.46 ms | 219.47 ms (-3.1%) | 190.23 ms |
+| A53, 1080p 4:4:4, Rust 1.99.1 | 103.41 ms | 103.57 ms (+0.2%) | 90.65 ms |
+
+With Rust 1.100.0 the A53 moved the same way (gray -18.4% against the NEON
+dispatch alone, 4:2:0 -2.8..-3.0% for the dispatch). Apple M-series: gray
+-19.6%, 4:2:0 -3.7..-4.2%, 4:4:4 +0.2%. x86_64 under Rosetta 2, which had
+the SSE2/AVX2 arms already: gray -7.0%, color within 0.8%.
+
+**Status (2026-11-18): closed.** `cargo test --workspace` passes (3,083
+passed, 0 failed, 7 ignored), including the C cross-validation of the
+upsampled and grayscale outputs. The remaining color gap to C is P4-286.
+
+## P4-286. Color RGB Decodes Are 14-16% Slower Than C libjpeg-turbo on a Cortex-A53 — **OPEN**
+
+Found 2026-11-18 with P4-285, same method (A53 pinned, Rust 1.99.1, reused
+output buffer, C 3.2.0 with NEON from `references/libjpeg-turbo`). After
+P4-285, `decompress_into` RGB takes 54.99 against C's 47.29 ms on 1080p
+4:2:0 (+16.3%), 219.47 against 190.23 ms on 4K 4:2:0 (+15.4%) and 103.57
+against 90.65 ms on 1080p 4:4:4 (+14.3%); grayscale is within 4.2%. The
+entropy decode and IDCT are not the cause: the raw strips are faster than
+C's `jpeg_read_raw_data` on the same images.
+
+The profile points at the frame-sized intermediate planes. The baseline
+RGB path decodes every component into a plane the size of the frame
+(`decode_baseline_planes`), allocated per decode, and then upsamples and
+converts row by row from those planes. About 10% of the 1080p 4:2:0 decode
+is kernel memory work (`memchr_inv`, `get_page_from_freelist`, `memset`,
+`clear_page`: first-touch page faults on the fresh planes and the scan of
+the pages freed after), and the planes make a write and a read pass over
+memory that C, which decodes an iMCU row into a small buffer and
+upsamples and converts it while it is in cache, does not make. These are
+the planes
+[P4-218](#p4-218-the-buffer-reuse-decode-still-allocates-whole-image-component-planes--open)
+filed for their memory (17.5 MiB peak on a 12 MP 4:2:0 `decompress_into`);
+its row-strip acceptance and this one ask for the same pipeline change.
+
+Acceptance: the 8-bit baseline RGB decodes (`decompress`, `decompress_to`,
+`decompress_into`) run from an iMCU-row working set, as the strip reader
+does, with no frame-sized intermediate planes, and are within noise of C
+on the A53 for 4:2:0 and 4:4:4, with no regression on aarch64 hosts or
+x86_64, every C cross-validation test still passing, and the result in
+`experiments/pipeline.tsv`.
+
+## P4-287. wasm32 Runs the Scalar 4:2:0 Fancy Upsample on the Row Dispatch Paths — **OPEN**
+
+Found 2026-11-18 by the docs-drift audit of P4-285. `fancy_h2v2_row_dispatch`
+(`src/decode/pipeline_impl/color.rs`) has NEON, AVX2 and SSE2 arms and no
+wasm32 one, although the simd128 row kernel exists
+(`simd::wasm32::upsample::wasm_fancy_h2v2_row`, a safe `pub fn` that checks
+its slices, today reached only through `wasm_fancy_upsample_h2v2` from
+`Decoder::fancy_h2v2`). So a wasm32 build with `+simd128` runs the scalar
+filter on the paths that come through the row dispatch: the row-streaming
+H2V2 upsample and color conversion in `pipeline_impl/output.rs` (the 8-bit
+4:2:0 fancy-upsampled color decode) and `fancy_h2v2_strided_dispatch`. This
+is the aarch64 shape P4-285 fixed; on the A53 the scalar filter was 8.4% of
+a 1080p 4:2:0 RGB decode. Unmeasured on wasm32.
+
+Acceptance: the dispatch gains a
+`cfg(all(target_arch = "wasm32", feature = "simd", target_feature = "simd128"))`
+arm calling `wasm_fancy_h2v2_row`;
+`fancy_h2v2_row_dispatch_tests::the_row_dispatch_matches_the_scalar_filter_at_every_width`
+passes under `cargo test --target wasm32-wasip1` (where it now compares the
+scalar filter with itself); and the Playwright WASM benchmark result for a
+4:2:0 decode, before and after, is recorded in `experiments/`.

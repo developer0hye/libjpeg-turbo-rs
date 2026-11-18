@@ -1098,42 +1098,49 @@ impl<'a> Decoder<'a> {
                         );
                         continue;
                     }
-                    for x in 0..out_width {
-                        let v = row[x];
-                        match out_format {
-                            PixelFormat::Rgb | PixelFormat::Bgr => {
-                                out_row[x * 3] = v;
-                                out_row[x * 3 + 1] = v;
-                                out_row[x * 3 + 2] = v;
+                    // The format is matched once per row, and each arm walks
+                    // whole pixels, so the copies vectorize (an interleaved
+                    // store on NEON); matched per pixel with indexed stores,
+                    // the expansion was a fifth of a grayscale RGB decode on
+                    // a Cortex-A53 (P4-285).
+                    match out_format {
+                        PixelFormat::Rgb | PixelFormat::Bgr => {
+                            for (px, &v) in out_row.chunks_exact_mut(3).zip(row) {
+                                px[0] = v;
+                                px[1] = v;
+                                px[2] = v;
                             }
-                            // Offset-derived like the CMYK/YCCK arms: the
-                            // pad/alpha byte position comes from the format,
-                            // matching the 3-component colour path and C
-                            // JCS_EXT_* (issue #369 had Argb/Abgr grouped
-                            // alpha-last).
-                            PixelFormat::Rgba
-                            | PixelFormat::Bgra
-                            | PixelFormat::Rgbx
-                            | PixelFormat::Bgrx
-                            | PixelFormat::Xrgb
-                            | PixelFormat::Xbgr
-                            | PixelFormat::Argb
-                            | PixelFormat::Abgr => {
-                                let mut px: [u8; 4] = [v; 4];
-                                px[pad_off.expect("4bpp format has a pad offset")] = 255;
-                                out_row[x * 4..x * 4 + 4].copy_from_slice(&px);
+                        }
+                        // Offset-derived like the CMYK/YCCK arms: the
+                        // pad/alpha byte position comes from the format,
+                        // matching the 3-component color path and C
+                        // JCS_EXT_* (issue #369 had Argb/Abgr grouped
+                        // alpha-last).
+                        PixelFormat::Rgba
+                        | PixelFormat::Bgra
+                        | PixelFormat::Rgbx
+                        | PixelFormat::Bgrx
+                        | PixelFormat::Xrgb
+                        | PixelFormat::Xbgr
+                        | PixelFormat::Argb
+                        | PixelFormat::Abgr => {
+                            let pad: usize = pad_off.expect("4bpp format has a pad offset");
+                            for (px, &v) in out_row.chunks_exact_mut(4).zip(row) {
+                                let mut pixel: [u8; 4] = [v; 4];
+                                pixel[pad] = 255;
+                                px.copy_from_slice(&pixel);
                             }
-                            PixelFormat::Rgb565 => {
-                                // Grayscale v → pack as R=G=B=v (no dither)
+                        }
+                        PixelFormat::Rgb565 => {
+                            // Grayscale v → pack as R=G=B=v (no dither)
+                            for (px, &v) in out_row.chunks_exact_mut(2).zip(row) {
                                 let packed: u16 = ((v as u16 >> 3) << 11)
                                     | ((v as u16 >> 2) << 5)
                                     | (v as u16 >> 3);
-                                let bytes: [u8; 2] = packed.to_ne_bytes();
-                                out_row[x * 2] = bytes[0];
-                                out_row[x * 2 + 1] = bytes[1];
+                                px.copy_from_slice(&packed.to_ne_bytes());
                             }
-                            PixelFormat::Grayscale | PixelFormat::Cmyk => unreachable!(),
                         }
+                        PixelFormat::Grayscale | PixelFormat::Cmyk => unreachable!(),
                     }
                 }
                 Ok(Image {

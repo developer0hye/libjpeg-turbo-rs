@@ -59,6 +59,11 @@ and `git log` between tags.
   Cortex-A53 with Rust 1.99 and 1.100, `decode_raw` is 4-7% faster than
   0.8.0 and the strips within 0.8% of their speed before the change above
   or faster; Apple M-series decodes gain another 2-4%.
+- aarch64 4:2:0 RGB decodes use the NEON fancy upsample, which the row
+  dispatch lacked, and the grayscale expansion to RGB, RGBA and RGB565
+  walks whole pixels instead of matching the format per pixel (P4-285): on
+  a Cortex-A53 grayscale `decompress_into` RGB is 19% faster and 4:2:0
+  3-4% faster; on Apple M-series 20% and 4% (only RGB output was timed).
 
 ### Removed
 
