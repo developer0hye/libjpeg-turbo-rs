@@ -16306,7 +16306,9 @@ the P4-58 incremental decode (`baseline_stream_step`,
 `pipeline_impl/streaming.rs`) and the coefficient reader
 (`api/coefficient.rs`), switched between `HotBits` and the reader with
 P4-271, its narrowing and P4-282, and were measured none of those times;
-since P4-282 they call the out-of-line `decode_block` on `HotBits`. Lossless
+since P4-282 they call the out-of-line `decode_block` on `HotBits`, and
+since P4-284 every refill, the 12-bit loops' included, takes the word path
+first; none of these was measured for it either. Lossless
 (`pipeline_impl/lossless.rs`) and progressive DC-first
 (`progressive.rs`) also decode DC through the wrapper, with a shorter
 chain per block.
@@ -16338,6 +16340,9 @@ P4-282 (2026-11-18) replaced the narrowing with an out-of-line
 measured on aarch64 (an M-series host and a Cortex-A53) and under Rosetta 2
 only (`decode_raw`, `decompress` and the strips within -5.8..+0.2% of
 `main` / #703 there), so the native run below now covers that change.
+So does P4-284's word refill (2026-11-18), which every Huffman decode's
+refill takes: it too was measured on aarch64 and under Rosetta 2 only
+(within 0.3% of P4-282 there).
 
 Acceptance: the same downstream batch on a native x86_64 machine shows
 grayscale `decompress_to` and `decompress_into` within noise of `main`
@@ -16434,7 +16439,9 @@ passed, 0 failed, 7 ignored; Rust 1.100.0, macOS aarch64), including the byte-id
 libjpeg cross-validation tests, `tests/raw_strips.rs`, and
 `decode::bitstream::tests::hot_bits_reads_and_leaves_the_reader_as_the_reader_alone_does`,
 which pins that the cursor reads and leaves the reader exactly as the
-reader alone does. Native x86_64 is P4-280.
+reader alone does. Native x86_64 is P4-280. These numbers are Rust 1.100.0;
+with 1.99.1 the strips came out 4% slower than 8a9add09, which P4-284's
+refill closes.
 
 ## P4-283. Progressive Decode Is About 5.5% Slower on a Cortex-A53 Than 0.8.0 — **OPEN**
 
@@ -16448,7 +16455,86 @@ not from the P4-282 inlining effect; P4-282's fix does not touch the progressive
 decoders. On the M-series host, by contrast, #703 and P4-282's change both
 decode it 9% faster than `main`.
 
+These figures predate P4-284 (2026-11-18), whose word refill the
+progressive decoders do take (M-series -2.6% on progressive against
+P4-282); no A53 progressive figure was recorded for it.
+
 Acceptance: the commit that moved it found on the A53, and the progressive
 `decode_raw` and `decompress` back within noise of 0.8.0 there, without a
 regression on aarch64 hosts or x86_64, recorded in
 `experiments/pipeline.tsv`.
+
+## P4-284. The Out-of-Line Block Decode Is 4% Slower With Rust 1.99, Downstream and Pinned — **CLOSED 2026-11-18**
+
+Found 2026-11-18 downstream, in the NekoLens compositor (a wgpu app that
+decodes 4:2:0 q95 photos through the strip reader straight into a mapped
+staging buffer), on the same Cortex-A53 phone as P4-282. Built with the
+consumer's toolchain (Rust 1.99.1, cargo's default release profile, no LTO,
+16 codegen units), P4-282's change made the strip decode 0.6-3.4% slower
+than 8a9add09 and `decode_raw` no better than 0.8.0, against P4-282's
+-2.4..-2.8% and -5.2..-8.5% measured with Rust 1.100.0.
+
+It reproduces without the GPU: the P4-282 consumer crates built with
+1.99.1, pinned to one core, put P4-282's strips 4.0-4.9% behind 8a9add09
+and its `decode_raw` only 3.0-3.5% ahead of 0.8.0 (the investigation run;
+the tables below are a later batch). simpleperf on the 4K
+strips: the AC loop inside `McuDecoder::decode_block` is instruction for
+instruction the same under both compilers; 1.99.1 spills the data pointer
+around the refill and runs it as the seven-step byte loop with a branch
+per byte. So the out-of-line function moved the effect from the caller's
+inlining to the compiler's handling of the refill, without removing it.
+
+**Fix.** `BitReader::fill_fast`, shared by the reader and `HotBits`, now
+takes the bytes the buffer needs (enough for 56 bits, one to seven) with
+one big-endian `u64` load and one shift when none of them is `0xFF`. A
+SWAR test (`!word` has a zero byte where `word` has `0xFF`) finds those;
+it can flag a byte next to a real one, never miss one, and any flag sends
+the refill down the byte loop, which is unchanged. The fast path is a
+dozen straight-line instructions, and both compilers emit `decode_block`
+at the same size (1,154 instructions each, 17 stack loads each; 1,040 and
+1,032 instructions with 25 and 17 stack loads before).
+`decode::bitstream::tests::the_refill_word_path_matches_the_byte_loop`
+pins it against the byte loop over random windows with `0xFF` at four
+densities, `FF 00` stuffing and markers, every bit count and every request
+up to 64 bits (it fails without the `0xFF` check, and when the check skips
+the last byte taken).
+
+A53, pinned, no LTO, median of 6 rotating rounds (strips) and 4
+(`decode_raw`), one binary per revision:
+
+| Strips | 8a9add09 | P4-282 | this change |
+|---|---:|---:|---:|
+| 1080p 4:2:0, Rust 1.99.1 | 40.40 ms | 42.14 ms (+4.3%) | 40.11 ms (-0.7%) |
+| 1080p 4:4:4, Rust 1.99.1 | 86.07 ms | 89.44 ms (+3.9%) | 84.04 ms (-2.4%) |
+| 4K 4:2:0, Rust 1.99.1 | 165.36 ms | 172.50 ms (+4.3%) | 163.97 ms (-0.8%) |
+| 1080p 4:2:0, Rust 1.100.0 | 40.31 ms | 39.60 ms (-1.8%) | 40.03 ms (-0.7%) |
+| 1080p 4:4:4, Rust 1.100.0 | 84.65 ms | 82.70 ms (-2.3%) | 84.00 ms (-0.8%) |
+| 4K 4:2:0, Rust 1.100.0 | 164.67 ms | 160.70 ms (-2.4%) | 165.96 ms (+0.8%) |
+
+| `decode_raw` against 0.8.0 (gray / 4:2:0 / 4:4:4 / 4K) | P4-282 | this change |
+|---|---|---|
+| Rust 1.99.1 | -2.1 / -2.7 / -4.5 / -4.3% | -6.5 / -4.5 / -4.1 / -6.5% |
+| Rust 1.100.0 | -4.7 / -8.3 / -8.1 / -6.8% | -4.6 / -7.0 / -4.9 / -5.3% |
+| Rust 1.99.1, thin LTO | -3.5 / -2.9 / not run / -3.4% | -5.1 / -4.9 / not run / -5.2% |
+
+With thin LTO and 1.99.1 the strips are at 8a9add09's speed (4:2:0 -0.8%,
+4K +0.1%; P4-282 +1.6% / +1.7%). With 1.100.0, P4-282 alone stays 1.1-3.3%
+faster than this change on the A53 strips and 0.1-3.5% on `decode_raw`; the word path trades that for not
+being slower than 8a9add09 with either compiler. On the M-series host
+(1.100.0) this change is a further -2.5..-4.4% on `decode_raw` and
+-2.2..-4.3% on the strips against P4-282 (progressive included, -2.6%),
+and under Rosetta 2 within 0.3% of it.
+
+Downstream, the NekoLens staging bench (1.99.1, no LTO, unpinned, 8 cores,
+decode plus GPU upload, processes alternated, n = 20-30 per cell) put the
+staged decode at +0.8 / -0.2 / +1.7% (2250x2250 / 3840x2160 / 3024x4032)
+against 8a9add09 in one batch, where P4-282 measured +2.1 / +0.6 / +2.8%,
+and at -0.9 / -2.6 / -0.7% (and -3.7% on a 1583x936 crop) in a second.
+Its plane path, identical code in both binaries, differed by up to 7%
+between those batches, so the downstream bench resolves only "not slower".
+
+**Status (2026-11-18): closed.** Pinned on the A53, with Rust 1.99.1 and
+1.100.0 without LTO and with 1.99.1 and thin LTO, the strips are within 0.8% of
+8a9add09 or faster, and `decode_raw` is 4.1-7.0% faster than 0.8.0 in
+every cell. `cargo test --workspace` passes (3,082 passed, 0 failed, 7
+ignored), and the new equivalence test passes under Miri.

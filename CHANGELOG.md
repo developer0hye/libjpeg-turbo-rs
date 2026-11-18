@@ -46,11 +46,19 @@ and `git log` between tags.
 - 8-bit sequential Huffman decodes are faster on in-order ARM cores
   (P4-282): each block's Huffman decode now runs out of line with the bit
   cursor in registers, so its codegen no longer depends on the surrounding
-  decode loop. On a Cortex-A53, baseline `decode_raw` is 5-8.5% faster than
-  0.8.0 (4.7-7.1% with LTO), where the unreleased tree before this change
-  was 4-6% slower, and `decompress` is 7-12% faster than that tree; baseline
-  decodes on Apple M-series are 1.4-3.2% faster.
+  decode loop. On a Cortex-A53 with Rust 1.100, baseline `decode_raw` was
+  then 5-8.5% faster than 0.8.0 (4.7-7.1% with LTO), where the unreleased
+  tree before this change was 4-6% slower, and `decompress` 7-12% faster
+  than that tree; baseline decodes on Apple M-series were 1.4-3.2% faster.
+  The refill change below sets the current figures.
   Progressive decodes are unchanged (their A53 gap is P4-283).
+- The bit reader's refill takes the bytes it needs with one 8-byte load
+  when none of them is `0xFF` (P4-284), which keeps the Huffman loop's
+  codegen the same across compilers: with Rust 1.99 the change above had
+  left the A53 strip decode 4% slower than before it. Pinned on a
+  Cortex-A53 with Rust 1.99 and 1.100, `decode_raw` is 4-7% faster than
+  0.8.0 and the strips within 0.8% of their speed before the change above
+  or faster; Apple M-series decodes gain another 2-4%.
 
 ### Removed
 

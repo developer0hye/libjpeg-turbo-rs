@@ -268,9 +268,19 @@ impl<'a> BitReader<'a> {
     /// finish the refill: under 16 bytes remain, or a marker or fill run
     /// stopped it, with `*pos` on that byte.
     ///
-    /// The 16-byte window keeps every access in bounds. Unrolled like C
-    /// libjpeg-turbo's FILL_BIT_BUFFER_FAST: up to seven bytes in straight-line
-    /// code, avoiding loop overhead.
+    /// The 16-byte window keeps every access in bounds. When the refill
+    /// targets the usual 56 bits (`needed <= 56`) and none of the bytes it
+    /// takes is `0xFF`
+    /// (no stuffing, no marker), they go in with one big-endian load and one
+    /// shift. Otherwise the bytes go in one at a time, unrolled like C
+    /// libjpeg-turbo's FILL_BIT_BUFFER_FAST.
+    ///
+    /// The word path is there for codegen stability, not only speed: the
+    /// byte loop's seven branches and temporaries made the Huffman loop
+    /// around it compile differently between LLVM versions (on a Cortex-A53
+    /// the out-of-line block decode left the strips 4-5% slower than before
+    /// it with Rust 1.99, and about 2% faster with 1.100), and
+    /// the word path is a dozen straight-line instructions (P4-284).
     #[inline(always)]
     fn fill_fast(data: &[u8], pos: &mut usize, buf: &mut u64, bits: &mut u8, needed: u8) -> bool {
         let start: usize = *pos;
@@ -278,6 +288,28 @@ impl<'a> BitReader<'a> {
             return false;
         }
         let window: &[u8] = &data[start..start + 16];
+        if needed <= 56 && *bits < 56 {
+            let word: u64 = u64::from_be_bytes([
+                window[0], window[1], window[2], window[3], window[4], window[5], window[6],
+                window[7],
+            ]);
+            // The bytes the byte loop would take: enough for 56 bits, 1..=7.
+            let take: u32 = (63 - u32::from(*bits)) / 8;
+            let shift: u32 = 64 - 8 * take;
+            // A 0xFF byte of `word` is a zero byte of `!word`; this flags
+            // every zero byte, never misses one, and can also flag a run of
+            // 0xFE bytes just before a real 0xFF (a borrow). A false flag
+            // only sends the refill down the byte loop, which is exact.
+            let inverted: u64 = !word;
+            let ff_bytes: u64 =
+                inverted.wrapping_sub(0x0101_0101_0101_0101) & !inverted & 0x8080_8080_8080_8080;
+            if ff_bytes >> shift == 0 {
+                *buf = (*buf << (8 * take)) | (word >> shift);
+                *bits += (8 * take) as u8;
+                *pos = start + take as usize;
+                return true;
+            }
+        }
         let mut off: usize = 0;
         // Each call returns usize::MAX on a multi-FF run or marker that the
         // fast path can't classify; bail to the slow path in that case.
@@ -750,6 +782,107 @@ impl BitSource for HotBits<'_, '_> {
 mod tests {
     use super::BitReader;
     use super::{BitSource, HotBits};
+
+    /// P4-284: the refill's word path must leave the cursor exactly as the
+    /// byte loop does. The reference below is that loop on its own. Windows
+    /// mix every byte value with `0xFF` at several densities (so the word
+    /// path is taken, skipped for a real `0xFF`, and skipped for a borrow's
+    /// false flag), `FF 00` stuffing and markers, at every starting bit count
+    /// and every request up to 64 bits.
+    #[test]
+    fn the_refill_word_path_matches_the_byte_loop() {
+        fn byte_loop(
+            data: &[u8],
+            pos: &mut usize,
+            buf: &mut u64,
+            bits: &mut u8,
+            needed: u8,
+        ) -> bool {
+            let start: usize = *pos;
+            if start + 16 > data.len() {
+                return false;
+            }
+            let window: &[u8] = &data[start..start + 16];
+            let mut off: usize = 0;
+            for _ in 0..7 {
+                if *bits < needed.max(56) && off < 15 {
+                    let next: usize = BitReader::get_byte(window, off, buf, bits);
+                    if next == usize::MAX {
+                        *pos = start + off;
+                        return false;
+                    }
+                    off = next;
+                }
+            }
+            *pos = start + off;
+            true
+        }
+
+        let mut seed: u32 = 0x9E37_79B9;
+        let mut next = move || -> u32 {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed
+        };
+        let cases: usize = if cfg!(miri) { 400 } else { 20_000 };
+        let mut word_path_taken: usize = 0;
+        for case in 0..cases {
+            // 0xFF one byte in 2, 8, 64 or never.
+            let ff_one_in: u32 = [2, 8, 64, 0][case % 4];
+            let len: usize = 16 + (next() % 24) as usize;
+            let data: Vec<u8> = (0..len)
+                .map(|_| {
+                    let r: u32 = next();
+                    if ff_one_in != 0 && r.is_multiple_of(ff_one_in) {
+                        0xFF
+                    } else if r.is_multiple_of(7) {
+                        0x00
+                    } else {
+                        (r >> 8) as u8
+                    }
+                })
+                .collect();
+            let start: usize = (next() as usize) % (len - 15);
+            let bits: u8 = (next() % 64) as u8;
+            let needed: u8 = 1 + (next() % 64) as u8;
+            let buf: u64 = u64::from(next()) << 32 | u64::from(next());
+
+            let (mut pos_a, mut buf_a, mut bits_a) = (start, buf, bits);
+            let (mut pos_b, mut buf_b, mut bits_b) = (start, buf, bits);
+            let done_a: bool =
+                BitReader::fill_fast(&data, &mut pos_a, &mut buf_a, &mut bits_a, needed);
+            let done_b: bool = byte_loop(&data, &mut pos_b, &mut buf_b, &mut bits_b, needed);
+            assert_eq!(
+                (done_a, pos_a, buf_a, bits_a),
+                (done_b, pos_b, buf_b, bits_b),
+                "case {case}: data {data:02X?}, start {start}, bits {bits}, needed {needed}"
+            );
+            // Counted from the inputs (the two paths' results are equal by
+            // design, so they cannot show which one ran): eligible, and no
+            // 0xFF among the bytes it takes.
+            let take: usize = ((63 - u32::from(bits)) / 8) as usize;
+            if needed <= 56 && bits < 56 && !data[start..start + take].contains(&0xFF) {
+                word_path_taken += 1;
+            }
+        }
+        assert!(
+            word_path_taken > cases / 4,
+            "word path eligible {word_path_taken} of {cases} times"
+        );
+
+        // A borrow's false flag, which the random windows reach only a few
+        // times: with 40 bits held the refill takes two bytes, `12 FE`, and
+        // the `FF 00` after them makes the SWAR test flag the `FE` too. The
+        // byte loop must then produce the word path's result.
+        let mut window: [u8; 16] = [0; 16];
+        window[..4].copy_from_slice(&[0x12, 0xFE, 0xFF, 0x00]);
+        let (mut pos, mut buf, mut bits): (usize, u64, u8) = (0, 0xAB, 40);
+        assert!(BitReader::fill_fast(
+            &window, &mut pos, &mut buf, &mut bits, 16
+        ));
+        assert_eq!((pos, buf, bits), (2, 0xAB_12FE, 56));
+    }
 
     /// P4-271: `HotBits` copies the cursor into locals for one block, so it
     /// must read exactly the bits, and leave the reader exactly where, the
