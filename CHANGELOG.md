@@ -50,8 +50,14 @@ and `git log` between tags.
   then 5-8.5% faster than 0.8.0 (4.7-7.1% with LTO), where the unreleased
   tree before this change was 4-6% slower, and `decompress` 7-12% faster
   than that tree; baseline decodes on Apple M-series were 1.4-3.2% faster.
-  The refill change below sets the current figures.
-  Progressive decodes are unchanged (their A53 gap is P4-283).
+  The refill change below sets the current figures. On native x86_64
+  (i5-10400) this change, the refill change and the strip reader's
+  register cursor (P4-271) together leave grayscale and progressive within
+  0.3% of the tree before them in a default-profile dependent build, and 8K
+  and 1/4-scale baseline decodes 1.7-3.6% faster (P4-280); with thin LTO,
+  grayscale is 1.0-1.1% slower, as much as the same-code `zune-jpeg`
+  control moved. Progressive decodes on the A53 are
+  unchanged (their gap there is P4-283).
 - The bit reader's refill takes the bytes it needs with one 8-byte load
   when none of them is `0xFF` (P4-284), which keeps the Huffman loop's
   codegen the same across compilers: with Rust 1.99 the change above had
