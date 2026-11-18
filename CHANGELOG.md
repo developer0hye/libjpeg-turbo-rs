@@ -39,7 +39,18 @@ and `git log` between tags.
   (strided SIMD) kernel, through one crate-internal function that checks the
   destination length itself; every other size and DCT method runs the safe
   kernels. Decode speed is unchanged within measurement noise on every path
-  and scale (measured on aarch64; x86_64 not measured).
+  and scale on Apple aarch64. On x86_64, 1/4-scale decodes are about 2%
+  slower and grayscale and 8K 1-1.5% at the default profile (P4-275); on a
+  Cortex-A53 the change shifted the Huffman loop's codegen by 4-5% until
+  P4-282.
+- 8-bit sequential Huffman decodes are faster on in-order ARM cores
+  (P4-282): each block's Huffman decode now runs out of line with the bit
+  cursor in registers, so its codegen no longer depends on the surrounding
+  decode loop. On a Cortex-A53, baseline `decode_raw` is 5-8.5% faster than
+  0.8.0 (4.7-7.1% with LTO), where the unreleased tree before this change
+  was 4-6% slower, and `decompress` is 7-12% faster than that tree; baseline
+  decodes on Apple M-series are 1.4-3.2% faster.
+  Progressive decodes are unchanged (their A53 gap is P4-283).
 
 ### Removed
 

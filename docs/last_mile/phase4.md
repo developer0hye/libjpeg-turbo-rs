@@ -15646,7 +15646,8 @@ functions out of line; `len` and `pos` kept out of one paired load; padding
 the fast function's frame.
 
 **Fix.** The strip loops decode each block through
-`McuDecoder::decode_block_hot`, which runs the Huffman decode on
+`McuDecoder::decode_block_hot` (since P4-282, the out-of-line
+`McuDecoder::decode_block`; see **Out of line** below), which runs the Huffman decode on
 `bitstream::HotBits`: it copies the cursor into locals for the block and
 writes it back before the slow refill and a failed-lookup note, and when
 dropped, so the
@@ -15733,6 +15734,12 @@ strict instance compiles without them:
 | aarch64, no LTO | 32.46 / 32.72 ms | 33.23 / 32.60 ms |
 | x86_64 (Rosetta), no LTO | 61.84 / 64.51 ms | 61.90 / 62.38 ms |
 | 1080p 4:2:0, aarch64, LTO | 4.11 / 4.40 ms | 4.24 / 4.09 ms |
+
+**Out of line (2026-11-18).** P4-282 replaced the narrowing:
+`McuDecoder::decode_block` is `#[inline(never)]` and decodes on `HotBits`
+for every caller, strips included, and `decode_block_hot` is gone. The
+Huffman loop no longer shares a function with the caller's loop, which is
+what made both the x86_64 22% and an A53 4-5% regression possible.
 
 **Status (2026-11-12): closed.** On aarch64 the strip reader is at most 0.5%
 slower than `decode_raw` on the inputs above and the matrix fixtures:
@@ -16280,10 +16287,10 @@ Related: P4-270 (lenient decodes never consult the strategy).
 
 Found 2026-11-12 in the review of the P4-271 fix. That fix moved the
 Huffman decode of one block onto `bitstream::HotBits`, a register copy of
-the `BitReader` cursor, in `McuDecoder::decode_block`; since 2026-11-15
-only `McuDecoder::decode_block_hot` does, which only the 8-bit strip loops
-use (the whole-frame loops went back to the reader, where `HotBits` cost
-x86_64 grayscale 22% without LTO, see P4-271). Two 12-bit per-block loops call the `BitReader` wrappers
+the `BitReader` cursor, in `McuDecoder::decode_block`; from 2026-11-15
+only the 8-bit strip loops did (`decode_block_hot`), and since P4-282
+(2026-11-18) every 8-bit sequential Huffman decode does again, through an
+out-of-line `decode_block`. Two 12-bit per-block loops call the `BitReader` wrappers
 `huffman::decode_dc_coefficient` / `decode_ac_coefficients` directly and
 so keep the store-then-load chain through the reader's memory that cost
 the 8-bit strip loop about 25% on aarch64:
@@ -16293,23 +16300,24 @@ the 8-bit strip loop about 25% on aarch64:
   decode.
 
 Not measured: whether the 12-bit loops got the fast codegen by luck, as
-`decode_baseline_planes` did before P4-271, or the slow one. The same holds
-for the 8-bit `McuDecoder::decode_block` callers outside the whole-frame
-loop since the 2026-11-15 narrowing: the P4-58 incremental decode
-(`baseline_stream_step`, `pipeline_impl/streaming.rs`) and the coefficient
-reader (`api/coefficient.rs`) decoded through `HotBits` for three days and
-were measured neither way. Lossless
+`decode_baseline_planes` did before P4-271, or the slow one. The 8-bit
+`McuDecoder::decode_block` callers outside the whole-frame and strip loops,
+the P4-58 incremental decode (`baseline_stream_step`,
+`pipeline_impl/streaming.rs`) and the coefficient reader
+(`api/coefficient.rs`), switched between `HotBits` and the reader with
+P4-271, its narrowing and P4-282, and were measured none of those times;
+since P4-282 they call the out-of-line `decode_block` on `HotBits`. Lossless
 (`pipeline_impl/lossless.rs`) and progressive DC-first
 (`progressive.rs`) also decode DC through the wrapper, with a shorter
 chain per block.
 
-Acceptance: a benchmark of the 12-bit sequential decode (and raw 12-bit),
-the incremental decode and the coefficient reader before and after decoding
-each block through `HotBits`
-(`huffman::decode_dc_from` / `decode_ac_from`), in-tree and in a build
-without LTO, on aarch64 and x86_64, recorded in
-`experiments/pipeline.tsv`; the change kept only if it is faster in every
-one and every 12-bit C cross-validation test still passes.
+Acceptance: benchmarks in-tree and in a build without LTO, on aarch64 and
+x86_64, recorded in `experiments/pipeline.tsv`: the 12-bit sequential
+decode (and raw 12-bit) before and after decoding each block through
+`HotBits` (`huffman::decode_dc_from` / `decode_ac_from`), kept only if it
+is faster in every one and every 12-bit C cross-validation test still
+passes; and the incremental decode and the coefficient reader against the
+reader-based `decode_block` of `6bf28f9f`, with any slowdown filed.
 
 ## P4-280. The P4-271 Narrowing Is Not Yet Verified on Native x86_64 — **OPEN**
 
@@ -16325,9 +16333,122 @@ aarch64 and on x86_64 under Rosetta 2, plus a static count of
 1,766 after). Rosetta has no AVX2, so the SIMD kernels around the loop
 differ from the review's machine, and no native x86_64 run has been made.
 
+P4-282 (2026-11-18) replaced the narrowing with an out-of-line
+`McuDecoder::decode_block` on `HotBits` for every caller. It too was
+measured on aarch64 (an M-series host and a Cortex-A53) and under Rosetta 2
+only (`decode_raw`, `decompress` and the strips within -5.8..+0.2% of
+`main` / #703 there), so the native run below now covers that change.
+
 Acceptance: the same downstream batch on a native x86_64 machine shows
 grayscale `decompress_to` and `decompress_into` within noise of `main`
 (the review's method: alternating fresh processes pinned to one core,
 judged against the published-0.8.0 rows with `zune-jpeg` as the control),
 and the in-tree strips at or below `decode_raw`, recorded in
+`experiments/pipeline.tsv`.
+
+## P4-282. Baseline Decodes Are 4-6% Slower on a Cortex-A53 Than 0.8.0 Because the Huffman Loop's Codegen Follows Unrelated Inlined Code — **CLOSED 2026-11-18**
+
+Found 2026-11-17 on a Snapdragon 625 phone (msm8953, eight in-order
+Cortex-A53 cores, Android 8.1), measured with one consumer binary per
+version (Cargo's default release profile, no LTO, Rust 1.100.0), fresh
+processes in rotating order pinned to one core (`taskset 80`), median of
+six rounds of per-process medians. On an Apple M-series host, `main` was
+1.5-4% faster than 0.8.0 on the same decodes; on the A53, `decode_raw` was
+4-6% slower on every baseline image, with or without LTO (+3.6..+6.4% on
+#703 in the tables below).
+
+Bisected, A53, `decode_raw` against 0.8.0:
+
+| Build | gray 1080p | 1080p 4:2:0 | 4K 4:2:0 |
+|---|---:|---:|---:|
+| v0.9.0 (`47ff06cb`, before #701) | +5.1% | +0.1% | 0.0% |
+| `8c6d4979` (#701, strip reader) | +4.9% | -0.3% | 0.0% |
+| `06065dfc` (#701, bounds-checked IDCT store) | +5.7% | +4.3% | +4.3% |
+| `cca79a0f` (#701 tip) | +0.9% | +0.5% | +0.8% |
+| `a9e5801f` (`main` before #706) | +0.9% | +0.4% | not run |
+| `main` (`6bf28f9f`, after #706) | +5.3% | +4.6% | +5.0% |
+
+None of these steps changes the work those decodes do. #706 (P4-275)
+touched only IDCT code they never execute: on aarch64 every 8x8 ISLOW block
+takes the strided NEON store, not `copy_block_rows` or the scaled arms. But
+`Decoder::idct_block_into` is `#[inline(always)]`, so that code is compiled
+into every decode loop. Ruled out on `main`, each still +4-6%: the 4/2/1
+arms moved back out of line; only `copy_block_rows::<8>` reverted to the
+runtime-length copy; 64-byte loop and function alignment
+(`-C llvm-args=-align-loops=64 -C llvm-args=-align-all-functions=6`, which
+left the fast and slow builds as far apart). simpleperf put about 70% of the
+cycles in `decode_baseline_planes`, in the inlined Huffman AC loop, in both
+builds. That loop kept the bit buffer in a stack slot either way; the slow
+build also reloaded the table base from the stack and had a padding `nop`
+in the loop body. So the loop's register allocation, inside one large
+function, followed whatever else was inlined there. This is the same
+fragility the P4-271 x86_64 review hit from the other side (`HotBits`
+inlined into the same loop, 22% slower without LTO).
+
+**Fix.** `McuDecoder::decode_block` is `#[inline(never)]` and decodes on
+`HotBits`, for every caller: the whole-frame loops, the raw strip loops
+(`decode_block_hot` is gone), the P4-58 incremental decode and the
+coefficient reader. The Huffman loop gets a function and a register file
+of its own, so the caller's inlining no longer reaches it, and the cursor
+stays in registers. One call per block (64 coefficients) measured as noise
+on aarch64; native x86_64 is P4-280. Out of line on the reader alone was
+measured too: it only brought the A53 back to 0.8.0 (gray +1.2%, 4:2:0
+0.0%, 4:4:4 -1.3%, 4K +0.2%). That matches the P4-271 attempt with
+`decode_block` out of line on the reader (`experiments/pipeline.tsv`), which
+also stayed slow: the boundary alone does not give the fast form, the
+register cursor inside it does. (An older row, `d40302e`, credited
+inlining `decode_block` with part of a 3.9% win, before the reader had its
+current refill and cursor layout.)
+
+| A53, no LTO | 0.8.0 | #703 | this change |
+|---|---:|---:|---:|
+| `decode_raw` gray 1080p | 37.29 ms | 39.18 ms (+5.1%) | 34.59 ms (-7.2%) |
+| `decode_raw` 1080p 4:2:0 | 50.17 ms | 53.26 ms (+6.2%) | 47.59 ms (-5.2%) |
+| `decode_raw` 1080p 4:4:4 | 103.91 ms | 109.20 ms (+5.1%) | 96.87 ms (-6.8%) |
+| `decode_raw` 4K 4:2:0 | 204.48 ms | 211.88 ms (+3.6%) | 187.01 ms (-8.5%) |
+
+With LTO, against 0.8.0: #703 +4.7..+6.4%, this change -4.7..-7.1% on the
+same four images.
+
+| A53, no LTO, against `main` | #703 | this change |
+|---|---:|---:|
+| `decompress` (RGB) gray 1080p | -0.4% | -12.1% (33.97 ms) |
+| `decompress` (RGB) 1080p 4:2:0 | +0.5% | -7.6% (70.18 ms) |
+| `decompress` (RGB) 1080p 4:4:4 | -0.2% | -9.8% (116.47 ms) |
+| `decompress` (RGB) 4K 4:2:0 | +0.1% | -7.2% (279.50 ms) |
+
+The strips gained 2.4-2.8% against #703 on the A53 (gray, 4:2:0, 4:4:4 and
+4K), where they already had `HotBits`. On the M-series host, against
+`main`, `decode_raw` and `decompress` moved -1.4..-3.2% on the baseline
+images and the strips were within noise of #703 (12-round reruns of the two
+noisiest cells: +0.2% gray strips). Under Rosetta 2 (x86_64, a proxy only,
+see P4-280), `decode_raw` and `decompress` were -1.2..+0.2% against `main`
+on the baseline images (the 4K `decode_raw` cell, +3.3% in a six-round run,
+was -1.2% in a twelve-round rerun) and the strips -5.8% on gray, within noise
+on color. Progressive decodes do not go through `decode_block` and did not
+move; their own A53 regression is P4-283.
+
+**Status (2026-11-18): closed.** Every A53 baseline cell above is faster
+than 0.8.0, with and without LTO. `cargo test --workspace` passes (3,081
+passed, 0 failed, 7 ignored; Rust 1.100.0, macOS aarch64), including the byte-identical `decode_raw` and
+libjpeg cross-validation tests, `tests/raw_strips.rs`, and
+`decode::bitstream::tests::hot_bits_reads_and_leaves_the_reader_as_the_reader_alone_does`,
+which pins that the cursor reads and leaves the reader exactly as the
+reader alone does. Native x86_64 is P4-280.
+
+## P4-283. Progressive Decode Is About 5.5% Slower on a Cortex-A53 Than 0.8.0 — **OPEN**
+
+Found 2026-11-18 while closing P4-282, with the same A53 method. The 1080p
+4:2:0 progressive photo's `decode_raw` is 5.5% slower than 0.8.0 on
+v0.9.0 (`47ff06cb`; 148.46 vs 140.76 ms) and stays there through #701, #706
+and P4-282 (`main` +6.3%, P4-282's change +6.1% without LTO and +4.3% with).
+So it comes from the 63 first-parent commits between v0.8.0 and v0.9.0
+that touch `src/` (`git rev-list --first-parent v0.8.0..v0.9.0 -- src`),
+not from the P4-282 inlining effect; P4-282's fix does not touch the progressive
+decoders. On the M-series host, by contrast, #703 and P4-282's change both
+decode it 9% faster than `main`.
+
+Acceptance: the commit that moved it found on the A53, and the progressive
+`decode_raw` and `decompress` back within noise of 0.8.0 there, without a
+regression on aarch64 hosts or x86_64, recorded in
 `experiments/pipeline.tsv`.

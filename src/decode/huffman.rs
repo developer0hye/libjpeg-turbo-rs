@@ -32,8 +32,9 @@ pub fn decode_dc_coefficient(reader: &mut BitReader, table: &HuffmanTable) -> Re
 
 /// [`decode_dc_coefficient`] over any [`BitSource`], so one body serves both
 /// a [`BitReader`] and a register-resident
-/// [`crate::decode::bitstream::HotBits`] cursor (`McuDecoder::decode_block`
-/// and `decode_block_hot`).
+/// [`crate::decode::bitstream::HotBits`] cursor (the latter in
+/// `McuDecoder::decode_block`; the 12-bit, lossless and progressive DC paths
+/// use the `BitReader` wrappers).
 #[inline(always)]
 pub(crate) fn decode_dc_from<R: BitSource>(reader: &mut R, table: &HuffmanTable) -> Result<i16> {
     let peek = reader.peek_bits(16);

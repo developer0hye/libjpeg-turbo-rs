@@ -105,10 +105,9 @@ pub struct BitReader<'a> {
 /// `bit_buffer` must not be adjacent, in either order. Adjacent, LLVM's SLP
 /// vectorizer merged `HotBits`' paired copy of the two into one 128-bit load
 /// and store and kept the cursor in a stack slot, which cost `decode_raw`
-/// about 13% on aarch64 while it decoded through `HotBits`. Since only the
-/// strip loops do (2026-11-15), the default layout measured the same on the
-/// strips but 1.2% slower on grayscale `decompress_to` (aarch64, no LTO), so
-/// the order stays. The assertion below pins the order `pos`,
+/// about 13% on aarch64 while it decoded through `HotBits`, as every 8-bit
+/// sequential Huffman decode does again since P4-282 (in the out-of-line
+/// `McuDecoder::decode_block`). The assertion below pins the order `pos`,
 /// `bits_left`, `bit_buffer`, so a reordering or a new field cannot undo
 /// that silently.
 #[repr(C)]
@@ -763,8 +762,8 @@ mod tests {
     /// `insufficient`) and on non-final windows (P4-58), which starve. Reads
     /// go up to 69 bits, past the 64 that `read_bits` caps, as a bogus DHT
     /// category can ask. The cursor is dropped and re-created every few
-    /// reads, as `decode_block_hot` does per block, with an occasional restart
-    /// `reset()` between.
+    /// reads, as `McuDecoder::decode_block` does per block, with an
+    /// occasional restart `reset()` between.
     #[test]
     fn hot_bits_reads_and_leaves_the_reader_as_the_reader_alone_does() {
         let mut seed: u32 = 0x2545_F491;

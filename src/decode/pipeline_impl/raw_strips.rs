@@ -450,7 +450,7 @@ impl<'a> Decoder<'a> {
                             coeffs = [0i16; 64];
                             Ok(())
                         } else {
-                            state.mcu_decoder.decode_block_hot(
+                            state.mcu_decoder.decode_block(
                                 &mut state.bit_reader,
                                 plan.dc_predictor,
                                 dc_table,
@@ -562,7 +562,7 @@ impl<'a> Decoder<'a> {
                     coeffs = [0i16; 64];
                     Ok(())
                 } else {
-                    state.mcu_decoder.decode_block_hot(
+                    state.mcu_decoder.decode_block(
                         &mut state.bit_reader,
                         0,
                         dc_table,

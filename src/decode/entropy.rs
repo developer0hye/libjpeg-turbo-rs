@@ -8,7 +8,7 @@ use alloc::{format, vec};
 use crate::common::error::{JpegError, Result};
 use crate::common::huffman_table::HuffmanTable;
 use crate::common::types::*;
-use crate::decode::bitstream::{BitReader, BitSource, HotBits};
+use crate::decode::bitstream::{BitReader, HotBits};
 use crate::decode::huffman;
 
 /// Pre-resolved per-component decode plan for the MCU loop.
@@ -101,7 +101,21 @@ impl McuDecoder {
     }
 
     /// Decode one 8x8 block of DCT coefficients (in natural/row-major order).
-    #[inline(always)]
+    ///
+    /// The reader's cursor is held in locals for the block (`bitstream::HotBits`;
+    /// dropping it writes the cursor back to `reader`, on the error paths as
+    /// well), so the symbol-to-symbol chain stays in registers.
+    ///
+    /// Kept out of line on purpose. Every 8-bit sequential Huffman decode
+    /// calls this per block, and inlined, the Huffman loop's register
+    /// allocation depended on everything else inlined into the caller's
+    /// loop: through `HotBits` a build without LTO decoded grayscale 22%
+    /// slower on x86_64, and on the reader, a change to IDCT code those
+    /// decodes never execute (#706) cost a Cortex-A53 4-5% on every
+    /// baseline decode. Here the loop gets its registers to itself; the one
+    /// call per 64 coefficients measured as noise on aarch64 (native x86_64
+    /// is P4-280; P4-282).
+    #[inline(never)]
     pub fn decode_block(
         &mut self,
         reader: &mut BitReader,
@@ -110,48 +124,10 @@ impl McuDecoder {
         ac_table: &HuffmanTable,
         coeffs: &mut [i16; 64],
     ) -> Result<()> {
-        self.decode_block_from(reader, component_index, dc_table, ac_table, coeffs)
-    }
-
-    /// [`Self::decode_block`] with the reader's cursor held in locals for the
-    /// block ([`HotBits`]; dropping it writes the cursor back to `reader`, on
-    /// the error paths as well), so the symbol-to-symbol chain stays in
-    /// registers whatever the caller's loop looks like (P4-271).
-    ///
-    /// Only the raw strip loops use it; every other caller (the whole-frame
-    /// loops, the incremental decode, the coefficient reader) keeps
-    /// [`Self::decode_block`]. `decode_baseline_planes` already got a cheap
-    /// cursor from the reader itself, and through `HotBits` a build without
-    /// LTO (what a dependent crate gets) decoded grayscale 22% slower on
-    /// x86_64, where the extra live values made that loop spill (P4-271). The
-    /// incremental decode and the coefficient reader were not measured either
-    /// way (P4-279).
-    #[inline(always)]
-    pub(crate) fn decode_block_hot(
-        &mut self,
-        reader: &mut BitReader,
-        component_index: usize,
-        dc_table: &HuffmanTable,
-        ac_table: &HuffmanTable,
-        coeffs: &mut [i16; 64],
-    ) -> Result<()> {
         let mut bits: HotBits<'_, '_> = HotBits::new(reader);
-        self.decode_block_from(&mut bits, component_index, dc_table, ac_table, coeffs)
-    }
-
-    // The one block body behind both, so the two cursor kinds cannot drift.
-    #[inline(always)]
-    fn decode_block_from<R: BitSource>(
-        &mut self,
-        bits: &mut R,
-        component_index: usize,
-        dc_table: &HuffmanTable,
-        ac_table: &HuffmanTable,
-        coeffs: &mut [i16; 64],
-    ) -> Result<()> {
         *coeffs = [0i16; 64];
 
-        let dc_diff: i16 = huffman::decode_dc_from(bits, dc_table)?;
+        let dc_diff: i16 = huffman::decode_dc_from(&mut bits, dc_table)?;
         let dc_pred = &mut self.dc_pred[component_index];
         // libjpeg-turbo's jdhuff.c treats DC prediction as modular 16-bit
         // arithmetic (the result is masked by quantization anyway); use
@@ -160,7 +136,7 @@ impl McuDecoder {
         *dc_pred = dc_pred.wrapping_add(dc_diff);
         coeffs[0] = *dc_pred;
 
-        huffman::decode_ac_from(bits, ac_table, coeffs)?;
+        huffman::decode_ac_from(&mut bits, ac_table, coeffs)?;
 
         Ok(())
     }
